@@ -1,38 +1,10 @@
 import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { CONFIG_KEYS } from './services/settings';
 import { hostStorage, type Host } from './services/host';
 
 /** The VS Code implementation of the Host contract. This is the only vscode-bound core module. */
-
-const CONFIG_KEYS = [
-	'mode',
-	'approval',
-	'network',
-	'workingDirectory',
-	'commandTimeout',
-	'denyReadPaths',
-	'planDirectory',
-	'maxSteps',
-	'graph',
-	'model',
-	'profiles',
-	'mcpServers',
-	'permissions',
-	'instructions',
-	'skills',
-	'memory',
-	'checkpoints',
-	'chatWindow',
-	'contextForm',
-	'displayForm',
-	'reasoningEffort',
-	'contextLimit',
-	'autoCompactChars',
-	'budgetUsd',
-	'filterSensitiveEnv',
-	'allowFullAccess',
-];
 
 export interface HostConfig {
 	extension: vscode.ExtensionContext;

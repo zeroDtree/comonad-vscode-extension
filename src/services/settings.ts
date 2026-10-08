@@ -3,6 +3,7 @@ import { DEFAULT_GRAPH_SOURCE } from '../lib/mermaid';
 import { parseRules, type RuleSet } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { WI_SETTINGS_DEFAULTS, type RegexScript } from '../lib/tavern/types';
+import { TAG_IMPORT } from '../lib/tavern/tags';
 import type { Approval, Capability, ReasoningEffort, WorkMode } from '../lib/types';
 import type { Host } from './host';
 
@@ -153,6 +154,12 @@ export interface Config {
 	tavernPersona: string;
 	/** The name `{{user}}` resolves to when the persona has none. */
 	tavernUserName: string;
+	/** Picking a persona locks it to the chat straight away — upstream's `persona_auto_lock`. */
+	personaAutoLock: boolean;
+	/** Allow more than one persona to be connected to the same character, as upstream does. */
+	personaAllowMultiConnections: boolean;
+	/** Say so when the chat's persona changes. */
+	personaShowNotifications: boolean;
 	tavernLorebooks: string[];
 	tavernPreset: string;
 	/** Standing text injected into the chat at `tavernNoteDepth`, like an author's note. */
@@ -162,6 +169,12 @@ export interface Config {
 	tavernScenarioFormat: string;
 	tavernPersonalityFormat: string;
 	tavernRegex: RegexScript[];
+	/**
+	 * A SillyTavern checkout whose `src/tokenizers` folder holds the tokenizers upstream ships in its
+	 * own tree (Gemma/Gemini, Llama3, Claude, Llama, Mistral, Yi, Jamba). Empty means those models are
+	 * counted with the fallback estimate, as upstream does when a tokenizer cannot be loaded.
+	 */
+	tokenizerDir: string;
 	wiScanDepth: number;
 	wiBudget: number;
 	wiBudgetCap: number;
@@ -174,6 +187,119 @@ export interface Config {
 	wiIncludeNames: boolean;
 	wiCharacterStrategy: number;
 	wiGroupScoring: boolean;
+	/** Warn when the scan ran out of world-info budget and dropped entries. */
+	wiOverflowAlert: boolean;
+	/**
+	 * Run the automation an activated entry names (upstream's *Automation ID*): a hook event and a
+	 * slash command of that name. Off by default, because a name is enough to run it.
+	 */
+	wiAutomation: boolean;
+	/**
+	 * The vector side of a world book (SillyTavern's Vectors extension for World Info): an entry that
+	 * says `vectorized` is found by meaning instead of by keys, and an embedding endpoint does the
+	 * finding. Off by default, because it needs an endpoint that embeds.
+	 */
+	wiVectorEnabled: boolean;
+	/** The profile whose endpoint embeds. Empty means the chat's own model profile. */
+	wiVectorProfile: string;
+	wiVectorModel: string;
+	/** The lowest cosine similarity an entry needs to be injected. */
+	wiVectorThreshold: number;
+	/** How many entries one book may contribute to a turn. */
+	wiVectorMaxEntries: number;
+	/** How many of the newest messages form the query. */
+	wiVectorQuery: number;
+	/**
+	 * What to do with the tags a character card ships in its own `tags` field: upstream's
+	 * `tag_import_setting` — `ASK` (1), `NONE` (2), `ALL` (3) or `ONLY_EXISTING` (4).
+	 */
+	tagImportSetting: number;
+}
+
+/**
+ * Every settings key the code reads, in one place. `Host.config()` reports only the keys it is given,
+ * so a setting missing from this list is a setting the user cannot actually change — which is how the
+ * tavern and world-info settings were written by the panel and then silently ignored. `as const`
+ * makes a typo a compile error; a test compares the list with `contributes.configuration` to catch a
+ * setting added on one side only.
+ */
+export const CONFIG_KEYS = [
+	'mode',
+	'approval',
+	'network',
+	'workingDirectory',
+	'commandTimeout',
+	'denyReadPaths',
+	'planDirectory',
+	'maxSteps',
+	'graph',
+	'model',
+	'profiles',
+	'mcpServers',
+	'permissions',
+	'instructions',
+	'skills',
+	'memory',
+	'checkpoints',
+	'chatWindow',
+	'contextForm',
+	'displayForm',
+	'reasoningEffort',
+	'contextLimit',
+	'autoCompactChars',
+	'budgetUsd',
+	'filterSensitiveEnv',
+	'allowFullAccess',
+	'tavernEnabled',
+	'tavernCharacter',
+	'tavernPersona',
+	'tavernUserName',
+	'personaAutoLock',
+	'personaAllowMultiConnections',
+	'personaShowNotifications',
+	'tavernLorebooks',
+	'tavernPreset',
+	'tavernAuthorNote',
+	'tavernNoteDepth',
+	'tavernWiFormat',
+	'tavernScenarioFormat',
+	'tavernPersonalityFormat',
+	'tavernRegex',
+	'tokenizerDir',
+	'wiScanDepth',
+	'wiBudget',
+	'wiBudgetCap',
+	'wiRecursive',
+	'wiMaxRecursionSteps',
+	'wiMinActivations',
+	'wiMaxActivationsDepth',
+	'wiCaseSensitive',
+	'wiMatchWholeWords',
+	'wiIncludeNames',
+	'wiCharacterStrategy',
+	'wiGroupScoring',
+	'wiOverflowAlert',
+	'wiAutomation',
+	'wiVectorEnabled',
+	'wiVectorProfile',
+	'wiVectorModel',
+	'wiVectorThreshold',
+	'wiVectorMaxEntries',
+	'wiVectorQuery',
+	'tagImportSetting',
+] as const satisfies readonly (keyof Config)[];
+
+/** Declared so an old value keeps validating, but deliberately never read. */
+export const DEPRECATED_CONFIG_KEYS = ['tavernSource'];
+
+/** The vectorized world-info settings, in the shape the vectors service reads them. */
+export interface VectorSettings {
+	enabled: boolean;
+	profile: string;
+	model: string;
+	threshold: number;
+	maxEntries: number;
+	queryMessages: number;
 }
 
 declare module 'cordis' {
@@ -233,6 +359,9 @@ export class Settings extends Service {
 			tavernCharacter: value('tavernCharacter', ''),
 			tavernPersona: value('tavernPersona', ''),
 			tavernUserName: value('tavernUserName', 'User'),
+			personaAutoLock: value('personaAutoLock', false),
+			personaAllowMultiConnections: value('personaAllowMultiConnections', false),
+			personaShowNotifications: value('personaShowNotifications', true),
 			tavernLorebooks: value('tavernLorebooks', [] as string[]),
 			tavernPreset: value('tavernPreset', ''),
 			tavernAuthorNote: value('tavernAuthorNote', ''),
@@ -241,6 +370,7 @@ export class Settings extends Service {
 			tavernScenarioFormat: value('tavernScenarioFormat', '{{scenario}}'),
 			tavernPersonalityFormat: value('tavernPersonalityFormat', '{{personality}}'),
 			tavernRegex: value('tavernRegex', [] as RegexScript[]),
+			tokenizerDir: value('tokenizerDir', ''),
 			wiScanDepth: value('wiScanDepth', WI_SETTINGS_DEFAULTS.scanDepth),
 			wiBudget: value('wiBudget', WI_SETTINGS_DEFAULTS.budget),
 			wiBudgetCap: value('wiBudgetCap', WI_SETTINGS_DEFAULTS.budgetCap),
@@ -253,11 +383,33 @@ export class Settings extends Service {
 			wiIncludeNames: value('wiIncludeNames', WI_SETTINGS_DEFAULTS.includeNames),
 			wiCharacterStrategy: value('wiCharacterStrategy', WI_SETTINGS_DEFAULTS.characterStrategy),
 			wiGroupScoring: value('wiGroupScoring', WI_SETTINGS_DEFAULTS.useGroupScoring),
+			wiOverflowAlert: value('wiOverflowAlert', false),
+			wiAutomation: value('wiAutomation', false),
+			wiVectorEnabled: value('wiVectorEnabled', false),
+			wiVectorProfile: value('wiVectorProfile', ''),
+			wiVectorModel: value('wiVectorModel', 'text-embedding-3-small'),
+			wiVectorThreshold: value('wiVectorThreshold', 0.25),
+			wiVectorMaxEntries: value('wiVectorMaxEntries', 5),
+			wiVectorQuery: value('wiVectorQuery', 2),
+			tagImportSetting: value('tagImportSetting', TAG_IMPORT.ASK),
 		};
 	}
 
 	rules(): RuleSet {
 		return parseRules(this.get().permissions);
+	}
+
+	/** The vectorized world-info settings, gathered the way the vectors service wants them. */
+	vectors(): VectorSettings {
+		const config = this.get();
+		return {
+			enabled: config.wiVectorEnabled,
+			profile: config.wiVectorProfile,
+			model: config.wiVectorModel.trim() || 'text-embedding-3-small',
+			threshold: Number.isFinite(config.wiVectorThreshold) ? config.wiVectorThreshold : 0.25,
+			maxEntries: Number.isFinite(config.wiVectorMaxEntries) ? config.wiVectorMaxEntries : 5,
+			queryMessages: Number.isFinite(config.wiVectorQuery) ? config.wiVectorQuery : 2,
+		};
 	}
 
 	workspace(): string {

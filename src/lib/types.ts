@@ -30,6 +30,24 @@ export interface Message {
 	startedAt?: number;
 	/** A character's opening line: the one assistant message that has no prompt behind it. */
 	greeting?: true;
+	/** A reply that continues the one before it (`/continue`) rather than answering a new prompt. */
+	continued?: true;
+	/**
+	 * Every variant of this reply, the way SillyTavern keeps them: `content` is the active one, so the
+	 * wire format and the scan read the same text the reader sees. Absent until something is swiped.
+	 */
+	swipes?: string[];
+	swipeId?: number;
+	/** One record per variant, upstream's `swipe_info` (only the fields a transcript can know). */
+	swipeInfo?: SwipeInfo[];
+}
+
+/** What produced one swipe, in SillyTavern's own field names. */
+export interface SwipeInfo {
+	send_date?: string;
+	gen_started?: number | null;
+	gen_finished?: number | null;
+	extra?: { gen_id?: number; api?: string; model?: string };
 }
 
 export interface SessionPolicy {

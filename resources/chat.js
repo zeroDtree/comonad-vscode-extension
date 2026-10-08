@@ -181,6 +181,17 @@
 	}
 
 	const modePill = setupPill('mode', (mode) => vscode.postMessage({ type: 'setMode', mode }));
+	// The generation menu is not a setting: every entry runs a generation of that type, which is how
+	// SillyTavern's own generate button works. The host owns the list (and its wording).
+	const GENERATION_TIPS = {
+		normal: 'answer the text in the box',
+		continue: 'carry the last message on from where it stops',
+		impersonate: 'write your next message for you',
+		swipe: 'another version of the last reply, keeping the one you are reading',
+		regenerate: 'the last reply again',
+		quiet: 'a reply that is never added to the chat',
+	};
+	const generationPill = setupPill('generate', () => undefined);
 	const approvalPill = setupPill('approval', (approval) => vscode.postMessage({ type: 'setApproval', approval }));
 	const contextPill = setupPill('context', (context) => vscode.postMessage({ type: 'setContext', context }));
 	// Display is global: it re-renders the whole transcript instead of one reply at a time.
@@ -391,7 +402,7 @@
 	/* The character pill: who the chat speaks as, who you are, its books and its preset. */
 
 	const tavernPill = setupPill('tavern', (action) => vscode.postMessage({ type: 'tavern', action }));
-	const tavernState = { enabled: true, character: '', persona: '', books: 0, bookNames: [], preset: '', activated: [], hasContent: false };
+	const tavernState = { enabled: true, character: '', persona: '', books: 0, bookNames: [], preset: '', activated: [], overflow: false, hasContent: false };
 
 	function tavernRow(action, label, value, tip) {
 		const row = document.createElement('button');
@@ -890,6 +901,32 @@
 				.join(' · ');
 		}
 		foot.appendChild(meta);
+		// More than one variant of the reply: upstream's `‹ n/m ›`, on the turn the variants belong to.
+		if (Array.isArray(turn.swipes) && turn.swipes.length > 1) {
+			const shown = Math.min(Math.max(turn.swipeId || 0, 0), turn.swipes.length - 1);
+			const nav = document.createElement('span');
+			nav.className = 'swipes';
+			const step = (label, delta, tip, disabled) => {
+				const control = document.createElement('button');
+				control.type = 'button';
+				control.className = 'swipe-step';
+				control.textContent = label;
+				control.disabled = disabled;
+				control.dataset.tip = tip;
+				control.addEventListener('click', () => vscode.postMessage({ type: 'setSwipe', index: shown + delta }));
+				return control;
+			};
+			const count = document.createElement('span');
+			count.className = 'swipe-count';
+			count.textContent = shown + 1 + '/' + turn.swipes.length;
+			count.dataset.tip = 'This reply has ' + turn.swipes.length + ' versions. Generate another with the ▾ menu or /swipe.';
+			nav.append(
+				step('‹', -1, 'Previous version', shown === 0),
+				count,
+				step('›', 1, 'Next version', shown === turn.swipes.length - 1),
+			);
+			foot.appendChild(nav);
+		}
 		foot.appendChild(
 			actionRow([
 				{ key: 'copy', icon: 'copy', tip: 'Copy reply', run: (button) => copyAction(button, turnAnswer(turn) || turnRaw(turn)) },
@@ -999,7 +1036,8 @@
 		const last = turns.length ? turns[turns.length - 1] : null;
 		const turn = {
 			index: last ? last.index + 1 : 0,
-			prompt: message.text || '',
+			// A swipe or a regenerate re-runs the same prompt, and the host sends no text with it.
+			prompt: message.text || replacing?.prompt || '',
 			steps: [],
 			at: 0,
 			startedAt: Date.now(),
@@ -1158,6 +1196,11 @@
 		turn.endedAt = message.endedAt ?? settledAt;
 		turn.stopped = Boolean(message.stopped);
 		turn.command = Boolean(message.command);
+		// A swipe or a regenerate answers with the whole variant list, which is what the ‹ n/m › nav draws.
+		if (Array.isArray(message.swipes) && message.swipes.length > 1) {
+			turn.swipes = message.swipes;
+			turn.swipeId = message.swipeId ?? 0;
+		}
 		// A folded thought is no longer being written, exactly as on a replayed turn.
 		for (const step of turn.steps) {
 			if (step._summary) {
@@ -1383,6 +1426,7 @@
 		fillPill(approvalPill, state.approvals, state.approval, 'Approval — what runs without asking');
 		fillPill(contextPill, CONTEXTS, state.context, 'Context — what this chat sends back to the model');
 		fillPill(displayPill, DISPLAYS, currentView(), 'Display — how every turn is shown');
+		fillGenerations();
 		Object.assign(tavernState, state.tavern || {});
 		renderTavern();
 		renderLore();
@@ -1429,8 +1473,13 @@
 			return;
 		}
 		loreChip.hidden = false;
-		loreChip.textContent = '◈ ' + hits.length + (hits.length === 1 ? ' lore entry' : ' lore entries');
-		loreChip.dataset.tip = 'World-book entries injected into the last turn:\n' + hits.join('\n') + '\n\nClick to pick the books this chat scans';
+		loreChip.classList.toggle('is-over', tavernState.overflow === true);
+		loreChip.textContent = (tavernState.overflow ? '◈⚠ ' : '◈ ') + hits.length + (hits.length === 1 ? ' lore entry' : ' lore entries');
+		loreChip.dataset.tip =
+			'World-book entries injected into the last turn:\n' +
+			hits.join('\n') +
+			(tavernState.overflow ? '\n\n⚠ The world-info budget was reached, so later entries were left out.' : '') +
+			'\n\nClick to pick the books this chat scans';
 	}
 
 	function renderTodos() {
@@ -1538,6 +1587,39 @@
 		input.value = '';
 		vscode.postMessage({ type: 'send', text });
 		input.focus();
+	}
+
+	/** Runs one of the generation types. `Normal` is Send; `Quiet` uses what is in the box. */
+	function runGeneration(trigger) {
+		if (running) {
+			return;
+		}
+		if (trigger === 'normal') {
+			submit();
+			return;
+		}
+		const text = trigger === 'quiet' ? input.value.trim() : '';
+		if (trigger === 'quiet') {
+			if (!text) {
+				return;
+			}
+			input.value = '';
+		}
+		vscode.postMessage({ type: 'generate', trigger, text });
+		input.focus();
+	}
+
+	function fillGenerations() {
+		const items = state?.generations || [];
+		if (!items.length || generationPill.menu.dataset.filled === 'yes') {
+			return;
+		}
+		generationPill.menu.dataset.filled = 'yes';
+		for (const item of items) {
+			generationPill.menu.append(
+				choiceRow({ id: item.value, label: item.label, description: GENERATION_TIPS[item.value] }, '', () => runGeneration(item.value)),
+			);
+		}
 	}
 
 	$('send').addEventListener('click', submit);

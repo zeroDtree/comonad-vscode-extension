@@ -1,4 +1,4 @@
-import type { TodoItem } from './types';
+import type { Message, TodoItem } from './types';
 
 /** Tiny shared helpers. Pure module. */
 
@@ -37,6 +37,21 @@ export function lastAssistant<T extends { role: string }>(messages: readonly T[]
 		}
 	}
 	return undefined;
+}
+
+/**
+ * The index of the assistant's last full reply: a message with text and no tool call hanging off it.
+ * A turn that ended in a call has no reply of its own, so this is what a swipe or a continue means by
+ * "the last thing the model said".
+ */
+export function lastReplyIndex(messages: readonly Message[]): number {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (message && message.role === 'assistant' && !message.toolCalls?.length && message.content.trim()) {
+			return index;
+		}
+	}
+	return -1;
 }
 
 /** Human label for a tool call's most telling argument, used in previews. */

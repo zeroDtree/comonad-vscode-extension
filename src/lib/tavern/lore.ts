@@ -1,5 +1,5 @@
 import { estimateTokens } from '../prompt';
-import { WI_LOGIC, WI_POSITION, WI_ROLE, WI_STRATEGY, worldEntry, type WiRole, type WorldBook, type WorldEntry, type WorldInfoSettings } from './types';
+import { WI_LOGIC, WI_POSITION, WI_ROLE, WI_STRATEGY, worldEntry, type GenerationTrigger, type WiRole, type WorldBook, type WorldEntry, type WorldInfoSettings } from './types';
 
 /**
  * The world-info engine: which entries a message activates, and where they go in the prompt.
@@ -52,11 +52,25 @@ export interface LoreInput {
 	/** Newest first, as SillyTavern passes them. */
 	messages: readonly LoreMessage[];
 	fields?: LoreFields;
+	/**
+	 * The character the chat speaks as, for an entry's own character/tag filter. `name` is the card's
+	 * id — the file name it was read from, which is SillyTavern's avatar name, the value its own
+	 * character filter compares against.
+	 */
+	character?: { name?: string; tags?: string[] };
 	settings: WorldInfoSettings;
 	/** The model's context size in tokens: `settings.budget` is a percentage of it. */
 	contextSize: number;
 	/** The scan index: the chat length in messages, which is what upstream's windows count in. */
 	turn: number;
+	/** What started this generation, for an entry tied to one of upstream's generation types. */
+	trigger?: GenerationTrigger;
+	/**
+	 * Entries the vector search found, as `<book>.<uid>`. Upstream keeps these in the same scan buffer
+	 * and consults them where `@@dont_activate` is honoured, so a vectorized entry is activated without
+	 * its keys being read. Key matching still applies to it, exactly as upstream does it.
+	 */
+	external?: ReadonlySet<string>;
 	effects?: TimedEffects;
 	/** Resolves macros in keys, fields and content before they are used. */
 	substitute?: (text: string) => string;
@@ -193,6 +207,38 @@ function contains(text: string, needle: string, caseSensitive: boolean, wholeWor
 /** The keys an entry watches, before substitution. */
 function primaryKeys(entry: WorldEntry): string[] {
 	return Array.isArray(entry.key) ? entry.key : [];
+}
+
+/**
+ * Whether an entry's character/tag filter lets it through, the way SillyTavern decides it: the name
+ * list first, then the tag list. The tags are the registry's **ids**, and upstream only skips this
+ * check when there is no character at all — its tag map answers for every character it has drawn, so
+ * an entry tied to tags is not injected for a character that carries none of them either.
+ * `isExclude` turns each check around instead of dropping the entry.
+ */
+export function passesCharacterFilter(
+	entry: WorldEntry,
+	character: { name?: string; tags?: string[] } | undefined,
+): boolean {
+	const filter = entry.characterFilter;
+	if (!filter) {
+		return true;
+	}
+	const names = filter.names ?? [];
+	if (names.length > 0) {
+		const included = Boolean(character?.name && names.includes(character.name));
+		if (filter.isExclude ? included : !included) {
+			return false;
+		}
+	}
+	const tags = filter.tags ?? [];
+	if (tags.length > 0 && character) {
+		const includesTag = (character.tags ?? []).some((tag) => tags.includes(tag));
+		if (filter.isExclude ? includesTag : !includesTag) {
+			return false;
+		}
+	}
+	return true;
 }
 
 function secondaryKeys(entry: WorldEntry): string[] {
@@ -357,7 +403,12 @@ function scanBooks(sorted: readonly ScanEntry[], input: LoreInput, state: ScanSt
 			if (entry.disable) {
 				continue;
 			}
-			if (Array.isArray(entry.triggers) && entry.triggers.length > 0 && !entry.triggers.includes('normal')) {
+			// Generation type triggers: an entry that names types belongs only to those, and one that names
+			// none belongs to every type — upstream checks this before the character filter.
+			if (entry.triggers?.length && !entry.triggers.includes(input.trigger ?? 'normal')) {
+				continue;
+			}
+			if (!passesCharacterFilter(entry, input.character)) {
 				continue;
 			}
 			const { decorators } = parseDecorators(entry.content);
@@ -382,6 +433,12 @@ function scanBooks(sorted: readonly ScanEntry[], input: LoreInput, state: ScanSt
 				continue;
 			}
 			if (decorators.includes('@@dont_activate')) {
+				continue;
+			}
+			// A vectorized entry arrives already chosen: the search decided it belongs to this chat.
+			if (input.external?.has(key)) {
+				hits.push(scan);
+				scores.set(scan, 0);
 				continue;
 			}
 			if (decorators.includes('@@activate') || entry.constant || sticky) {
@@ -447,7 +504,7 @@ function scanBooks(sorted: readonly ScanEntry[], input: LoreInput, state: ScanSt
 					cooldownUntil: typeof entry.cooldown === 'number' && entry.cooldown > 0 ? input.turn + entry.cooldown : undefined,
 				};
 			}
-			state.activated.set(key, { book: scan.book, entry, reason: reasonFor(scan, state.effects[key], input.turn), content });
+			state.activated.set(key, { book: scan.book, entry, reason: reasonFor(scan, state.effects[key], input.turn, input), content });
 			state.text += `\n${content}`;
 			kept += 1;
 		}
@@ -517,7 +574,10 @@ function groupWinner(hits: ScanEntry[], sorted: readonly ScanEntry[], scores: Ma
 	return hits.filter((hit) => !dropped.has(hit)).sort((left, right) => (order.get(left) ?? 0) - (order.get(right) ?? 0));
 }
 
-function reasonFor(scan: ScanEntry, effect: TimedEffect | undefined, turn: number): string {
+function reasonFor(scan: ScanEntry, effect: TimedEffect | undefined, turn: number, input: LoreInput): string {
+	if (input.external?.has(effectKey(scan))) {
+		return 'vector';
+	}
 	if (effect && isActive(effect, 'stickyUntil', turn)) {
 		return 'sticky';
 	}
@@ -730,8 +790,7 @@ export function toWorldBook(source: { name?: string; entries?: unknown[] } | nul
 	return book;
 }
 
-/** Converts SillyTavern's own world-book file, where `entries` is an object keyed by uid. */
-export function worldInfoToBook(name: string, entries: Record<string, unknown>): WorldBook {
+/** Converts SillyTavern's own world-book file, where `entries` is an object keyed by uid. */export function worldInfoToBook(name: string, entries: Record<string, unknown>): WorldBook {
 	const book: WorldBook = { name: name.trim() || 'Lorebook', entries: {} };
 	let index = 0;
 	for (const [key, raw] of Object.entries(entries)) {
@@ -809,15 +868,30 @@ export function worldEntryFromJson(raw: unknown, uid: number): WorldEntry | null
 		matchCharacterDepthPrompt: pick([ext, 'match_character_depth_prompt'], [entry, 'matchCharacterDepthPrompt']) === true,
 		matchScenario: pick([ext, 'match_scenario'], [entry, 'matchScenario']) === true,
 		matchCreatorNotes: pick([ext, 'match_creator_notes'], [entry, 'matchCreatorNotes']) === true,
-		characterFilter:
-			Array.isArray(entry.characterFilterNames) || Array.isArray(entry.characterFilterTags) || entry.characterFilterExclude !== undefined
-				? {
-						names: stringList(entry.characterFilterNames),
-						tags: stringList(entry.characterFilterTags),
-						isExclude: entry.characterFilterExclude === true,
-					}
-				: undefined,
+		characterFilter: readCharacterFilter(pick([entry, 'character_filter'], [ext, 'character_filter']), entry),
 	});
+}
+
+/**
+ * The character/tag filter, from `character_filter` — the name SillyTavern's own editor writes, with
+ * the tag list holding registry ids — or from the three flat keys an early Comonad file carries.
+ */
+function readCharacterFilter(object: unknown, entry: Record<string, unknown>): WorldEntry['characterFilter'] {
+	if (object && typeof object === 'object' && !Array.isArray(object)) {
+		const filter = object as { names?: unknown; tags?: unknown; isExclude?: unknown };
+		return {
+			names: stringList(filter.names),
+			tags: stringList(filter.tags),
+			isExclude: filter.isExclude === true,
+		};
+	}
+	return Array.isArray(entry.characterFilterNames) || Array.isArray(entry.characterFilterTags) || entry.characterFilterExclude !== undefined
+		? {
+				names: stringList(entry.characterFilterNames),
+				tags: stringList(entry.characterFilterTags),
+				isExclude: entry.characterFilterExclude === true,
+			}
+		: undefined;
 }
 
 function stringList(value: unknown): string[] {

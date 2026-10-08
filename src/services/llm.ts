@@ -334,6 +334,18 @@ export class Llm extends Service {
 		return !wanted || wanted === 'auto' || Boolean(this.profile(parseModelId(wanted).profile));
 	}
 
+	/**
+	 * The model name a chat's model id resolves to, after the fallbacks above. The tokenizer keys off
+	 * this: a chat that remembers a removed profile still counts tokens for the model it will run.
+	 */
+	modelName(policyModel: string): string {
+		try {
+			return this.resolve(policyModel).model;
+		} catch {
+			return '';
+		}
+	}
+
 	/** The adapter a profile names, or the only loaded one. */
 	private adapter(name: string | undefined): LlmAdapter {
 		const adapter = this.findAdapter(name);

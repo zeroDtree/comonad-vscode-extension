@@ -3,9 +3,16 @@ import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 
 import { join } from 'node:path';
 import { Service, type Context } from 'cordis';
 import type { ContextForm } from '../lib/prompt';
-import type { Message, ReasoningEffort, SessionPolicy } from '../lib/types';
+import type { Message, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
 
 /** Session persistence and the active-session pointer. One JSON document per chat. */
+
+/** The variants of the reply a regenerate or a swipe is about, handed to the turn that replaces it. */
+export interface SwipeCarry {
+	swipes: string[];
+	swipeId: number;
+	swipeInfo: SwipeInfo[];
+}
 
 export interface SessionUsage {
 	inputTokens: number;
@@ -61,6 +68,8 @@ export interface Session {
 	tavernEffects?: Record<string, { activatedAt: number; stickyUntil?: number; cooldownUntil?: number }>;
 	/** What the books contributed to the last turn, for the chat's readout. */
 	tavernActivated?: Array<{ book: string; comment: string; reason: string }>;
+	/** True when the last scan ran out of world-info budget and had to drop entries. */
+	tavernOverflow?: boolean;
 }
 
 export function threadTitle(text: string): string {
@@ -484,6 +493,59 @@ export class Sessions extends Service {
 		session.transcript = session.transcript.slice(0, at);
 		this.save(session);
 		return text;
+	}
+
+	/**
+	 * The index of the reply a swipe talks about: the last thing the assistant said in full. A turn
+	 * that ended in a tool call has no reply of its own, so the answer is the last message with text
+	 * and no calls hanging off it.
+	 */
+	private replyIndex(session: Session): number {
+		for (let at = session.transcript.length - 1; at >= 0; at -= 1) {
+			const message = session.transcript[at]!;
+			if (message.role === 'assistant' && !message.toolCalls?.length && message.content.trim()) {
+				return at;
+			}
+		}
+		return -1;
+	}
+
+	/**
+	 * The variants of the last reply, so a regenerate or a swipe can grow that list instead of losing
+	 * what the user already read. A reply that was never swiped has one variant: itself.
+	 */
+	swipeCarry(id: string): SwipeCarry | undefined {
+		const session = this.require(id);
+		const at = this.replyIndex(session);
+		if (at < 0) {
+			return undefined;
+		}
+		const message = session.transcript[at]!;
+		return {
+			swipes: [...(message.swipes ?? [message.content])],
+			swipeId: message.swipeId ?? 0,
+			swipeInfo: [...(message.swipeInfo ?? [])],
+		};
+	}
+
+	/** Shows another variant of the last reply. This only moves the pointer: nothing is generated. */
+	setSwipe(id: string, index: number): boolean {
+		const session = this.require(id);
+		const at = this.replyIndex(session);
+		if (at < 0) {
+			return false;
+		}
+		const message = session.transcript[at]!;
+		const swipes = message.swipes?.length ? message.swipes : [message.content];
+		if (!Number.isInteger(index) || index < 0 || index >= swipes.length) {
+			return false;
+		}
+		message.swipes = swipes;
+		message.swipeId = index;
+		message.content = swipes[index]!;
+		this.save(session);
+		this.changed(id);
+		return true;
 	}
 
 	/**

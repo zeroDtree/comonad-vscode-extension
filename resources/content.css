@@ -1,57 +1,79 @@
 /* Comonad Content — the ST tab's pane. Loaded by the settings panel, so every rule is scoped to
-   `#st-pane` and the shared form styles (.grid/.field/.control/.hint/.check) come from
-   settings.css. Ids here are `st-*`; the settings document owns everything else. */
+   `#st-pane`, the shared form styles (.grid/.field/.control/.hint/.check) come from settings.css,
+   and the sizes and colours come from its tokens. Ids here are `st-*`; the settings document owns
+   everything else. */
 
 #st-pane {
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
+	gap: 10px;
 	min-height: 0;
+	/* The Manage Tags dialog is positioned against the pane, not against the document. */
+	position: relative;
 }
 
-/* The sub-tabs of the ST tab: the four content kinds, then the settings. */
+/* The sub-tabs of the ST tab: the four content kinds, then the settings. A tab strip rather than a
+   row of pills, so the current one reads as a place and not as a button. */
 #st-tabs {
 	display: flex;
-	gap: 4px;
+	gap: 2px;
 	flex-wrap: wrap;
-	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
-	padding-bottom: 6px;
+	border-bottom: 1px solid var(--st-border);
 }
 
 .subtab {
 	background: transparent;
-	border: 1px solid transparent;
-	border-radius: 6px;
-	padding: 3px 8px;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	padding: 5px 10px 6px;
+	margin-bottom: -1px;
 	font: inherit;
-	font-size: 12px;
+	font-size: 12.5px;
 	white-space: nowrap;
-	color: inherit;
+	color: var(--st-muted);
 	cursor: pointer;
-	opacity: 0.75;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.subtab:hover {
+	color: var(--vscode-foreground);
+	background: var(--st-hover);
+	border-radius: var(--st-radius-sm) var(--st-radius-sm) 0 0;
+}
+
+.subtab.is-on {
+	color: var(--vscode-foreground);
+	font-weight: 500;
+	border-bottom-color: var(--st-accent);
+}
+
+/* The count is a fact about the library, not part of the tab's name. */
+.subtab .count {
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	background: var(--st-surface);
+	border-radius: 999px;
+	padding: 0 6px;
+	line-height: 15px;
+}
+
+.subtab.is-on .count {
+	color: var(--vscode-foreground);
 }
 
 /* Settings is not a content kind: it sits apart, so a wrapped row still reads as two groups. */
 .subtab[data-st='settings'] {
-	margin-left: 10px;
-	border-left: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	margin-left: 12px;
+	border-left: 1px solid var(--st-border);
 	border-top-left-radius: 0;
 	border-bottom-left-radius: 0;
 }
 
-.subtab:hover {
-	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.16));
-	opacity: 1;
-}
-
-.subtab.is-on {
-	background: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
-	opacity: 1;
-}
-
 #st-pane[data-view='settings'] #st-actions,
-#st-pane[data-view='settings'] #st-split {
+#st-pane[data-view='settings'] #st-split,
+#st-pane[data-view='settings'] #wi-panel {
 	display: none;
 }
 
@@ -59,11 +81,15 @@
 	display: none;
 }
 
+/* The pane's own toolbar: the three verbs on the left, the library's folder and the save on the
+   right, with a rule underneath so the list and the form start together. */
 #st-actions {
 	display: flex;
 	align-items: center;
 	gap: 6px;
 	flex-wrap: wrap;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--st-border-soft);
 }
 
 #st-actions .grow {
@@ -72,28 +98,38 @@
 
 #st-pane .link {
 	background: transparent;
-	border: 0;
-	color: var(--vscode-textLink-foreground);
+	border: 1px solid transparent;
+	color: var(--st-muted);
 	font: inherit;
 	font-size: 12.5px;
-	padding: 3px 8px;
+	padding: 0 10px;
 	cursor: pointer;
-	border-radius: 4px;
+	border-radius: var(--st-radius-sm);
 }
 
 #st-pane .link:hover {
-	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.16));
+	background: var(--st-hover);
+	color: var(--vscode-foreground);
+}
+
+#st-pane .link:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+#st-pane button.secondary.danger {
+	color: var(--st-danger);
 }
 
 #st-save.is-dirty {
-	color: var(--vscode-editorWarning-foreground, #d19a00);
+	color: var(--st-accent);
 	font-weight: 600;
 }
 
 #st-split {
 	display: grid;
-	grid-template-columns: minmax(180px, 240px) 1fr;
-	gap: 10px;
+	grid-template-columns: minmax(190px, 250px) minmax(0, 1fr);
+	gap: 14px;
 	min-height: 320px;
 }
 
@@ -108,47 +144,192 @@
 	overflow: auto;
 	display: flex;
 	flex-direction: column;
-	gap: 2px;
+	gap: 1px;
 	min-height: 0;
 	max-height: 62vh;
+	padding-right: 2px;
 }
 
 .item {
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;
-	gap: 2px;
+	gap: 1px;
 	background: transparent;
 	border: 1px solid transparent;
-	border-radius: 6px;
-	padding: 5px 8px;
+	border-left: 2px solid transparent;
+	border-radius: var(--st-radius-sm);
+	padding: 4px 8px;
 	font: inherit;
 	color: inherit;
 	text-align: left;
 	cursor: pointer;
+	width: 100%;
+	box-sizing: border-box;
+}
+
+/* The character list's own controls: search, order, favourites, grid and the pager. */
+#st-tools {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+}
+
+#st-search {
+	flex: 1 0 100%;
+	min-width: 80px;
+	background: var(--st-surface);
+	color: inherit;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	height: var(--st-row);
+	padding: 0 8px;
+	font: inherit;
+	font-size: var(--st-text);
+}
+
+#st-search:focus {
+	outline: 1px solid var(--st-accent);
+	outline-offset: -1px;
+}
+
+#st-sort {
+	max-width: 118px;
+}
+
+#st-pager {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	margin-left: auto;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+/* Grid view: a wall of pictures, which is how upstream shows a library of cards. */
+#st-items.is-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+	gap: 8px;
+}
+
+#st-items.is-grid .item {
+	align-items: center;
+	text-align: center;
+	border-left-width: 1px;
+	padding: 5px;
+}
+
+#st-items.is-grid .item-avatar {
+	width: 100%;
+	aspect-ratio: 1;
+	height: auto;
+}
+
+#st-items.is-grid .item-detail {
+	display: none;
+}
+
+.item-avatar {
+	width: 28px;
+	height: 28px;
+	flex: 0 0 auto;
+	object-fit: cover;
+	border-radius: var(--st-radius-sm);
+	border: 1px solid var(--st-border-soft);
+	margin-bottom: 2px;
+}
+
+.item-star {
+	color: var(--vscode-charts-yellow, #d7ba7d);
+}
+
+/* A card's picture: what the card's own file holds, shown beside the button that replaces it. */
+.picture-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.picture-shot {
+	width: 56px;
+	height: 56px;
+	flex: 0 0 auto;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius);
+	overflow: hidden;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	background: var(--st-surface-2);
+}
+
+.picture-shot img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+
+.range-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.range-row input[type='range'] {
+	flex: 1;
+	min-width: 0;
+}
+
+.range-row output {
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	min-width: 30px;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+
+select.more-menu {
+	max-width: 150px;
 }
 
 .item:hover {
-	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.14));
+	background: var(--st-hover);
 }
 
 .item.is-on {
-	background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.24));
+	background: var(--st-selected);
 }
 
-.item.is-adopted .item-name::after {
-	content: ' ●';
-	color: var(--vscode-charts-green, #4caf50);
-	font-size: 10px;
+/* The chat is using this one: an edge says so without a dot glued to the name. */
+.item.is-adopted {
+	border-left-color: var(--st-green);
+}
+
+#st-items.is-grid .item.is-adopted {
+	border-color: var(--st-green);
 }
 
 .item-name {
-	font-size: 12.5px;
+	font-size: var(--st-text);
+	font-weight: 500;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.item.is-on .item-name {
+	font-weight: 600;
 }
 
 .item-detail {
-	font-size: 11px;
-	opacity: 0.65;
+	font-size: var(--st-small);
+	color: var(--st-muted);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -159,30 +340,45 @@
 	overflow: auto;
 	min-height: 0;
 	max-height: 66vh;
+	padding-right: 2px;
 }
 
-#st-form section {
+#st-form > .actions {
 	margin-bottom: 14px;
 }
 
-#st-form h2 {
-	font-size: 12px;
-	font-weight: 600;
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
-	opacity: 0.6;
-	margin: 0 0 6px;
+#st-form section {
+	margin-bottom: 18px;
+}
+
+#st-form section:last-child {
+	margin-bottom: 4px;
 }
 
 #st-form .extra {
-	margin-top: 4px;
+	margin-top: 0;
 }
 
+/* The card's own actions: what the chat uses on the left, the file-level verbs on the right, each
+   group wrapping as a unit so the row never breaks in the middle of one. */
 #st-form .actions {
+	display: flex;
+	gap: 6px 10px;
+	flex-wrap: wrap;
+	align-items: center;
+	margin-bottom: 16px;
+}
+
+#st-form .actions .group {
 	display: flex;
 	gap: 6px;
 	flex-wrap: wrap;
-	margin-bottom: 12px;
+	align-items: center;
+}
+
+#st-form .actions .group.push {
+	flex: 1 1 100%;
+	justify-content: flex-end;
 }
 
 .list-rows {
@@ -195,116 +391,422 @@
 .list-row {
 	display: flex;
 	gap: 6px;
-	align-items: flex-start;
+	align-items: center;
 }
 
 .list-row .control {
 	flex: 1;
+	min-width: 0;
 }
 
 .control.mono {
-	font-family: var(--vscode-editor-font-family, monospace);
+	font-family: var(--st-mono);
+	font-size: var(--st-small);
 }
 
 .control.bad {
-	border-color: var(--vscode-errorForeground);
+	border-color: var(--st-danger);
+}
+
+button.secondary.danger {
+	color: var(--st-danger);
 }
 
 button.secondary.danger:hover {
-	background: var(--vscode-inputValidation-errorBackground, rgba(200, 60, 60, 0.3));
+	background: var(--vscode-inputValidation-errorBackground, rgba(200, 60, 60, 0.25));
 }
 
-/* ------------------------------------------------------------- world-book entries */
+/* ------------------------------------------------------------- the prompt list (presets)
 
-.entries {
+   Upstream draws this list as a column of bordered rows: what a block is, what it costs, and the
+   row's own controls. Every row is the same grid, which is what keeps the columns straight, and a
+   block that is open grows its editor *inside* its own row, so the two read as one card. */
+
+#st-form .prompt-head,
+#st-form .prompt-row {
+	display: grid;
+	/* The controls column is a fixed width in both, or the two grids would size their share columns
+	   differently and the labels would drift away from the fields under them. */
+	grid-template-columns: 26px minmax(0, 1fr) 116px 48px;
+	align-items: center;
+	gap: 6px;
+}
+
+#st-form .prompt-head {
+	padding: 0 6px 5px 5px;
+	border-bottom: 1px solid var(--st-border);
+	font-size: var(--st-small);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--st-muted);
+}
+
+#st-form .prompt-head .num {
+	text-align: right;
+}
+
+/* The preset manager's own row: the template picker and the three file verbs, as one group. */
+#st-form .preset-tools {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	align-items: center;
+}
+
+#st-form .preset-tools select {
+	max-width: 200px;
+}
+
+#st-form .prompt-list {
 	display: flex;
 	flex-direction: column;
-	gap: 2px;
-	max-height: 24vh;
-	overflow: auto;
-	margin: 6px 0 12px;
-}
-
-.entry {
-	display: flex;
-	justify-content: space-between;
-	gap: 8px;
-	background: transparent;
-	border: 1px solid transparent;
-	border-radius: 5px;
-	padding: 3px 8px;
-	font: inherit;
-	font-size: 12px;
-	color: inherit;
-	text-align: left;
-	cursor: pointer;
-}
-
-.entry:hover {
-	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.14));
-}
-
-.entry.is-on {
-	background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.24));
-}
-
-.entry.is-off .entry-title {
-	opacity: 0.5;
-	text-decoration: line-through;
-}
-
-.entry-keys {
-	opacity: 0.55;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	max-width: 40%;
-}
-
-/* ------------------------------------------------------------- tables (prompts) */
-
-#st-form table {
-	width: 100%;
-	border-collapse: collapse;
-	font-size: 12px;
+	gap: 4px;
 	margin-top: 6px;
 }
 
-#st-form th,
-#st-form td {
+#st-form .prompt-item {
+	border: 1px solid var(--st-border-soft);
+	border-radius: var(--st-radius-sm);
+	background: var(--st-surface-2);
+}
+
+#st-form .prompt-item:hover {
+	border-color: var(--st-border);
+}
+
+#st-form .prompt-item.is-editing {
+	border-color: var(--st-accent);
+}
+
+/* Comonad's own block leads the list and cannot be switched off: it reads as the fixed thing it is. */
+#st-form .prompt-item.is-fixed {
+	background: transparent;
+}
+
+#st-form .prompt-row {
+	padding: 3px 6px 3px 5px;
+}
+
+/* The name, with upstream's markers: a pin for a marker, ★ for a block a card cannot replace, ⧉ for
+   an extension's block, the role only where it is not the system, and `@ n` where the block goes
+   into the chat. */
+#st-form .prompt-name-block {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+}
+
+#st-form .prompt-badge {
+	flex: none;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+}
+
+#st-form .prompt-open {
+	background: none;
+	border: 0;
+	padding: 0;
+	color: inherit;
+	font: inherit;
+	font-size: var(--st-text);
 	text-align: left;
-	padding: 3px 6px;
-	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.16));
-	vertical-align: middle;
-}
-
-#st-form th {
-	font-weight: 600;
-	opacity: 0.7;
-}
-
-#st-form td select.control,
-#st-form td input.control {
-	padding: 2px 4px;
-	font-size: 12px;
-}
-
-#st-form td input[type='number'] {
-	width: 58px;
-}
-
-#st-form tr.is-fixed td:first-child::after {
-	content: '★';
-	margin-left: 2px;
-	opacity: 0.5;
-}
-
-#st-form td.prompt-move {
+	cursor: pointer;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
+#st-form .prompt-open:hover {
+	color: var(--vscode-textLink-foreground);
+	text-decoration: underline;
+}
+
+#st-form .prompt-role {
+	flex: none;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+}
+
+#st-form .prompt-tokens {
+	text-align: right;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+#st-form .prompt-controls {
+	display: flex;
+	gap: 1px;
+	justify-content: flex-end;
+}
+
+/* A block that is switched off stays legible but stops asking for attention. */
+#st-form .prompt-item.is-off .prompt-name-block {
+	opacity: 0.5;
+}
+
+#st-form .prompt-item.is-off .prompt-tokens {
+	opacity: 0.45;
+}
+
+/* The toolbar under the list: what can be added, and what the list costs in all. */
+#st-form .prompt-tools {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin-top: 8px;
+}
+
+#st-form .prompt-tools select {
+	max-width: 220px;
+}
+
+#st-form .prompt-tools .prompt-total {
+	margin-left: auto;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
+/* The editor, unfolded inside its own row: upstream's fields, in upstream's order. */
+#st-form .prompt-edit {
+	border-top: 1px solid var(--st-border-soft);
+	padding: 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+#st-form .prompt-edit h3 {
+	margin: 0;
+	font-size: var(--st-label);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--st-muted);
+}
+
+#st-form .prompt-edit-rows {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+	gap: 8px 10px;
+	align-items: start;
+}
+
+#st-form .prompt-field {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-width: 0;
+}
+
+#st-form .prompt-field > label,
+#st-form .prompt-text-label > label {
+	font-size: var(--st-label);
+	color: var(--st-muted);
+}
+
+#st-form .prompt-field select[multiple] {
+	min-height: 92px;
+	padding: 2px;
+}
+
+#st-form .prompt-text-label {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+#st-form .prompt-text-label label.check {
+	margin-left: auto;
+}
+
+#st-form .prompt-edit textarea.control {
+	width: 100%;
+	min-height: 104px;
+	resize: vertical;
+	font-family: var(--st-mono);
+	font-size: var(--st-small);
+	line-height: 1.5;
+}
+
+#st-form .prompt-edit-footer {
+	display: flex;
+	gap: 6px;
+	justify-content: flex-end;
+}
+
+#st-form .prompt-edit-footer button.reset {
+	color: var(--st-warning);
+}
+
 #st-status {
-	min-height: 14px;
+	min-height: 18px;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+}
+
+/* ------------------------------------------------------------------------- tags */
+
+/* The chips of the selected character, above the card's own fields: a tag lives in the registry,
+   not in the file, so it is drawn apart from the form and written as soon as it is changed. */
+#st-tags .tag-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	align-items: center;
+	margin-bottom: 6px;
+	min-height: 20px;
+}
+
+.tag-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	border-radius: 10px;
+	background: var(--vscode-badge-background, rgba(128, 128, 128, 0.24));
+	padding: 1px 8px;
+	font-size: 11.5px;
+	white-space: nowrap;
+}
+
+.tag-chip-x {
+	background: transparent;
+	border: 0;
+	color: inherit;
+	font: inherit;
+	opacity: 0.6;
+	cursor: pointer;
+	padding: 0 0 0 4px;
+}
+
+.tag-chip-x:hover {
+	opacity: 1;
+	color: var(--vscode-errorForeground);
+}
+
+.tag-add {
+	display: flex;
+	gap: 4px;
+	align-items: center;
+}
+
+.tag-add .control {
+	width: 180px;
+}
+
+.tag-tools {
+	display: flex;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+/* The Manage Tags dialog: upstream's list of tags with a colour, a folder type and a delete that can
+   hand everything over to another tag. It floats over the pane, because it is not part of the form. */
+.tag-manager {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	bottom: 8px;
+	width: min(560px, 70%);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+	border-radius: 8px;
+	box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+	padding: 10px;
+	z-index: 20;
+}
+
+.tag-manager-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.tag-manager-head h2 {
+	flex: 1;
 	font-size: 12px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.6;
+	margin: 0;
+}
+
+.tag-manager-list {
+	flex: 1;
+	overflow: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-height: 0;
+}
+
+.tag-manager-row {
+	display: grid;
+	grid-template-columns: auto minmax(80px, 1fr) auto auto auto auto auto auto auto;
+	gap: 4px;
+	align-items: center;
+	padding: 2px 0;
+}
+
+.tag-manager-row .tag-name {
+	min-width: 0;
+}
+
+.tag-colour {
+	display: flex;
+	align-items: center;
+	gap: 1px;
+}
+
+.tag-colour input[type='color'] {
+	width: 22px;
+	height: 20px;
+	padding: 0;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	background: transparent;
+}
+
+.tag-folder {
+	width: 24px;
+	padding: 1px 0;
+}
+
+.tag-hidden {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	font-size: 11px;
 	opacity: 0.8;
+	white-space: nowrap;
+}
+
+.tag-uses {
+	font-size: 11px;
+	opacity: 0.6;
+	white-space: nowrap;
+}
+
+.tag-merge {
+	font-size: 11px;
+}
+
+.tag-manager-create {
+	display: flex;
+	gap: 6px;
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+	padding-top: 6px;
+}
+
+.tag-manager-create .control {
+	flex: 1;
 }

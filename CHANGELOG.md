@@ -6,6 +6,166 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **The ST tab is one design now.** Its pages were built one after another and it showed: five kinds of
+  button, three field sizes, icons floating in the middle of a row, a header line that did not sit over
+  the columns it named. They now share one scale, declared once as tokens in `settings.css` — every
+  pane is loaded into that one document — with a **26px control height**, 6/4px radii, 11.5px labels,
+  muted hints, one focus ring, and every colour a theme variable with a neutral fallback, so the panel
+  is at home in a light theme and a dark one.
+  - The sub-tabs are a **tab strip** whose counts are badges of their own rather than parentheses in
+    the tab's name, and the pane's toolbars group their verbs, so a row breaks between groups instead
+    of in the middle of one.
+  - The **prompt list** reads the way upstream's does: one card per block — a switch, the name with its
+    markers (📌 marker, ★ important, the role where it is not the system's, and `@ 2` where the block
+    goes into the chat), the block's own controls and its token count — on a grid the header line
+    shares, which is what keeps the columns straight. *Add prompt…* and *Restore prompts* sit under it
+    with the list's total on the right.
+  - The **world-book list's** labels are a row of the entry row's own grid instead of a hand-tuned
+    padding, so *Strategy*, *Position*, *Depth*, *Order* and *Trigger %* sit over the fields they name;
+    the state column is the bare 🟢/🔵/🔗 upstream shows, and an entry that is switched off dims whole
+    (and comes back on hover) rather than striking its title through.
+  - The **persona page** lists personas as rows — picture, name, title, and the crown and lock badges —
+    with upstream's picture wall one click away; position, depth and role are one row of three fields
+    instead of three loose rows, and a connection is a chip with its own ✕.
+  - A card's actions are two groups (what the chat uses, then the file verbs), the list's search takes
+    a row of its own, and every icon button — ↑ ↓ ✎ ⧉ ✕, the fold arrows, the ★ and ▦ filters — is the
+    same 22px square with the same hover.
+
+- **Personas are SillyTavern's own now, pictures and all.** The Personas sub-tab is upstream's persona
+  panel: the avatar tiles on the left (create, search, A-Z / Z-A / search order, paging, grid toggle
+  and the upload tile) and the open persona on the right — name and title, picture, description with a
+  live token count, where the description goes (**None (disabled)** first, upstream's own order),
+  depth and role, the three locks (*Default* / *Character* / *Chat*) with the connection list, the
+  persona's own book, and the three persona-wide settings. It saves as you type, as upstream's does.
+
+  - Connections are stored in upstream's `{type, id}` shape, so a persona backup made in SillyTavern
+    reads here and ours reads there. The bare names an earlier Comonad file carried still load, and a
+    connection written `Kestrel.png` now matches the card Comonad calls `Kestrel`.
+  - The picture is a file beside the persona, named after it — which is what upstream's avatar is.
+    **Backup** writes every persona into the document SillyTavern restores from; **Restore** merges one
+    back, skipping what is already there and naming what it skipped; **Duplicate** copies the persona
+    and its picture; **Convert a character…** makes a persona out of a card, swapping
+    `{{char}}`/`{{user}}` if you say so; deleting a persona takes its picture with it.
+  - Three settings joined them: `comonad.personaAutoLock`, `comonad.personaAllowMultiConnections` (off
+    means connecting a persona to a character takes the character from whichever persona had it) and
+    `comonad.personaShowNotifications`.
+  - *Sync user name* is deliberately absent: `{{user}}` is resolved when a request is built, so there
+    are no stored names to rewrite.
+
+- **Cards carry the fields upstream keeps outside the V2 spec.** A card's **favourite** (`fav`, at the
+  V1 root and under `extensions`), its **talkativeness**, the **create date** upstream stamps on it and
+  its **source link** are read from wherever upstream writes them and written back to both places. The
+  editor gained a **picture** — and since upstream keeps a card *as* its picture, choosing one writes
+  the card as a PNG card beside it and removes the JSON — plus a talkativeness slider and a **More…**
+  menu with upstream's own entries: *Import Card Lore* (the book a card carries becomes a library world
+  book and the card is linked to it), *Convert to Persona*, *Rename* (the file, the tag-registry key,
+  the persona connections, the default character and every open chat follow the new name), *Link to
+  Source*, *Import cards…* and *Export JSON…*. The list gained search, order (name, newest, oldest),
+  a favourites filter, grid view, paging and avatars. A card's embedded book is no longer scanned twice
+  once it has been imported and linked.
+
+- **The whole chat-completion preset, not just its samplers.** The preset form now covers what
+  SillyTavern's OpenAI settings hold: the six **nudge prompts** (what is sent when there is otherwise
+  nothing to send — the history is headed by *New chat*, a history ending on a reply is filled by *Send
+  if empty* as the user, and a continue carries *Continue nudge*, `{{lastChatMessage}}` and all), plus
+  `seed`, a **logit-bias** set and the name of the one to send, `stream_openai`, `max_context_unlocked`
+  and `use_sysprompt`. A preset can also keep a **prompt order per character**, which is used for the
+  character it names; a SillyTavern block whose numeric `character_id` means nothing here is preserved
+  verbatim rather than dropped. `frequency_penalty`, `presence_penalty`, `seed` and the selected logit
+  bias now reach the request, and a field the preset does not set is never sent. `{{charIfNotGroup}}`
+  joined the macros — the shipped *Main Prompt* is upstream's own text, written with it.
+  - The preset manager gained **Import…** (validated before it is accepted), **Export…** (a library
+    file is copied byte for byte, so nothing unmodelled is lost), **Start from…**, **Restore template**
+    and **Restore prompts**, and *Add prompt…* offers eight blocks worth having to hand.
+  - **Four templates ship with Comonad**, written here rather than copied from anyone: *Balanced*,
+    *Creative*, *Precise* and *Long-form*. Choosing one copies it into `.comonad/presets/`, where it is
+    an ordinary preset you can edit or delete.
+  - What is kept but not acted on says so in its own hint rather than being dropped silently:
+    `top_k`/`top_a`/`min_p`/`repetition_penalty` (a chat-completions endpoint refuses them) and
+    `stream_openai: false` (Comonad always shows tokens as they arrive).
+  - The context template, instruct mode and sysprompt are still not built, and that is deliberate:
+    SillyTavern hides all three while the API is chat completion and never sends them. Their keys ride
+    along in a preset's unmodelled ones, so importing an upstream preset loses nothing.
+
+- **A prompt entry is editable, the way upstream edits one.** Every row of the preset's prompt list
+  unfolds upstream's *Edit* panel under itself, as the world-book entries do — **Name**, **Role**,
+  **Triggers** (the generation types the block fires for; nothing ticked means all of them),
+  **Position** (*Relative* or *In-chat @ Depth*), **Depth**, **Order**, the prompt text and
+  **Forbid Overrides**, each with upstream's own hint. The
+  list draws the row the way upstream draws it — the name with its markers (a pin for a marker, ★ for
+  forbid-overrides, ⧉ for an extension block, the role, and `@ depth` when it is in chat), the block's
+  token count, and its own controls: move, edit, duplicate, delete. A marker says its text is pulled
+  from elsewhere and cannot be edited, in upstream's words, and *Reset* puts a shipped block back to
+  the name, role and text Comonad ships. This is not only an editor: a block limited to some
+  generation types really is left out of the others, and an in-chat block's **text now reaches the
+  request**, spliced into the history at its depth and order — deeper depths further up, and within a
+  depth low order first and assistant, user, system, which is upstream's own `populationInjectionPrompts`
+  order.
+
+- **Creating a world book asks for its name.** *Create* used to make a `New Lorebook` file the moment
+  it was pressed; it now opens the same input box *Rename* uses, prefilled with the first free name,
+  and nothing is written if it is dismissed. The name a pane sends outright is still taken as it is,
+  and a name that is already taken gets a number rather than overwriting a file.
+
+- **The world-info fields that were hidden are real now.** An entry's **Automation ID**, its
+  **Filter to Generation Triggers** and its **🔗 Vectorized** state are back in the editor and mean
+  something:
+  - *Automation ID*: when the entry activates, the `WorldInfoActivated` hook fires and the
+    same-named slash command runs — once per turn, and only with `comonad.wiAutomation` on, because
+    a name is all it takes to run a command.
+  - *Generation triggers*: SillyTavern's six types (**Normal, Continue, Impersonate, Swipe,
+    Regenerate, Quiet**) are now real generations, offered by the ▾ beside *Send* and by
+    `/continue`, `/impersonate`, `/swipe`, `/regenerate` and `/quiet`. An entry that names types
+    fires only for those. Replies keep their versions — `‹ n/m ›` on the turn walks them — a
+    regenerate replaces the first version and adds every later one, a continue extends the message
+    it carries on, an impersonation is recorded as *your* message, and a quiet generation leaves no
+    trace in the chat.
+  - *Vectorized*: with `comonad.wiVectorEnabled` an entry in that state is found by meaning instead
+    of by its keys — the newest messages are embedded through an OpenAI-compatible `/embeddings`
+    endpoint, ranked by cosine similarity against each entry's own vector, and the best few above
+    the score threshold are injected. Vectors are cached per book and model under the extension's
+    storage, keyed by a hash of the entry's text.
+- **A real tag registry.** Tags live in `.comonad/tags.json` in SillyTavern's own shape (`tags` plus
+  a `tag_map` from character to tag **ids**), the Characters tab shows a character's tags as chips,
+  *Manage tags…* creates, renames, colours, folders, deletes and merges them, *Import card tags*
+  reads the card's own `tags` field exactly as upstream does (`comonad.tagImportSetting` decides
+  between asking, all, only existing, or none), and an entry's character filter now stores tag
+  **ids**, so renaming a tag cannot break a filter.
+- **Search is Fuse.js, with upstream's options.** The world-book search box now ranks entries the
+  way SillyTavern's does — the same key weights, `ignoreLocation`, the extended syntax (`'exact`,
+  `!not`) — and `.comonad/tags.json`-style matching is case- and accent-insensitive.
+- **Exact token counts.** The counter behind the world-info budget, the context trim and every
+  panel readout is now the model's own tokenizer: tiktoken (`o200k_base` / `cl100k_base` / `r50k`)
+  for the GPT families, and SillyTavern's own tokenizer files — downloaded from upstream's
+  repository, or read from a SillyTavern checkout configured in `comonad.tokenizerDir` — for Claude,
+  Gemini, Llama, Mistral and friends, with upstream's `+6` message framing added on top. A model
+  nothing is known for falls back to the byte estimate, as upstream does.
+- **An entry's character/tag filter reads SillyTavern's own key.** The filter is written as
+  `character_filter` (the name upstream's editor writes, holding tag ids), and the three flat keys
+  an earlier Comonad file carried are read for compatibility and dropped on the next write.
+
+- **The World books sub-tab is SillyTavern's own panel, in its shape.** Active worlds, the global
+  activation knobs (scan depth, context %, budget cap, min activations, max depth, max recursion
+  steps, insertion strategy, include names, recursive scan, case-sensitive, whole words, group
+  scoring, **alert on overflow**) and the book toolbar (Create / pick / Import / Export / Rename /
+  Duplicate / Delete) sit above the entry list, which has SillyTavern's search (weighted over keys,
+  group, title, secondary keys and body), its sort rules (priority, custom, title, size, depth,
+  order, uid, trigger %) with *Apply sorting as Order*, its paging, *Open all* / *Close all* and
+  *Fill empty titles*, and drag-to-reorder under the custom sort. Every row unfolds into the full
+  editor — key **chips** with the ✨/⌨️ plaintext switch, the optional filter, outlet name, per-entry
+  scan depth and trinary overrides, recursion level, content with its **token count and uid**, the
+  inclusion group and weight, sticky/cooldown/delay, the character-or-tag filter, *Selective* / *Use
+  Probability* / *Add Memo* and the *Additional Matching Sources* drawer — and there is no Save
+  button: the page writes the book back as it is typed into. The world-info knobs moved out of the
+  Settings sub-tab, where SillyTavern keeps them.
+- **An entry's character/tag filter now decides activation.** It was read from the file and then
+  ignored, so an entry SillyTavern would have kept out of a chat was injected there anyway. The
+  names are matched against the character's file name and the tags against its own, with *Exclude*
+  turning the test around.
+- **`{{outlet::Name}}` works.** An entry whose position is *outlet* is not injected where it sits;
+  its text is now collectable in a prompt by name. Before this the position was a dead end.
+- **Alert On Overflow.** A new setting: when the world-info budget stops the scan, the chat says so
+  once, the way SillyTavern's toast does.
 - **The content layer has its own library, in SillyTavern's formats.** Characters, world books,
   personas and presets live in `.comonad/{characters,lorebooks,presets,personas}` (project and user
   folder) — Comonad's own folders, written in the same file shapes SillyTavern uses, so an item can

@@ -797,6 +797,21 @@
           "default": "User",
           "description": "What the {{user}} macro expands to when no persona is selected."
         },
+        "comonad.personaAutoLock": {
+          "type": "boolean",
+          "default": false,
+          "description": "Lock a persona to the chat as soon as it is picked, the way SillyTavern's Auto-lock does."
+        },
+        "comonad.personaAllowMultiConnections": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow more than one persona to be connected to the same character."
+        },
+        "comonad.personaShowNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tell the user when the chat's persona changes."
+        },
         "comonad.tavernLorebooks": {
           "type": "array",
           "items": {
@@ -842,6 +857,11 @@
           },
           "default": [],
           "markdownDescription": "Regex scripts applied to the prompt or to replies. The same shape SillyTavern stores: `{ scriptName, findRegex, replaceString, placement, disabled, markdownOnly, promptOnly, runOnEdit, minDepth, maxDepth, trimStrings }`."
+        },
+        "comonad.tokenizerDir": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "A SillyTavern folder whose `src/tokenizers` holds the tokenizers it ships itself — Gemma/Gemini, Llama3, Claude, Llama, Mistral, Yi, Jamba. Models with a published tokenizer (DeepSeek, Qwen2, Command R/A, Nemo, GLM) are downloaded and cached instead, and OpenAI-family models use `tiktoken`'s encodings. Empty means those models are counted with SillyTavern's own fallback estimate (bytes / 3.35)."
         },
         "comonad.wiScanDepth": {
           "type": "number",
@@ -895,18 +915,79 @@
         },
         "comonad.wiCharacterStrategy": {
           "type": "number",
-          "default": 0,
+          "default": 1,
           "enum": [
             0,
             1,
             2
           ],
-          "markdownDescription": "Order of equal-priority books: `0` character first, `1` global first, `2` evenly."
+          "markdownDescription": "How character-bound and global books interleave: `0` sorted evenly, `1` character lore first, `2` global lore first."
         },
         "comonad.wiGroupScoring": {
           "type": "boolean",
           "default": false,
           "description": "Score a group's entries together instead of keeping only its strongest member."
+        },
+        "comonad.wiOverflowAlert": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Say so when the world-info scan ran out of budget and dropped entries (SillyTavern's *Alert On Overflow*)."
+        },
+        "comonad.wiAutomation": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Run the automation an activated entry names in its *Automation ID*: the `WorldInfoActivated` hook, then a slash command of that name. Off by default — naming an automation is enough to run it."
+        },
+        "comonad.wiVectorEnabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Find world-info entries marked *Vectorized* by meaning instead of by keys, the way SillyTavern's Vectors extension does. Needs an endpoint that embeds."
+        },
+        "comonad.wiVectorProfile": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The profile whose endpoint embeds. Empty means the chat's own model profile — set this when that endpoint has no embeddings."
+        },
+        "comonad.wiVectorModel": {
+          "type": "string",
+          "default": "text-embedding-3-small",
+          "description": "The embedding model to ask for."
+        },
+        "comonad.wiVectorThreshold": {
+          "type": "number",
+          "default": 0.25,
+          "minimum": 0,
+          "maximum": 1,
+          "markdownDescription": "The lowest cosine similarity an entry needs to be injected (SillyTavern's *Score threshold*)."
+        },
+        "comonad.wiVectorMaxEntries": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "description": "How many vectorized entries one book may contribute to a turn."
+        },
+        "comonad.wiVectorQuery": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "description": "How many of the newest messages of the chat form the search query."
+        },
+        "comonad.tagImportSetting": {
+          "type": "number",
+          "default": 1,
+          "enum": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "enumDescriptions": [
+            "Ask every time a card's own tags could be imported.",
+            "Never import a card's tags.",
+            "Import every tag a card carries, creating the ones that are new.",
+            "Import only the card tags that already exist as tags in the library."
+          ],
+          "markdownDescription": "What to do with the tags a character card carries in its own `tags` field (SillyTavern's *Tag Import Option*): `1` ask, `2` none, `3` all, `4` only existing."
         }
       }
     }
@@ -942,6 +1023,9 @@
     "serialize-javascript": "^7.0.6"
   },
   "dependencies": {
-    "cordis": "^4.0.0-rc.10"
+    "@agnai/web-tokenizers": "^0.1.6-pre3",
+    "cordis": "^4.0.0-rc.10",
+    "fuse.js": "^7.5.0",
+    "gpt-tokenizer": "^4.0.0"
   }
 }

@@ -40,7 +40,13 @@
 	};
 
 	// The content editor lives in the same document and shares this webview's message channel.
-	const pane = window.comonadContentPane({ post });
+	// `store` is the small per-document preference bag the two content guests share, kept apart from
+	// the tab the panel itself remembers.
+	const store = {
+		get: () => vscode.getState() || {},
+		set: (patch) => vscode.setState({ ...(vscode.getState() || {}), ...patch }),
+	};
+	const pane = window.comonadContentPane({ post, store });
 
 	/* ------------------------------------------------------------------ tabs */
 
@@ -50,7 +56,7 @@
 			return;
 		}
 		activeSt = name;
-		vscode.setState({ tab: activeTab, st: name });
+		store.set({ tab: activeTab, st: name });
 		for (const button of document.querySelectorAll('.subtab[data-st]')) {
 			if (button.dataset.st === 'settings') {
 				button.classList.toggle('is-on', name === 'settings');
@@ -68,7 +74,7 @@
 			name = 'agent';
 		}
 		activeTab = name;
-		vscode.setState({ tab: name, st: activeSt });
+		store.set({ tab: name, st: activeSt });
 		for (const tab of document.querySelectorAll('.tab')) {
 			const on = tab.dataset.tab === name;
 			tab.classList.toggle('is-on', on);
@@ -146,7 +152,6 @@
 		fillCatalog($('tavern-character'), catalog.characters, tavern.character, 'No default character');
 		fillCatalog($('tavern-persona'), catalog.personas, tavern.persona, 'No persona');
 		fillCatalog($('tavern-preset'), catalog.presets, tavern.preset, 'The shipped prompts');
-		$('tavern-books').value = (tavern.lorebooks || []).join('\n');
 		$('books-known').textContent = 'Known books: ' + ((catalog.books || []).map((book) => book.name + ' (' + book.entries + ')').join(', ') || 'none found');
 		$('catalog-summary').textContent =
 			(catalog.characters || []).length +
@@ -158,18 +163,6 @@
 			(catalog.presets || []).length +
 			' preset(s). Reload after adding files — **Comonad: Reload Characters, Books and Presets**.';
 		const wi = tavern.wi || {};
-		$('wi-scan').value = String(wi.scanDepth ?? 0);
-		$('wi-budget').value = String(wi.budget ?? 0);
-		$('wi-cap').value = String(wi.budgetCap ?? 0);
-		$('wi-min').value = String(wi.minActivations ?? 0);
-		$('wi-min-depth').value = String(wi.maxActivationsDepth ?? 0);
-		$('wi-recursion').checked = Boolean(wi.recursive);
-		$('wi-recursion-steps').value = String(wi.maxRecursionSteps ?? 0);
-		$('wi-case').checked = Boolean(wi.caseSensitive);
-		$('wi-words').checked = Boolean(wi.matchWholeWords);
-		$('wi-names').checked = Boolean(wi.includeNames);
-		$('wi-groups').checked = Boolean(wi.groupScoring);
-		fillSelect($('wi-strategy'), Object.fromEntries(STRATEGIES), String(wi.characterStrategy ?? 0));
 		$('wi-format').value = tavern.wiFormat || '';
 		$('fmt-scenario').value = tavern.scenarioFormat || '';
 		$('fmt-personality').value = tavern.personalityFormat || '';
@@ -222,24 +215,11 @@
 			tavernCharacter: $('tavern-character').value,
 			tavernPersona: $('tavern-persona').value,
 			tavernUserName: $('tavern-user').value.trim(),
-			tavernLorebooks: lines($('tavern-books')),
 			tavernAuthorNote: $('tavern-note').value,
 			tavernNoteDepth: Number($('tavern-note-depth').value) || 0,
 			tavernWiFormat: $('wi-format').value,
 			tavernScenarioFormat: $('fmt-scenario').value,
 			tavernPersonalityFormat: $('fmt-personality').value,
-			wiScanDepth: Number($('wi-scan').value) || 0,
-			wiBudget: Number($('wi-budget').value) || 0,
-			wiBudgetCap: Number($('wi-cap').value) || 0,
-			wiMinActivations: Number($('wi-min').value) || 0,
-			wiMaxActivationsDepth: Number($('wi-min-depth').value) || 0,
-			wiRecursive: $('wi-recursion').checked,
-			wiMaxRecursionSteps: Number($('wi-recursion-steps').value) || 0,
-			wiCaseSensitive: $('wi-case').checked,
-			wiMatchWholeWords: $('wi-words').checked,
-			wiIncludeNames: $('wi-names').checked,
-			wiGroupScoring: $('wi-groups').checked,
-			wiCharacterStrategy: Number($('wi-strategy').value) || 0,
 			tavernPreset: $('tavern-preset').value,
 		};
 	}

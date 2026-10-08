@@ -14,19 +14,43 @@ import { turnsOf } from '../lib/turns';
 import { parseUnified } from '../services/checkpoints';
 import { SessionStore, unusedChat } from '../services/sessions';
 import { formatModelId, parseModelId, shapeModels } from '../services/llm';
-import { profileKeyEnvs } from '../services/settings';
+import { CONFIG_KEYS, DEPRECATED_CONFIG_KEYS, profileKeyEnvs } from '../services/settings';
 import { toolset } from '../services/tools';
-import { cardTextFromPng, characterToCard, greetingsOf, loadCard, normaliseCard, parseCard, readPngText, writePngText } from '../lib/tavern/card';
-import { adoptBook, adoptCharacter, adoptPersona, adoptPreset, blankBook, blankCharacter, blankPersona, blankPreset } from '../lib/tavern/authoring';
+import { blankPng, cardTextFromPng, characterToCard, greetingsOf, loadCard, normaliseCard, parseCard, readPngText, writePngText } from '../lib/tavern/card';
+import { adoptBook, adoptCharacter, adoptPersona, adoptPreset, blankBook, blankCharacter, blankPersona, blankPreset, entryToJson } from '../lib/tavern/authoring';
 import { readBookFile } from '../services/tavern';
+import { convertCharacterToPersona } from '../lib/tavern/personas';
 import { parseExamples, substituteMacros } from '../lib/tavern/macro';
 import { parsePreset, presetSamplers, presetToJson } from '../lib/tavern/preset';
-import { DEFAULT_ORDER, IDENTITY_PROMPT, movePrompt, promptCollection, setEnabled } from '../lib/tavern/prompts';
+import { PRESET_TEMPLATES } from '../lib/tavern/templates/presets';
+import { PROMPT_BLOCKS } from '../lib/tavern/templates/blocks';
+import { DEFAULT_ORDER, DEFAULT_PROMPTS, IDENTITY_PROMPT, movePrompt, promptCollection, setEnabled, shippedPrompt, triggersGeneration } from '../lib/tavern/prompts';
 import { activateLore, toWorldBook, worldInfoToBook, type LoreBook, type LoreInput } from '../lib/tavern/lore';
 import { assemble, exampleMessages, injectAtDepth } from '../lib/tavern/assemble';
 import { applyRegex, makeScript } from '../lib/tavern/regex';
-import { REGEX_PLACEMENT, WI_LOGIC, WI_POSITION, WI_ROLE, WI_SETTINGS_DEFAULTS, WI_STRATEGY, worldEntry, type WorldEntry } from '../lib/tavern/types';
+import { ruleOf, searchEntries, visibleEntries } from '../lib/tavern/search';
+import {
+	ANTI_TROLL_MAX_TAGS,
+	TAG_IMPORT,
+	addTags,
+	applyTagImport,
+	byId,
+	deleteTag,
+	emptyStore,
+	ensureTag,
+	mergeStores,
+	planTagImport,
+	pruneTags,
+	readStore,
+	renameTag,
+	storeJson,
+	tagIdsOf,
+	tagsOf,
+} from '../lib/tavern/tags';
+import { REGEX_PLACEMENT, WI_LOGIC, WI_POSITION, WI_ROLE, WI_SETTINGS_DEFAULTS, WI_STRATEGY, worldEntry, type GenerationTrigger, type WorldEntry } from '../lib/tavern/types';
 import { createTestKernel } from './harness';
+import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, countMessages, countRaw, countTokens, encodingForModel, guesstimate, setEncoder } from '../lib/tokens';
+import { planFor } from '../services/tokenizers';
 
 const readTool: ToolSpec = {
 	name: 'read_file',
@@ -58,6 +82,61 @@ const policy = (patch: Partial<SessionPolicy> = {}): SessionPolicy => ({
 });
 
 const call = (name: string, args: Record<string, unknown>): ToolCall => ({ id: '1', name, arguments: JSON.stringify(args) });
+
+suite('Token counting', () => {
+	test('a model name picks the same tokenizer SillyTavern picks', () => {
+		assert.strictEqual(planFor('deepseek-chat').kind, 'download');
+		assert.deepStrictEqual(planFor('deepseek-reasoner'), { kind: 'download', file: 'deepseek.json.gz' });
+		assert.deepStrictEqual(planFor('gemini-2.5-flash'), { kind: 'local', file: 'gemma.model' });
+		assert.deepStrictEqual(planFor('claude-3-5-sonnet'), { kind: 'local', file: 'claude.json' });
+		assert.deepStrictEqual(planFor('llama-3.1-70b'), { kind: 'local', file: 'llama3.json' });
+		assert.deepStrictEqual(planFor('qwen2.5-72b'), { kind: 'download', file: 'qwen2.json.gz' });
+		assert.deepStrictEqual(planFor('gpt-4o'), { kind: 'tiktoken', encoding: 'o200k_base' });
+		// An unknown name is an OpenAI-compatible model, which is where upstream's default ends too.
+		assert.deepStrictEqual(planFor('some-local-model'), { kind: 'tiktoken', encoding: 'cl100k_base' });
+		assert.strictEqual(planFor('').kind, 'none');
+	});
+
+	test('the encoding table follows the model families that matter', () => {
+		assert.strictEqual(encodingForModel('gpt-4o-mini'), 'o200k_base');
+		assert.strictEqual(encodingForModel('o3-mini'), 'o200k_base');
+		assert.strictEqual(encodingForModel('gpt-4.1'), 'o200k_base');
+		assert.strictEqual(encodingForModel('gpt-4-turbo'), 'cl100k_base');
+		assert.strictEqual(encodingForModel('gpt-3.5-turbo'), 'cl100k_base');
+		assert.strictEqual(encodingForModel('text-embedding-ada-002'), 'cl100k_base');
+		assert.strictEqual(encodingForModel('text-davinci-003'), 'r50k_base');
+	});
+
+	test('a count is the encoding plus the message framing SillyTavern adds', async () => {
+		const kernel = await createTestKernel();
+		try {
+			setEncoder(null);
+			setEncoder(() => 7);
+			assert.strictEqual(countRaw('anything'), 7);
+			// Upstream counts a string as a message of its own: 3 per message, 3 of padding.
+			assert.strictEqual(countTokens('anything'), 13);
+			assert.strictEqual(countTokens(''), 0, 'an empty field costs nothing');
+
+			// Without an encoder it degrades to upstream's own estimate rather than to zero.
+			setEncoder(null);
+			assert.strictEqual(guesstimate('abcd'), Math.ceil(4 / BYTES_PER_TOKEN));
+			assert.ok(countTokens('四字漢字') > 0, 'multibyte text is measured in bytes');
+			assert.strictEqual(countMessages([{ content: 'a' }, { content: 'b' }]), 2 * (TOKENS_PER_MESSAGE + 1) + TOKENS_PADDING);
+
+			// The real thing: the kernel's tokenizer service installs a BPE for the model.
+			setEncoder(null);
+			const status = await kernel.ctx.tokenizers.warm('gpt-4o');
+			assert.strictEqual(status.kind, 'tiktoken');
+			assert.strictEqual(status.label, 'o200k_base');
+			assert.strictEqual(countRaw('Hello world'), 2, 'o200k counts this in two tokens');
+			assert.strictEqual(countTokens('Hello world'), 8, 'and the field shows two plus the framing');
+			assert.strictEqual(kernel.ctx.tokenizers.describe().kind, 'tiktoken');
+		} finally {
+			setEncoder(null);
+			await kernel.dispose();
+		}
+	});
+});
 
 suite('Comonad domain', () => {
 	test('policy presets', () => {
@@ -435,6 +514,67 @@ suite('Comonad domain', () => {
 		assert.strictEqual(applyContextLimit(messages, 0).length, 4);
 		assert.deepStrictEqual(applyContextLimit(messages, 250).map((message) => message.content[0]), ['c', 'd']);
 		assert.deepStrictEqual(applyContextLimit(messages, 150).map((message) => message.content[0]), ['c', 'd']);
+	});
+
+	test('a `hidden` attribute hides, in both webview documents', () => {
+		// A user-agent style is the weakest kind: `[hidden] { display: none }` loses to any class that
+		// sets `display`, so an element toggled with the attribute simply stays visible. That is how the
+		// world-book entry editor refused to fold — and how a folded entry's fields were still on screen
+		// while nothing had wired them.
+		for (const file of ['settings.css', 'chat.css']) {
+			const css = readFileSync(join(__dirname, '..', '..', 'resources', file), 'utf8');
+			assert.match(
+				css,
+				/\[hidden\]\s*\{[^}]*display:\s*none\s*!important/,
+				`${file} must force \`[hidden]\` to hide, or every module in that document that toggles it breaks`,
+			);
+		}
+	});
+
+	test('the persona page takes the personas kind over, and the item list steps aside', () => {
+		const dir = join(__dirname, '..', '..', 'resources');
+		// The persona page is a guest module of its own, like the world-book page: it saves as it is
+		// edited, so it owns the tile list and the connection editor while the kind is showing.
+		const pane = readFileSync(join(dir, 'persona.js'), 'utf8');
+		assert.match(pane, /window\.comonadPersonas/, 'the page is its own guest module');
+		for (const verb of ['personaAvatar', 'personaClearAvatar', 'personaConnect', 'personaDisconnect', 'personaBackup', 'personaRestore', 'personaFromCharacter', 'personaDuplicate', 'personaDelete', 'personaSetting']) {
+			assert.ok(pane.includes(verb), `the persona page sends ${verb}`);
+		}
+		// Upstream offers *None (disabled)* first, and it is the only way to say "send no description".
+		assert.match(pane, /\[\s*9,\s*'None \(disabled\)'\s*\]/, 'the position list carries NONE');
+		assert.match(pane, /In-chat @ Depth/, 'and upstream’s own words for the other four');
+
+		const css = readFileSync(join(dir, 'persona.css'), 'utf8');
+		assert.match(css, /#pf-panel\s*\{[^}]*display:\s*none/, 'the page is hidden until its kind shows');
+		assert.match(css, /#st-pane\[data-kind='personas'\]\s*#pf-panel\s*\{[^}]*display:\s*flex/, 'and shown for personas');
+		assert.match(css, /#st-pane\[data-kind='personas'\]\s*#st-split/, 'the item list steps aside for it');
+		assert.match(css, /#st-pane\[data-view='settings'\]\s*#pf-panel/, 'and the settings view still hides it');
+
+		const host = readFileSync(join(dir, 'content.js'), 'utf8');
+		assert.match(host, /window\.comonadPersonas/, 'the content pane loads it');
+		assert.match(host, /kind === 'personas' && personaPane/, 'and hands the kind over');
+	});
+
+	test('every setting the manifest declares is one the code actually reads', () => {
+		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+			contributes: { configuration: { properties: Record<string, unknown> } };
+		};
+		const declared = new Set(Object.keys(manifest.contributes.configuration.properties).map((key) => key.replace(/^comonad\./, '')));
+		const read = new Set<string>(CONFIG_KEYS);
+		const deprecated = new Set<string>(DEPRECATED_CONFIG_KEYS);
+		// `Host.config()` only reports the keys it is handed, so a setting the manifest declares but the
+		// code never reads is a setting the user cannot change: the panel writes it and nothing comes
+		// back. Every `comonad.tavern*` and `comonad.wi*` setting was in exactly that state.
+		assert.deepStrictEqual(
+			[...declared].filter((key) => !read.has(key) && !deprecated.has(key)).sort(),
+			[],
+			'the manifest declares settings nothing reads',
+		);
+		assert.deepStrictEqual(
+			[...read].filter((key) => !declared.has(key)).sort(),
+			[],
+			'the code reads settings the manifest does not declare',
+		);
 	});
 });
 
@@ -1331,8 +1471,21 @@ suite('Tavern content', () => {
 							{ identifier: 'authorsNote', enabled: false },
 						],
 					},
+					// One block for a character of our own, and one SillyTavern index we cannot map.
+					{ character_id: 'Kestrel', order: [{ identifier: 'chatHistory', enabled: true }, { identifier: 'main', enabled: true }] },
+					{ character_id: 7, order: [{ identifier: 'main', enabled: false }] },
 				],
 				unknown_key: 'kept',
+				new_chat_prompt: '[Start a new Chat]',
+				continue_nudge_prompt: '[Carry on from {{lastChatMessage}}.]',
+				send_if_empty: '[Say something.]',
+				seed: 42,
+				frequency_penalty: 0.3,
+				bias_preset_selected: 'Tidy',
+				logit_bias: [{ id: 'b1', name: 'Tidy', value: { '1234': -100 } }, { id: 'b2', name: 'Loose', value: {} }],
+				stream_openai: false,
+				max_context_unlocked: true,
+				use_sysprompt: true,
 			}),
 			'Test preset',
 			'test',
@@ -1340,13 +1493,36 @@ suite('Tavern content', () => {
 		assert.strictEqual(preset.temperature, 1.1);
 		assert.strictEqual(preset.maxContext, 8192);
 		assert.strictEqual(preset.wi_format, 'Lore: {0}');
-		assert.deepStrictEqual(presetSamplers(preset), { temperature: 1.1, topP: 0.9, maxTokens: 512 });
+		assert.strictEqual(preset.new_chat_prompt, '[Start a new Chat]');
+		assert.strictEqual(preset.continue_nudge_prompt, '[Carry on from {{lastChatMessage}}.]');
+		assert.strictEqual(preset.stream, false);
+		assert.strictEqual(preset.maxContextUnlocked, true);
+		assert.strictEqual(preset.useSysprompt, true);
+		assert.deepStrictEqual(Object.keys(preset.promptOrders ?? {}), ['Kestrel'], 'only a character we know gets its own order');
+		assert.deepStrictEqual(presetSamplers(preset), {
+			temperature: 1.1,
+			topP: 0.9,
+			maxTokens: 512,
+			frequencyPenalty: 0.3,
+			seed: 42,
+			logitBias: { '1234': -100 },
+		}, 'only an endpoint-compatible sampler is sent, and the selected bias set comes along');
 
 		const messages = promptCollection(preset);
 		assert.strictEqual(messages[0].identifier, IDENTITY_PROMPT, 'the agent identity leads');
 		assert.deepStrictEqual(messages.slice(1, 4).map((item) => item.identifier), ['main', 'chatHistory', 'authorsNote']);
 		assert.deepStrictEqual(messages.filter((item) => item.identifier === 'authorsNote').map((item) => item.enabled), [false]);
 		assert.ok(messages.some((item) => item.identifier === 'jailbreak'), 'the shipped blocks still ride along');
+		// A character with an order of its own uses it instead of the preset's default block.
+		assert.deepStrictEqual(
+			promptCollection(preset, 'Kestrel').slice(2, 3).map((item) => item.identifier),
+			['main'],
+			'a character’s own order is used for that character',
+		);
+		// A preset is written back with its blocks kept: ours first, the one we cannot map last.
+		const written = JSON.parse(presetToJson(preset)) as { prompt_order: { character_id: unknown }[]; unknown_key: string };
+		assert.deepStrictEqual(written.prompt_order.map((block) => block.character_id), [100000, 'Kestrel', 7]);
+		assert.strictEqual(written.unknown_key, 'kept', 'and the keys we do not model are kept');
 		// The preset's own text replaced the shipped block of the same identifier.
 		assert.strictEqual(messages.find((item) => item.identifier === 'main')?.content, 'Speak as {{char}}.');
 
@@ -1714,6 +1890,37 @@ suite('Tavern content', () => {
 				[{ depth: 1, role: WI_ROLE.user, content: 'X' }],
 			).map((message) => message.content),
 			['a', 'b', 'X', 'c'],
+		);
+		// At one depth upstream reads: `order` low first, and within an order assistant, user, system.
+		assert.deepStrictEqual(
+			injectAtDepth(
+				[
+					{ role: 'user', content: 'a' },
+					{ role: 'assistant', content: 'b' },
+					{ role: 'user', content: 'c' },
+				],
+				[
+					{ depth: 1, role: WI_ROLE.system, content: 'late-system', order: 200 },
+					{ depth: 1, role: WI_ROLE.system, content: 'early-system', order: 10 },
+					{ depth: 1, role: WI_ROLE.user, content: 'early-user', order: 10 },
+					{ depth: 1, role: WI_ROLE.assistant, content: 'early-assistant', order: 10 },
+				],
+			).map((message) => message.content),
+			['a', 'b', 'early-assistant', 'early-user', 'early-system', 'late-system', 'c'],
+		);
+		// Two depths: the deeper one ends up further up, and depth 0 sits after the last message.
+		assert.deepStrictEqual(
+			injectAtDepth(
+				[
+					{ role: 'user', content: 'a' },
+					{ role: 'assistant', content: 'b' },
+				],
+				[
+					{ depth: 0, role: WI_ROLE.system, content: 'after' },
+					{ depth: 1, role: WI_ROLE.system, content: 'before-last' },
+				],
+			).map((message) => message.content),
+			['a', 'before-last', 'b', 'after'],
 		);
 		assert.deepStrictEqual(exampleMessages('<START>\none').map((message) => message.content), ['<START>\none\n']);
 	});
@@ -2206,6 +2413,123 @@ suite('Tavern content', () => {
 		}
 	});
 
+	test('a persona at NONE names the user and sends no description', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'personas'), { recursive: true });
+			mkdirSync(join(library, 'characters'), { recursive: true });
+			writeFileSync(
+				join(library, 'personas', 'Ada.json'),
+				JSON.stringify({ name: 'Ada', description: 'You are Ada, holding the lamp.', position: 9 }),
+			);
+			writeFileSync(join(library, 'characters', 'kestrel.json'), JSON.stringify({ name: 'Kestrel', description: 'A cartographer.' }));
+			await kernel.ctx.tavern.reload();
+			assert.strictEqual(kernel.ctx.tavern.persona('Ada')?.position, 9, 'upstream’s NONE position survives the read');
+
+			const composed = kernel.ctx.tavern.compose({
+				identity: 'identity',
+				history: [{ role: 'user', content: 'Here.' }],
+				binding: { character: 'kestrel', persona: 'Ada' },
+				scan: [{ role: 'user', text: 'hi' }],
+				turn: 1,
+			});
+			const texts = composed.messages.map((message) => message.content).join('\n');
+			assert.ok(!texts.includes('holding the lamp'), 'the description is left out of the request');
+			assert.ok(texts.includes('Ada'), 'but the name still resolves wherever the persona supplies {{user}}');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a persona is written in SillyTavern’s own shape, picture and all', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			const picture = join(kernel.root, 'ada.png');
+			writeFileSync(picture, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+			const persona = blankPersona('Ada', 'Ada');
+			persona.description = 'You are Ada.';
+			persona.connections = [{ type: 'character', id: 'Kestrel' }];
+			const file = await kernel.ctx.tavern.savePersona(persona);
+			assert.strictEqual(file, join(library, 'personas', 'Ada.json'));
+			const written = JSON.parse(readFileSync(file, 'utf8')) as { connections: unknown; depth: number };
+			assert.deepStrictEqual(written.connections, [{ type: 'character', id: 'Kestrel' }], 'the file holds upstream’s connection objects');
+			assert.strictEqual(written.depth, 2);
+
+			const avatar = await kernel.ctx.tavern.setPersonaAvatar('Ada', picture);
+			assert.strictEqual(avatar, join(library, 'personas', 'Ada.png'), 'the picture is a file beside the persona');
+			assert.strictEqual(kernel.ctx.tavern.persona('Ada')?.avatar, avatar, 'and the catalog finds it by the persona’s id');
+			assert.strictEqual(await kernel.ctx.tavern.clearPersonaAvatar('Ada'), true);
+			assert.strictEqual(kernel.ctx.tavern.persona('Ada')?.avatar, undefined);
+			// Deleting a persona takes its picture: no file is left naming a persona that is gone.
+			await kernel.ctx.tavern.setPersonaAvatar('Ada', picture);
+			assert.strictEqual(await kernel.ctx.tavern.deletePersona('Ada'), true);
+			assert.strictEqual(existsSync(join(library, 'personas', 'Ada.png')), false);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('every persona backs up into upstream’s document, and restores from one', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			const ada = blankPersona('Ada', 'Ada');
+			ada.description = 'You are Ada.';
+			ada.connections = [{ type: 'group', id: 'The Crew' }];
+			await kernel.ctx.tavern.savePersona(ada);
+			await kernel.ctx.settings.update('tavernPersona', 'Ada');
+
+			const backup = kernel.ctx.tavern.exportPersonas();
+			assert.deepStrictEqual(Object.keys(backup.personas), ['Ada'], 'the names are keyed by persona id');
+			assert.strictEqual(backup.personas['Ada'], 'Ada');
+			assert.strictEqual(backup.persona_descriptions['Ada']?.description, 'You are Ada.');
+			assert.deepStrictEqual(backup.persona_descriptions['Ada']?.connections, [{ type: 'group', id: 'The Crew' }]);
+			assert.strictEqual(backup.default_persona, 'Ada');
+
+			// Restoring is a merge: what is already here is left exactly as it is.
+			const again = await kernel.ctx.tavern.importPersonas(backup);
+			assert.deepStrictEqual(again.personas, []);
+			assert.ok(again.skipped.some((line) => line.includes('already exists')), 'and it says what it skipped');
+
+			const restore = await kernel.ctx.tavern.importPersonas({
+				personas: { 'The Narrator': 'Narrator', 'Odd (Persona)': 'Odd' },
+				persona_descriptions: {
+					'The Narrator': { description: 'You narrate.', position: 4, depth: 3, role: 2, connections: [{ type: 'character', id: 'Kestrel' }] },
+					'Odd (Persona)': { description: 'You are odd.' },
+					Orphan: { description: 'there is no persona for this one' },
+				},
+				default_persona: 'The Narrator',
+			});
+			assert.deepStrictEqual(
+				restore.personas.map((persona) => persona.id),
+				['The-Narrator', 'Odd-Persona'],
+				'an id that is not file-safe is renamed along with its file',
+			);
+			assert.strictEqual(restore.defaultPersona, 'The-Narrator', 'and the document’s default follows the rename');
+			assert.ok(restore.skipped.some((line) => line.includes('Orphan')), 'a description without a persona is skipped, as upstream does');
+			assert.ok(existsSync(join(library, 'personas', 'The-Narrator.json')));
+			assert.strictEqual(kernel.ctx.tavern.persona('The-Narrator')?.position, 4);
+			assert.strictEqual(kernel.ctx.tavern.persona('The-Narrator')?.connections[0]?.id, 'Kestrel');
+			assert.strictEqual(kernel.ctx.settings.get().tavernPersona, 'The-Narrator', 'the document’s own default is adopted with it');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a character converts into a persona, macros and all', () => {
+		const character = blankCharacter('Kestrel', 'Kestrel');
+		character.description = '{{char}} is a cartographer. {{user}} holds the lamp.';
+		const kept = convertCharacterToPersona(character, 'Kestrel-Persona', '', false);
+		assert.strictEqual(kept.name, 'Kestrel');
+		assert.strictEqual(kept.description, character.description, 'the description comes across untouched when the macros are kept');
+		const swapped = convertCharacterToPersona(character, 'Kestrel-Persona', '', true);
+		assert.strictEqual(swapped.description, '{{user}} is a cartographer. {{char}} holds the lamp.', 'a swap trades the two macros');
+		assert.strictEqual(swapped.depth, 2);
+		assert.deepStrictEqual(swapped.connections, [], 'upstream binds nothing on conversion either');
+	});
+
 	test('edited items are sanitised before they are written', async () => {
 		// What a webview sends is untrusted: a bad value here becomes a corrupt file on disk.
 		const character = adoptCharacter({
@@ -2259,10 +2583,27 @@ suite('Tavern content', () => {
 		assert.strictEqual((entry as unknown as Record<string, unknown>).unknown_field, 'kept', 'unknown keys survive an edit');
 		assert.strictEqual(book.source, '/tmp/Salt.json');
 
-		const persona = adoptPersona({ name: 'Ada', connections: ['Kestrel', ''], position: 4, depth: 2, role: 1 });
-		assert.deepStrictEqual(persona.connections, ['Kestrel']);
+		const persona = adoptPersona({
+			name: 'Ada',
+			connections: ['Kestrel', '', { type: 'character', id: 'Kestrel' }, { type: 'group', id: 'The Crew' }, { id: 'Astra' }, { nope: true }],
+			position: 4,
+			depth: 2,
+			role: 1,
+		});
+		assert.deepStrictEqual(
+			persona.connections,
+			[
+				{ type: 'character', id: 'Kestrel' },
+				{ type: 'group', id: 'The Crew' },
+				{ type: 'character', id: 'Astra' },
+			],
+			'a bare name reads as a character connection, upstream’s objects keep their type, and a repeat is dropped',
+		);
 		assert.strictEqual(persona.title, '', 'a missing title stays empty');
 		assert.strictEqual(persona.position, 4);
+		assert.strictEqual(adoptPersona({ name: 'Bare' }).depth, 2, 'a fresh persona is at SillyTavern’s own default depth');
+		assert.strictEqual(blankPersona('Ada', 'Ada').depth, 2);
+		assert.strictEqual(blankPersona('Ada', 'Ada').title, '', 'the picker shows the name until a title is given');
 
 		const preset = adoptPreset({
 			name: 'Edited',
@@ -2279,8 +2620,240 @@ suite('Tavern content', () => {
 		assert.strictEqual(preset.maxTokens, 800);
 	});
 
-	test('a character, its book and a preset shape the request without displacing the agent', async () => {
-		const card = {
+	test('a card keeps upstream’s own fields, and the card verbs move what they say they move', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'characters'), { recursive: true });
+			// A V1 card: `fav` and `talkativeness` live at the root there, and `create_date` always does.
+			writeFileSync(
+				join(library, 'characters', 'kestrel.json'),
+				JSON.stringify({
+					name: 'Kestrel',
+					description: 'A cartographer.',
+					fav: true,
+					talkativeness: 0.9,
+					create_date: '2024-01-02T03:04:05.000Z',
+					data: { extensions: { source_url: 'https://example.invalid/kestrel' } },
+				}),
+			);
+			// A card that carries a book of its own, which is what upstream's *Import Card Lore* reads.
+			writeFileSync(
+				join(library, 'characters', 'city.json'),
+				JSON.stringify({
+					name: 'City',
+					data: {
+						name: 'City',
+						character_book: { name: 'City Lore', entries: [{ id: 0, keys: ['salt'], content: 'The flats drink sound.' }] },
+					},
+				}),
+			);
+			writeFileSync(join(library, 'characters', 'plain.json'), JSON.stringify({ name: 'Plain', data: { name: 'Plain' } }));
+			await kernel.ctx.tavern.reload();
+
+			const card = kernel.ctx.tavern.character('kestrel')!;
+			assert.strictEqual(card.favourite, true, '`fav` at the root of a V1 card is the favourite');
+			assert.strictEqual(card.talkativeness, 0.9);
+			assert.strictEqual(card.createdAt, '2024-01-02T03:04:05.000Z');
+			assert.strictEqual(card.sourceLink, 'https://example.invalid/kestrel');
+			assert.strictEqual(kernel.ctx.tavern.character('plain')?.talkativeness, 0.5, 'a card without one speaks at upstream’s default');
+
+			// The new fields are written where upstream writes them: `extensions` in V2, the root in V1.
+			const written = JSON.parse(await (async () => {
+				await kernel.ctx.tavern.saveCharacter({ ...kernel.ctx.tavern.character('plain')!, favourite: true, talkativeness: 0.2 });
+				return readFileSync(join(library, 'characters', 'plain.json'), 'utf8');
+			})()) as { fav?: boolean; talkativeness?: number; data: { extensions: { fav?: boolean; talkativeness?: number } } };
+			assert.strictEqual(written.fav, true, 'a V1 reader sees the root flag');
+			assert.strictEqual(written.talkativeness, 0.2);
+			assert.strictEqual(written.data.extensions.fav, true, 'and a V2 reader sees the extension');
+			assert.strictEqual(written.data.extensions.talkativeness, 0.2);
+
+			// A picture becomes the card: the JSON goes, the PNG carries the same document.
+			const picture = join(kernel.root, 'kestrel.png');
+			writeFileSync(picture, blankPng(8, 8));
+			const file = await kernel.ctx.tavern.setCharacterAvatar('kestrel', picture);
+			assert.strictEqual(file, join(library, 'characters', 'kestrel.png'));
+			assert.strictEqual(existsSync(join(library, 'characters', 'kestrel.json')), false, 'the JSON card is gone');
+			const reread = kernel.ctx.tavern.character('kestrel')!;
+			assert.strictEqual(reread.name, 'Kestrel', 'the document came along into the PNG');
+			assert.strictEqual(reread.favourite, true);
+			assert.strictEqual(reread.description, 'A cartographer.');
+
+			// Import Card Lore: the embedded book becomes a library book, and the card links to it.
+			const imported = await kernel.ctx.tavern.importCardLore('city');
+			assert.deepStrictEqual(imported, { name: 'City Lore', entries: 1 });
+			assert.ok(existsSync(join(library, 'lorebooks', 'City-Lore.json')), 'the book is a file of its own, named after it');
+			assert.strictEqual(kernel.ctx.tavern.character('city')?.world, 'City Lore', 'and the card is linked to it');
+			assert.strictEqual(kernel.ctx.tavern.book('City Lore')?.book.entries['0']?.content, 'The flats drink sound.');
+			// The same book is not scanned twice: the embedded copy is the world that is now linked.
+			const books = kernel.ctx.tavern.booksFor('no-chat').map((book) => book.name);
+			assert.deepStrictEqual(books, [], 'a chat with nothing selected scans nothing');
+
+			// Rename: the file, the tag key and a persona's connection all move with the character.
+			const store = kernel.ctx.tavern.tags;
+			addTags(store, 'plain', [ensureTag(store, 'Scenery')!]);
+			await kernel.ctx.tavern.saveTags();
+			const persona = blankPersona('Ada', 'Ada');
+			persona.connections = [{ type: 'character', id: 'plain' }];
+			await kernel.ctx.tavern.savePersona(persona);
+			assert.strictEqual(await kernel.ctx.tavern.renameCharacter('plain', 'Plain Sight'), 'Plain-Sight');
+			assert.ok(existsSync(join(library, 'characters', 'Plain-Sight.json')));
+			assert.strictEqual(existsSync(join(library, 'characters', 'plain.json')), false, 'the old file is renamed, not copied');
+			assert.strictEqual(kernel.ctx.tavern.character('Plain Sight')?.name, 'Plain Sight');
+			assert.deepStrictEqual(kernel.ctx.tavern.tagIdsFor('Plain-Sight').length, 1, 'the tags followed the file');
+			assert.deepStrictEqual(kernel.ctx.tavern.persona('Ada')?.connections, [{ type: 'character', id: 'Plain-Sight' }]);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('Comonad’s own preset templates are presets, and each one is written like any other', async () => {
+		const kernel = await createTestKernel();
+		try {
+			assert.ok(PRESET_TEMPLATES.length >= 4, 'there are templates to start from');
+			for (const template of PRESET_TEMPLATES) {
+				assert.ok(template.preset.prompts?.length, `${template.name} ships the prompt list`);
+				assert.ok(template.preset.promptOrder?.length, `${template.name} ships its order`);
+				assert.ok(template.preset.new_chat_prompt, `${template.name} marks a new chat`);
+				const file = await kernel.ctx.tavern.savePresetValue({ ...template.preset, source: '' });
+				const back = kernel.ctx.tavern.preset(template.id);
+				assert.ok(back, `${template.name} lands in the library as ${template.id}`);
+				assert.strictEqual(existsSync(file), true);
+				assert.deepStrictEqual(presetSamplers(back), presetSamplers(template.preset), 'and reads back with its samplers');
+				assert.strictEqual(back.new_chat_prompt, template.preset.new_chat_prompt, 'and with its nudges');
+			}
+			// A block's identifier is its own, so inserting one never collides with a shipped block.
+			const shipped = new Set(['main', 'nsfw', 'chatHistory', 'jailbreak', 'worldInfoBefore', 'worldInfoAfter', 'dialogueExamples']);
+			for (const block of PROMPT_BLOCKS) {
+				assert.ok(!shipped.has(block.id), `${block.name} uses an identifier of its own`);
+				assert.ok(block.content.trim().length > 40, `${block.name} says something`);
+			}
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a preset heads the history, fills an empty turn, and nudges a continue', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'presets'), { recursive: true });
+			mkdirSync(join(library, 'characters'), { recursive: true });
+			writeFileSync(join(library, 'characters', 'kestrel.json'), JSON.stringify({ name: 'Kestrel', description: 'A cartographer.' }));
+			writeFileSync(
+				join(library, 'presets', 'Nudges.json'),
+				JSON.stringify({
+					new_chat_prompt: '[A new chat begins.]',
+					send_if_empty: '[Say something.]',
+					continue_nudge_prompt: '[Carry on from {{lastChatMessage}}.]',
+					// The shipped main prompt is written with `{{charIfNotGroup}}`, which a solo chat reads
+					// as the character's name.
+					prompts: [{ identifier: 'main', name: 'Main Prompt', role: 'system', system_prompt: true, content: 'Write for {{charIfNotGroup}} and {{user}}.' }],
+					prompt_order: [
+						{
+							character_id: 100000,
+							order: [
+								{ identifier: 'main', enabled: true },
+								{ identifier: 'chatHistory', enabled: true },
+							],
+						},
+					],
+				}),
+			);
+			await kernel.ctx.tavern.reload();
+			assert.ok(presetSamplers(kernel.ctx.tavern.preset('Nudges')) !== undefined);
+
+			const composed = kernel.ctx.tavern.compose({
+				identity: 'identity',
+				history: [
+					{ role: 'user', content: 'hi' },
+					{ role: 'assistant', content: 'hm.' },
+				],
+				binding: { character: 'kestrel', preset: 'Nudges' },
+				scan: [],
+				turn: 2,
+				trigger: 'continue',
+			});
+			const texts = composed.messages.map((message) => message.content);
+			assert.strictEqual(texts[0], 'identity', 'the agent identity still leads');
+			assert.ok(texts.some((text) => text.includes('Write for Kestrel and')), '{{charIfNotGroup}} is the character in a solo chat');
+			assert.ok(texts.includes('[A new chat begins.]'), 'the new-chat marker heads the history');
+			assert.ok(texts.some((text) => text.includes('Carry on from hm.')), 'the continue nudge carries the last message');
+			assert.ok(
+				composed.messages.findIndex((message) => message.content.includes('Carry on from')) >
+					composed.messages.findIndex((message) => message.content === 'hm.'),
+				'and it is said after the message it carries on from',
+			);
+			// Upstream checks the *history* for `send_if_empty`, and a continue's history also ends on a
+			// reply, so both are said — the nudge and the filled turn. That is upstream's own behaviour.
+			assert.ok(texts.includes('[Say something.]'), 'the empty turn is filled when the history ends on a reply');
+			assert.ok(
+				composed.messages.findIndex((message) => message.content.includes('Carry on from')) <
+					composed.messages.findIndex((message) => message.content === '[Say something.]'),
+				'and the nudge comes before it, as upstream adds it',
+			);
+
+			// `send_if_empty` fills a turn the history would otherwise end on.
+			const filled = kernel.ctx.tavern.compose({
+				identity: 'identity',
+				history: [{ role: 'assistant', content: 'hm.' }],
+				binding: { character: 'kestrel', preset: 'Nudges' },
+				scan: [],
+				turn: 2,
+			});
+			assert.ok(
+				filled.messages.some((message) => message.role === 'user' && message.content === '[Say something.]'),
+				'the empty turn is filled as the user',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an edited prompt keeps its triggers, its depth and its order, and Reset has the shipped one', () => {
+		// Upstream's `shouldTrigger`: a list of generation types, and nothing in the list means all of them.
+		assert.ok(triggersGeneration({}, 'continue'), 'no trigger list means every generation type');
+		assert.ok(triggersGeneration({ injection_trigger: [] }, 'continue'), 'and so does an empty one');
+		assert.ok(!triggersGeneration({ injection_trigger: ['normal'] }, 'continue'));
+
+		const preset = parsePreset(
+			JSON.stringify({
+				prompts: [
+					// A block limited to some generation types is left out of the others.
+					{ identifier: 'main', name: 'Main Prompt', content: 'Main.', injection_trigger: ['normal', 'telepathy'] },
+					// An in-chat block: its own text is spliced into the history at its depth and its order.
+					{ identifier: 'assistantPrefill', name: 'Prefill', role: 'assistant', content: 'A prefill.', injection_position: 1, injection_depth: 0, injection_order: 50 },
+					{ identifier: 'quiet', name: 'Quiet', role: 'system', content: '', injection_position: 1, injection_depth: 1, injection_order: 10 },
+				],
+			}),
+			'Prompts',
+			'prompts',
+		);
+		assert.deepStrictEqual(preset.prompts?.[0].injection_trigger, ['normal'], 'a generation type upstream does not have is dropped as it is read');
+		assert.ok(promptCollection(preset, '', 'normal').some((prompt) => prompt.identifier === 'main'), 'the block is sent for the type it names');
+		assert.ok(!promptCollection(preset, '', 'continue').some((prompt) => prompt.identifier === 'main'), 'and left out of the ones it does not');
+		assert.strictEqual(promptCollection(preset, '', 'continue')[0].identifier, IDENTITY_PROMPT, 'the identity block is never filtered away');
+
+		const history = [
+			{ role: 'user' as const, content: 'one' },
+			{ role: 'assistant' as const, content: 'two' },
+			{ role: 'user' as const, content: 'three' },
+		];
+		const messages = assemble(promptCollection(preset), { identity: 'identity' }, history);
+		assert.strictEqual(messages.find((message) => message.content === 'A prefill.')?.role, 'assistant', 'an in-chat block keeps the role it was given');
+		assert.deepStrictEqual(
+			messages.filter((message) => ['one', 'two', 'three', 'A prefill.'].includes(message.content)).map((message) => message.content),
+			['one', 'two', 'three', 'A prefill.'],
+			'it lands at depth 0, after the last message, and the block that was emptied sends nothing at all',
+		);
+
+		// *Reset* in the pane reads the shipped block, and a block of your own has nothing to go back to.
+		const shipped = shippedPrompt('main');
+		assert.deepStrictEqual(shipped, DEFAULT_PROMPTS.find((prompt) => prompt.identifier === 'main'), 'the shipped block is the one upstream ships');
+		assert.strictEqual(shippedPrompt('my-own-block'), undefined);
+	});
+
+	test('a character, its book and a preset shape the request without displacing the agent', async () => {		const card = {
 			spec: 'chara_card_v2',
 			spec_version: '2.0',
 			data: {
@@ -2355,6 +2928,492 @@ suite('Tavern content', () => {
 				stored.tavernActivated?.map((hit) => hit.reason),
 				['key', 'key'],
 			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an entry that names a character or a tag is left out of every other chat', () => {
+		const books = [
+			loreBookOf([
+				{ uid: 0, key: ['salt'], content: 'Only for Kestrel.', comment: 'only', characterFilter: { names: ['kestrel'] } },
+				{ uid: 1, key: ['salt'], content: 'For everyone else.', comment: 'except', characterFilter: { names: ['kestrel'], isExclude: true } },
+				{ uid: 2, key: ['salt'], content: 'For a tagged character.', comment: 'tagged', characterFilter: { tags: ['wilderness'] } },
+			]),
+		];
+		const activated = (patch: Partial<LoreInput>): string[] =>
+			activateLore(lore({ books, ...patch })).activated.map((hit) => hit.entry.comment ?? '');
+		assert.deepStrictEqual(
+			activated({ character: { name: 'kestrel', tags: ['wilderness'] } }),
+			['only', 'tagged'],
+			'the named card gets its own entry, and the tagged one gets the tag entry',
+		);
+		assert.deepStrictEqual(activated({ character: { name: 'other', tags: ['city'] } }), ['except'], 'the name check turns around, the tags miss');
+		assert.deepStrictEqual(activated({ character: { name: 'other', tags: ['wilderness'] } }), ['except', 'tagged'], 'a matching tag lets the third entry through');
+		assert.deepStrictEqual(activated({ character: { name: 'other' } }), ['except'], 'a character with no tags carries none of them, so the tag filter still applies');
+		assert.deepStrictEqual(activated({}), ['except', 'tagged'], 'with no card at all only the exclusion keeps its meaning');
+	});
+
+	test('an outlet entry is not injected where it sits: {{outlet::Name}} is how it lands', () => {
+		const books = [
+			loreBookOf([
+				{ uid: 0, key: ['salt'], content: 'Sign: the flats.', position: WI_POSITION.outlet, outletName: 'sign' },
+				{ uid: 1, key: ['salt'], content: 'In the prompt.', position: WI_POSITION.before },
+			]),
+		];
+		const result = activateLore(lore({ books }));
+		assert.deepStrictEqual(result.outlets, { sign: ['Sign: the flats.'] }, 'the scan collects outlets instead of injecting them');
+		assert.deepStrictEqual(result.before, ['In the prompt.'], 'the outlet entry is not in the before bucket');
+		assert.deepStrictEqual(result.after, []);
+		assert.deepStrictEqual(result.atDepth, []);
+		const macro = { char: 'Kestrel', user: 'You', outlets: result.outlets };
+		assert.strictEqual(substituteMacros('a {{outlet::sign}} b', macro), 'a Sign: the flats. b');
+		assert.strictEqual(substituteMacros('a {{outlet:sign}} b', macro), 'a Sign: the flats. b', 'the single-colon form is read too');
+		assert.strictEqual(substituteMacros('a {{outlet::nobody}} b', macro), 'a  b', 'an unknown outlet is empty, not left as a macro');
+	});
+
+	test('the budget says which entries it dropped, and the alert is said once per chat', async () => {
+		const kernel = await createTestKernel({
+			config: { tavernLorebooks: ['Big'], contextLimit: 400, wiBudget: 2, wiOverflowAlert: true },
+		});
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'lorebooks'), { recursive: true });
+			const entry = (uid: number): Record<string, unknown> => ({ uid, key: ['salt'], content: `${uid} `.repeat(120), position: 0 });
+			writeFileSync(join(library, 'lorebooks', 'Big.json'), JSON.stringify({ name: 'Big', entries: { '0': entry(0), '1': entry(1) } }));
+			await kernel.ctx.tavern.reload();
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant' as const, content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const notices: string[] = [];
+			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'big');
+			session.transcript.push({ role: 'user', content: 'salt', at: 1 });
+			kernel.ctx.sessions.save(session);
+			await kernel.ctx.agent.runTurn({ text: 'tell me about the salt', sessionId: 'big' });
+			assert.strictEqual(kernel.ctx.sessions.require('big').tavernOverflow, true, 'the scan reports that it ran out');
+			assert.strictEqual(notices.filter((text) => text.includes('budget')).length, 1, 'the alert is said once');
+			await kernel.ctx.agent.runTurn({ text: 'and again about the salt', sessionId: 'big' });
+			assert.strictEqual(notices.filter((text) => text.includes('budget')).length, 1, 'and not again on the next turn');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a book keeps its display order and the fields the editor does not show', () => {
+		const entry = worldEntry({
+			uid: 3,
+			key: ['salt'],
+			content: 'x',
+			displayIndex: 7,
+			vectorized: true,
+			automationId: 'qr-1',
+			triggers: ['continue'],
+			addMemo: true,
+			characterFilter: { names: ['kestrel'], tags: [], isExclude: false },
+		});
+		const json = entryToJson(entry);
+		assert.strictEqual(json.displayIndex, 7, 'the display order is written where upstream keeps it');
+		assert.strictEqual(json.vectorized, true);
+		assert.strictEqual(json.automationId, 'qr-1');
+		assert.deepStrictEqual(json.triggers, ['continue']);
+		assert.strictEqual(json.addMemo, true);
+		assert.deepStrictEqual(json.character_filter, { isExclude: false, names: ['kestrel'], tags: [] }, 'the filter keeps SillyTavern’s own key and shape');
+		assert.ok(!('characterFilterNames' in json), 'and the flat keys an early file carried are gone');
+		assert.strictEqual((json.extensions as Record<string, unknown>).display_index, 7, 'and the mirror stays in step');
+	});
+
+	test('the entry list searches and sorts the way the panel offers', () => {
+		const book = [
+			worldEntry({ uid: 1, key: ['eldoria'], content: 'nothing here', comment: 'The forest', order: 100 }),
+			worldEntry({ uid: 2, key: [], content: 'the eldoria road', comment: '', order: 300 }),
+			worldEntry({ uid: 3, key: ['salt'], content: 'x', comment: '', order: 200, constant: true }),
+			worldEntry({ uid: 4, key: ['salt'], content: 'x', comment: '', order: 400, disable: true }),
+			worldEntry({ uid: 5, key: ['glade'], content: 'the forest floor', comment: '', order: 400 }),
+		];
+		const hits = (query: string) => [...searchEntries(book, query).keys()].sort((left, right) => left - right);
+		// The query goes through Fuse with upstream's own keys and weights: a key beats a body match…
+		assert.deepStrictEqual(hits('eldoria'), [1, 2]);
+		assert.ok(
+			(searchEntries(book, 'eldoria').get(1) ?? 1) < (searchEntries(book, 'eldoria').get(2) ?? 1),
+			'a key match outranks a body match, which is what the weights are for',
+		);
+		assert.deepStrictEqual(hits('forest'), [1, 5]);
+		assert.deepStrictEqual(hits('salt'), [3, 4], 'a group of entries shares a key');
+		// …and the fields that are not prose are searchable too, as upstream allows.
+		assert.deepStrictEqual(hits('5'), [5], 'the uid is a field');
+		assert.deepStrictEqual(hits('nothing'), [1], 'a match in the body alone is still a hit');
+		// Extended search is on upstream's list of options, so `'exact` and `!not` are understood.
+		assert.deepStrictEqual(hits("'the forest"), [1, 5]);
+		assert.deepStrictEqual(hits('!forest'), [], 'a negated term is not a hit by itself');
+		assert.deepStrictEqual(hits('zzzz'), [], 'a query nothing matches returns nothing');
+		// No query: the rule decides, and every rule falls back to order descending, then uid.
+		assert.deepStrictEqual(
+			visibleEntries(book, '', 'priority').map((entry) => entry.uid),
+			[3, 5, 2, 1, 4],
+			'constant first, then ordinary, then disabled',
+		);
+		assert.deepStrictEqual(
+			visibleEntries(book, '', 'uid-asc').map((entry) => entry.uid),
+			[1, 2, 3, 4, 5],
+			'a field sort orders by that field',
+		);
+		assert.deepStrictEqual(
+			visibleEntries(book, '', 'depth-asc').map((entry) => entry.uid),
+			[4, 5, 2, 3, 1],
+			'a field every entry ties on falls back to order descending, then uid',
+		);
+		assert.deepStrictEqual(
+			visibleEntries(book, '', 'custom').map((entry) => entry.uid),
+			[1, 2, 3, 4, 5],
+			'custom follows the display index, which defaults to the uid',
+		);
+		// A query filters and switches the order to the scores, whatever the select says.
+		assert.deepStrictEqual(
+			visibleEntries(book, 'forest', 'uid-asc').map((entry) => entry.uid),
+			[1, 5],
+			'only the hits, best first',
+		);
+		assert.strictEqual(ruleOf('nonsense').value, 'priority', 'an unknown rule is the default');
+	});
+
+	test('the tag registry is a list of ids with a map from entity to tags', () => {
+		const store = emptyStore();
+		const first = ensureTag(store, 'Fantasy')!;
+		assert.strictEqual(store.tags.length, 1);
+		assert.strictEqual(ensureTag(store, 'fantasy')!.id, first.id, 'a name matches in any case, so nothing is duplicated');
+		const second = ensureTag(store, 'Other')!;
+		assert.ok((second.sort_order ?? 0) > (first.sort_order ?? 0), 'the sort key lands after the tags that exist');
+		assert.strictEqual(addTags(store, 'kestrel', [first, second]), 2);
+		assert.strictEqual(addTags(store, 'kestrel', [first]), 0, 'assigning a tag twice adds nothing');
+		assert.deepStrictEqual(tagsOf(store, 'kestrel').map((tag) => tag.name), ['Fantasy', 'Other'], 'in the registry order');
+		// A rename keeps the id, which is why every reference survives it.
+		assert.strictEqual(renameTag(store, first.id, 'High fantasy'), true);
+		assert.deepStrictEqual(tagIdsOf(store, 'kestrel'), [first.id, second.id], 'the ids are untouched');
+		// Delete with a merge hands over everything that carried it.
+		assert.strictEqual(deleteTag(store, second.id, first.id), true);
+		assert.deepStrictEqual(tagIdsOf(store, 'kestrel'), [first.id], 'the carrier moved to the tag it was merged into');
+		assert.ok(!byId(store, second.id), 'and the deleted tag is gone');
+		assert.deepStrictEqual(readStore(JSON.parse(storeJson(store)) as unknown), store, 'the file round-trips');
+		// A registry copied out of SillyTavern keys the map by the avatar's file name.
+		const theirs = readStore({ tags: [{ id: 'a', name: 'A' }], tag_map: { 'kestrel.png': ['a'] } });
+		assert.deepStrictEqual(tagIdsOf(theirs, 'kestrel'), ['a'], 'the file name is found by its stem');
+	});
+
+	test("a card's own tags are imported exactly the way the setting says", () => {
+		const store = readStore({ tags: [{ id: 'a', name: 'Fantasy' }], tag_map: {} });
+		const card = ['Fantasy', 'TAVERN', 'Adventure', '', 'adventure'];
+		assert.deepStrictEqual(planTagImport(store, 'kestrel', card, TAG_IMPORT.NONE), { names: [], existing: [], fresh: [] });
+		const only = planTagImport(store, 'kestrel', card, TAG_IMPORT.ONLY_EXISTING);
+		assert.deepStrictEqual(only.names, ['Fantasy'], 'only the tag that is already in the registry');
+		assert.deepStrictEqual(applyTagImport(store, 'kestrel', only), ['Fantasy']);
+		assert.deepStrictEqual(store.tags.map((tag) => tag.name), ['Fantasy'], 'and nothing was created');
+		const all = planTagImport(store, 'kestrel', card, TAG_IMPORT.ALL);
+		assert.deepStrictEqual(all.names, ['Adventure'], 'the generator tag and the assigned tag are both left out');
+		assert.deepStrictEqual(all.fresh, ['Adventure'], 'a second spelling of a name is not a second tag');
+		assert.deepStrictEqual(applyTagImport(store, 'kestrel', all), ['Adventure']);
+		assert.deepStrictEqual(tagsOf(store, 'kestrel').map((tag) => tag.name), ['Fantasy', 'Adventure']);
+		assert.deepStrictEqual(planTagImport(store, 'kestrel', card, TAG_IMPORT.ALL).names, [], 'importing again has nothing left to do');
+		// A card may carry hundreds of junk tags, which is why upstream caps the import.
+		const many = Array.from({ length: 80 }, (_, index) => `tag ${index}`);
+		assert.strictEqual(planTagImport(emptyStore(), 'kestrel', many, TAG_IMPORT.ALL).names.length, ANTI_TROLL_MAX_TAGS);
+		// Pruning is the cleanup for a library that had tags imported into it and then emptied.
+		const busy = readStore({ tags: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }], tag_map: { kestrel: ['a'] } });
+		assert.strictEqual(pruneTags(busy), 1);
+		assert.deepStrictEqual(busy.tags.map((tag) => tag.name), ['A']);
+	});
+
+	test('the project registry overlays the user one instead of replacing it', () => {
+		const project = readStore({ tags: [{ id: 'a', name: 'Shared', color: '#123' }], tag_map: { kestrel: ['a'] } });
+		const user = readStore({ tags: [{ id: 'a', name: 'Shared (user)' }, { id: 'b', name: 'Theirs' }], tag_map: { kestrel: ['b'], other: ['b'] } });
+		const merged = mergeStores(project, user);
+		assert.strictEqual(merged.tags.length, 2, 'one tag per id');
+		assert.strictEqual(byId(merged, 'a')!.name, 'Shared', 'the project root wins');
+		assert.strictEqual(byId(merged, 'a')!.color, '#123', 'including the fields of the tag');
+		assert.deepStrictEqual(merged.tag_map.kestrel, ['a', 'b'], 'an entity keeps what both files gave it');
+		assert.deepStrictEqual(merged.tag_map.other, ['b']);
+	});
+
+	test('an entry filtered to a tag reaches only the characters that carry it', async () => {
+		const kernel = await createTestKernel({ config: { tavernCharacter: 'kestrel', tavernLorebooks: ['Salt'] } });
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'characters'), { recursive: true });
+			mkdirSync(join(library, 'lorebooks'), { recursive: true });
+			const card = (name: string): string => JSON.stringify({ spec: 'chara_card_v2', spec_version: '2.0', data: { name, description: `${name} is here.` } });
+			writeFileSync(join(library, 'characters', 'kestrel.json'), card('Kestrel'));
+			writeFileSync(join(library, 'characters', 'other.json'), card('Other'));
+			// The registry first, because the entry below filters on a tag id and the id has to exist.
+			writeFileSync(join(library, 'tags.json'), JSON.stringify({ tags: [{ id: 'wild', name: 'Wilderness' }], tag_map: { kestrel: ['wild'] } }));
+			writeFileSync(
+				join(library, 'lorebooks', 'Salt.json'),
+				JSON.stringify({
+					name: 'Salt',
+					entries: { '0': { uid: 0, key: ['salt'], content: 'Only the wild ones know.', character_filter: { names: [], tags: ['wild'], isExclude: false } } },
+				}),
+			);
+			await kernel.ctx.tavern.reload();
+			assert.deepStrictEqual(kernel.ctx.tavern.tagIdsFor('kestrel'), ['wild'], 'the registry is read from the library');
+			assert.deepStrictEqual(kernel.ctx.tavern.tagIdsFor('other'), [], 'a card without tags carries none');
+			assert.strictEqual(kernel.ctx.tavern.tagFile(), join(library, 'tags.json'), 'the registry is written into the library');
+
+			let seen: Message[] = [];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					seen = request.messages;
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'tagged');
+			kernel.ctx.sessions.save(session);
+			await kernel.ctx.agent.runTurn({ text: 'tell me about the salt', sessionId: 'tagged' });
+			const said = (): boolean => seen.some((message) => message.content.includes('Only the wild ones know.'));
+			assert.strictEqual(said(), true, 'the tagged card gets the entry');
+
+			const stored = kernel.ctx.sessions.require('tagged');
+			stored.character = 'other';
+			kernel.ctx.sessions.save(stored);
+			await kernel.ctx.agent.runTurn({ text: 'and again about the salt', sessionId: 'tagged' });
+			assert.strictEqual(said(), false, 'the untagged card does not, even though the key matches');
+
+			// The pane's write path: a tag assigned to the other card lands in the file and comes back.
+			const store = kernel.ctx.tavern.tags;
+			addTags(store, 'other', [byId(store, 'wild')!]);
+			await kernel.ctx.tavern.saveTags();
+			const written = JSON.parse(readFileSync(join(library, 'tags.json'), 'utf8')) as { tag_map: Record<string, string[]> };
+			assert.deepStrictEqual(written.tag_map.other, ['wild'], 'a tag assigned in the pane is written to tags.json');
+			assert.deepStrictEqual(kernel.ctx.tavern.tagIdsFor('other'), ['wild'], 'and read back from it');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an entry automation fires the hook and runs the command it names', async () => {
+		// `/cost` is registered by the extension, so it is exactly what a book can automate by name.
+		const kernel = await createTestKernel({ config: { tavernLorebooks: ['Auto'], wiAutomation: true } });
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'lorebooks'), { recursive: true });
+			writeFileSync(
+				join(library, 'lorebooks', 'Auto.json'),
+				JSON.stringify({
+					name: 'Auto',
+					entries: {
+						'0': { uid: 0, key: ['salt'], content: 'Pickled.', automationId: 'test-automation' },
+						'1': { uid: 1, key: ['salt'], content: 'Also pickled.', automationId: 'test-automation' },
+						'2': { uid: 2, key: ['salt'], content: 'Nothing to run here.', automationId: 'no-such-automation' },
+					},
+				}),
+			);
+			await kernel.ctx.tavern.reload();
+			// A book can automate any command by name: this one is the test's own stand-in for a QR.
+			let ran = 0;
+			kernel.ctx.commands.register({
+				name: 'test-automation',
+				description: '',
+				run: () => {
+					ran += 1;
+					return { done: true, result: 'the automation ran' };
+				},
+			});
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant' as const, content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const notices: string[] = [];
+			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'auto');
+			kernel.ctx.sessions.save(session);
+			await kernel.ctx.agent.runTurn({ text: 'tell me about the salt', sessionId: 'auto' });
+			// The automation runs in the background of the turn, so give it a tick to finish.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			assert.strictEqual(ran, 1, 'two entries naming one automation share a single run for the batch');
+			assert.strictEqual(notices.filter((text) => text.includes('the automation ran')).length, 1, 'and its output is said once');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a vectorized entry is found by the chat’s meaning, not by its keys', async () => {
+		const kernel = await createTestKernel({ config: { tavernLorebooks: ['Salt'], wiVectorEnabled: true, wiVectorThreshold: 0.5, wiVectorMaxEntries: 1 } });
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'lorebooks'), { recursive: true });
+			writeFileSync(
+				join(library, 'lorebooks', 'Salt.json'),
+				JSON.stringify({
+					name: 'Salt',
+					entries: {
+						// Three entries, two of them vectorized: the search may bring back one (max entries 1).
+						'0': { uid: 0, key: [], content: 'The flats drink sound.', vectorized: true },
+						'1': { uid: 1, key: [], content: 'A caravan went north.', vectorized: true },
+						'2': { uid: 2, key: ['salt'], content: 'Keys still work.', vectorized: false },
+					},
+				}),
+			);
+			await kernel.ctx.tavern.reload();
+			// A stand-in endpoint: the vector of a text is its length, which is enough to rank two texts.
+			const asked: string[][] = [];
+			let seen: Message[] = [];
+			kernel.ctx.vectors.use({
+				name: 'http::text-embedding-3-small',
+				embed: async (texts) => {
+					asked.push([...texts]);
+					return texts.map((text) => [text.length, 1]);
+				},
+			});
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					seen = request.messages;
+					return { message: { role: 'assistant' as const, content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'vectors');
+			kernel.ctx.sessions.save(session);
+			await kernel.ctx.agent.runTurn({ text: 'the salt flats are quiet today, they say', sessionId: 'vectors' });
+			const hits = kernel.ctx.sessions.require('vectors').tavernActivated ?? [];
+			assert.deepStrictEqual(
+				hits.map((hit) => hit.reason).sort(),
+				['key', 'vector'],
+				'the keyed entry matched and the closest vectorized one was injected',
+			);
+			const said = seen.map((message) => message.content).join('\n');
+			assert.ok(said.includes('The flats drink sound.'), 'the entry the search picked reached the prompt');
+			assert.ok(!said.includes('A caravan went north.'), 'the one it did not pick is not there: one book contributes one entry');
+			assert.ok(asked.length >= 1, 'the endpoint was asked for the query and the missing vectors');
+			assert.strictEqual(asked[0]?.length, 3, 'the query and the two unindexed entries went in one call');
+			// The second turn asks only for the query: the index is on disk now.
+			asked.length = 0;
+			await kernel.ctx.agent.runTurn({ text: 'and the caravan?', sessionId: 'vectors' });
+			assert.strictEqual(asked[0]?.length, 1, 'the entries are embedded once, then read from the index');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a world-info entry fires only for the generation types it names', () => {
+		const books = [
+			loreBookOf([
+				{ uid: 0, key: ['salt'], content: 'Always.', triggers: [] },
+				{ uid: 1, key: ['salt'], content: 'On a swipe.', triggers: ['swipe'] },
+				{ uid: 2, key: ['salt'], content: 'On a continue.', triggers: ['continue'] },
+			]),
+		];
+		const activated = (trigger?: GenerationTrigger): string[] =>
+			activateLore(lore({ books, trigger })).activated.map((hit) => hit.entry.content ?? '');
+		// `normal` is what an ordinary prompt is, so an entry tied to another type stays out of it.
+		assert.deepStrictEqual(activated(), ['Always.'], 'a plain turn is upstream’s normal generation');
+		assert.deepStrictEqual(activated('normal'), ['Always.']);
+		assert.deepStrictEqual(activated('swipe'), ['Always.', 'On a swipe.']);
+		assert.deepStrictEqual(activated('continue'), ['Always.', 'On a continue.']);
+		assert.deepStrictEqual(activated('regenerate'), ['Always.']);
+		assert.deepStrictEqual(activated('quiet'), ['Always.']);
+	});
+
+	test('a continue extends one message, a quiet turn writes none, and an impersonation writes yours', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const replies = ['first.', 'second.', 'yours.', 'unwritten.'];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant' as const, content: replies.shift() ?? 'x' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'types');
+			kernel.ctx.sessions.save(session);
+			await kernel.ctx.agent.runTurn({ text: 'tell me about the salt', sessionId: 'types' });
+			const written = (): string[] => kernel.ctx.sessions.require('types').transcript.map((message) => `${message.role}:${message.content}`);
+			assert.deepStrictEqual(written(), ['user:tell me about the salt', 'assistant:first.']);
+
+			// Continue: no prompt of its own, and the text lands in the message it carries on.
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'continue', sessionId: 'types' });
+			assert.deepStrictEqual(written(), ['user:tell me about the salt', 'assistant:first. second.']);
+			assert.strictEqual(kernel.ctx.sessions.require('types').transcript[1]?.continued, true);
+			assert.deepStrictEqual(
+				turnsOf(kernel.ctx.sessions.require('types').transcript).map((turn) => turn.continued),
+				[true],
+				'a continuation belongs to the turn it continues',
+			);
+
+			// Quiet: the reply comes back to the caller and the transcript is left exactly as it was.
+			const before = kernel.ctx.sessions.require('types').transcript;
+			const quiet = await kernel.ctx.agent.runTurn({ text: 'answer this privately', trigger: 'quiet', sessionId: 'types' });
+			assert.strictEqual(quiet.text, 'yours.', 'a quiet generation still answers');
+			assert.deepStrictEqual(kernel.ctx.sessions.require('types').transcript, before, 'and leaves no trace');
+
+			// Impersonate: the model writes your side of the conversation, so that is what is recorded.
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'impersonate', sessionId: 'types' });
+			const impersonated = kernel.ctx.sessions.require('types').transcript;
+			assert.strictEqual(impersonated[impersonated.length - 1]?.role, 'user', 'what the model wrote for you is your message');
+			assert.strictEqual(impersonated[impersonated.length - 1]?.content, 'unwritten.');
+			assert.strictEqual(
+				impersonated.filter((message) => message.role === 'assistant').length,
+				1,
+				'and nothing the assistant said on the way there stays behind',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a swipe keeps every version of a reply, and the first one is the only one replaced', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const replies = ['one.', 'two.', 'three.', 'again.', 'again again.'];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant' as const, content: replies.shift() ?? 'x' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'swipes');
+			kernel.ctx.sessions.save(session);
+			await kernel.ctx.agent.runTurn({ text: 'hello there', sessionId: 'swipes' });
+			assert.deepStrictEqual(kernel.ctx.sessions.swipeCarry('swipes')?.swipes, ['one.'], 'the first reply is the only version so far');
+
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'swipe', sessionId: 'swipes' });
+			const reply = (id: string): Message => {
+				const transcript = kernel.ctx.sessions.require(id).transcript;
+				return transcript[transcript.length - 1]!;
+			};
+			assert.deepStrictEqual(reply('swipes').swipes, ['one.', 'two.'], 'a swipe grows the list instead of replacing it');
+			assert.strictEqual(reply('swipes').swipeId, 1);
+			assert.strictEqual(reply('swipes').content, 'two.', 'and the version it generated is the one showing');
+			assert.strictEqual(reply('swipes').swipeInfo?.length, 2, 'upstream keeps one record per version');
+			assert.strictEqual(
+				kernel.ctx.sessions.require('swipes').transcript.filter((message) => message.role === 'user').length,
+				1,
+				'the prompt was not written down twice',
+			);
+			assert.deepStrictEqual(
+				turnsOf(kernel.ctx.sessions.require('swipes').transcript).slice(-1)[0]?.swipes,
+				['one.', 'two.'],
+				'the turn carries the versions, which is what the panel walks',
+			);
+
+			assert.strictEqual(kernel.ctx.sessions.setSwipe('swipes', 0), true);
+			assert.strictEqual(reply('swipes').content, 'one.', 'going back shows the version that was there first');
+			assert.strictEqual(kernel.ctx.sessions.setSwipe('swipes', 7), false, 'there is no eighth version');
+
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'regenerate', sessionId: 'swipes' });
+			assert.deepStrictEqual(reply('swipes').swipes, ['one.', 'two.', 'three.'], 'a regenerate on a reply with versions adds one');
+			assert.strictEqual(kernel.ctx.sessions.require('swipes').transcript.filter((message) => message.role === 'user').length, 1);
+
+			// The very first regenerate has nothing to keep, so it replaces the reply it was given.
+			const fresh = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'fresh');
+			kernel.ctx.sessions.save(fresh);
+			await kernel.ctx.agent.runTurn({ text: 'hello again', sessionId: 'fresh' });
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'regenerate', sessionId: 'fresh' });
+			assert.deepStrictEqual(reply('fresh').swipes, ['again again.'], 'one version, replaced');
+			assert.strictEqual(reply('fresh').swipeId, 0);
 		} finally {
 			await kernel.dispose();
 		}

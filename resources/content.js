@@ -13,11 +13,20 @@ window.comonadContentPane = function contentPane(options) {
 		options.post({ type: 'content', action: type, ...rest });
 	};
 
+	// The world-book page is its own module: it is large enough to live apart, and it owns the open
+	// book while it is showing. It posts through this same channel and gets the same state slice.
+	const bookPane = window.comonadWorldInfo ? window.comonadWorldInfo({ post, store: options.store }) : null;
+	// The persona page is a module of its own too: it saves as it is edited, and it owns the tile list
+	// and the connection editor while the `personas` kind is showing.
+	const personaPane = window.comonadPersonas ? window.comonadPersonas({ post, store: options.store }) : null;
+
 	let state = null;
 	let kind = 'characters';
 	let item = null;
 	let dirty = false;
 	let selection = null;
+	// The small per-document preference bag the settings panel owns and the content guests share.
+	const store = options.store || { get: () => ({}), set: () => {} };
 
 	const esc = (value) =>
 		String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -38,28 +47,11 @@ window.comonadContentPane = function contentPane(options) {
 
 	/* ------------------------------------------------------------------ option sets */
 
-	const POSITIONS = [
-		[0, 'Before character'],
-		[1, 'After character'],
-		[2, "Author's note top"],
-		[3, "Author's note bottom"],
-		[4, 'In chat at depth'],
-		[5, 'Example block top'],
-		[6, 'Example block bottom'],
-		[7, 'Outlet (never injected)'],
-	];
 	const ROLES = [
 		[0, 'System'],
 		[1, 'User'],
 		[2, 'Assistant'],
 	];
-	const LOGICS = [
-		[0, 'AND any'],
-		[1, 'NOT all'],
-		[2, 'NOT any'],
-		[3, 'AND all'],
-	];
-	const TRIGGERS = ['normal', 'continue', 'impersonate', 'swipe', 'regenerate', 'quiet'];
 	const PERSONA_POSITIONS = [
 		[0, 'In prompt'],
 		[1, 'After character (deprecated)'],
@@ -83,10 +75,22 @@ window.comonadContentPane = function contentPane(options) {
 			{
 				group: 'Identity',
 				fields: [
+					{ key: 'picture', label: 'Picture', type: 'picture' },
 					{ key: 'name', label: 'Name', type: 'text' },
 					{ key: 'creator', label: 'Creator', type: 'text' },
 					{ key: 'version', label: 'Version', type: 'text' },
 					{ key: 'tags', label: 'Tags', type: 'lines', hint: 'One per line.' },
+					{ key: 'favourite', label: 'Favourite ★', type: 'checkbox', hint: 'Upstream’s `fav`: its character list can show only these.' },
+					{
+						key: 'talkativeness',
+						label: 'Talkativeness',
+						type: 'range',
+						min: 0,
+						max: 1,
+						step: 0.05,
+						hint: 'How much this character speaks in a group chat. SillyTavern starts a card at 0.5.',
+					},
+					{ key: 'sourceLink', label: 'Source link', type: 'text', hint: 'Where the card came from: upstream’s *Link to Source* opens it.' },
 				],
 			},
 			{
@@ -155,6 +159,26 @@ window.comonadContentPane = function contentPane(options) {
 				{ key: 'names_behavior', label: 'Name prefixes', type: 'select', options: NAMES_BEHAVIOR },
 				{ key: 'assistant_prefill', label: 'Assistant prefill', type: 'textarea', rows: 2 },
 				{ key: 'squash_system_messages', label: 'Squash system messages', type: 'checkbox' },
+			] },
+			// What upstream sends when there is otherwise nothing to send. They are set in a request like
+			// anything else, so a preset that has them reads the same in either tool.
+			{ group: 'Nudges', fields: [
+				{ key: 'new_chat_prompt', label: 'New chat', type: 'text', hint: 'Set at the head of the chat history to mark a new chat.' },
+				{ key: 'new_group_chat_prompt', label: 'New group chat', type: 'text' },
+				{ key: 'new_example_chat_prompt', label: 'Example chat', type: 'text' },
+				{ key: 'continue_nudge_prompt', label: 'Continue nudge', type: 'textarea', rows: 2, hint: '{{lastChatMessage}} is the message being carried on from.' },
+				{ key: 'group_nudge_prompt', label: 'Group nudge', type: 'text', hint: 'Comonad has no group chats, so this one is kept rather than sent.' },
+				{ key: 'send_if_empty', label: 'Send if empty', type: 'text', hint: 'Said as the user when the history would otherwise end on the reply.' },
+			] },
+			// The request knobs. The two flags that Comonad cannot act on say so in their hint: they are
+			// kept so a preset round-trips, never silently dropped.
+			{ group: 'Request', fields: [
+				{ key: 'seed', label: 'Seed', type: 'numberOrNull', hint: 'Sent when the endpoint takes one.' },
+				{ key: 'logitBiasSelected', label: 'Logit bias set', type: 'text', hint: 'The name of the set below that a request sends.' },
+				{ key: 'logitBias', label: 'Logit bias sets', type: 'json', hint: 'Upstream’s own shape: [{ id, name, value: { tokenId: bias } }].' },
+				{ key: 'stream', label: 'Stream the reply', type: 'checkbox', hint: 'Kept so a preset round-trips: Comonad always shows tokens as they arrive.' },
+				{ key: 'maxContextUnlocked', label: 'Context size unlocked', type: 'checkbox', hint: 'Send the full context size even when the model is thought to be smaller.' },
+				{ key: 'useSysprompt', label: 'Use system prompt', type: 'checkbox', hint: 'Kept so a preset round-trips: the OpenAI-compatible path always sends a system message.' },
 			] },
 		],
 	};
@@ -301,10 +325,11 @@ window.comonadContentPane = function contentPane(options) {
 				wrap.append(labelEl(spec.label));
 				const select = document.createElement('select');
 				select.className = 'control';
-				const options = spec.options || [['', spec.empty || '—']].concat(catalogOptions(spec.from));
-				if (spec.from) {
-					options.unshift(['', spec.empty || 'None']);
-				}
+				// A select that offers the catalog gets one empty choice; one that lists its own options
+				// gets exactly those.
+				const options = spec.from
+					? [['', spec.empty || 'None']].concat(catalogOptions(spec.from))
+					: (spec.options || []).slice();
 				for (const [optionValue, text] of options) {
 					const option = document.createElement('option');
 					option.value = String(optionValue);
@@ -322,6 +347,53 @@ window.comonadContentPane = function contentPane(options) {
 					item[spec.key] = spec.from ? select.value : Number(select.value);
 				});
 				wrap.append(select);
+				break;
+			}
+			case 'range': {
+				wrap.append(labelEl(spec.label));
+				const row = document.createElement('div');
+				row.className = 'range-row';
+				const input = document.createElement('input');
+				input.type = 'range';
+				input.min = String(spec.min ?? 0);
+				input.max = String(spec.max ?? 1);
+				input.step = String(spec.step ?? 0.05);
+				input.value = String(typeof value === 'number' ? value : (spec.min ?? 0));
+				const readout = document.createElement('output');
+				readout.textContent = Number(input.value).toFixed(2);
+				control(input).addEventListener('input', () => {
+					item[spec.key] = Number(input.value);
+					readout.textContent = Number(input.value).toFixed(2);
+				});
+				row.append(input, readout);
+				wrap.append(row);
+				break;
+			}
+			case 'picture': {
+				// Upstream keeps a card and its picture in one file, so the picture shown here *is* the
+				// card's own file when it is a PNG, and choosing one writes the card as a PNG.
+				wrap.append(labelEl(spec.label));
+				const row = document.createElement('div');
+				row.className = 'picture-row';
+				const shot = document.createElement('div');
+				shot.className = 'picture-shot';
+				if (item && item.picture) {
+					const image = document.createElement('img');
+					image.src = String(item.picture);
+					image.alt = '';
+					shot.append(image);
+				} else {
+					shot.textContent = 'no picture';
+					shot.classList.add('is-empty');
+				}
+				const pick = document.createElement('button');
+				pick.type = 'button';
+				pick.className = 'secondary';
+				pick.textContent = 'Choose picture…';
+				pick.title = 'A PNG becomes the card itself, the way SillyTavern stores one.';
+				pick.addEventListener('click', () => post({ type: 'characterAvatar', kind, id: selection, item }));
+				row.append(shot, pick);
+				wrap.append(row);
 				break;
 			}
 			case 'depthPrompt': {
@@ -449,330 +521,346 @@ window.comonadContentPane = function contentPane(options) {
 		}
 	}
 
-	/* ------------------------------------------------------------------ world books */
+	/* ------------------------------------------------------------------ tags */
 
-	let entryUid = null;
+	// The tag registry is SillyTavern's: tags have ids, an entity carries ids, and a world info entry's
+	// character filter stores ids too. The pane only draws what the host sends — it posts a verb and
+	// the host writes `tags.json`. Nothing here goes through the form's Save button, because a tag
+	// belongs to the registry and not to any card.
 
-	function entryTitle(entry) {
-		return (entry.comment || '').trim() || (entry.key || []).join(', ') || `entry ${entry.uid}`;
+	let managerOpen = false;
+
+	const tagInfo = () => (state && state.tags) || { list: [], counts: {}, assigned: [], import: 1 };
+	const tagById = (id) => tagInfo().list.find((tag) => tag.id === id) || null;
+
+	const chip = (tag, onRemove) => {
+		const node = document.createElement('span');
+		node.className = 'tag-chip';
+		node.textContent = tag.name;
+		if (tag.color) {
+			node.style.background = tag.color;
+		}
+		if (tag.color2) {
+			node.style.color = tag.color2;
+		}
+		if (onRemove) {
+			const remove = document.createElement('button');
+			remove.type = 'button';
+			remove.className = 'tag-chip-x';
+			remove.textContent = '✕';
+			remove.title = `Take ${tag.name} off this character`;
+			remove.addEventListener('click', () => post({ type: 'tagUnassign', kind, id: selection, tag: tag.id }));
+			node.append(remove);
+		}
+		return node;
+	};
+
+	const actionButton = (text, title, onClick, className) => {
+		const node = document.createElement('button');
+		node.type = 'button';
+		node.className = className || 'secondary';
+		node.textContent = text;
+		if (title) {
+			node.title = title;
+		}
+		node.addEventListener('click', onClick);
+		return node;
+	};
+
+	function renderTags() {
+		const info = tagInfo();
+		const section = document.createElement('section');
+		section.id = 'st-tags';
+		const heading = document.createElement('h2');
+		heading.textContent = `Tags (${info.assigned.length})`;
+		const row = document.createElement('div');
+		row.className = 'tag-row';
+		for (const id of info.assigned) {
+			const tag = tagById(id);
+			if (tag) {
+				row.append(chip(tag, true));
+			}
+		}
+		if (!info.assigned.length) {
+			row.append(hintEl('No tags yet. A tag is stored in `tags.json` and can be renamed without touching what carries it.'));
+		}
+		const add = document.createElement('div');
+		add.className = 'tag-add';
+		const input = document.createElement('input');
+		input.className = 'control';
+		input.type = 'text';
+		input.placeholder = 'Add a tag…';
+		input.spellcheck = false;
+		// Suggestions are the registry's own names, but a name that is not a tag yet is allowed: that is
+		// how upstream's tag input creates one.
+		input.setAttribute('list', 'st-tag-names');
+		const names = document.createElement('datalist');
+		names.id = 'st-tag-names';
+		for (const tag of info.list) {
+			const option = document.createElement('option');
+			option.value = tag.name;
+			names.append(option);
+		}
+		const commit = () => {
+			const name = input.value.trim();
+			if (!name) {
+				return;
+			}
+			post({ type: 'tagAssign', kind, id: selection, name });
+			input.value = '';
+		};
+		input.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				commit();
+			}
+		});
+		add.append(input, names, actionButton('Add', '', commit));
+		const tools = document.createElement('div');
+		tools.className = 'tag-tools';
+		tools.append(
+			actionButton(managerOpen ? 'Hide tag manager' : 'Manage tags…', 'Create, rename, colour, merge and prune tags.', () => {
+				managerOpen = !managerOpen;
+				render();
+			}),
+			actionButton(
+				'Import card tags',
+				info.import === 1 ? 'Ask about the tags this card carries in its own file.' : 'The Tag Import Option setting decides what is imported.',
+				() => post({ type: 'tagImport', kind, id: selection }),
+			),
+		);
+		section.append(heading, row, add, tools);
+		return section;
 	}
 
-	function renderBook() {
-		const host = $('st-form');
-		host.innerHTML = '';
-		host.append(fieldEl({ key: 'name', label: 'Book name', type: 'text' }));
-		const entries = item.entries || {};
-		const keys = Object.keys(entries);
-		if (entryUid === null || !entries[entryUid]) {
-			entryUid = keys[0] ?? null;
+	function renderManager() {
+		const existing = $('st-tag-manager');
+		if (existing) {
+			existing.remove();
 		}
-
-		const listSection = document.createElement('section');
-		const head = document.createElement('h2');
-		head.textContent = `Entries (${keys.length})`;
-		const row = document.createElement('div');
-		row.className = 'row';
-		const add = document.createElement('button');
-		add.type = 'button';
-		add.className = 'secondary';
-		add.textContent = 'Add entry';
-		add.addEventListener('click', () => {
-			const uid = Object.values(entries).reduce((max, entry) => Math.max(max, Number(entry.uid) + 1), 0);
-			entries[String(uid)] = {
-				uid,
-				key: [],
-				keysecondary: [],
-				comment: '',
-				content: '',
-				constant: false,
-				selective: true,
-				selectiveLogic: 0,
-				order: 100,
-				position: 0,
-				disable: false,
-				probability: 100,
-				useProbability: true,
-				depth: 4,
-			};
-			item.entries = entries;
-			entryUid = String(uid);
-			markDirty();
-			render();
-		});
-		row.append(add);
-		listSection.append(head, row);
-
-		const table = document.createElement('div');
-		table.className = 'entries';
-		for (const key of keys) {
-			const entry = entries[key];
-			const line = document.createElement('button');
-			line.type = 'button';
-			line.className = 'entry';
-			line.classList.toggle('is-on', key === entryUid);
-			line.innerHTML =
-				'<span class="entry-title">' +
-				esc(entryTitle(entry)) +
-				'</span><span class="entry-keys">' +
-				esc((entry.key || []).slice(0, 3).join(', ')) +
-				'</span>';
-			if (entry.disable) {
-				line.classList.add('is-off');
-			}
-			line.addEventListener('click', () => {
-				entryUid = key;
-				render();
-			});
-			table.append(line);
-		}
-		listSection.append(table);
-		host.append(listSection);
-
-		const entry = entryUid ? entries[entryUid] : null;
-		if (!entry) {
-			host.append(hintEl('No entries yet — add one to give the book something to scan.'));
+		if (!managerOpen) {
 			return;
 		}
-		host.append(
-			sectionEl('Entry', [
-				fieldEl({ key: 'comment', label: 'Title', type: 'text', hint: 'Shown in the activated-lore readout.' }),
-				fieldEl({ key: 'disable', label: 'Disabled', type: 'checkbox' }),
-			]),
+		const info = tagInfo();
+		const box = document.createElement('div');
+		box.id = 'st-tag-manager';
+		box.className = 'tag-manager';
+		const head = document.createElement('div');
+		head.className = 'tag-manager-head';
+		const title = document.createElement('h2');
+		title.textContent = `Tags (${info.list.length})`;
+		head.append(
+			title,
+			actionButton('Prune unused', 'Delete every tag no character carries.', () => post({ type: 'tagPrune', kind }), 'secondary danger'),
+			actionButton('Done', 'Close the tag manager.', () => {
+				managerOpen = false;
+				render();
+			}),
 		);
-		const entryFields = (spec) => entryFieldEl(entry, entryUid, spec);
-		const groups = [
-			{
-				group: 'Content',
-				fields: [
-					{ key: 'key', label: 'Keys', type: 'lines', hint: 'One per line. A key may be a /regex/ with flags.' },
-					{ key: 'keysecondary', label: 'Secondary keys', type: 'lines' },
-					{ key: 'selectiveLogic', label: 'Secondary logic', type: 'select', options: LOGICS },
-					{ key: 'selective', label: 'Require a secondary key', type: 'checkbox' },
-					{ key: 'content', label: 'Content', type: 'textarea', rows: 6 },
-				],
-			},
-			{
-				group: 'Activation',
-				fields: [
-					{ key: 'constant', label: 'Always active', type: 'checkbox' },
-					{ key: 'probability', label: 'Probability %', type: 'number' },
-					{ key: 'useProbability', label: 'Use probability', type: 'checkbox' },
-					{ key: 'scanDepth', label: 'Scan depth override', type: 'numberOrNull' },
-					{ key: 'caseSensitive', label: 'Case sensitive', type: 'trinary' },
-					{ key: 'matchWholeWords', label: 'Whole words only', type: 'trinary' },
-					{ key: 'matchCharacterDescription', label: 'Match card description', type: 'checkbox' },
-					{ key: 'matchCharacterPersonality', label: 'Match card personality', type: 'checkbox' },
-					{ key: 'matchCharacterDepthPrompt', label: 'Match depth prompt', type: 'checkbox' },
-					{ key: 'matchScenario', label: 'Match scenario', type: 'checkbox' },
-					{ key: 'matchPersonaDescription', label: 'Match persona', type: 'checkbox' },
-					{ key: 'matchCreatorNotes', label: 'Match creator notes', type: 'checkbox' },
-				],
-			},
-			{
-				group: 'Insertion',
-				fields: [
-					{ key: 'position', label: 'Where', type: 'select', options: POSITIONS },
-					{ key: 'depth', label: 'Depth', type: 'number' },
-					{ key: 'role', label: 'Role', type: 'select', options: ROLES },
-					{ key: 'order', label: 'Order', type: 'number', hint: 'Higher goes first.' },
-					{ key: 'outletName', label: 'Outlet name', type: 'text' },
-					{ key: 'ignoreBudget', label: 'Ignore the token budget', type: 'checkbox' },
-				],
-			},
-			{
-				group: 'Timing',
-				fields: [
-					{ key: 'sticky', label: 'Sticky turns', type: 'numberOrNull' },
-					{ key: 'cooldown', label: 'Cooldown turns', type: 'numberOrNull' },
-					{ key: 'delay', label: 'Delay turns', type: 'numberOrNull' },
-				],
-			},
-			{
-				group: 'Grouping',
-				fields: [
-					{ key: 'group', label: 'Group', type: 'text' },
-					{ key: 'groupWeight', label: 'Weight', type: 'number' },
-					{ key: 'groupOverride', label: 'Override the group', type: 'checkbox' },
-					{ key: 'useGroupScoring', label: 'Score the group together', type: 'trinary' },
-				],
-			},
-			{
-				group: 'Recursion',
-				fields: [
-					{ key: 'excludeRecursion', label: 'Skip in recursive scans', type: 'checkbox' },
-					{ key: 'preventRecursion', label: 'Do not trigger recursion', type: 'checkbox' },
-					{ key: 'delayUntilRecursion', label: 'From recursion level', type: 'number' },
-					{ key: 'vectorized', label: 'Vectorized (reserved)', type: 'checkbox' },
-					{ key: 'automationId', label: 'Automation id', type: 'text' },
-					{ key: 'triggers', label: 'Generation triggers', type: 'lines', hint: 'Empty means every generation: ' + TRIGGERS.join(', ') },
-				],
-			},
-			{
-				group: 'Character filter',
-				fields: [
-					{ key: 'characterFilter', label: 'Names', type: 'filterNames' },
-					{ key: 'characterFilter', label: 'Tags', type: 'filterTags' },
-					{ key: 'characterFilter', label: 'Exclude', type: 'filterExclude' },
-				],
-			},
-		];
-		for (const block of groups) {
-			host.append(sectionEl(block.group, block.fields.map(entryFields)));
+		const list = document.createElement('div');
+		list.className = 'tag-manager-list';
+		if (!info.list.length) {
+			list.append(hintEl('No tags yet. Name one below and it appears here.'));
 		}
+		for (const tag of info.list) {
+			list.append(managerRow(tag, info));
+		}
+		const create = document.createElement('div');
+		create.className = 'tag-manager-create';
+		const input = document.createElement('input');
+		input.className = 'control';
+		input.type = 'text';
+		input.placeholder = 'New tag name';
+		input.spellcheck = false;
+		const commit = () => {
+			const name = input.value.trim();
+			if (!name) {
+				return;
+			}
+			post({ type: 'tagCreate', kind, name });
+			input.value = '';
+		};
+		input.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				commit();
+			}
+		});
+		create.append(input, actionButton('Create', '', commit));
+		box.append(head, list, create);
+		$('st-pane').append(box);
 	}
 
-	/** The entry form's fields read and write one entry of the selected world book. */
-	function entryFieldEl(entry, uid, spec) {
-		const wrap = document.createElement('div');
-		wrap.className = 'field' + (['textarea', 'lines'].includes(spec.type) ? ' wide' : '');
-		const set = (value) => {
-			if (spec.key === 'characterFilter') {
-				entry.characterFilter = { ...(entry.characterFilter || {}), ...value };
-			} else {
-				entry[spec.key] = value;
+	function managerRow(tag, info) {
+		const row = document.createElement('div');
+		row.className = 'tag-manager-row';
+		row.dataset.tag = tag.id;
+		const name = document.createElement('input');
+		name.className = 'control tag-name';
+		name.type = 'text';
+		name.value = tag.name;
+		name.spellcheck = false;
+		name.title = 'Rename. The id stays, so nothing that carries this tag loses it.';
+		name.addEventListener('change', () => {
+			const wanted = name.value.trim();
+			if (!wanted || wanted === tag.name) {
+				name.value = tag.name;
+				return;
 			}
-			item.entries[uid] = entry;
+			post({ type: 'tagRename', kind, tag: tag.id, name: wanted });
+		});
+		const colour = (label, key, value) => {
+			const wrap = document.createElement('label');
+			wrap.className = 'tag-colour';
+			wrap.title = label;
+			const picker = document.createElement('input');
+			picker.type = 'color';
+			picker.value = value || '#888888';
+			picker.addEventListener('change', () => post({ type: 'tagUpdate', kind, tag: tag.id, patch: { [key]: picker.value } }));
+			const clear = actionButton('⌫', `Use the default ${label.toLowerCase()}`, () => post({ type: 'tagUpdate', kind, tag: tag.id, patch: { [key]: '' } }), 'link');
+			wrap.append(picker, clear);
+			return wrap;
 		};
-		const control = (node) => {
-			node.addEventListener('input', markDirty);
-			node.addEventListener('change', markDirty);
-			return node;
-		};
-		switch (spec.type) {
-			case 'lines': {
-				wrap.append(labelEl(spec.label));
-				const area = document.createElement('textarea');
-				area.className = 'control';
-				area.rows = 3;
-				area.spellcheck = false;
-				area.value = (entry[spec.key] || []).join('\n');
-				control(area).addEventListener('input', () => {
-					set(area.value.split('\n').map((line) => line.trim()).filter(Boolean));
-				});
-				wrap.append(area);
-				break;
+		const folder = actionButton(
+			tag.folder_type === 'OPEN' ? '✔' : tag.folder_type === 'CLOSED' ? '👁' : '✕',
+			'Folder type: ✕ none, ✔ open, 👁 closed. Open shows every character, closed hides the ones without the tag.',
+			() => {
+				const order = ['NONE', 'OPEN', 'CLOSED'];
+				const next = order[(order.indexOf(tag.folder_type || 'NONE') + 1) % order.length];
+				post({ type: 'tagUpdate', kind, tag: tag.id, patch: { folder_type: next } });
+			},
+			'secondary tag-folder',
+		);
+		const hidden = document.createElement('label');
+		hidden.className = 'tag-hidden';
+		hidden.title = 'Do not draw this tag on the character card.';
+		const check = document.createElement('input');
+		check.type = 'checkbox';
+		check.checked = tag.is_hidden_on_character_card === true;
+		check.addEventListener('change', () => post({ type: 'tagUpdate', kind, tag: tag.id, patch: { is_hidden_on_character_card: check.checked } }));
+		hidden.append(check, document.createTextNode(' hidden'));
+		const uses = document.createElement('span');
+		uses.className = 'tag-uses';
+		uses.textContent = `${info.counts[tag.id] || 0} use${(info.counts[tag.id] || 0) === 1 ? '' : 's'}`;
+		const merge = document.createElement('select');
+		merge.className = 'control tag-merge';
+		merge.title = 'Delete and hand everything that carried it to another tag.';
+		const none = document.createElement('option');
+		none.value = '';
+		none.textContent = 'Do not merge';
+		merge.append(none);
+		for (const other of info.list) {
+			if (other.id === tag.id) {
+				continue;
 			}
-			case 'trinary': {
-				wrap.append(labelEl(spec.label));
-				const select = document.createElement('select');
-				select.className = 'control';
-				for (const [value, text] of [['inherit', 'Use the global setting'], ['true', 'On'], ['false', 'Off']]) {
-					const option = document.createElement('option');
-					option.value = value;
-					option.textContent = text;
-					option.selected = value === 'inherit' ? entry[spec.key] === null || entry[spec.key] === undefined : String(entry[spec.key]) === value;
-					select.append(option);
-				}
-				control(select).addEventListener('change', () => {
-					set(select.value === 'inherit' ? null : select.value === 'true');
-				});
-				wrap.append(select);
-				break;
-			}
-			case 'filterNames':
-			case 'filterTags': {
-				wrap.append(labelEl(spec.label));
-				const field = spec.type === 'filterNames' ? 'names' : 'tags';
-				const area = document.createElement('textarea');
-				area.className = 'control';
-				area.rows = 2;
-				area.spellcheck = false;
-				area.value = ((entry.characterFilter || {})[field] || []).join('\n');
-				control(area).addEventListener('input', () => {
-					set({ [field]: area.value.split('\n').map((line) => line.trim()).filter(Boolean) });
-				});
-				wrap.append(area);
-				break;
-			}
-			case 'filterExclude': {
-				const line = document.createElement('label');
-				line.className = 'check';
-				const input = document.createElement('input');
-				input.type = 'checkbox';
-				input.checked = Boolean((entry.characterFilter || {}).isExclude);
-				control(input).addEventListener('change', () => set({ isExclude: input.checked }));
-				line.append(input, document.createTextNode(' ' + spec.label));
-				wrap.append(line);
-				break;
-			}
-			case 'select': {
-				wrap.append(labelEl(spec.label));
-				const select = document.createElement('select');
-				select.className = 'control';
-				for (const [value, text] of spec.options) {
-					const option = document.createElement('option');
-					option.value = String(value);
-					option.textContent = text;
-					option.selected = Number(entry[spec.key]) === Number(value);
-					select.append(option);
-				}
-				control(select).addEventListener('change', () => set(Number(select.value)));
-				wrap.append(select);
-				break;
-			}
-			case 'checkbox': {
-				const line = document.createElement('label');
-				line.className = 'check';
-				const input = document.createElement('input');
-				input.type = 'checkbox';
-				input.checked = entry[spec.key] === true;
-				control(input).addEventListener('change', () => set(input.checked));
-				line.append(input, document.createTextNode(' ' + spec.label));
-				wrap.append(line);
-				break;
-			}
-			case 'number':
-			case 'numberOrNull': {
-				wrap.append(labelEl(spec.label));
-				const input = document.createElement('input');
-				input.className = 'control';
-				input.type = 'number';
-				input.value = entry[spec.key] === null || entry[spec.key] === undefined ? '' : String(entry[spec.key]);
-				control(input).addEventListener('input', () => {
-					const empty = input.value.trim() === '';
-					set(empty && spec.type === 'numberOrNull' ? null : Number(input.value) || 0);
-				});
-				wrap.append(input);
-				break;
-			}
-			default: {
-				wrap.append(labelEl(spec.label));
-				const input = document.createElement('input');
-				input.className = 'control';
-				input.type = 'text';
-				input.spellcheck = false;
-				input.value = String(entry[spec.key] ?? '');
-				control(input).addEventListener('input', () => {
-					set(input.value);
-				});
-				wrap.append(input);
-			}
+			const option = document.createElement('option');
+			option.value = other.id;
+			option.textContent = `Merge into ${other.name}`;
+			merge.append(option);
 		}
-		if (spec.hint) {
-			wrap.append(hintEl(spec.hint));
-		}
-		return wrap;
+		const del = actionButton('✕', `Delete ${tag.name}`, () => post({ type: 'tagDelete', kind, tag: tag.id, into: merge.value }), 'secondary danger');
+		row.append(chip(tag, false), name, colour('Background colour', 'color', tag.color), colour('Text colour', 'color2', tag.color2), folder, hidden, uses, merge, del);
+		return row;
 	}
 
 	/* ------------------------------------------------------------------ prompt table */
 
+	/** The prompt the *Edit* panel is open on. Upstream's pencil opens one just like it. */
+	let editingPrompt = null;
+
+	/** The token count of a prompt's text, in the same shape the host's counter reports one. */
+	const promptTokens = (prompt) => Math.ceil(new TextEncoder().encode(String(prompt.content ?? '')).length / 4);
+
+	/** The little markers upstream puts beside a block's name, in our own glyphs. */
+	function promptBadges(prompt) {
+		const inChat = Number(prompt.injection_position) === 1;
+		const badges = [];
+		if (prompt.marker) {
+			badges.push([
+				inChat ? '💉' : '📌',
+				inChat ? 'Injected into the chat at a depth' : 'Marker: its content is filled from the chat, the card or the world books',
+			]);
+		}
+		if (prompt.forbid_overrides) {
+			badges.push(['★', 'Important: a character card cannot replace this block']);
+		}
+		if (prompt.extension) {
+			badges.push(['⧉', 'An extension prompt']);
+		}
+		const role = prompt.role === 'user' ? ['👤', 'Sent as the user'] : prompt.role === 'assistant' ? ['🤖', 'Sent as the assistant'] : [];
+		if (inChat) {
+			role.push(`@ ${Number(prompt.injection_depth ?? 4)}`);
+		}
+		return { badges, role, inChat };
+	}
+
+	/** The editor redraws with the form, so whatever is being typed into is put back afterwards. */
+	function captureFocus() {
+		const active = document.activeElement;
+		const form = $('st-form');
+		if (!active || !form || !form.contains(active) || !active.id) {
+			return null;
+		}
+		return { id: active.id, start: active.selectionStart, end: active.selectionEnd };
+	}
+
+	function restoreFocus(saved) {
+		if (!saved) {
+			return;
+		}
+		const node = document.getElementById(saved.id);
+		if (!node) {
+			return;
+		}
+		node.focus();
+		if (typeof saved.start === 'number' && typeof node.setSelectionRange === 'function') {
+			try {
+				node.setSelectionRange(saved.start, saved.end);
+			} catch {
+				// A control that holds no text: focusing it is enough.
+			}
+		}
+	}
+
 	function renderPrompts() {
+		const focus = captureFocus();
 		const host = $('st-form');
 		host.innerHTML = '';
-		host.append(sectionEl('Prompts', [fieldEl({ key: 'name', label: 'Preset name', type: 'text' })]));
+		host.append(sectionEl('Preset', [fieldEl({ key: 'name', label: 'Preset name', type: 'text' })]));
 		const prompts = Array.isArray(item.prompts) ? item.prompts : (item.prompts = []);
+		const slice = state.preset || {};
+		const known = (prompt) => Object.prototype.hasOwnProperty.call(slice.tokens || {}, prompt.identifier);
+		// The open block counts itself, so the number follows what is being typed.
+		const countOf = (prompt) => (prompt.identifier === editingPrompt || !known(prompt) ? promptTokens(prompt) : slice.tokens[prompt.identifier]);
+		const total = prompts.reduce((sum, prompt) => sum + countOf(prompt), 0);
+		// The edited block's row, so the counts beside the editor follow what is typed into it, and the
+		// toolbar's total, which is built below the list.
+		let countCell = null;
+		let totalNode = null;
+
 		const section = document.createElement('section');
 		const heading = document.createElement('h2');
-		heading.textContent = `Collection (${prompts.length})`;
-		const hint = hintEl('Order is the order the model reads. “In chat” injects the block into the conversation at a depth.');
-		const table = document.createElement('table');
-		const head = document.createElement('tr');
-		for (const title of ['On', 'Prompt', 'Role', 'Where', 'Depth', 'Order', '']) {
-			const th = document.createElement('th');
-			th.textContent = title;
-			head.append(th);
-		}
-		table.append(head);
+		heading.textContent = `Prompts (${prompts.length})`;
+		const hint = hintEl(
+			'Order is the order the model reads. ✎ unfolds a block for editing — its text, its role, the generation types it is sent for, and where it goes.',
+		);
+		const list = document.createElement('div');
+		list.className = 'prompt-list';
+		// One line of labels over the rows, so the list reads as a table without being one: a row is a card
+		// that can grow an editor inside itself.
+		const head = document.createElement('div');
+		head.className = 'prompt-head';
+		const headCell = (text, className) => {
+			const cell = document.createElement('span');
+			cell.textContent = text;
+			if (className) {
+				cell.className = className;
+			}
+			return cell;
+		};
+		head.append(headCell(''), headCell('Prompt'), headCell(''), headCell('Tokens', 'num'));
+		list.append(head);
+
 		const move = (index, delta) => {
 			const target = index + delta;
 			if (target < 1 || target >= prompts.length) {
@@ -783,92 +871,377 @@ window.comonadContentPane = function contentPane(options) {
 			markDirty();
 			render();
 		};
+
 		prompts.forEach((prompt, index) => {
-			const tr = document.createElement('tr');
+			// One block is one card: the row, and — while it is open — its editor, so the two read as the
+			// single thing they are.
+			const block = document.createElement('div');
+			block.className = 'prompt-item';
 			const identity = prompt.identifier === 'comonad';
 			if (identity) {
-				tr.classList.add('is-fixed');
+				block.classList.add('is-fixed');
 			}
-			const cell = (node) => {
-				const td = document.createElement('td');
-				if (node) {
-					td.append(node);
-				}
-				return td;
-			};
+			if (prompt.identifier === editingPrompt) {
+				block.classList.add('is-editing');
+			}
+			if (prompt.enabled === false) {
+				block.classList.add('is-off');
+			}
+			const row = document.createElement('div');
+			row.className = 'prompt-row';
+
+			// The switch: upstream toggles a block with an icon, and this reads the same way.
+			const toggle = document.createElement('label');
+			toggle.className = 'switch';
+			toggle.title = identity ? 'Comonad’s own block always leads' : prompt.enabled === false ? 'Send this block' : 'Stop sending this block';
 			const on = document.createElement('input');
 			on.type = 'checkbox';
 			on.checked = prompt.enabled !== false;
 			on.disabled = identity;
+			const knob = document.createElement('span');
+			knob.className = 'knob';
+			toggle.append(on, knob);
 			on.addEventListener('change', () => {
 				prompt.enabled = on.checked;
+				block.classList.toggle('is-off', !on.checked);
+				toggle.title = on.checked ? 'Stop sending this block' : 'Send this block';
 				markDirty();
 			});
-			tr.append(cell(on));
-			const label = document.createElement('td');
-			label.textContent = prompt.name || prompt.identifier;
-			tr.append(label);
-			const role = document.createElement('select');
-			role.className = 'control';
-			role.disabled = identity;
-			for (const value of CARD_ROLES) {
-				const option = document.createElement('option');
-				option.value = value;
-				option.textContent = value;
-				option.selected = (prompt.role || 'system') === value;
-				role.append(option);
+			row.append(toggle);
+
+			// The name, with upstream's markers beside it: what kind of block it is, and where it goes.
+			const label = document.createElement('div');
+			label.className = 'prompt-name-block';
+			const { badges, role } = promptBadges(prompt);
+			for (const [glyph, tip] of badges) {
+				const badge = document.createElement('span');
+				badge.className = 'prompt-badge';
+				badge.textContent = glyph;
+				badge.title = tip;
+				label.append(badge);
 			}
-			role.addEventListener('change', () => {
-				prompt.role = role.value;
-				markDirty();
+			const name = document.createElement('button');
+			name.type = 'button';
+			name.className = 'prompt-open';
+			name.textContent = prompt.name || prompt.identifier;
+			name.title = `Edit ${prompt.name || prompt.identifier}`;
+			name.addEventListener('click', () => {
+				editingPrompt = editingPrompt === prompt.identifier ? null : prompt.identifier;
+				render();
 			});
-			tr.append(cell(role));
-			const where = document.createElement('select');
-			where.className = 'control';
-			where.disabled = identity;
-			for (const [value, text] of [['relative', 'In list'], ['absolute', 'In chat']]) {
-				const option = document.createElement('option');
-				option.value = value;
-				option.textContent = text;
-				option.selected = Number(prompt.injection_position) === (value === 'absolute' ? 1 : 0);
-				where.append(option);
+			label.append(name);
+			// The role is only worth saying when it is not the system's, and the depth only when the block
+			// goes into the chat — the same two facts upstream marks, and nothing else.
+			if (role.length) {
+				const roleGlyph = document.createElement('span');
+				roleGlyph.className = 'prompt-role';
+				roleGlyph.textContent = role.join(' ');
+				label.append(roleGlyph);
 			}
-			where.addEventListener('change', () => {
-				prompt.injection_position = where.value === 'absolute' ? 1 : 0;
+			row.append(label);
+
+			const buttons = document.createElement('div');
+			buttons.className = 'prompt-controls';
+			const control = (glyph, tip, onClick, disabled) => {
+				const button = document.createElement('button');
+				button.type = 'button';
+				button.className = 'icon';
+				button.textContent = glyph;
+				button.title = tip;
+				button.disabled = identity || disabled;
+				button.addEventListener('click', onClick);
+				buttons.append(button);
+				return button;
+			};
+			control('↑', 'Move up', () => move(index, -1));
+			control('↓', 'Move down', () => move(index, 1));
+			control('✎', 'Edit this block', () => {
+				editingPrompt = editingPrompt === prompt.identifier ? null : prompt.identifier;
+				render();
+			});
+			control('⧉', 'Duplicate this block', () => {
+				const copy = { ...structuredClone(prompt), identifier: `${prompt.identifier}-copy` };
+				copy.name = `${prompt.name || prompt.identifier} (copy)`;
+				prompts.splice(index + 1, 0, copy);
 				markDirty();
 				render();
 			});
-			tr.append(cell(where));
-			const numeric = (key, fallback) => {
-				const input = document.createElement('input');
-				input.type = 'number';
-				input.className = 'control';
-				input.disabled = identity || Number(prompt.injection_position) !== 1;
-				input.value = String(prompt[key] ?? fallback);
-				input.addEventListener('input', () => {
-					prompt[key] = Number(input.value) || 0;
-					markDirty();
-				});
-				return input;
-			};
-			tr.append(cell(numeric('injection_depth', 4)), cell(numeric('injection_order', 100)));
-			const buttons = document.createElement('td');
-			buttons.className = 'prompt-move';
-			for (const [delta, glyph, tip] of [[-1, '↑', 'Move up'], [1, '↓', 'Move down']]) {
-				const button = document.createElement('button');
-				button.type = 'button';
-				button.className = 'link';
-				button.textContent = glyph;
-				button.title = tip;
-				button.disabled = identity;
-				button.addEventListener('click', () => move(index, delta));
-				buttons.append(button);
+			control('✕', 'Delete this block', () => {
+				prompts.splice(index, 1);
+				if (editingPrompt === prompt.identifier) {
+					editingPrompt = null;
+				}
+				markDirty();
+				render();
+			});
+			row.append(buttons);
+
+			const counts = document.createElement('div');
+			counts.className = 'prompt-tokens';
+			counts.textContent = String(countOf(prompt));
+			counts.title = 'Tokens this block costs';
+			if (prompt.identifier === editingPrompt) {
+				countCell = counts;
 			}
-			tr.append(buttons);
-			table.append(tr);
+			row.append(counts);
+
+			block.append(row);
+			// The editor unfolds inside the card it belongs to, and refreshes the row's count as it is
+			// typed into.
+			if (prompt.identifier === editingPrompt) {
+				block.append(
+					promptEditor(prompt, () => {
+						if (countCell) {
+							countCell.textContent = String(countOf(prompt));
+						}
+						if (totalNode) {
+							totalNode.textContent = `Total Tokens: ${prompts.reduce((sum, entry) => sum + countOf(entry), 0)}`;
+						}
+					}),
+				);
+			}
+			list.append(block);
 		});
-		section.append(heading, hint, table);
+		section.append(heading, hint, list);
+
+		// The toolbar above the list: *Add prompt*, the restore, and the total the list costs.
+		const tools = document.createElement('div');
+		tools.className = 'prompt-tools';
+		const add = document.createElement('select');
+		add.className = 'control';
+		const placeholder = document.createElement('option');
+		placeholder.value = '';
+		placeholder.textContent = 'Add prompt…';
+		placeholder.selected = true;
+		add.append(placeholder);
+		for (const block of state.promptBlocks || []) {
+			const option = document.createElement('option');
+			option.value = block.id;
+			option.textContent = block.name;
+			option.title = block.description;
+			add.append(option);
+		}
+		const blank = document.createElement('option');
+		blank.value = 'blank';
+		blank.textContent = 'Empty block';
+		add.append(blank);
+		add.addEventListener('change', () => {
+			const wanted = add.value;
+			add.value = '';
+			if (!wanted) {
+				return;
+			}
+			const block = (state.promptBlocks || []).find((entry) => entry.id === wanted);
+			const created = {
+				identifier: block ? block.id : `${item.id || 'preset'}-prompt-${prompts.length + 1}`,
+				name: block ? block.name : 'New prompt',
+				role: block ? block.role : 'system',
+				system_prompt: (block ? block.role : 'system') === 'system',
+				content: block ? block.content : '',
+			};
+			prompts.push(created);
+			editingPrompt = created.identifier;
+			markDirty();
+			render();
+		});
+		const restore = document.createElement('button');
+		restore.type = 'button';
+		restore.className = 'secondary';
+		restore.textContent = 'Restore prompts';
+		restore.title = 'Put the shipped prompts and their order back.';
+		restore.addEventListener('click', () => post({ type: 'presetRestorePrompts', kind, id: selection }));
+		totalNode = document.createElement('span');
+		totalNode.className = 'prompt-total';
+		totalNode.textContent = `Total Tokens: ${total}`;
+		tools.append(add, restore, totalNode);
+		// The toolbar belongs to the list, so it keeps the section's own spacing instead of butting up
+		// against whatever group of settings comes next.
+		section.append(tools);
 		host.append(section);
+		restoreFocus(focus);
+	}
+
+	/**
+	 * Upstream's *Edit* panel, field for field: name, role, the generation types it fires for, where it
+	 * goes, its depth and order, and the prompt itself. A marker block's text is filled from elsewhere,
+	 * so its textarea is closed — upstream says the same thing in the same place.
+	 */
+	function promptEditor(prompt, refresh) {
+		const slice = state.preset || {};
+		const panel = document.createElement('section');
+		panel.className = 'prompt-edit';
+		const heading = document.createElement('h3');
+		heading.textContent = 'Edit';
+		panel.append(heading);
+
+		const field = (label, hint, node, wide) => {
+			const wrap = document.createElement('div');
+			wrap.className = 'prompt-field' + (wide ? ' wide' : '');
+			const text = document.createElement('label');
+			text.textContent = label;
+			wrap.append(text, node);
+			if (hint) {
+				wrap.append(hintEl(hint));
+			}
+			return wrap;
+		};
+		const write = (key, value) => {
+			prompt[key] = value;
+			markDirty();
+		};
+
+		const name = document.createElement('input');
+		name.id = 'pe-name';
+		name.className = 'control';
+		name.type = 'text';
+		name.spellcheck = false;
+		name.value = prompt.name || '';
+		name.addEventListener('input', () => write('name', name.value));
+
+		const role = document.createElement('select');
+		role.id = 'pe-role';
+		role.className = 'control';
+		for (const [value, text] of [['system', 'System'], ['user', 'User'], ['assistant', 'AI Assistant']]) {
+			const option = document.createElement('option');
+			option.value = value;
+			option.textContent = text;
+			option.selected = (prompt.role || 'system') === value;
+			role.append(option);
+		}
+		role.addEventListener('change', () => write('role', role.value));
+
+		// *Triggers*: a block limited to some generation types is left out of the others. An empty
+		// selection is upstream's "All types (default)".
+		const triggers = document.createElement('select');
+		triggers.id = 'pe-triggers';
+		triggers.className = 'control';
+		triggers.multiple = true;
+		triggers.size = 6;
+		for (const generation of slice.generations || []) {
+			const option = document.createElement('option');
+			option.value = generation.value;
+			option.textContent = generation.label;
+			option.selected = Array.isArray(prompt.injection_trigger) && prompt.injection_trigger.includes(generation.value);
+			triggers.append(option);
+		}
+		triggers.addEventListener('change', () => {
+			write(
+				'injection_trigger',
+				[...triggers.selectedOptions].map((option) => option.value),
+			);
+		});
+
+		const position = document.createElement('select');
+		position.id = 'pe-position';
+		position.className = 'control';
+		for (const [value, text] of [['0', 'Relative'], ['1', 'In-chat']]) {
+			const option = document.createElement('option');
+			option.value = value;
+			option.textContent = text;
+			option.selected = String(Number(prompt.injection_position ?? 0)) === value;
+			position.append(option);
+		}
+		position.addEventListener('change', () => {
+			write('injection_position', Number(position.value));
+			render();
+		});
+
+		const numeric = (id, key, fallback, min, max) => {
+			const input = document.createElement('input');
+			input.id = id;
+			input.className = 'control';
+			input.type = 'number';
+			input.min = String(min);
+			input.max = String(max);
+			input.value = String(prompt[key] ?? fallback);
+			input.addEventListener('input', () => write(key, Number(input.value) || 0));
+			return input;
+		};
+		const depth = numeric('pe-depth', 'injection_depth', 4, 0, 9999);
+		depth.disabled = Number(prompt.injection_position ?? 0) !== 1;
+		const order = numeric('pe-order', 'injection_order', 100, 0, 9999);
+
+		// The prompt itself. A marker's text comes from the chat, the card or the world books, so there
+		// is nothing here to type into — upstream disables the same field.
+		const content = document.createElement('textarea');
+		content.id = 'pe-content';
+		content.className = 'control';
+		content.rows = 8;
+		content.spellcheck = false;
+		content.placeholder = 'The prompt to be sent.';
+		content.value = prompt.content ?? '';
+		content.disabled = prompt.marker === true;
+		content.addEventListener('input', () => {
+			write('content', content.value);
+			if (refresh) {
+				refresh();
+			}
+		});
+
+		const forbid = document.createElement('input');
+		forbid.type = 'checkbox';
+		forbid.id = 'pe-forbid';
+		forbid.checked = prompt.forbid_overrides === true;
+		forbid.addEventListener('change', () => write('forbid_overrides', forbid.checked));
+		const forbidLabel = document.createElement('label');
+		forbidLabel.className = 'check';
+		forbidLabel.title = 'This prompt cannot be overridden by character cards, even if overrides are preferred.';
+		forbidLabel.append(forbid, document.createTextNode(' Forbid Overrides'));
+
+		const textLabel = document.createElement('div');
+		textLabel.className = 'prompt-text-label';
+		const textTitle = document.createElement('label');
+		textTitle.textContent = 'Prompt';
+		textLabel.append(textTitle, forbidLabel);
+
+		const rows = document.createElement('div');
+		rows.className = 'prompt-edit-rows';
+		rows.append(
+			field('Name', 'A name for this prompt.', name),
+			field('Role', 'To whom this message will be attributed.', role),
+			field('Triggers', 'Filter to specific generation types. Nothing selected means all of them.', triggers),
+			field('Position', 'Relative (to other prompts in prompt manager) or In-chat @ Depth.', position),
+			field('Depth', '0 = after the last message, 1 = before the last message, etc.', depth),
+			field('Order', 'Ordered from low/top to high/bottom, and at same order: Assistant, User, System.', order),
+		);
+		panel.append(rows, textLabel, content);
+		if (prompt.marker) {
+			panel.append(hintEl('The content of this prompt is pulled from elsewhere and cannot be edited here.'));
+		}
+
+		const footer = document.createElement('div');
+		footer.className = 'prompt-edit-footer';
+		const close = document.createElement('button');
+		close.type = 'button';
+		close.className = 'secondary';
+		close.textContent = 'Close';
+		close.addEventListener('click', () => {
+			editingPrompt = null;
+			render();
+		});
+		const reset = document.createElement('button');
+		reset.type = 'button';
+		reset.className = 'secondary reset';
+		reset.textContent = 'Reset';
+		reset.title = 'Put this block back to what Comonad ships — the text, the name and the role it starts with.';
+		reset.addEventListener('click', () => {
+			const shipped = (slice.shipped || []).find((entry) => entry.identifier === prompt.identifier);
+			if (shipped) {
+				prompt.name = shipped.name;
+				prompt.role = shipped.role;
+				prompt.content = shipped.content ?? '';
+				prompt.system_prompt = shipped.system_prompt === true;
+				prompt.marker = shipped.marker === true;
+			} else {
+				// A block that is not one of ours: there is no shipped text to go back to, so it is emptied.
+				prompt.content = '';
+			}
+			markDirty();
+			render();
+		});
+		footer.append(close, reset);
+		panel.append(footer);
+		return panel;
 	}
 
 	/* ------------------------------------------------------------------ the page */
@@ -880,15 +1253,179 @@ window.comonadContentPane = function contentPane(options) {
 			if (!(state.kindLabels && state.kindLabels[value])) {
 				continue;
 			}
-			button.textContent = state.kindLabels[value] + ' (' + ((state.counts && state.counts[value]) || 0) + ')';
+			// The label and the count are two elements, so the count can be a badge of its own rather than
+			// part of the tab's name.
+			const text = document.createElement('span');
+			text.textContent = state.kindLabels[value];
+			const count = document.createElement('span');
+			count.className = 'count';
+			count.textContent = String((state.counts && state.counts[value]) || 0);
+			button.replaceChildren(text, count);
 			button.classList.toggle('is-on', value === kind);
 		}
 	}
 
+	/* ------------------------------------------------------------------ the character list */
+
+	// The list's own controls, which are SillyTavern's controls for its character list: a search box,
+	// the order, the favourites filter, the grid toggle and the pager. They live in the pane, so the
+	// host never sees them; the order and the grid are remembered in the webview's own store.
+	const SORTS = [
+		['name', 'Name (A-Z)'],
+		['namedesc', 'Name (Z-A)'],
+		['newest', 'Newest first'],
+		['oldest', 'Oldest first'],
+	];
+	const PAGE_SIZE = 50;
+	const remembered = store.get() || {};
+	const listView = {
+		query: '',
+		sort: SORTS.some(([value]) => value === remembered.listSort) ? remembered.listSort : 'name',
+		favourites: remembered.listFavourites === true,
+		grid: remembered.listGrid === true,
+		page: 0,
+	};
+
+	/** The rows the list shows: the catalog, or the characters after the list's own controls. */
+	function visibleItems() {
+		const all = state.items || [];
+		if (kind !== 'characters') {
+			return all;
+		}
+		const term = listView.query.trim().toLowerCase();
+		let rows = term
+			? all.filter((entry) => (entry.name + ' ' + entry.detail).toLowerCase().includes(term))
+			: all.slice();
+		if (listView.favourites) {
+			rows = rows.filter((entry) => entry.favourite === true);
+		}
+		const byName = (left, right) => left.name.localeCompare(right.name);
+		// A card upstream never stamped with a date sorts last whichever way the list is ordered.
+		const byDate = (left, right, compare) => {
+			const a = String(left.createdAt ?? '');
+			const b = String(right.createdAt ?? '');
+			if (!a || !b) {
+				return a === b ? compare(left, right) : a ? 1 : -1;
+			}
+			return compare(left, right);
+		};
+		rows.sort(
+			listView.sort === 'namedesc'
+				? (left, right) => byName(right, left)
+				: listView.sort === 'newest'
+					? (left, right) => byDate(left, right, (a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || byName(a, b))
+					: listView.sort === 'oldest'
+						? (left, right) => byDate(left, right, (a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || byName(a, b))
+						: byName,
+		);
+		return rows;
+	}
+
+	/** The little toolbar above the list: search, order, favourites, grid view and the pager. */
+	function renderListTools(total) {
+		const list = $('st-list');
+		let tools = $('st-tools');
+		if (kind !== 'characters') {
+			if (tools) {
+				tools.remove();
+			}
+			return;
+		}
+		if (!tools) {
+			tools = document.createElement('div');
+			tools.id = 'st-tools';
+			list.prepend(tools);
+			const search = document.createElement('input');
+			search.id = 'st-search';
+			search.type = 'search';
+			search.placeholder = 'Search…';
+			const order = document.createElement('select');
+			order.id = 'st-sort';
+			order.className = 'control';
+			for (const [value, label] of SORTS) {
+				const option = document.createElement('option');
+				option.value = value;
+				option.textContent = label;
+				order.append(option);
+			}
+			const stars = document.createElement('button');
+			stars.type = 'button';
+			stars.id = 'st-favs';
+			stars.className = 'icon';
+			stars.textContent = '★';
+			stars.title = 'Show only favourites';
+			const grid = document.createElement('button');
+			grid.type = 'button';
+			grid.id = 'st-grid';
+			grid.className = 'icon';
+			grid.textContent = '▦';
+			grid.title = 'Toggle grid view';
+			tools.append(search, order, stars, grid);
+			search.addEventListener('input', () => {
+				listView.query = search.value;
+				listView.page = 0;
+				renderList();
+			});
+			order.addEventListener('change', () => {
+				listView.sort = order.value;
+				store.set({ listSort: order.value });
+				renderList();
+			});
+			stars.addEventListener('click', () => {
+				listView.favourites = !listView.favourites;
+				listView.page = 0;
+				store.set({ listFavourites: listView.favourites });
+				renderList();
+			});
+			grid.addEventListener('click', () => {
+				listView.grid = !listView.grid;
+				store.set({ listGrid: listView.grid });
+				renderList();
+			});
+		}
+		$('st-search').value = listView.query;
+		$('st-sort').value = listView.sort;
+		$('st-favs').classList.toggle('is-on', listView.favourites);
+		$('st-grid').classList.toggle('is-on', listView.grid);
+
+		const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+		listView.page = Math.min(listView.page, pages - 1);
+		const pager = document.createElement('span');
+		pager.id = 'st-pager';
+		if (pages > 1) {
+			pager.textContent = `${listView.page + 1} / ${pages}`;
+			const step = (label, delta, disabled) => {
+				const button = document.createElement('button');
+				button.type = 'button';
+				button.className = 'icon';
+				button.textContent = label;
+				button.disabled = disabled;
+				button.addEventListener('click', () => {
+					listView.page += delta;
+					renderList();
+				});
+				return button;
+			};
+			pager.prepend(step('‹', -1, listView.page === 0));
+			pager.append(step('›', 1, listView.page === pages - 1));
+		}
+		const stale = $('st-pager');
+		if (stale) {
+			stale.replaceWith(pager);
+		} else {
+			tools.append(pager);
+		}
+	}
+
 	function renderList() {
+		const rows = visibleItems();
+		renderListTools(rows.length);
 		const host = $('st-items');
 		host.innerHTML = '';
-		for (const entry of state.items || []) {
+		host.classList.toggle('is-grid', kind === 'characters' && listView.grid);
+		const first = kind === 'characters' ? listView.page * PAGE_SIZE : 0;
+		const shown = kind === 'characters' ? rows.slice(first, first + PAGE_SIZE) : rows;
+		for (const entry of shown) {
 			const row = document.createElement('button');
 			row.type = 'button';
 			row.className = 'item';
@@ -897,9 +1434,18 @@ window.comonadContentPane = function contentPane(options) {
 			row.innerHTML =
 				'<span class="item-name">' +
 				esc(entry.name) +
+				(entry.favourite ? ' <span class="item-star" title="Favourite">★</span>' : '') +
 				'</span><span class="item-detail">' +
 				esc(entry.detail) +
 				'</span>';
+			// A card's picture is its own file when it is a PNG, so the row shows it where there is one.
+			if (entry.avatar) {
+				const image = document.createElement('img');
+				image.className = 'item-avatar';
+				image.src = String(entry.avatar);
+				image.alt = '';
+				row.prepend(image);
+			}
 			const adopted = ((state.adopted && state.adopted[kind]) || []).includes(entry.id);
 			if (adopted) {
 				row.classList.add('is-adopted');
@@ -914,8 +1460,14 @@ window.comonadContentPane = function contentPane(options) {
 			});
 			host.append(row);
 		}
-		if (!(state.items || []).length) {
-			host.append(hintEl('Nothing here yet. Use New, or drop files into the library folder.'));
+		if (!rows.length) {
+			host.append(
+				hintEl(
+					(state.items || []).length
+						? 'No card matches that search.'
+						: 'Nothing here yet. Use New, or drop files into the library folder.',
+				),
+			);
 		}
 		$('st-library').textContent = 'Library: ' + (state.library || '') + ' — SillyTavern-compatible files; a card may also be a PNG.';
 	}
@@ -924,6 +1476,13 @@ window.comonadContentPane = function contentPane(options) {
 		const host = $('st-form');
 		const bar = document.createElement('div');
 		bar.className = 'actions';
+		// Two groups: what the chat uses, and the file-level verbs. They wrap as groups, so the row never
+		// breaks in the middle of one of them.
+		const used = document.createElement('div');
+		used.className = 'group';
+		const extras = document.createElement('div');
+		extras.className = 'group push';
+		bar.append(used, extras);
 		const adopted = ((state.adopted && state.adopted[kind]) || []).includes(selection);
 		const use = document.createElement('button');
 		use.type = 'button';
@@ -931,7 +1490,7 @@ window.comonadContentPane = function contentPane(options) {
 		use.textContent = adopted ? 'Remove from this chat' : 'Use in this chat';
 		use.disabled = Boolean(item && !item.source && !adopted);
 		use.addEventListener('click', () => post({ type: 'adopt', kind, id: selection, on: !adopted }));
-		bar.append(use);
+		used.append(use);
 		if (kind !== 'lorebooks') {
 			const makeDefault = document.createElement('button');
 			makeDefault.type = 'button';
@@ -943,7 +1502,7 @@ window.comonadContentPane = function contentPane(options) {
 			clearDefault.className = 'secondary';
 			clearDefault.textContent = 'Clear default';
 			clearDefault.addEventListener('click', () => post({ type: 'adopt', kind, id: selection, asDefault: true, on: false }));
-			bar.append(makeDefault, clearDefault);
+			used.append(makeDefault, clearDefault);
 		}
 		if (kind === 'characters') {
 			const png = document.createElement('button');
@@ -952,9 +1511,89 @@ window.comonadContentPane = function contentPane(options) {
 			png.textContent = 'Export PNG…';
 			png.title = 'Write a shareable card: SillyTavern reads the same PNG.';
 			png.addEventListener('click', () => post({ type: 'exportPng', kind, id: selection }));
-			bar.append(png);
+			extras.append(png);
+			// Upstream's *More…* menu, with the entries of it that need a file or a question of their own.
+			const more = document.createElement('select');
+			more.className = 'control more-menu';
+			const idle = document.createElement('option');
+			idle.value = '';
+			idle.textContent = 'More…';
+			idle.disabled = true;
+			idle.selected = true;
+			more.append(idle);
+			for (const [value, label] of [
+				['characterImportLore', 'Import Card Lore'],
+				['personaFromCharacter', 'Convert to Persona'],
+				['characterRename', 'Rename'],
+				['characterSource', 'Link to Source'],
+				['characterImport', 'Import cards…'],
+				['characterExportJson', 'Export JSON…'],
+			]) {
+				const option = document.createElement('option');
+				option.value = value;
+				option.textContent = label;
+				more.append(option);
+			}
+			more.addEventListener('change', () => {
+				const action = more.value;
+				more.value = '';
+				if (action) {
+					post({ type: action, kind, id: selection, item, character: selection });
+				}
+			});
+			extras.append(more);
+		}
+		if (kind === 'presets' && presetTools) {
+			extras.append(presetTools());
 		}
 		host.prepend(bar);
+	}
+
+	/**
+	 * The preset manager's row: start from one of Comonad's templates, restore the one a preset came
+	 * from, and move a preset in or out as a file. Upstream's *Update current preset* is this pane's
+	 * Save button, because the form already writes the prompt list and the order into the preset.
+	 */
+	function presetTools() {
+		const row = document.createElement('span');
+		row.className = 'preset-tools';
+		const start = document.createElement('select');
+		start.className = 'control';
+		const idle = document.createElement('option');
+		idle.value = '';
+		idle.textContent = 'Start from…';
+		idle.selected = true;
+		start.append(idle);
+		for (const template of state.presetTemplates || []) {
+			const option = document.createElement('option');
+			option.value = template.id;
+			option.textContent = template.inLibrary ? `${template.name} (in the library)` : template.name;
+			option.title = template.description;
+			start.append(option);
+		}
+		start.addEventListener('change', () => {
+			const wanted = start.value;
+			start.value = '';
+			if (wanted) {
+				post({ type: 'presetTemplate', kind, template: wanted });
+			}
+		});
+		const button = (label, tip, action) => {
+			const node = document.createElement('button');
+			node.type = 'button';
+			node.className = 'secondary';
+			node.textContent = label;
+			node.title = tip;
+			node.addEventListener('click', () => post({ type: action, kind, id: selection }));
+			return node;
+		};
+		row.append(
+			start,
+			button('Restore template', 'Write this preset again from the template it came from.', 'presetRestoreTemplate'),
+			button('Import…', 'Bring an OpenAI preset in as a file of its own.', 'presetImport'),
+			button('Export…', 'Write this preset out as SillyTavern reads it.', 'presetExport'),
+		);
+		return row;
 	}
 
 	function render() {
@@ -976,9 +1615,14 @@ window.comonadContentPane = function contentPane(options) {
 			$('st-form').append(extra);
 		} else {
 			renderSpec();
+			if (kind === 'characters' && selection) {
+				// The tags sit above the card's own fields: they belong to the library, not to the file.
+				$('st-form').prepend(renderTags());
+			}
 		}
 		renderActions();
 		renderList();
+		renderManager();
 	}
 
 	/* ------------------------------------------------------------------ wiring */
@@ -1014,8 +1658,16 @@ window.comonadContentPane = function contentPane(options) {
 			kind = content.kind;
 			item = content.item;
 			selection = item && item.id ? item.id : kind === 'lorebooks' && item ? item.name : null;
-			entryUid = null;
 			renderKinds();
+			$('st-pane').dataset.kind = kind;
+			if (kind === 'lorebooks' && bookPane) {
+				bookPane.render(content);
+				return;
+			}
+			if (kind === 'personas' && personaPane) {
+				personaPane.render(content);
+				return;
+			}
 			render();
 			if (!dirty) {
 				clearDirty();
@@ -1023,6 +1675,14 @@ window.comonadContentPane = function contentPane(options) {
 		},
 		// A note about the last action: a save, a delete, or why it failed.
 		note(message) {
+			if (kind === 'lorebooks' && bookPane) {
+				bookPane.note(message);
+				return;
+			}
+			if (kind === 'personas' && personaPane) {
+				personaPane.note(message);
+				return;
+			}
 			status(message.message, message.error === true);
 			if (message.error !== true) {
 				clearDirty();
@@ -1030,11 +1690,35 @@ window.comonadContentPane = function contentPane(options) {
 		},
 		// Said out loud when the panel pushes a state this pane cannot use, rather than going blank.
 		notice(text) {
+			if (kind === 'lorebooks' && bookPane && bookPane.notice) {
+				bookPane.notice(text);
+				return;
+			}
+			if (kind === 'personas' && personaPane && personaPane.notice) {
+				personaPane.notice(text);
+				return;
+			}
 			status(text, true);
 		},
 		// The panel's sub-tabs run through here, so unsaved edits are not dropped by accident.
 		select(next) {
 			if (next === kind) {
+				return true;
+			}
+			if (kind === 'lorebooks' && bookPane) {
+				// The world-book page writes as it is typed into, so there is nothing to discard.
+				bookPane.flush();
+				if (next !== 'settings') {
+					post({ type: 'select', kind: next, id: '' });
+				}
+				return true;
+			}
+			if (kind === 'personas' && personaPane) {
+				// The persona page saves as it is edited as well: a pending edit is written, never dropped.
+				personaPane.flush();
+				if (next !== 'settings') {
+					post({ type: 'select', kind: next, id: '' });
+				}
 				return true;
 			}
 			if (dirty && !window.confirm('Discard the unsaved changes to ' + selection + '?')) {

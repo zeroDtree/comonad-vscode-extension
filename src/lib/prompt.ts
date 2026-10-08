@@ -1,3 +1,4 @@
+import { countMessages, countTokens } from './tokens';
 import type { Message } from './types';
 
 /** How much of the recorded transcript is sent back to the model. Pure module. */
@@ -28,16 +29,13 @@ export function applyContextForm(transcript: Message[], form: ContextForm, toolL
 	);
 }
 
-/** Cheap token estimate: ~4 characters per token, good enough for budgets. */
+/** One string's token count, in the shape SillyTavern reports one (see `lib/tokens.ts`). */
 export function estimateTokens(text: string): number {
-	return Math.ceil(text.length / 4);
+	return countTokens(text);
 }
 
 export function estimateMessages(messages: Message[]): number {
-	return messages.reduce(
-		(sum, message) => sum + estimateTokens(message.content) + (message.toolCalls ? estimateTokens(JSON.stringify(message.toolCalls)) : 0),
-		0,
-	);
+	return countMessages(messages);
 }
 
 /**

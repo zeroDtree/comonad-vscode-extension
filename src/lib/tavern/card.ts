@@ -2,6 +2,7 @@ import { deflateSync } from 'node:zlib';
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import type { Character, CharacterCard, CharacterData, DepthPrompt, RegexScript } from './types';
+import { TALKATIVENESS_DEFAULT } from './types';
 
 /**
  * Character cards, read and written the way SillyTavern stores them: a PNG with the card in a `tEXt`
@@ -70,6 +71,11 @@ export function readPngText(image: Buffer): PngText[] {
 		offset = end + 4;
 	}
 	return chunks;
+}
+
+/** Whether a buffer is a PNG, which is the only image a card can be written onto. */
+export function isPng(image: Buffer): boolean {
+	return image.length >= 8 && image.subarray(0, 8).equals(PNG_SIGNATURE);
 }
 
 /** Replaces the card chunks of a PNG, keeping the image itself untouched. */
@@ -178,8 +184,18 @@ function strings(value: unknown): string[] {
 	return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
-function depthPromptOf(value: unknown): DepthPrompt | null {
-	if (!value || typeof value !== 'object') {
+/** A flag as upstream writes one: a boolean in V2, the string `true` in a V1 form. */
+function flag(value: unknown): boolean {
+	return value === true || value === 'true';
+}
+
+/** A number that may have arrived as a string; anything else falls back. */
+function numberOr(value: unknown, fallback: number): number {
+	const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number.parseFloat(value) : Number.NaN;
+	return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function depthPromptOf(value: unknown): DepthPrompt | null {	if (!value || typeof value !== 'object') {
 		return null;
 	}
 	const prompt = text((value as { prompt?: unknown }).prompt);
@@ -199,6 +215,7 @@ export function normaliseCard(card: CharacterCard, id: string, source: string): 
 	const data = cardData(card);
 	const extensions = (data.extensions ?? {}) as { depth_prompt?: unknown; regex_scripts?: unknown; world?: unknown };
 	const scripts = Array.isArray(extensions.regex_scripts) ? (extensions.regex_scripts as RegexScript[]) : [];
+	const root = card as CharacterCard & { talkativeness?: unknown; fav?: unknown; create_date?: unknown };
 	return {
 		id,
 		name: text(data.name) || text(card.name) || id,
@@ -214,6 +231,11 @@ export function normaliseCard(card: CharacterCard, id: string, source: string): 
 		creator: text(data.creator),
 		version: text(data.character_version),
 		tags: (strings(data.tags).length ? strings(data.tags) : strings(card.tags)).filter(Boolean),
+		// Upstream writes these under `extensions` in V2 and at the root in V1: read either.
+		favourite: flag((extensions as { fav?: unknown }).fav) || flag(root.fav),
+		talkativeness: numberOr((extensions as { talkativeness?: unknown }).talkativeness, numberOr(root.talkativeness, TALKATIVENESS_DEFAULT)),
+		createdAt: text(root.create_date),
+		sourceLink: text((extensions as { source_url?: unknown }).source_url),
 		depthPrompt: depthPromptOf(extensions.depth_prompt),
 		world: typeof extensions.world === 'string' ? extensions.world.trim() : '',
 		book: data.character_book && typeof data.character_book === 'object' ? data.character_book : null,
@@ -287,6 +309,22 @@ export function characterToCard(character: Character): CharacterCard {
 	} else {
 		delete extensions.world;
 	}
+	// Upstream mirrors these two into `extensions`, and keeps `fav` at the root of a V1 card as well.
+	if (character.talkativeness !== TALKATIVENESS_DEFAULT) {
+		extensions.talkativeness = character.talkativeness;
+	} else {
+		delete extensions.talkativeness;
+	}
+	if (character.favourite) {
+		extensions.fav = true;
+	} else {
+		delete extensions.fav;
+	}
+	if (character.sourceLink.trim()) {
+		extensions.source_url = character.sourceLink.trim();
+	} else {
+		delete extensions.source_url;
+	}
 	data.extensions = extensions;
 	return {
 		...character.raw,
@@ -300,6 +338,10 @@ export function characterToCard(character: Character): CharacterCard {
 		first_mes: character.greeting,
 		mes_example: character.examples,
 		tags: character.tags,
+		talkativeness: character.talkativeness,
+		// A V1 reader looks for `fav` at the root; V2 has it under `extensions`, written above.
+		fav: character.favourite,
+		...(character.createdAt.trim() ? { create_date: character.createdAt.trim() } : {}),
 		data,
 	};
 }

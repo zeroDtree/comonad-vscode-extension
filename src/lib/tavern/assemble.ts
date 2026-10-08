@@ -30,8 +30,18 @@ export interface AssembleBlocks {
 	/** World-info entries that asked to sit at the edges of the example block. */
 	examplesBefore?: readonly string[];
 	examplesAfter?: readonly string[];
-	/** World-info entries that asked to be injected into the chat at a depth. */
-	atDepth?: readonly { depth: number; role: number; content: string }[];
+	/** World-info entries and in-chat prompts that asked to sit at a depth. */
+	atDepth?: readonly { depth: number; role: number; content: string; order?: number }[];
+	/**
+	 * Upstream's `new_chat_prompt`: the heading of the chat-history block, which a preset sends on
+	 * every request (a group chat sends its own).
+	 */
+	historyHead?: string;
+	/**
+	 * Upstream's `send_if_empty`: what is said *as the user* when the history would otherwise end on
+	 * the reply — a continue is the case that reaches this.
+	 */
+	sendIfEmpty?: string;
 }
 
 export interface AssembleOptions {
@@ -96,24 +106,53 @@ export function exampleMessages(examples: string | undefined): Message[] {
 	}));
 }
 
+/** The role order upstream inserts a depth group in: assistant, then user, then system. */
+function rolePriority(role: number): number {
+	if (role === WI_ROLE.assistant) {
+		return 2;
+	}
+	return role === WI_ROLE.user ? 1 : 0;
+}
+
 /**
  * Splices in-chat injections into a history: `depth` counts back from the end, so depth 0 is after
- * the last message. Same-depth entries keep their relative order.
+ * the last message. Deeper depths are handled first, so they end up further up the transcript; inside
+ * a depth the order is upstream's — `order` low first, then assistant, user, system, which is how
+ * `populationInjectionPrompts` lays a depth group out. Entries that tie keep the order they arrived
+ * in, which is where the world-info scan or the prompt list put them.
  */
 export function injectAtDepth(
 	history: readonly Message[],
-	injections: readonly { depth: number; role: number; content: string }[],
+	injections: readonly { depth: number; role: number; content: string; order?: number }[],
 ): Message[] {
 	if (!injections.length) {
 		return [...history];
 	}
 	const sorted = [...injections]
 		.map((injection, index) => ({ injection, index }))
-		.sort((left, right) => right.injection.depth - left.injection.depth || left.index - right.index);
+		.sort(
+			(left, right) =>
+				right.injection.depth - left.injection.depth ||
+				(left.injection.order ?? 100) - (right.injection.order ?? 100) ||
+				rolePriority(right.injection.role) - rolePriority(left.injection.role) ||
+				left.index - right.index,
+		);
+	// A depth group is spliced in one go: inserting them one by one would reverse them, since every
+	// insertion lands on the same index.
 	const result = [...history];
-	for (const { injection } of sorted) {
-		const at = Math.max(0, result.length - Math.max(0, injection.depth));
-		result.splice(at, 0, { role: roleFromWorldInfo(injection.role), content: injection.content });
+	for (let start = 0; start < sorted.length; ) {
+		const depth = sorted[start].injection.depth;
+		let end = start;
+		while (end < sorted.length && sorted[end].injection.depth === depth) {
+			end++;
+		}
+		const at = Math.max(0, result.length - Math.max(0, depth));
+		result.splice(
+			at,
+			0,
+			...sorted.slice(start, end).map(({ injection }) => ({ role: roleFromWorldInfo(injection.role), content: injection.content })),
+		);
+		start = end;
 	}
 	return result;
 }
@@ -133,6 +172,20 @@ export function assemble(
 			messages.push({ role, content: text });
 		}
 	};
+	// A block whose position is *in chat* is not sent where it sits in the list: it is spliced into the
+	// history at its own depth, in its own order and with its own role, exactly as upstream does. The
+	// world-info entries that asked for a depth travel the same way.
+	const injections = [
+		...(blocks.atDepth ?? []).map((entry) => ({ ...entry })),
+		...prompts
+			.filter((prompt) => prompt.enabled && isInChat(prompt) && (prompt.content ?? '').trim())
+			.map((prompt) => ({
+				depth: prompt.injection_depth ?? 4,
+				role: prompt.role === 'user' ? WI_ROLE.user : prompt.role === 'assistant' ? WI_ROLE.assistant : WI_ROLE.system,
+				content: substitute(prompt.content ?? ''),
+				order: prompt.injection_order,
+			})),
+	];
 
 	for (const prompt of prompts) {
 		if (!prompt.enabled || isInChat(prompt)) {
@@ -140,7 +193,12 @@ export function assemble(
 		}
 		if (prompt.identifier === 'chatHistory') {
 			// The history carries its own injections, so the chat-lore depth entries go in here.
-			messages.push(...injectAtDepth(history, blocks.atDepth ?? []));
+			// Upstream heads this block with the *new chat* prompt, and fills an empty turn after a reply.
+			push('system', substitute(blocks.historyHead ?? ''));
+			messages.push(...injectAtDepth(history, injections));
+			if (blocks.sendIfEmpty && history[history.length - 1]?.role === 'assistant') {
+				push('user', substitute(blocks.sendIfEmpty));
+			}
 			continue;
 		}
 		if (prompt.identifier === 'dialogueExamples') {

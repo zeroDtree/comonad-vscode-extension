@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { Service, type Context } from 'cordis';
 import { resolveInside, runProcess, shellArgv } from '../lib/sandbox';
 import type { SessionPolicy } from '../lib/types';
+import type { GenerationTrigger } from '../lib/tavern/types';
 import type { CustomCommand } from './catalog';
 
 /** Slash commands: built-ins registered as plugins plus `.comonad/commands/*.md`. */
@@ -17,6 +18,8 @@ export interface CommandOutcome {
 	text?: string;
 	/** Policy overrides for the turn. */
 	policy?: Partial<SessionPolicy>;
+	/** The generation type this command starts; the surface passes it to the turn. */
+	trigger?: GenerationTrigger;
 	/** Output to show when the command did not stream through the turn pipeline. */
 	result?: string;
 }

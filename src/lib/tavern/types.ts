@@ -24,6 +24,28 @@ export const WI_POSITION = {
 
 export type WiPosition = (typeof WI_POSITION)[keyof typeof WI_POSITION];
 
+/**
+ * How a generation was started — SillyTavern's `GENERATION_TYPE_TRIGGERS`. An entry may name the
+ * types it belongs to; with no types named it belongs to all of them.
+ */
+export const GENERATION_TRIGGERS = ['normal', 'continue', 'impersonate', 'swipe', 'regenerate', 'quiet'] as const;
+
+export type GenerationTrigger = (typeof GENERATION_TRIGGERS)[number];
+
+/** How each type reads in the UI, in upstream's wording. */
+export const GENERATION_LABELS: Record<GenerationTrigger, string> = {
+	normal: 'Normal',
+	continue: 'Continue',
+	impersonate: 'Impersonate',
+	swipe: 'Swipe',
+	regenerate: 'Regenerate',
+	quiet: 'Quiet',
+};
+
+export function generationTrigger(value: unknown): GenerationTrigger {
+	return GENERATION_TRIGGERS.includes(value as GenerationTrigger) ? (value as GenerationTrigger) : 'normal';
+}
+
 /** How secondary keys combine with the primary match, verbatim from `world_info_logic`. */
 export const WI_LOGIC = {
 	/** At least one secondary key matches. */
@@ -288,7 +310,10 @@ export interface CharacterCard {
 	[key: string]: unknown;
 }
 
-/** A card as Comonad uses it: one flat view plus the untouched document for a lossless export. */
+/**
+ * A card as Comonad uses it: one flat view plus the untouched document for a lossless export. A
+ * PNG card is its own picture, which is how upstream stores the two together; a JSON card has none.
+ */
 export interface Character {
 	id: string;
 	name: string;
@@ -306,6 +331,14 @@ export interface Character {
 	creator: string;
 	version: string;
 	tags: string[];
+	/** `extensions.fav`, and the V1 root `fav` beside it: upstream's favourite, which its list filters on. */
+	favourite: boolean;
+	/** `extensions.talkativeness`: how much this character speaks in a group chat. */
+	talkativeness: number;
+	/** The root `create_date` upstream stamps on a card; empty for a card that never had one. */
+	createdAt: string;
+	/** `extensions.source_url`: where the card came from, shown by upstream's *Link to Source*. */
+	sourceLink: string;
 	depthPrompt: DepthPrompt | null;
 	/** `extensions.world`: a world book the card binds, scanned without being listed. */
 	world: string;
@@ -318,6 +351,9 @@ export interface Character {
 	raw: CharacterCard;
 }
 
+/** Upstream's `talkativeness_default`: the value a card without one speaks at. */
+export const TALKATIVENESS_DEFAULT = 0.5;
+
 /* ------------------------------------------------------------------ personas */
 
 /** Where a persona description goes, verbatim from SillyTavern's `persona_description_positions`. */
@@ -328,7 +364,25 @@ export const PERSONA_POSITION = {
 	anTop: 2,
 	anBottom: 3,
 	atDepth: 4,
+	/**
+	 * Sent nowhere: the persona still supplies the user's name, but its description is left out of the
+	 * request entirely. Upstream spells this position `NONE`.
+	 */
+	none: 9,
 } as const;
+
+/** Upstream's own default for a fresh persona: two messages from the end, in the system role. */
+export const PERSONA_DEPTH_DEFAULT = 2;
+
+/**
+ * One end of a persona connection, in upstream's own shape. A `character` id is the card's avatar
+ * name, which is the id Comonad gives a card; a `group` connection is kept and compared like any
+ * other, though Comonad has no group chats that could create one.
+ */
+export interface PersonaConnection {
+	type: 'character' | 'group';
+	id: string;
+}
 
 export interface PersonaDescription {
 	description?: string;
@@ -338,8 +392,8 @@ export interface PersonaDescription {
 	role?: number;
 	/** Name of a world book bound to this persona. */
 	lorebook?: string;
-	/** Character names or card ids this persona is bound to; empty means it is available everywhere. */
-	connections?: string[];
+	/** The characters and groups this persona is bound to; empty means it is available anywhere. */
+	connections?: PersonaConnection[];
 	[key: string]: unknown;
 }
 
@@ -354,12 +408,21 @@ export interface Persona {
 	role: number;
 	lorebook: string;
 	/** Chats whose character is in this list use the persona automatically. */
-	connections: string[];
+	connections: PersonaConnection[];
 	source: string;
+	/** The picture beside the file, when there is one, as an absolute path. */
+	avatar?: string;
 	raw: PersonaDescription;
 }
 
 /* ------------------------------------------------------------------ prompts and presets */
+
+/** One of upstream's named logit-bias sets: a map of token id to bias, with a name to pick it by. */
+export interface LogitBiasSet {
+	id: string;
+	name: string;
+	value: Record<string, number>;
+}
 
 /** `0` keeps a prompt in the ordered list; `1` injects it in chat, at a depth. */
 export const INJECTION_POSITION = {
@@ -381,6 +444,11 @@ export interface PromptItem {
 	injection_position?: number;
 	injection_depth?: number;
 	injection_order?: number;
+	/**
+	 * The generation types this block is sent for — upstream's *Triggers*. An empty list, or no list at
+	 * all, means every type.
+	 */
+	injection_trigger?: string[];
 	forbid_overrides?: boolean;
 	extension?: boolean;
 }
@@ -412,9 +480,33 @@ export interface TavernPreset {
 	names_behavior?: number;
 	assistant_prefill?: string;
 	squash_system_messages?: boolean;
+	/**
+	 * The nudge prompts. Upstream sends one when there is otherwise nothing to send: at the head of
+	 * the chat history, when a reply is continued, or when the user sends nothing at all.
+	 */
+	new_chat_prompt?: string;
+	new_group_chat_prompt?: string;
+	new_example_chat_prompt?: string;
+	continue_nudge_prompt?: string;
+	group_nudge_prompt?: string;
+	send_if_empty?: string;
+	/** `seed`, when the endpoint accepts one. */
+	seed?: number;
+	/** `logit_bias`: the set in use, and every set the preset carries. */
+	logitBiasSelected?: string;
+	logitBias?: LogitBiasSet[];
+	/** `stream_openai`: off asks for the whole reply at once instead of a stream of tokens. */
+	stream?: boolean;
+	/** `max_context_unlocked`: send the full context size even when the model is thought to be smaller. */
+	maxContextUnlocked?: boolean;
+	/** `use_sysprompt`: fold the system prompt into the first user message, for backends that want that. */
+	useSysprompt?: boolean;
 	/** Prompts as the user arranged them; the shipped order applies when absent. */
 	prompts?: PromptItem[];
+	/** The order the default character uses. */
 	promptOrder?: PromptOrderEntry[];
+	/** Per-character orders, keyed by character, the way upstream keys its blocks by character id. */
+	promptOrders?: Record<string, PromptOrderEntry[]>;
 	/** Where it was loaded from, so a save writes back to the same file. */
 	source?: string;
 	/** The file as read, so a save round-trips unknown keys. */

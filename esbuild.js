@@ -29,7 +29,10 @@ async function main() {
 		bundle: true,
 		format: 'cjs',
 		platform: 'node',
-		external: ['vscode'],
+		// The tokenizers are megabytes of rank tables and an inlined wasm blob. Bundling them would put
+		// that in front of every activation; left external they are read from `node_modules` the first
+		// time a token is actually counted. `.vscodeignore` re-includes them for the packaged build.
+		external: ['vscode', '@agnai/web-tokenizers', 'gpt-tokenizer/*'],
 		logLevel: 'silent',
 		plugins: [
 			/* add to the end of plugins array */

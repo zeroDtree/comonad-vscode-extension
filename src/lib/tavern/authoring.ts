@@ -1,11 +1,14 @@
 import { DEFAULT_ORDER, DEFAULT_PROMPTS } from './prompts';
 import {
+	PERSONA_DEPTH_DEFAULT,
 	PERSONA_POSITION,
+	TALKATIVENESS_DEFAULT,
 	WI_ENTRY_DEFAULTS,
 	WI_LOGIC,
 	WI_POSITION,
 	type Character,
 	type Persona,
+	type PersonaConnection,
 	type PromptItem,
 	type TavernPreset,
 	type WorldBook,
@@ -73,6 +76,10 @@ export function adoptCharacter(raw: unknown): Character {
 		creator: asText(value.creator),
 		version: asText(value.version),
 		tags: asList(value.tags),
+		favourite: value.favourite === true,
+		talkativeness: asNumber(value.talkativeness, TALKATIVENESS_DEFAULT),
+		createdAt: asText(value.createdAt),
+		sourceLink: asText(value.sourceLink),
 		// An empty prompt is not a prompt: the card has none, which is a state of its own.
 		depthPrompt: depth && asText(depth.prompt).trim() ? { prompt: asText(depth.prompt), depth: asNumber(depth.depth, 4), role } : null,
 		world: asText(value.world).trim(),
@@ -132,17 +139,19 @@ export function adoptBook(raw: unknown): WorldBook & { source: string; raw: Reco
 export function adoptPersona(raw: unknown): Persona {
 	const value = asObject(raw);
 	const id = asText(value.id).trim() || slugId(asText(value.name), 'persona');
+	const avatar = asText(value.avatar).trim();
 	return {
 		id,
 		name: asText(value.name).trim() || id,
 		title: asText(value.title),
 		description: asText(value.description),
 		position: asNumber(value.position, PERSONA_POSITION.inPrompt),
-		depth: asNumber(value.depth, 4),
+		depth: asNumber(value.depth, PERSONA_DEPTH_DEFAULT),
 		role: asNumber(value.role, 0),
 		lorebook: asText(value.lorebook),
-		connections: asList(value.connections),
+		connections: readPersonaConnections(value.connections),
 		source: asText(value.source),
+		...(avatar ? { avatar } : {}),
 		raw: asObject(value.raw) as Persona['raw'],
 	};
 }
@@ -262,6 +271,8 @@ export function entryToJson(entry: WorldEntry, raw: Record<string, unknown> = {}
 	set('order', entry.order ?? 100);
 	set('position', entry.position ?? WI_POSITION.before);
 	set('disable', entry.disable === true);
+	// Upstream keeps the display order at the root of the entry, not only in the `extensions` mirror.
+	set('displayIndex', entry.displayIndex ?? entry.uid);
 	set('vectorized', entry.vectorized === true);
 	set('addMemo', entry.addMemo === true);
 	set('ignoreBudget', entry.ignoreBudget === true);
@@ -290,9 +301,17 @@ export function entryToJson(entry: WorldEntry, raw: Record<string, unknown> = {}
 	set('matchCharacterDepthPrompt', entry.matchCharacterDepthPrompt === true);
 	set('matchScenario', entry.matchScenario === true);
 	set('matchCreatorNotes', entry.matchCreatorNotes === true);
-	set('characterFilterNames', entry.characterFilter?.names ?? []);
-	set('characterFilterTags', entry.characterFilter?.tags ?? []);
-	set('characterFilterExclude', entry.characterFilter?.isExclude === true);
+	// Upstream keeps the filter as one object at the root, under the name its editor writes, and the
+	// tag list holds registry ids. The three flat keys are what early Comonad files carry; they are
+	// dropped here so a file written once is SillyTavern's own shape.
+	set('character_filter', {
+		isExclude: entry.characterFilter?.isExclude === true,
+		names: entry.characterFilter?.names ?? [],
+		tags: entry.characterFilter?.tags ?? [],
+	});
+	delete json.characterFilterNames;
+	delete json.characterFilterTags;
+	delete json.characterFilterExclude;
 	set('triggers', entry.triggers ?? []);
 	const extensions = { ...((raw.extensions as Record<string, unknown>) ?? {}) };
 	for (const [field, name] of MIRROR) {
@@ -336,6 +355,11 @@ export function blankCharacter(name: string, id: string): Character {
 		creator: '',
 		version: '',
 		tags: [],
+		favourite: false,
+		talkativeness: TALKATIVENESS_DEFAULT,
+		// Upstream stamps a card the moment it is created; the date rides along in the file.
+		createdAt: new Date().toISOString(),
+		sourceLink: '',
 		depthPrompt: null,
 		world: '',
 		book: null,
@@ -352,15 +376,55 @@ export function blankPersona(name: string, id: string): Persona {
 		id,
 		name: name.trim() || id,
 		description: '',
-		title: name.trim() || id,
+		// Upstream leaves the picker's label empty and shows the name until the user sets one.
+		title: '',
 		position: PERSONA_POSITION.inPrompt,
-		depth: 4,
+		depth: PERSONA_DEPTH_DEFAULT,
 		role: 0,
 		lorebook: '',
 		connections: [],
 		source: '',
 		raw: {},
 	};
+}
+
+/**
+ * Reads a persona's connections: upstream's `{type, id}` objects, and the bare names older Comonad
+ * files carry — a name can only have meant a character, so those become character connections. A
+ * malformed entry is dropped rather than making the whole persona unreadable.
+ */
+export function readPersonaConnections(value: unknown): PersonaConnection[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	const connections: PersonaConnection[] = [];
+	const seen = new Set<string>();
+	const add = (type: PersonaConnection['type'], id: string): void => {
+		const key = `${type}\u0000${id}`;
+		if (seen.has(key)) {
+			return;
+		}
+		seen.add(key);
+		connections.push({ type, id });
+	};
+	for (const entry of value) {
+		if (typeof entry === 'string') {
+			const id = entry.trim();
+			if (id) {
+				add('character', id);
+			}
+			continue;
+		}
+		if (!entry || typeof entry !== 'object') {
+			continue;
+		}
+		const record = entry as Record<string, unknown>;
+		const id = asText(record.id).trim();
+		if (id) {
+			add(record.type === 'group' ? 'group' : 'character', id);
+		}
+	}
+	return connections;
 }
 
 /** A persona as a file: SillyTavern's own `persona_descriptions` block, plus the name. */
@@ -375,7 +439,7 @@ export function personaJson(persona: Persona, raw: Record<string, unknown> = {})
 			depth: persona.depth,
 			role: persona.role,
 			lorebook: persona.lorebook,
-			connections: persona.connections,
+			connections: persona.connections.map((connection) => ({ type: connection.type, id: connection.id })),
 		},
 		null,
 		4,

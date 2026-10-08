@@ -1,16 +1,65 @@
 /* Comonad settings webview — VS Code theme variables only, no external assets. */
 
+/* `hidden` is only a user-agent style, so any rule that sets `display` on the same element silently
+   beats it: the entry editor (`.wi-edit`), the drawers (`.wi-drawer-body`, `.wi-sources-body`) and
+   everything else the guests toggle with the attribute would stay visible. Chat does the same. */
+[hidden] {
+	display: none !important;
+}
+
+/* ------------------------------------------------------------------ the design tokens
+
+   Every pane of this document — the content editor, the world-book page, the persona page — is
+   loaded into this one file, so the scale lives here and they all inherit it: a button in one
+   sub-tab is then the same button in the next. Sizes follow VS Code's own controls (26px high, 4px
+   radii, 11.5px labels); every colour is a theme variable with a neutral fallback, so the panel is
+   at home in a light theme and a dark one alike. */
+
+:root {
+	--st-radius: 6px;
+	--st-radius-sm: 4px;
+	--st-row: 26px;
+	--st-border: var(--vscode-panel-border, rgba(128, 128, 128, 0.28));
+	--st-border-soft: var(--vscode-panel-border, rgba(128, 128, 128, 0.16));
+	--st-surface: var(--vscode-input-background, rgba(128, 128, 128, 0.1));
+	--st-surface-2: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.07));
+	--st-hover: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.16));
+	--st-selected: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.26));
+	--st-accent: var(--vscode-focusBorder, #0078d4);
+	--st-accent-bg: var(--vscode-button-background, #0e639c);
+	--st-accent-fg: var(--vscode-button-foreground, #ffffff);
+	--st-muted: var(--vscode-descriptionForeground, rgba(204, 204, 204, 0.72));
+	--st-danger: var(--vscode-errorForeground, #f48771);
+	--st-warning: var(--vscode-editorWarning-foreground, #d7a45f);
+	--st-green: var(--vscode-charts-green, #89d185);
+	--st-mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, monospace);
+	--st-text: 12.5px;
+	--st-label: 11.5px;
+	--st-small: 11px;
+}
+
 body {
 	font-family: var(--vscode-font-family);
 	font-size: var(--vscode-font-size, 13px);
 	color: var(--vscode-foreground);
 	background: var(--vscode-editor-background);
 	margin: 0;
-	padding: 10px 20px 24px;
+	padding: 12px 20px 28px;
+	line-height: 1.45;
 }
 
 .grow {
 	flex: 1;
+	min-width: 0;
+}
+
+/* Every control in the document is one height, so a row of them lines up whatever it mixes. */
+button.secondary,
+button.primary,
+select.control,
+input.control,
+#st-pane .link {
+	height: var(--st-row);
 }
 
 /* ------------------------------------------------------------------ header */
@@ -18,77 +67,89 @@ body {
 #bar {
 	display: flex;
 	align-items: center;
-	gap: 4px;
-	margin-bottom: 14px;
+	gap: 8px;
+	margin-bottom: 16px;
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	background: var(--vscode-editor-background);
+	padding: 2px 0 8px;
 }
 
 #tabs {
 	display: flex;
-	gap: 6px;
+	gap: 2px;
+	background: var(--st-surface-2);
+	border: 1px solid var(--st-border-soft);
+	border-radius: var(--st-radius);
+	padding: 2px;
 }
 
 .tab {
 	background: transparent;
-	color: var(--vscode-foreground);
+	color: var(--st-muted);
 	border: 0;
-	border-radius: 999px;
-	padding: 4px 13px;
+	border-radius: var(--st-radius-sm);
+	padding: 3px 12px;
 	font: inherit;
 	font-size: 12.5px;
-	opacity: 0.75;
 	cursor: pointer;
+	white-space: nowrap;
 }
 
 .tab:hover {
-	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.16));
-	opacity: 1;
+	background: var(--st-hover);
+	color: var(--vscode-foreground);
 }
 
 .tab.is-on {
-	background: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
-	opacity: 1;
+	background: var(--st-selected);
+	color: var(--vscode-foreground);
+	font-weight: 500;
 }
 
+/* A button that reads as a link: the toolbar's quiet actions, and every row's own controls. */
 .link {
 	background: transparent;
-	border: 0;
-	border-radius: 4px;
-	color: var(--vscode-foreground);
+	border: 1px solid transparent;
+	border-radius: var(--st-radius-sm);
+	color: var(--st-muted);
 	font: inherit;
 	font-size: 12.5px;
-	padding: 4px 12px;
-	opacity: 0.85;
+	padding: 0 8px;
 	cursor: pointer;
+	white-space: nowrap;
 }
 
 .link:hover {
-	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.16));
-	opacity: 1;
+	background: var(--st-hover);
+	color: var(--vscode-foreground);
+}
+
+.link:disabled {
+	opacity: 0.4;
+	cursor: default;
 }
 
 .link.is-dirty {
-	color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+	color: var(--st-accent);
+	font-weight: 600;
 	opacity: 1;
-}
-
-section[hidden] {
-	display: none;
 }
 
 /* ------------------------------------------------------------------ form */
 
 .grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-	gap: 12px 24px;
+	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+	gap: 10px 14px;
 	align-items: start;
 }
 
 .field {
 	display: flex;
 	flex-direction: column;
-	gap: 4px;
+	gap: 3px;
 	min-width: 0;
 }
 
@@ -97,74 +158,263 @@ section[hidden] {
 }
 
 .field > label {
-	font-size: 12px;
-	opacity: 0.8;
+	font-size: var(--st-label);
+	color: var(--st-muted);
 }
 
 .control {
-	background: var(--vscode-input-background);
-	color: var(--vscode-input-foreground);
-	border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.25));
-	border-radius: 4px;
-	padding: 5px 8px;
+	background: var(--st-surface);
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	padding: 0 8px;
 	font: inherit;
-	font-size: 12.5px;
+	font-size: var(--st-text);
 	width: 100%;
 	box-sizing: border-box;
 }
 
+select.control {
+	padding-right: 4px;
+}
+
+.control::placeholder {
+	color: var(--st-muted);
+	opacity: 1;
+}
+
 textarea.control {
-	min-height: 110px;
+	min-height: 96px;
+	height: auto;
+	padding: 6px 8px;
 	resize: vertical;
-	font-family: var(--vscode-editor-font-family, monospace);
-	line-height: 1.45;
+	line-height: 1.5;
 }
 
 input.control:focus,
 select.control:focus,
 textarea.control:focus {
-	outline: 1px solid var(--vscode-focusBorder);
+	outline: 1px solid var(--st-accent);
 	outline-offset: -1px;
+	border-color: var(--st-accent);
+}
+
+.control:disabled {
+	opacity: 0.6;
+}
+
+input[type='checkbox'] {
+	accent-color: var(--st-accent-bg);
+	width: 13px;
+	height: 13px;
+	margin: 0;
+	flex: none;
+}
+
+input[type='number'] {
+	font-variant-numeric: tabular-nums;
+}
+
+input[type='range'] {
+	accent-color: var(--st-accent-bg);
+	height: 16px;
 }
 
 .hint {
 	margin: 0;
-	font-size: 11.5px;
-	opacity: 0.6;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	line-height: 1.5;
+	overflow-wrap: anywhere;
 }
 
 .hint.error {
-	color: var(--vscode-errorForeground);
-	opacity: 1;
+	color: var(--st-danger);
+}
+
+.hint code {
+	font-family: var(--st-mono);
+	font-size: 10.5px;
+	background: var(--st-surface-2);
+	border-radius: 3px;
+	padding: 0 3px;
 }
 
 .row {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 8px;
+	gap: 6px;
 	align-items: center;
 }
 
 .check {
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	font-size: 12.5px;
-}
-
-button.secondary {
-	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.16));
-	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-	border: 0;
-	border-radius: 4px;
-	padding: 5px 12px;
-	font: inherit;
-	font-size: 12.5px;
+	gap: 6px;
+	font-size: var(--st-text);
+	color: var(--st-muted);
 	cursor: pointer;
 }
 
+/* The form's own section headings: the same treatment in every pane, with the hairline that
+   separates one group of fields from the next. */
+h2 {
+	font-size: var(--st-label);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--st-muted);
+	margin: 0 0 8px;
+	padding-bottom: 5px;
+	border-bottom: 1px solid var(--st-border-soft);
+}
+
+/* ------------------------------------------------------------------ buttons */
+
+button.secondary,
+button.primary {
+	border: 1px solid transparent;
+	border-radius: var(--st-radius-sm);
+	padding: 0 12px;
+	font: inherit;
+	font-size: var(--st-text);
+	cursor: pointer;
+	white-space: nowrap;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+}
+
+button.secondary {
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.17));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
 button.secondary:hover {
-	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.26));
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.28));
+}
+
+button.primary {
+	background: var(--st-accent-bg);
+	color: var(--st-accent-fg);
+}
+
+button.primary:hover {
+	background: var(--vscode-button-hoverBackground, var(--st-accent-bg));
+}
+
+/* The Save button says whether there is anything to save, so a change is never lost silently. */
+button.primary.is-dirty {
+	box-shadow: 0 0 0 2px var(--st-accent);
+}
+
+button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+button.secondary:focus-visible,
+button.primary:focus-visible,
+.link:focus-visible,
+.tab:focus-visible,
+.control:focus-visible {
+	outline: 1px solid var(--st-accent);
+	outline-offset: 1px;
+}
+
+/* A square button that holds one glyph: the row controls of the prompt list and the entry list. */
+button.icon {
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: 1px solid transparent;
+	border-radius: var(--st-radius-sm);
+	background: transparent;
+	color: var(--st-muted);
+	font: inherit;
+	font-size: 12px;
+	line-height: 1;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+button.icon:hover {
+	background: var(--st-hover);
+	color: var(--vscode-foreground);
+}
+
+button.icon.is-on {
+	background: var(--st-selected);
+	color: var(--vscode-foreground);
+}
+
+button.icon.danger:hover {
+	color: var(--st-danger);
+}
+
+/* An on/off switch, drawn here because the panes have no icon font: the prompt list's *On* and the
+   three persona locks all read the same way. */
+.switch {
+	position: relative;
+	display: inline-block;
+	width: 26px;
+	height: 14px;
+	flex: none;
+}
+
+.switch input {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	margin: 0;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.switch input:disabled {
+	cursor: default;
+}
+
+.switch .knob {
+	position: absolute;
+	inset: 0;
+	border-radius: 999px;
+	background: var(--vscode-checkbox-background, rgba(128, 128, 128, 0.35));
+	transition: background 0.12s ease;
+	pointer-events: none;
+}
+
+.switch .knob::after {
+	content: '';
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: var(--vscode-checkbox-foreground, #ffffff);
+	transition: transform 0.12s ease;
+}
+
+.switch input:checked + .knob {
+	background: var(--st-accent-bg);
+}
+
+.switch input:checked + .knob::after {
+	transform: translateX(12px);
+}
+
+.switch input:focus-visible + .knob {
+	outline: 1px solid var(--st-accent);
+	outline-offset: 1px;
+}
+
+.switch input:disabled + .knob {
+	opacity: 0.4;
 }
 
 /* ------------------------------------------------- path picker (working dir) */
@@ -185,10 +435,6 @@ button.secondary:hover {
 	border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 	border-radius: 6px;
 	box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.4));
-}
-
-#dirs[hidden] {
-	display: none;
 }
 
 #dirs .path {
@@ -320,94 +566,51 @@ button.secondary:hover {
 table {
 	border-collapse: collapse;
 	width: 100%;
-	font-size: 12px;
+	font-size: var(--st-text);
 }
 
 th,
 td {
 	text-align: left;
-	padding: 4px 8px;
-	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
-	vertical-align: top;
+	padding: 5px 8px;
+	border-bottom: 1px solid var(--st-border-soft);
+	vertical-align: middle;
 }
 
 th {
+	font-size: var(--st-small);
 	font-weight: 600;
-	opacity: 0.75;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--st-muted);
+	border-bottom-color: var(--st-border);
+}
+
+tbody tr:hover td {
+	background: var(--st-hover);
 }
 
 td.mono {
-	font-family: var(--vscode-editor-font-family, monospace);
+	font-family: var(--st-mono);
 }
 
-/* ------------------------------------------------------------- prompts tab */
-
-#prompts {
-	margin-top: 10px;
-	table-layout: auto;
-}
-
-#prompts th:first-child,
-#prompts td:first-child {
-	width: 1%;
-	white-space: nowrap;
-}
-
-#prompts td select.control,
-#prompts td input.control {
-	padding: 2px 4px;
-	font-size: 12px;
-}
-
-#prompts td input[type='number'] {
-	width: 60px;
-}
-
-#prompts tr.is-fixed td:first-child::after {
-	content: '★';
-	margin-left: 2px;
-	opacity: 0.5;
-}
-
-#prompts td.prompt-move {
-	white-space: nowrap;
-}
-
-#prompts td.prompt-move .link {
-	padding: 0 4px;
-	font-size: 13px;
-}
-
-#prompts td.prompt-move .link:disabled {
-	opacity: 0.25;
-	cursor: default;
-}
-
-#prompts tbody tr:hover {
-	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
-}
-
-#preset-name {
-	max-width: 240px;
-}
-
-.row .inline {
-	font-size: 12.5px;
-	opacity: 0.8;
+td.num,
+th.num {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
 }
 
 /* ------------------------------------------------------------------ status */
 
 #status {
-	min-height: 16px;
-	margin-top: 14px;
-	font-size: 12px;
-	opacity: 0.8;
+	min-height: 18px;
+	margin-top: 16px;
+	font-size: var(--st-small);
+	color: var(--st-muted);
 }
 
 #status.error {
-	color: var(--vscode-errorForeground);
-	opacity: 1;
+	color: var(--st-danger);
 }
 
 @media (max-width: 720px) {

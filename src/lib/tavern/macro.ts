@@ -25,12 +25,24 @@ export interface MacroContext {
 	creatorNotes?: string;
 	/** `{{group}}`: reserved for group chats; empty in Comonad. */
 	group?: string;
+	/**
+	 * `{{charIfNotGroup}}`: the character's name in a solo chat, nothing in a group — which is what the
+	 * shipped main prompt is written with. Comonad has no group chats, so it is the character's name.
+	 */
+	charIfNotGroup?: string;
 	/** `{{input}}`: the text the user just sent. */
 	input?: string;
+	/** `{{lastChatMessage}}`: the message a continue carries on from. */
+	lastChatMessage?: string;
 	/** `{{original}}`: the pre-replacement text, for regex scripts that rewrite in place. */
 	original?: string;
 	/** `{{model}}`: the model of the current chat. */
 	model?: string;
+	/**
+	 * `{{outlet::Name}}`: the world-info entries whose position is *outlet*, grouped by their outlet
+	 * name. Filled by the scan, so an entry's own content resolves it to nothing — as upstream does.
+	 */
+	outlets?: Record<string, string[]>;
 }
 
 export interface MacroOptions {
@@ -58,6 +70,9 @@ function values(ctx: MacroContext): Record<string, string | undefined> {
 		creatornotes: ctx.creatorNotes,
 		group: ctx.group,
 		input: ctx.input,
+		// Upstream's own alias: the character in a solo chat, empty in a group.
+		charifnotgroup: ctx.charIfNotGroup ?? ctx.char,
+		lastchatmessage: ctx.lastChatMessage,
 		original: ctx.original,
 		model: ctx.model,
 		// Aliases SillyTavern keeps for older cards.
@@ -95,6 +110,9 @@ export function substituteMacros(text: string, ctx: MacroContext, options: Macro
 				return String(roll(body, random));
 			case 'reverse':
 				return [...body].reverse().join('');
+			case 'outlet':
+				// `{{outlet::name}}` and `{{outlet:name}}` are both written in the wild.
+				return (ctx.outlets?.[body.replace(/^:+/, '').trim()] ?? []).join('\n');
 			default:
 				return whole;
 		}

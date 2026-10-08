@@ -1,0 +1,411 @@
+/* Comonad Personas — the ST tab's Persona Management page. Loaded by the settings panel, so every
+   rule is scoped to `#pf-panel` and the shared styles (.control/.hint/button/.secondary) come from
+   settings.css. Upstream's panel is two columns: the tiles on the left, the open persona on the
+   right, with the persona-wide settings underneath them. */
+
+#pf-panel {
+	display: none;
+	flex-direction: column;
+	gap: 10px;
+	min-height: 0;
+}
+
+#st-pane[data-kind='personas'] #pf-panel {
+	display: flex;
+}
+
+/* The persona page owns the whole tab while it is showing: the item list and the form step aside. */
+#st-pane[data-kind='personas'] #st-actions,
+#st-pane[data-kind='personas'] #st-split,
+#st-pane[data-view='settings'] #pf-panel {
+	display: none;
+}
+
+#pf-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--st-border-soft);
+}
+
+#pf-head .grow {
+	flex: 1;
+}
+
+.pf-label {
+	font-size: var(--st-label);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--st-muted);
+}
+
+#pf-split {
+	display: grid;
+	grid-template-columns: minmax(200px, 250px) minmax(0, 1fr);
+	gap: 16px;
+	min-height: 340px;
+}
+
+#pf-left {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	min-height: 0;
+}
+
+#pf-tools {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+#pf-search {
+	flex: 1 0 100%;
+	min-width: 70px;
+	order: -1;
+}
+
+#pf-sort {
+	max-width: 92px;
+}
+
+#pf-pager {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	margin-left: auto;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+#pf-tiles {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	overflow: auto;
+	max-height: 60vh;
+	padding-right: 2px;
+}
+
+#pf-tiles.is-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+	gap: 6px;
+}
+
+/* One persona: a row with its picture, its name and its locks. The picture *is* the persona upstream,
+   so a tile is the picture — a small one in the list, and the whole tile in grid view. */
+.pf-tile {
+	display: grid;
+	grid-template-columns: 28px minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 8px;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: var(--st-radius-sm);
+	padding: 4px 8px;
+	font: inherit;
+	color: inherit;
+	cursor: pointer;
+	min-width: 0;
+	text-align: left;
+}
+
+.pf-tile:hover {
+	background: var(--st-hover);
+}
+
+.pf-tile.is-on {
+	background: var(--st-selected);
+	border-color: var(--st-accent);
+}
+
+.pf-tile img,
+.pf-tile .pf-letter {
+	width: 28px;
+	height: 28px;
+	object-fit: cover;
+	border-radius: var(--st-radius-sm);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--st-surface);
+	color: var(--st-muted);
+	font-size: 13px;
+	font-weight: 600;
+	overflow: hidden;
+}
+
+.pf-meta {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.pf-caption {
+	font-size: var(--st-text);
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pf-sub {
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Upstream's two badges: the crown for the persona new chats open with, a lock for this chat's. */
+.pf-badges {
+	display: flex;
+	gap: 3px;
+	font-size: var(--st-small);
+	line-height: 1;
+}
+
+.pf-badge {
+	filter: grayscale(0.2);
+}
+
+#pf-tiles.is-grid .pf-tile {
+	grid-template-columns: minmax(0, 1fr);
+	justify-items: center;
+	text-align: center;
+	gap: 3px;
+	padding: 5px;
+}
+
+#pf-tiles.is-grid .pf-tile img,
+#pf-tiles.is-grid .pf-tile .pf-letter {
+	width: 100%;
+	height: auto;
+	aspect-ratio: 1;
+	font-size: 20px;
+}
+
+#pf-tiles.is-grid .pf-meta {
+	align-items: center;
+	width: 100%;
+}
+
+#pf-tiles.is-grid .pf-badges {
+	justify-content: center;
+}
+
+.pf-upload {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 17px;
+	color: var(--st-muted);
+	border: 1px dashed var(--st-border);
+	min-height: 38px;
+}
+
+#pf-tiles.is-grid .pf-upload {
+	aspect-ratio: 1;
+	min-height: 0;
+}
+
+.pf-upload:hover {
+	color: var(--vscode-foreground);
+	border-color: var(--st-accent);
+}
+
+#pf-right {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	min-height: 0;
+	overflow: auto;
+	padding-right: 2px;
+}
+
+#pf-editor {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+#pf-title-row {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+#pf-picture {
+	width: 56px;
+	height: 56px;
+	flex: 0 0 auto;
+	padding: 0;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius);
+	background: var(--st-surface);
+	color: var(--st-muted);
+	cursor: pointer;
+	overflow: hidden;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+#pf-picture:hover {
+	border-color: var(--st-accent);
+}
+
+#pf-picture img,
+#pf-picture .pf-letter {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 22px;
+	font-weight: 600;
+}
+
+#pf-titles {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	flex: 1;
+	min-width: 0;
+}
+
+#pf-name {
+	font-size: 13px;
+	font-weight: 500;
+}
+
+.pf-buttons {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.pf-field {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-width: 0;
+}
+
+.pf-field > label {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	font-size: var(--st-label);
+	color: var(--st-muted);
+}
+
+.pf-tokens {
+	margin-left: auto;
+	font-size: var(--st-small);
+	font-variant-numeric: tabular-nums;
+}
+
+#pf-description {
+	width: 100%;
+	min-height: 110px;
+	resize: vertical;
+}
+
+/* The three knobs of the description's own injection, side by side like upstream's. */
+.pf-grid3 {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 80px minmax(0, 130px);
+	gap: 8px 10px;
+	align-items: start;
+}
+
+#pf-depth {
+	width: 100%;
+}
+
+/* The locks are upstream's own buttons: they read as on or off, and nothing else says so. */
+.pf-locks {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.pf-locks .secondary.is-on {
+	background: var(--st-accent-bg);
+	color: var(--st-accent-fg);
+	border-color: var(--st-accent-bg);
+}
+
+/* A connection is a chip with its own ✕, the way a key is a chip in the world-info editor. */
+#pf-connections {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+.pf-connection {
+	display: inline-flex;
+}
+
+.pf-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	background: var(--st-surface);
+	border: 1px solid var(--st-border);
+	border-radius: 999px;
+	padding: 1px 4px 1px 9px;
+	font-size: var(--st-small);
+	white-space: nowrap;
+}
+
+.pf-x {
+	background: transparent;
+	border: 0;
+	color: var(--st-muted);
+	cursor: pointer;
+	font: inherit;
+	font-size: var(--st-small);
+	line-height: 1;
+	padding: 2px 4px;
+	border-radius: 999px;
+}
+
+.pf-x:hover {
+	color: var(--st-danger);
+	background: var(--st-hover);
+}
+
+#pf-connect-row {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+	margin-top: 2px;
+}
+
+#pf-connect-row select {
+	flex: 1;
+}
+
+/* The persona-wide settings, apart from the persona's own fields. */
+.pf-globals {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	border-top: 1px solid var(--st-border-soft);
+	padding-top: 10px;
+}
+
+.pf-globals .check {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: var(--st-text);
+}

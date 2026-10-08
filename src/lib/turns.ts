@@ -33,6 +33,14 @@ export interface Turn {
 	endedAt?: number;
 	/** A character's opening line: there is no prompt behind it, so it cannot be regenerated. */
 	greeting?: boolean;
+	/**
+	 * The reply's variants, when it has been swiped or regenerated: `steps` already holds the active
+	 * one, because the transcript's `content` is always the variant that is showing.
+	 */
+	swipes?: string[];
+	swipeId?: number;
+	/** This turn's reply was continued rather than answered: it has no prompt of its own. */
+	continued?: boolean;
 }
 
 function statusOf(output: string | undefined): StepStatus {
@@ -85,6 +93,13 @@ export function turnsOf(transcript: Message[], first = 0): Turn[] {
 		}
 		if (message.role === 'assistant') {
 			const round = duration(message.startedAt, message.at);
+			if (message.swipes && message.swipes.length > 1) {
+				current.swipes = message.swipes;
+				current.swipeId = message.swipeId ?? 0;
+			}
+			if (message.continued) {
+				current.continued = true;
+			}
 			if (message.reasoning?.trim()) {
 				current.steps.push({ kind: 'thought', text: message.reasoning, ms: round, at: message.at });
 			}

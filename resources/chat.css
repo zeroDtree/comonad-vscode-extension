@@ -590,6 +590,40 @@ details.thinking summary::before {
 	white-space: nowrap;
 }
 
+/* The reply's variants, as upstream shows them: ‹ n/m ›, and only where there is more than one. */
+.swipes {
+	display: inline-flex;
+	align-items: center;
+	gap: 1px;
+	font-size: 11px;
+	opacity: 0.7;
+}
+
+.swipe-step {
+	background: transparent;
+	border: none;
+	color: inherit;
+	font: inherit;
+	font-size: 12px;
+	line-height: 1;
+	padding: 0 3px;
+	cursor: pointer;
+	opacity: 0.8;
+}
+
+.swipe-step:disabled {
+	opacity: 0.3;
+	cursor: default;
+}
+
+.swipe-step:not(:disabled):hover {
+	opacity: 1;
+}
+
+.swipe-count {
+	font-variant-numeric: tabular-nums;
+}
+
 .trace-pre {
 	margin: 0;
 	white-space: pre-wrap;
@@ -878,6 +912,15 @@ footer {
 	max-width: 60%;
 }
 
+/* The generate caret sits beside Send and carries no label: the chevron is the whole control. */
+#controls .pill-caret {
+	max-width: none;
+}
+
+.pill-caret .pill-trigger {
+	padding: 2px 6px;
+}
+
 /* Work mode, approval, context and network: their own row under the input box. */
 #pills {
 	display: flex;
@@ -919,6 +962,13 @@ footer {
 
 #lore.chip {
 	cursor: pointer;
+}
+
+/* The scan ran out of world-info budget: the readout is no longer the whole story. */
+#lore.chip.is-over {
+	border-color: var(--vscode-editorWarning-foreground, #cca700);
+	color: var(--vscode-editorWarning-foreground, #cca700);
+	opacity: 1;
 }
 
 /* ------------------------------------------------------------------ hover tips */

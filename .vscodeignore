@@ -2,6 +2,10 @@
 .vscode-test/**
 out/**
 node_modules/**
+# The tokenizers stay external (see esbuild.js): rank tables and an inlined wasm blob are read from
+# here on first use rather than parsed at activation.
+!node_modules/gpt-tokenizer/**
+!node_modules/@agnai/web-tokenizers/**
 src/**
 .gitignore
 .yarnrc

@@ -1,0 +1,693 @@
+/* Comonad World Info — the world-book page of the ST tab, laid out the way SillyTavern's
+   Worlds/Lorebooks panel is: the active worlds and the global activation knobs on top, then the book
+   toolbar, then the entry list, where each row unfolds into its own editor. Everything is scoped to
+   `#wi-panel`, and the shared form styles (.control/.hint/button) come from settings.css. */
+
+#wi-panel {
+	display: none;
+}
+
+#st-pane[data-kind='lorebooks'] #wi-panel {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+/* The generic content page — the library list and its form — is for the other three kinds. */
+#st-pane[data-kind='lorebooks'] #st-actions,
+#st-pane[data-kind='lorebooks'] #st-split {
+	display: none;
+}
+
+/* ------------------------------------------------------------- the active worlds and the knobs */
+
+#wi-panel > hr {
+	border: 0;
+	border-top: 1px solid var(--st-border-soft);
+	margin: 0;
+}
+
+#wi-top {
+	display: flex;
+	gap: 16px;
+	align-items: flex-start;
+	flex-wrap: wrap;
+}
+
+.wi-block {
+	flex: 1 1 280px;
+	min-width: 230px;
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+
+.wi-label {
+	font-size: var(--st-label);
+	color: var(--st-muted);
+}
+
+#wi-worlds {
+	min-height: 76px;
+	background: var(--st-surface);
+	color: inherit;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	padding: 2px;
+	font: inherit;
+	font-size: var(--st-text);
+}
+
+.wi-drawer {
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius);
+	overflow: hidden;
+}
+
+.wi-drawer-head,
+.wi-sources-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	width: 100%;
+	height: var(--st-row);
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.15));
+	color: inherit;
+	border: 0;
+	padding: 0 10px;
+	font: inherit;
+	font-size: var(--st-text);
+	text-align: left;
+	cursor: pointer;
+}
+
+.wi-drawer-head:hover,
+.wi-sources-head:hover {
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.26));
+}
+
+.wi-chev {
+	color: var(--st-muted);
+	transition: transform 0.12s ease;
+}
+
+.wi-drawer-head.is-open .wi-chev,
+.wi-sources-head.is-open .wi-chev {
+	transform: rotate(180deg);
+}
+
+.wi-drawer-body,
+.wi-sources-body {
+	padding: 10px;
+	display: flex;
+	gap: 12px;
+	align-items: flex-start;
+	flex-wrap: wrap;
+	border-top: 1px solid var(--st-border-soft);
+}
+
+.wi-sliders {
+	flex: 2 1 400px;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+	gap: 8px 12px;
+}
+
+.wi-slider {
+	display: grid;
+	grid-template-columns: 1fr 66px;
+	gap: 4px 8px;
+	align-items: center;
+	min-width: 0;
+}
+
+.wi-slider > small {
+	grid-column: 1 / -1;
+	font-size: var(--st-label);
+	color: var(--st-muted);
+}
+
+.wi-slider input[type='range'] {
+	width: 100%;
+	min-width: 0;
+}
+
+.wi-slider input[type='number'],
+.wi-slider select {
+	width: 100%;
+	min-width: 0;
+	background: var(--st-surface);
+	color: inherit;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	height: 22px;
+	padding: 0 4px;
+	font: inherit;
+	font-size: var(--st-small);
+}
+
+.wi-global-checks {
+	flex: 1 1 200px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+/* ------------------------------------------------------------- the book toolbar */
+
+#wi-toolbar,
+#wi-toolbar2,
+#wi-toolbar .group,
+#wi-toolbar2 .group {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+#wi-toolbar,
+#wi-toolbar2 {
+	gap: 6px 10px;
+}
+
+/* The file verbs travel together, and sit at the right: the row then breaks between groups rather
+   than in the middle of one. */
+#wi-toolbar .group,
+#wi-pager {
+	margin-left: auto;
+}
+
+/* The search, the sort and the paging of the list are a group of their own, on its own line. */
+#wi-toolbar2 .group.push {
+	flex: 1 1 100%;
+}
+
+#wi-toolbar {
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--st-border-soft);
+}
+
+#wi-pick {
+	flex: 0 1 220px;
+	min-width: 140px;
+	background: var(--st-surface);
+	color: inherit;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	height: var(--st-row);
+	padding: 0 4px;
+	font: inherit;
+	font-size: var(--st-text);
+}
+
+.wi-or {
+	font-size: var(--st-small);
+	color: var(--st-muted);
+}
+
+#wi-search {
+	flex: 1 1 150px;
+	min-width: 120px;
+	background: var(--st-surface);
+	color: inherit;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	height: var(--st-row);
+	padding: 0 8px;
+	font: inherit;
+	font-size: var(--st-text);
+}
+
+#wi-search:focus {
+	outline: 1px solid var(--st-accent);
+	outline-offset: -1px;
+}
+
+#wi-sort,
+#wi-page-size {
+	background: var(--st-surface);
+	color: inherit;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	height: var(--st-row);
+	padding: 0 4px;
+	font: inherit;
+	font-size: var(--st-text);
+}
+
+#wi-pager {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------- the entry list */
+
+/* The list is one grid, and the labels over it are a row of that same grid: that is what keeps the two
+   in line at any width, instead of a padding that has to be tuned by hand. */
+#wi-headers,
+.wi-row {
+	display: grid;
+	grid-template-columns: 18px 16px 16px minmax(110px, 1fr) 62px 74px 48px 48px 60px 66px;
+	gap: 4px;
+	align-items: center;
+	padding: 3px 6px;
+}
+
+#wi-headers {
+	font-size: var(--st-small);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--st-muted);
+	border-bottom: 1px solid var(--st-border);
+	padding-bottom: 5px;
+}
+
+/* The first three columns belong to the grip, the fold and the on/off switch, so the labels start at
+   the fourth one. */
+#wi-headers > :nth-child(1) {
+	grid-column: 4;
+}
+
+#wi-headers > :nth-child(2) {
+	grid-column: 5;
+	text-align: center;
+}
+
+#wi-headers > :nth-child(3) {
+	grid-column: 6;
+	text-align: center;
+}
+
+#wi-headers > :nth-child(4) {
+	grid-column: 7;
+	text-align: center;
+}
+
+#wi-headers > :nth-child(5) {
+	grid-column: 8;
+	text-align: center;
+}
+
+#wi-headers > :nth-child(6) {
+	grid-column: 9;
+	text-align: center;
+}
+
+#wi-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.wi-entry {
+	border: 1px solid var(--st-border-soft);
+	border-radius: var(--st-radius-sm);
+	background: var(--st-surface-2);
+}
+
+.wi-entry:hover {
+	border-color: var(--st-border);
+}
+
+.wi-entry.is-open {
+	border-color: var(--st-accent);
+}
+
+/* Upstream dims a switched-off entry whole — and brings it back on hover — rather than striking its
+   title through: the row keeps its place, and nothing in it is a guess. */
+.wi-entry.is-off {
+	opacity: 0.45;
+}
+
+.wi-entry.is-off:hover,
+.wi-entry.is-off:focus-within {
+	opacity: 1;
+}
+
+.wi-entry.is-constant {
+	border-left: 2px solid var(--vscode-charts-blue, #3794ff);
+}
+
+.wi-entry.is-vectorized {
+	border-left: 2px solid var(--vscode-charts-purple, #b180d7);
+}
+
+.wi-entry.is-dragging {
+	opacity: 0.5;
+}
+
+.wi-entry.is-over {
+	border-top: 2px solid var(--st-accent);
+}
+
+.wi-buttons {
+	display: flex;
+	gap: 1px;
+	justify-content: flex-end;
+}
+
+.wi-grip {
+	cursor: grab;
+	color: var(--st-muted);
+	text-align: center;
+	font-size: var(--st-small);
+}
+
+.wi-grip.is-off {
+	visibility: hidden;
+}
+
+/* The row's own controls: square, quiet, and the same size as every other icon button in the panel.
+   The switch takes the colour of the entry's state, as upstream's own bullet does. */
+.wi-fold,
+.wi-kill,
+.wi-move,
+.wi-copy,
+.wi-drop {
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: 1px solid transparent;
+	border-radius: var(--st-radius-sm);
+	background: transparent;
+	color: var(--st-muted);
+	font: inherit;
+	font-size: var(--st-small);
+	line-height: 1;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.wi-fold:hover,
+.wi-kill:hover,
+.wi-move:hover,
+.wi-copy:hover,
+.wi-drop:hover {
+	background: var(--st-hover);
+	color: var(--vscode-foreground);
+}
+
+.wi-drop:hover {
+	color: var(--st-danger);
+}
+
+.wi-entry:not(.is-off) .wi-kill {
+	color: var(--st-green);
+}
+
+.wi-entry.is-constant .wi-kill {
+	color: var(--vscode-charts-blue, #3794ff);
+}
+
+.wi-entry.is-vectorized .wi-kill {
+	color: var(--vscode-charts-purple, #b180d7);
+}
+
+.wi-title {
+	background: transparent;
+	color: inherit;
+	border: 1px solid transparent;
+	border-radius: var(--st-radius-sm);
+	font: inherit;
+	font-size: var(--st-text);
+	padding: 1px 5px;
+	/* A one-line memo that grows as it is typed into, like upstream's own title field. */
+	height: 22px;
+	min-height: 0;
+	resize: none;
+	overflow: hidden;
+	box-sizing: border-box;
+}
+
+.wi-title::placeholder {
+	color: var(--st-muted);
+	opacity: 1;
+}
+
+.wi-title:hover,
+.wi-title:focus {
+	background: var(--st-surface);
+	border-color: var(--st-border);
+	outline: none;
+}
+
+.wi-state,
+.wi-row-position,
+.wi-num {
+	background: var(--st-surface);
+	color: inherit;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	font: inherit;
+	font-size: var(--st-small);
+	height: 22px;
+	padding: 0 2px;
+	width: 100%;
+	min-width: 0;
+	text-align: center;
+}
+
+.wi-state:focus,
+.wi-row-position:focus,
+.wi-num:focus {
+	outline: 1px solid var(--st-accent);
+	outline-offset: -1px;
+}
+
+/* ------------------------------------------------------------- the unfolded editor */
+
+.wi-edit {
+	border-top: 1px solid var(--st-border-soft);
+	padding: 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.wi-line {
+	display: flex;
+	gap: 10px;
+	flex-wrap: wrap;
+	/* Top, not bottom: every field's label then sits on the line's own label row. */
+	align-items: flex-start;
+}
+
+.wi-field {
+	flex: 1 1 130px;
+	min-width: 110px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.wi-field > small {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	justify-content: space-between;
+	font-size: var(--st-label);
+	color: var(--st-muted);
+}
+
+.wi-field.wi-thin {
+	flex: 0 0 104px;
+}
+
+.wi-field.wi-keys {
+	flex: 2 1 240px;
+}
+
+.wi-field.wi-wide,
+.wi-content {
+	flex: 1 1 100%;
+}
+
+.wi-field.wi-group {
+	flex: 2 1 220px;
+}
+
+.wi-field input[type='text'],
+.wi-field input[type='number'],
+.wi-field select,
+.wi-field textarea,
+.wi-content textarea {
+	background: var(--st-surface);
+	color: inherit;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	font: inherit;
+	font-size: var(--st-text);
+	padding: 4px 6px;
+	width: 100%;
+	box-sizing: border-box;
+	resize: vertical;
+}
+
+.wi-field input:focus,
+.wi-field select:focus,
+.wi-field textarea:focus,
+.wi-content textarea:focus {
+	outline: 1px solid var(--st-accent);
+	outline-offset: -1px;
+}
+
+.wi-content textarea {
+	font-family: var(--st-mono);
+	font-size: var(--st-small);
+	line-height: 1.55;
+}
+
+.wi-content textarea::placeholder,
+.wi-field input::placeholder {
+	color: var(--st-muted);
+	opacity: 1;
+}
+
+.wi-content-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+	margin-bottom: 3px;
+}
+
+.wi-flags {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.wi-inline {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	white-space: nowrap;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	cursor: pointer;
+}
+
+/* The key inputs: chips, with the plaintext mode upstream keeps as a user preference. */
+.wi-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	min-height: 26px;
+	align-items: center;
+	border-radius: var(--st-radius-sm);
+}
+
+.wi-chip {
+	background: var(--vscode-badge-background, rgba(128, 128, 128, 0.25));
+	color: var(--vscode-badge-foreground, inherit);
+	border: 0;
+	border-radius: 10px;
+	padding: 1px 8px;
+	font: inherit;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.wi-chip:hover {
+	text-decoration: line-through;
+}
+
+.wi-chip-input {
+	width: 100%;
+	box-sizing: border-box;
+}
+
+/* The fancy/plaintext switch sits on the field's own label row, at the right. */
+.wi-field.wi-keys {
+	position: relative;
+}
+
+.wi-field.wi-keys .wi-plain {
+	position: absolute;
+	top: 0;
+	right: 0;
+	background: transparent;
+	border: 0;
+	color: inherit;
+	cursor: pointer;
+	font-size: 12px;
+	opacity: 0.7;
+	padding: 0;
+	line-height: 1;
+}
+
+.wi-field.wi-keys .wi-plain:hover {
+	opacity: 1;
+}
+
+.wi-foot {
+	display: flex;
+	gap: 14px;
+	flex-wrap: wrap;
+	border-top: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+	padding-top: 6px;
+}
+
+.wi-sources {
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+	border-radius: 6px;
+	overflow: hidden;
+}
+
+.wi-sources-body {
+	padding: 8px;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 18px;
+}
+
+/* ------------------------------------------------------------- the move/copy question */
+
+#wi-modal {
+	position: fixed;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.35);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 20;
+}
+
+.wi-modal-body {
+	background: var(--vscode-editorWidget-background, #252526);
+	border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+	border-radius: 6px;
+	padding: 12px;
+	min-width: 280px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.wi-modal-text {
+	margin: 0;
+}
+
+#wi-modal-select {
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 4px;
+	padding: 3px 4px;
+	font: inherit;
+	font-size: 12px;
+}
+
+.wi-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 6px;
+}

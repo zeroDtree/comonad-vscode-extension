@@ -13,7 +13,8 @@ export const DEFAULT_PROMPTS: readonly PromptItem[] = [
 		name: 'Main Prompt',
 		system_prompt: true,
 		role: 'system',
-		content: "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}.",
+		// Upstream's own text, `{{charIfNotGroup}}` and all: that macro is the character in a solo chat.
+		content: "Write {{char}}'s next reply in a fictional chat between {{charIfNotGroup}} and {{user}}.",
 	},
 	{
 		identifier: 'nsfw',
@@ -70,6 +71,17 @@ export const DEFAULT_ORDER: readonly PromptOrderEntry[] = [
  */
 export const IDENTITY_PROMPT = 'comonad';
 
+/** Upstream's `shouldTrigger`: a block with no trigger list is sent for every generation type. */
+export function triggersGeneration(prompt: Pick<PromptItem, 'injection_trigger'>, trigger: string | undefined): boolean {
+	return !trigger || !prompt.injection_trigger?.length || prompt.injection_trigger.includes(trigger);
+}
+
+/** The block of this identifier as Comonad ships it, which is what *Reset* puts back. */
+export function shippedPrompt(identifier: string): PromptItem | undefined {
+	const found = DEFAULT_PROMPTS.find((prompt) => prompt.identifier === identifier);
+	return found ? { ...found } : undefined;
+}
+
 /** A prompt plus whether the order turns it on. */
 export interface ActivePrompt extends PromptItem {
 	enabled: boolean;
@@ -79,9 +91,11 @@ export interface ActivePrompt extends PromptItem {
  * Merges a preset's prompts and order over the shipped ones. A prompt the preset defines replaces
  * the shipped block of the same identifier; a prompt the preset adds is appended; an identifier that
  * appears in the order but nowhere else becomes a marker, so a preset can place a block the build
- * does not know about.
+ * does not know about. `character` picks the order: upstream keeps one per character, and the preset's
+ * default block stands in for every character that has none. `trigger` picks the blocks themselves: a
+ * block limited to some generation types is left out of the others, as upstream's `shouldTrigger` says.
  */
-export function promptCollection(preset?: TavernPreset): ActivePrompt[] {
+export function promptCollection(preset?: TavernPreset, characterId = '', trigger?: string): ActivePrompt[] {
 	const prompts = new Map<string, PromptItem>();
 	prompts.set(IDENTITY_PROMPT, {
 		identifier: IDENTITY_PROMPT,
@@ -97,7 +111,9 @@ export function promptCollection(preset?: TavernPreset): ActivePrompt[] {
 		const existing = prompts.get(prompt.identifier);
 		prompts.set(prompt.identifier, existing ? { ...existing, ...prompt } : { ...prompt });
 	}
-	const order = preset?.promptOrder?.length ? preset.promptOrder : DEFAULT_ORDER;
+	// The character's own order wins over the preset's default block, which wins over the shipped one.
+	const perCharacter = characterId ? preset?.promptOrders?.[characterId] : undefined;
+	const order = perCharacter?.length ? perCharacter : preset?.promptOrder?.length ? preset.promptOrder : DEFAULT_ORDER;
 	// Comonad's identity block leads whatever the preset says; the shipped order predates it.
 	const ordered: ActivePrompt[] = [{ ...prompts.get(IDENTITY_PROMPT)!, enabled: true }];
 	for (const entry of order) {
@@ -106,14 +122,18 @@ export function promptCollection(preset?: TavernPreset): ActivePrompt[] {
 		}
 		const prompt = prompts.get(entry.identifier) ?? { identifier: entry.identifier, role: 'system' as const, marker: false };
 		prompts.delete(entry.identifier);
-		ordered.push({ ...prompt, enabled: entry.enabled });
+		if (triggersGeneration(prompt, trigger)) {
+			ordered.push({ ...prompt, enabled: entry.enabled });
+		}
 	}
 	// Anything the order never mentions rides along at the end, switched on, rather than vanishing.
 	for (const prompt of prompts.values()) {
 		if (prompt.identifier === IDENTITY_PROMPT) {
 			continue;
 		}
-		ordered.push({ ...prompt, enabled: true });
+		if (triggersGeneration(prompt, trigger)) {
+			ordered.push({ ...prompt, enabled: true });
+		}
 	}
 	return ordered;
 }

@@ -28,6 +28,11 @@ const HELP = [
 	'| `/rewind` | restore files and conversation to an earlier turn |',
 	'| `/export` | export this session as markdown |',
 	'| `/resume` | resume a suspended turn |',
+	'| `/continue` | continue the last message |',
+	'| `/impersonate` | write your next message for you |',
+	'| `/swipe` | generate another version of the last reply |',
+	'| `/regenerate` | generate the last reply again |',
+	'| `/quiet [text]` | generate a reply without adding it to the transcript |',
 	'| `/char [name]` | pick the character this chat speaks as |',
 	'| `/persona [name]` | pick who you are in this chat |',
 	'| `/lore [names]` | pick the world books this chat scans |',
@@ -184,6 +189,14 @@ export function slashCommands(ctx: Context): void {
 		const result = await ctx.agent.resume(session.id);
 		return { done: true, result: result.text };
 	});
+
+	// The generation types SillyTavern's own generate menu offers. Each one is a real generation: the
+	// type decides which world-info entries may activate and how the text is written down.
+	register('continue', 'Continue the last message instead of answering a new one', () => ({ done: false, text: '', trigger: 'continue' }));
+	register('impersonate', 'Write your next message for you', () => ({ done: false, text: '', trigger: 'impersonate' }));
+	register('swipe', 'Generate another version of the last reply', () => ({ done: false, text: '', trigger: 'swipe' }));
+	register('regenerate', 'Generate the last reply again', () => ({ done: false, text: '', trigger: 'regenerate' }));
+	register('quiet', 'Generate a reply without adding it to the transcript', (args) => ({ done: false, text: args, trigger: 'quiet' }));
 
 	register('char', 'Pick the character this chat speaks as', async (args, surface) => {
 		const session = ctx.sessions.active();

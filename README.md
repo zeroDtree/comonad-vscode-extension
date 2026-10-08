@@ -140,34 +140,121 @@ edit, duplicate and delete every kind, then use it in this chat or make it the d
   and written back in the same shape — a PNG card keeps its picture, a JSON card stays JSON. The
   editor covers the whole card: description, personality, scenario, first message and alternates,
   example messages, system prompt, post-history instructions, creator notes, tags, the depth prompt
-  and `extensions.world` (a world book the card binds, scanned without being listed). *Export PNG…*
-  writes a shareable PNG card.
-- **World books.** Every entry field is editable: keys (including `/regex/`), secondary keys and
-  their logic, content, position and depth, role, order, probability, always-on, groups and weights,
-  sticky/cooldown/delay, recursion flags, generation triggers, per-entry scan depth, case/whole-word
-  overrides and the character filter. Files are written the way SillyTavern writes them, with the
-  camelCase names at the root mirrored under `extensions`.
-- **Personas.** Name (`{{user}}`), title, description, where its text goes (in prompt, at a depth,
-  in the author's note), and the world book it binds. `connections` ties a persona to characters, so
-  a chat speaking as that card uses it automatically.
-- **Presets.** An OpenAI preset — prompts, prompt order, samplers and formats — is edited in the
-  **Presets** tab: switch a block off, change its role, inject it in chat at a depth, move it, and
-  edit temperature/top_p/top_k/top_a/min_p/penalties/context/reply length plus `wi_format`,
-  `scenario_format`, `personality_format`, `impersonation_prompt`, `names_behavior`,
-  `assistant_prefill` and `squash_system_messages`.
+  and `extensions.world` (a world book the card binds, scanned without being listed) — plus the fields
+  upstream keeps outside the V2 spec: the **favourite** star (`fav`, written at the V1 root and under
+  `extensions`), **talkativeness**, the **create date** and the **source link**. **Choose picture…**
+  gives the card a picture, and since upstream keeps a card *as* its picture, that writes the card as a
+  PNG beside it — which is also why the list shows each card's picture, and its ★. The list has
+  **search**, an **order** (name A-Z/Z-A, newest, oldest), a favourites filter, a grid view, paging
+  and avatars. The **More…** menu is upstream's own: *Import Card Lore* (the book the card carries
+  becomes a library world book, and the card is linked to it), *Convert to Persona*, *Rename* (the
+  file, the tag key, persona connections, the default character and open chats all follow), *Link to
+  Source*, *Import cards…*, *Export JSON…*, and *Export PNG…* writes a shareable card.
+- **World books.** The page is SillyTavern's own *Worlds/Lorebooks* panel, in its shape: **Active
+  World(s) for all chats** and the global activation knobs on top (scan depth, context %, budget cap,
+  min activations, max depth, max recursion steps, insertion strategy, include names, recursive scan,
+  case-sensitive, whole words, group scoring, *alert on overflow*, *automation*, and the vector
+  settings), then the book toolbar (**Create** — which asks for the name, as *Rename* does — *pick /
+  Import / Export / Rename / Duplicate / Delete*), then the entry list — **search** (Fuse.js
+  over keys, group, title, secondary keys, body, uid and automation id, ignoring where in the text a
+  match sits, with `'exact` and `!not` understood) **sort** (priority, custom, title, size, depth,
+  order, uid, trigger %) and paging, with **drag-to-reorder** under the *custom* sort and *Apply
+  sorting as Order* to write that order into the entries. Every row unfolds into the full editor:
+  primary keywords (**chips**, with a ✨/⌨️ switch to the plaintext list), secondary keys and their
+  logic, the optional filter, outlet name, per-entry scan depth, case/whole-word/group-scoring
+  overrides, recursion level, content with its **token count and uid**, the four recursion/budget
+  flags, inclusion group and weight, *Prioritize*/*Sticky*/*Cooldown*/*Delay*, the entry state
+  (**🟢 Normal / 🔵 Constant / 🔗 Vectorized**), an **Automation ID** (offered from the ids the other
+  entries use), **Filter to Generation Triggers** (*Normal, Continue, Impersonate, Swipe, Regenerate,
+  Quiet*), the character-or-tag filter (the library's characters, and the tag registry's tags by id),
+  *Selective*/*Use Probability*/*Add Memo*, and the *Additional Matching Sources* drawer. There is no
+  Save button: the pane holds the book and writes it back as you type. Files are written the way
+  SillyTavern writes them, with the camelCase names at the root mirrored under `extensions` and the
+  character filter under its own `character_filter` key.
+- **Tags.** The tag registry lives in `.comonad/tags.json` (project over user), in SillyTavern's own
+  shape: `{tags: [{id, name, color, color2, folder_type, sort_order, …}], tag_map: {<character id>:
+  [tag id]}}`. Tags are referred to by **id** everywhere — an entry's character/tag filter stores
+  ids, so renaming a tag never breaks a filter. The **Characters** tab shows a character's tags as
+  chips above its fields, with an *Add* box that accepts a new name, *Manage tags…* (create, rename,
+  colour, folder type, hide-on-card, delete, and delete-merge into another tag, plus *Prune unused*)
+  and *Import card tags*, which reads the card's own `tags` field the way upstream does: the
+  generator tags (`ROOT`, `TAVERN`) are skipped, at most 50 at a time, names are matched case- and
+  accent-insensitively, and `comonad.tagImportSetting` decides between asking, importing everything,
+  only what already exists, or nothing.
+- **How a turn is generated.** The ▾ beside *Send* offers SillyTavern's six generation types, and
+  each is a real generation: **Normal** answers the box, **Continue** carries the last message on
+  (one message, no new prompt), **Impersonate** writes your next message for you (recorded as
+  *your* message), **Swipe** adds another version of the last reply, **Regenerate** runs the last
+  prompt again, and **Quiet** generates without writing anything to the chat. An entry limited to a
+  generation type only fires for those. Replies keep their versions: `‹ n/m ›` on the turn walks
+  them, and a regenerate only overwrites the very first version — after that it adds one, as
+  upstream does. `/continue`, `/impersonate`, `/swipe`, `/regenerate` and `/quiet [text]` are the
+  same thing from the keyboard.
+- **Personas.** The page is SillyTavern's *Persona Management*: the avatar tiles on the left (create,
+  search, A-Z / Z-A / search order, paging, grid toggle, and the upload tile that makes a persona out
+  of a picture) and the open persona on the right — name, title, picture, description with a live token
+  count, where the description goes (**None (disabled)** first, which is upstream's own order: the
+  persona still names you, its description is left out), depth and role, the three locks (*Default*,
+  *Character*, *Chat*) with the connection list, the world book it scans, and the three persona-wide
+  settings (`comonad.personaAutoLock`, `comonad.personaAllowMultiConnections`,
+  `comonad.personaShowNotifications`). It saves as you type, the way upstream's does. Connections are
+  stored in upstream's
+  `{type, id}` shape, so a **Backup** made in either tool restores in the other — and a connection
+  written `Kestrel.png` matches the card Comonad calls `Kestrel`. **Duplicate** copies the persona and
+  its picture; **Convert a character…** makes one out of a card, swapping `{{char}}`/`{{user}}` if you
+  say so; deleting a persona takes its picture with it.
+- **Presets.** A chat-completion preset is the whole of upstream's OpenAI settings, edited in the
+  **Presets** tab: the prompt list (switch a block off, move it, duplicate it, delete it, add one of
+  eight blocks worth having to hand, restore the shipped list, and **edit any entry** — which opens
+  under its own row, as a world-book entry does — its name, its role, the **generation types** it
+  fires for, *Relative* / *In-chat @ depth*, its depth and order, its text and **Forbid Overrides**,
+  with upstream's own hints and its *Reset* putting a shipped block back; a marker says its text is
+  pulled from elsewhere and cannot be edited, as upstream says), the order —
+  including **an order per character**, which is used for the character it names — the samplers, the
+  formats (`wi_format`, `scenario_format`, `personality_format`, `impersonation_prompt`,
+  `names_behavior`, `assistant_prefill`, `squash_system_messages`), the six **nudge prompts** (the
+  history is headed by *New chat*, a history ending on a reply is filled by *Send if empty* as the
+  user, and a continue carries *Continue nudge*, `{{lastChatMessage}}` and all), `seed`, a
+  **logit-bias** set to send, and `stream_openai` / `max_context_unlocked` / `use_sysprompt`. Only what
+  a preset sets is sent, and only what a chat-completions endpoint understands: the fields it does not
+  (`top_k`, `top_a`, `min_p`, `repetition_penalty`, `stream_openai: false`) say so in their own hint
+  rather than being dropped silently. **Import…** takes a preset from anywhere, **Export…** writes it
+  out as SillyTavern reads it, and **four templates ship with Comonad** — *Balanced*, *Creative*,
+  *Precise*, *Long-form* — which copy themselves into the library when you pick one, where they are
+  ordinary presets. *Update current preset* is the tab's own Save button.
 - **Identity stays first.** The agent's own block (mode, approval, instructions, memory, skills,
   todos, tool rules) still leads every request; content only *adds* blocks. With nothing selected,
   the request is byte-identical to a plain agent turn.
 - **Runtime.** A chat can pick a character (its opening line — or an alternate — is inserted as the
   first turn and pinned when the history is trimmed), books (scanned every turn for keywords, with
   the scan depth, budget, cap, recursion, groups, sticky/cooldown/delay and per-entry positions all
-  honoured), a persona and a preset (whose samplers override the profile's). The **◈ lore** chip
+  honoured, and an entry's generation type and character/tag filter decided before it can activate),
+  a persona and a
+  preset (whose samplers override the profile's). The **◈ lore** chip
   above the composer lists what the last turn injected, and `lore_lookup` lets the model search the
-  books on demand — read-only, it never changes what the next turn injects.
-- **Macros and regex.** `{{char}}`, `{{user}}`, `{{persona}}`, `{{scenario}}`, `{{time}}`,
-  `{{random}}`, `{{pick}}`, `{{roll}}` and friends are substituted in every block; regex scripts
-  (from `comonad.tavern.regex` or the card) run on the prompt and on replies with SillyTavern's
-  placement/depth rules.
+  books on demand — read-only, it never changes what the next turn injects. When the budget stops the
+  scan, *Alert On Overflow* says so once per chat. **Exact counts:** the token counter is the model's
+  own — tiktoken for the GPT families, and SillyTavern's own tokenizer files (downloaded or read from
+  a SillyTavern checkout, see `comonad.tokenizerDir`) for Claude, Gemini, Llama, Mistral and the
+  rest — with upstream's `+6` message framing on top.
+- **Vectorized entries.** With `comonad.wiVectorEnabled`, an entry whose state is 🔗 **Vectorized** is
+  found by meaning instead of by its keys: the newest `wiVectorQuery` messages of the chat are
+  embedded by an OpenAI-compatible `/embeddings` endpoint (the chat's profile, or
+  `comonad.wiVectorProfile`), compared by cosine similarity against each entry's own vector, and the
+  best `wiVectorMaxEntries` above `wiVectorThreshold` are injected. Vectors are cached per book and
+  model under the extension's storage, keyed by a hash of the entry's text, so an edited entry is the
+  only thing re-embedded. Nothing here can cost a turn: with no endpoint, or an endpoint that will
+  not answer, the scan runs on keys alone.
+- **Automation.** An entry's **Automation ID** runs what it names when the entry activates: the
+  `WorldInfoActivated` hook, then a slash command of that name (a built-in, or one of your own
+  `.comonad/commands/*.md`). Once per turn, not once per entry, and off unless
+  `comonad.wiAutomation` is on — a name is all it takes to run a command.
+- **Macros and regex.** `{{char}}`, `{{charIfNotGroup}}`, `{{user}}`, `{{persona}}`, `{{scenario}}`,
+  `{{lastChatMessage}}`, `{{time}}`, `{{random}}`, `{{pick}}`, `{{roll}}`, `{{outlet::Name}}` and
+  friends are substituted in every block; regex scripts (from `comonad.tavern.regex` or the card) run
+  on the prompt and on replies with SillyTavern's placement/depth rules. An entry whose position is
+  *outlet* is never injected where it sits: `{{outlet::Name}}` is how its text lands, and the outlet
+  name is what ties the two together.
 
 Licensing note: Comonad's content layer is an independent re-implementation of the file formats and
 the prompt assembly. SillyTavern itself (AGPL-3.0) is not bundled, and its default content is never
@@ -187,6 +274,11 @@ copied.
 | `/cost` | token usage for today and the session |
 | `/permissions` | mode capabilities and permission rules |
 | `/model` | switch the active model |
+| `/continue` | carry the last message on from where it stops |
+| `/impersonate` | write your next message for you |
+| `/swipe` | generate another version of the last reply |
+| `/regenerate` | generate the last reply again |
+| `/quiet [text]` | generate a reply without adding it to the transcript |
 | `/init` | create a `COMONAD.md` project instruction file |
 | `/rewind` | restore files and conversation to an earlier turn |
 | `/export` | export the session as markdown |
@@ -353,9 +445,14 @@ npm test             # full VS Code test host
 npm run package      # production bundle
 ```
 
-esbuild bundles the extension (cordis included) into a single CJS file; the test bundle is built
+esbuild bundles the extension into a single CJS file; the test bundle is built
 the same way, so the fast suite runs the real services on a headless Cordis context with a fake
 host (`src/test/harness.ts`). Tests cover the policy gate, rule syntax, graph parse/compile/
 suspend, frontmatter, path guards, diff parsing and session persistence — plus the Cordis kernel
 itself: tool-effect unwinding, visibility filtering, and a full scripted agent turn (tool loop,
 streamed events, approval waterfall).
+
+Four packages are bundled or shipped beside the bundle, and nothing else: `cordis` (the plugin
+kernel), `fuse.js` (the world-book search, with upstream's own options and field weights),
+`gpt-tokenizer` and `@agnai/web-tokenizers` (the tokenizer chain — the first is bundled, the second
+is kept as a real file because its wasm would bloat the bundle four megabytes).

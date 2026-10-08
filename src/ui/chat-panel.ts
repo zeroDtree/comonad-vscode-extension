@@ -7,6 +7,7 @@ import type { ContextForm } from '../lib/prompt';
 import { turnsOf, type Step } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
 import type { Approval, ApprovalDecision, ReasoningEffort, WorkMode } from '../lib/types';
+import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/tavern/types';
 import type { Session } from '../services/sessions';
 import { registerCommand } from './register';
 
@@ -34,6 +35,7 @@ function tavernState(ctx: Context, session: Session | undefined): Record<string,
 		bookNames: books,
 		preset: preset?.name ?? '',
 		activated: (session?.tavernActivated ?? []).map((hit) => `${hit.book} — ${hit.comment || hit.reason} (${hit.reason})`),
+		overflow: session?.tavernOverflow === true,
 		hasContent: Boolean(ctx.tavern.characters.length || ctx.tavern.books.length || ctx.tavern.presets.length || ctx.tavern.personas.length),
 	};
 }
@@ -127,6 +129,7 @@ export function chatPanel(ctx: Context): void {
 			contextLimit: session?.contextLimit ?? config.contextLimit,
 			modes: splitChoices(MODE_LABELS),
 			approvals: splitChoices(APPROVAL_LABELS),
+			generations: GENERATION_TRIGGERS.map((value) => ({ value, label: GENERATION_LABELS[value] })),
 			model: config.model,
 			modelLabel: ctx.llm.describe(config.model),
 			models: await ctx.llm.availableModels(),
@@ -163,6 +166,10 @@ export function chatPanel(ctx: Context): void {
 				index: turn.index,
 				prompt: turn.prompt,
 				greeting: turn.greeting,
+				// The reply variants and which one is showing: the webview draws `‹ n/m ›` from these.
+				swipes: turn.swipes,
+				swipeId: turn.swipeId,
+				continued: turn.continued,
 				at: turn.at,
 				startedAt: turn.startedAt,
 				endedAt: turn.endedAt,
@@ -293,6 +300,7 @@ export function chatPanel(ctx: Context): void {
 				text: handled.text ?? input,
 				sessionId: ctx.sessions.active()?.id,
 				policy: handled.policy,
+				trigger: handled.trigger,
 				surface: SURFACE,
 			});
 			if (result.text.startsWith('Error:') || result.text.startsWith('Blocked by hook')) {
@@ -304,6 +312,55 @@ export function chatPanel(ctx: Context): void {
 			running = false;
 			post({ type: 'turn-end', stopped, command: handledByCommand, ...settledTurn() });
 			stopped = false;
+			refresh();
+		}
+	};
+
+	/** The generation types the composer's ▾ menu offers: upstream's own list, in its order. */
+	const generate = async (trigger: GenerationTrigger, text = ''): Promise<void> => {
+		const session = ctx.sessions.active();
+		if (!session || running) {
+			return;
+		}
+		if (trigger === 'swipe' || trigger === 'regenerate') {
+			const turns = turnsOf(session.transcript);
+			const last = turns[turns.length - 1];
+			if (!last || last.greeting) {
+				post({ type: 'notice', text: 'There is nothing to generate again yet.' });
+				return;
+			}
+		}
+		running = true;
+		streamed = false;
+		// A swipe and a regenerate replace the last reply in place: the webview swaps that turn for the
+		// streaming one, and the variants it had are handed over so nothing the reader saw is lost.
+		const replaces = trigger === 'swipe' || trigger === 'regenerate' ? turnsOf(session.transcript).slice(-1)[0]?.index : undefined;
+		post({ type: 'turn-start', text, replaces });
+		try {
+			const result = await ctx.agent.runTurn({ text, sessionId: session.id, trigger, surface: SURFACE });
+			if (result.text.startsWith('Error:') || result.text.startsWith('Blocked by hook')) {
+				post({ type: 'notice', text: result.text });
+			} else if (trigger === 'quiet') {
+				// A quiet generation is not in the transcript, so the only place it can be read is here.
+				post({ type: 'notice', text: result.text || '(no reply)' });
+			} else if (!streamed) {
+				post({ type: 'command', text: result.text || '(no reply)' });
+			}
+		} finally {
+			running = false;
+			post({ type: 'turn-end', stopped, ...settledTurn() });
+			stopped = false;
+			refresh();
+		}
+	};
+
+	/** Switches the last reply to one of its variants. Nothing is generated: the text is already there. */
+	const swipeTo = (index: number): void => {
+		const session = ctx.sessions.active();
+		if (!session || running) {
+			return;
+		}
+		if (ctx.sessions.setSwipe(session.id, index)) {
 			refresh();
 		}
 	};
@@ -320,27 +377,7 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text: 'Only the last turn can be regenerated.' });
 			return;
 		}
-		const text = ctx.sessions.replayLast(session.id);
-		if (!text) {
-			post({ type: 'notice', text: 'Nothing to regenerate yet.' });
-			return;
-		}
-		running = true;
-		streamed = false;
-		post({ type: 'turn-start', text, replaces: last.index });
-		try {
-			const result = await ctx.agent.runTurn({ text, sessionId: session.id, surface: SURFACE });
-			if (result.text.startsWith('Error:') || result.text.startsWith('Blocked by hook')) {
-				post({ type: 'notice', text: result.text });
-			} else if (!streamed) {
-				post({ type: 'command', text: result.text || '(no reply)' });
-			}
-		} finally {
-			running = false;
-			post({ type: 'turn-end', stopped, ...settledTurn() });
-			stopped = false;
-			refresh();
-		}
+		await generate('regenerate');
 	};
 
 	const resume = async (): Promise<void> => {		const session = ctx.sessions.active();
@@ -436,6 +473,12 @@ export function chatPanel(ctx: Context): void {
 				}
 				case 'regenerate':
 					await regenerate(Number.isFinite(Number(message.turn)) ? Number(message.turn) : undefined);
+					break;
+				case 'generate':
+					await generate(generationTrigger(message.trigger), String(message.text ?? ''));
+					break;
+				case 'setSwipe':
+					swipeTo(Number(message.index));
 					break;
 				case 'setMode':
 					if (typeof message.mode === 'string' && message.mode in MODE_LABELS) {
@@ -710,6 +753,10 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 			<button id="lore" class="chip" hidden></button>
 			<button id="changes" class="chip" hidden></button>
 			<button id="stop" class="ghost" data-tip="Stop the running turn (Esc)" hidden>Stop</button>
+			<div class="pill pill-caret" data-control="generate">
+				<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false" data-tip="Generation type — Normal, Continue, Impersonate, Swipe, Regenerate, Quiet"><span class="chev">▾</span></button>
+				<div class="pill-menu" hidden></div>
+			</div>
 			<button id="send" class="primary" data-tip="Send — Enter">Send</button>
 		</div>
 	</div>

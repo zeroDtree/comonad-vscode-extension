@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context, type Fiber } from 'cordis';
 import { hostStorage, type Host } from '../services/host';
+import { tokenizersPlugin } from '../services/tokenizers';
 import { logPlugin } from '../services/log';
 import { settingsPlugin } from '../services/settings';
 import { auditPlugin } from '../services/audit';
@@ -12,7 +13,9 @@ import { usagePlugin } from '../services/usage';
 import { tasksPlugin } from '../services/tasks';
 import { toolsPlugin } from '../services/tools';
 import { catalogPlugin } from '../services/catalog';
+import { commandsPlugin } from '../services/commands';
 import { tavernPlugin } from '../services/tavern';
+import { vectorsPlugin } from '../services/vectors';
 import { loreToolPlugin } from '../tools/tavern';
 import { llmPlugin } from '../services/llm';
 import { hooksPlugin } from '../services/hooks';
@@ -104,7 +107,7 @@ export async function createTestKernel(options: { config?: Record<string, unknow
 	function waitForServices(): void {
 		ready();
 	}
-	waitForServices.inject = ['host', 'settings', 'sessions', 'checkpoints', 'tools', 'llm', 'hooks', 'catalog', 'tavern', 'usage', 'tasks', 'approval', 'audit', 'log', 'agent'];
+	waitForServices.inject = ['host', 'settings', 'sessions', 'checkpoints', 'tools', 'llm', 'hooks', 'catalog', 'tavern', 'vectors', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log', 'commands', 'agent'];
 	const fiber: Fiber & PromiseLike<Fiber> = ctx.plugin(function kernel(child: Context) {
 		child.provide('host', host);
 		child.plugin(logPlugin);
@@ -117,6 +120,9 @@ export async function createTestKernel(options: { config?: Record<string, unknow
 		child.plugin(toolsPlugin);
 		child.plugin(catalogPlugin);
 		child.plugin(tavernPlugin);
+		child.plugin(vectorsPlugin);
+		child.plugin(commandsPlugin);
+		child.plugin(tokenizersPlugin);
 		child.plugin(loreToolPlugin);
 		child.plugin(llmPlugin);
 		child.plugin(hooksPlugin);

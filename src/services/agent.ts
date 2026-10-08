@@ -20,13 +20,16 @@ import { formatInstructions, loadInstructions, memoryDir, readMemory } from '../
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { gateCalls, MODE_CAPS, MODE_LABELS, suggestAllowRule } from '../lib/policy';
 import type { AgentSpawnRequest, Message, SessionPolicy, TodoItem, ToolCall, ToolContext } from '../lib/types';
-import { describe, formatTodos, lastAssistant } from '../lib/util';
+import type { GenerationTrigger } from '../lib/tavern/types';
+import type { PresetSamplers } from '../lib/tavern/preset';
+import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { agentIndex, allowedToolsFor, skillIndex } from './catalog';
 import type { Config } from './settings';
-import { threadTitle, type Session } from './sessions';
+import { threadTitle, type Session, type SwipeCarry } from './sessions';
 import type { ComposeResult } from './tavern';
 
 export interface TurnInput {
+	/** The prompt. Empty for a continue, a swipe or a regenerate, which re-run what is already there. */
 	text: string;
 	sessionId?: string;
 	systemContext?: string;
@@ -34,6 +37,11 @@ export interface TurnInput {
 	/** Identifies the calling surface; events and approvals are routed by it. */
 	surface?: string;
 	signal?: AbortSignal;
+	/**
+	 * How this generation was started — SillyTavern's generation type. It decides which world-info
+	 * entries may activate and how the reply is written down; `normal` is a plain prompt.
+	 */
+	trigger?: GenerationTrigger;
 }
 
 export interface TurnResult {
@@ -52,10 +60,26 @@ interface RunState {
 	confirmed: boolean | null;
 	filter?: { allow?: string[] };
 	/** Samplers a selected preset contributed to this turn. */
-	samplers?: { temperature?: number; topP?: number; maxTokens?: number };
+	samplers?: PresetSamplers;
+	/** What started this turn, which decides what may activate and what gets written down. */
+	trigger: GenerationTrigger;
+	/** The transcript as it stood before this turn, which is what a quiet generation leaves behind. */
+	prior: Message[];
+	/** The reply a continue extends: its index in the transcript as it stood before this turn. */
+	continueInto?: number;
+	/** The variants a swipe or a regenerate replaces or grows. */
+	swipes?: SwipeCarry;
 }
 
 const MAX_SUBAGENT_DEPTH = 2;
+
+/**
+ * A continuation is appended to the text it continues. The model usually starts where the text stops
+ * with a space of its own; this only supplies one when neither side brought it.
+ */
+function joins(text: string, reply: string): string {
+	return !text || /\s$/.test(text) || /^\s/.test(reply) ? reply : ` ${reply}`;
+}
 const MAX_SUBAGENTS = 4;
 
 declare module 'cordis' {
@@ -70,7 +94,7 @@ declare module 'cordis' {
  * `ctx.agent.runTurn()` and watch `agent/*` events.
  */
 export class Agent extends Service {
-	static inject = ['host', 'settings', 'sessions', 'checkpoints', 'tools', 'llm', 'hooks', 'catalog', 'tavern', 'usage', 'tasks', 'approval', 'audit', 'log'];
+	static inject = ['host', 'settings', 'sessions', 'checkpoints', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tavern', 'vectors', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
 
 	private readonly stops = new Map<string, AbortController>();
 	/** The live Session object per running turn; usage is mutated here and saved by finish(). */
@@ -80,6 +104,8 @@ export class Agent extends Service {
 	private readonly greeted = new Set<string>();
 	private readonly depths = new Map<string, number>();
 	private readonly budgetWarned = new Set<string>();
+	/** Sessions already warned that the world-info budget was spent. */
+	private readonly overflowWarned = new Set<string>();
 	/** Sessions already told that their stored model profile is gone. */
 	private readonly warned = new Set<string>();
 	private activeSubagents = 0;
@@ -111,9 +137,23 @@ export class Agent extends Service {
 	}
 
 	async runTurn(input: TurnInput): Promise<TurnResult> {
-		const text = input.text.trim();
+		let text = input.text.trim();
+		const trigger: GenerationTrigger = input.trigger ?? 'normal';
+		// A swipe or a regenerate re-runs the prompt that is already there: the reply it produced is
+		// dropped here, and the variants it had are handed to `finish` so none of them is lost. The
+		// session is read *after* the replay, which rewrites the stored transcript.
+		let swipes: SwipeCarry | undefined;
+		if (trigger === 'swipe' || trigger === 'regenerate') {
+			const target = input.sessionId ?? this.ctx.sessions.active()?.id ?? '';
+			swipes = target ? this.ctx.sessions.swipeCarry(target) : undefined;
+			const replayed = target ? this.ctx.sessions.replayLast(target) : '';
+			if (!replayed) {
+				return { sessionId: target, text: 'There is nothing to generate again yet.' };
+			}
+			text = replayed;
+		}
 		const session = input.sessionId ? (this.ctx.sessions.get(input.sessionId) ?? this.ctx.sessions.ensureActive(this.policyFor())) : this.ctx.sessions.ensureActive(this.policyFor());
-		if (!text) {
+		if (!text && trigger !== 'continue' && trigger !== 'impersonate') {
 			return { sessionId: session.id, text: '' };
 		}
 		if (session.cursor) {
@@ -131,7 +171,7 @@ export class Agent extends Service {
 				`model profile "${session.policy.model}" is gone — using ${this.ctx.llm.describe('auto')}. Pick one from the model menu.`,
 			);
 		}
-		if (session.title === 'New session') {
+		if (session.title === 'New session' && text) {
 			session.title = threadTitle(text);
 		}
 		const config = this.ctx.settings.get();
@@ -161,6 +201,32 @@ export class Agent extends Service {
 		if (input.systemContext) {
 			contexts.push(input.systemContext);
 		}
+		// A continuation is not a new request: the model is asked to carry the last line on, and an
+		// impersonation writes your side of the conversation, with the preset's own prompt for it.
+		if (trigger === 'continue') {
+			// The preset's own nudge travels with the messages (see `compose`); when it has none, the
+			// agent says what it wants in its own words.
+			const binding = {
+				character: session.character ?? config.tavernCharacter,
+				persona: session.persona ?? config.tavernPersona,
+				preset: session.preset ?? config.tavernPreset,
+			};
+			const last = session.transcript[session.transcript.length - 1]?.content ?? '';
+			if (!this.ctx.tavern.continueNudge(binding, last)) {
+				contexts.push('Continue the last message exactly where it stops. Do not repeat any of it, and do not start over.');
+			}
+		}
+		if (trigger === 'impersonate') {
+			const impersonation = this.ctx.tavern.impersonationPrompt({
+				character: session.character ?? config.tavernCharacter,
+				persona: session.persona ?? config.tavernPersona,
+				preset: session.preset ?? config.tavernPreset,
+			});
+			contexts.push(
+				impersonation ||
+					`Write the next message of this conversation as ${this.ctx.settings.get().tavernUserName || 'the user'}, in their voice, and nothing else.`,
+			);
+		}
 		if (config.checkpoints && session.policy.workingDirectory) {
 			const checkpointId = randomUUID();
 			try {
@@ -176,19 +242,34 @@ export class Agent extends Service {
 				this.ctx.log.message(`checkpoint failed: ${describe(error)}`);
 			}
 		}
-		const transcript = [...session.transcript, { role: 'user', content: text, at: Date.now() } as Message];
+		// A continue and an impersonation add no prompt of their own: the conversation is already there,
+		// and quiet throws its prompt away again at the end.
+		const prompted = trigger !== 'continue' && trigger !== 'impersonate' && trigger !== 'quiet';
+		const prior = [...session.transcript];
+		const seeded = prompted ? [...session.transcript, { role: 'user', content: text, at: Date.now() } as Message] : [...session.transcript];
+		const continueInto = trigger === 'continue' ? lastReplyIndex(seeded) : undefined;
 		const system = await this.systemPrompt(session, contexts);
 		const ref: TurnRef = { sessionId: session.id, surface: input.surface };
+		// The world-info budget, the context trim and every counter in the panels read the same counter,
+		// so the model's own tokenizer is made exact before anything is measured with it.
+		await this.ctx.tokenizers.warm(this.ctx.llm.modelName(session.policy.model));
 		const history = applyContextLimit(
-			applyContextForm(transcript, session.contextForm ?? config.contextForm),
+			applyContextForm(seeded, session.contextForm ?? config.contextForm),
 			session.contextLimit ?? config.contextLimit,
 		);
-		const tavern = this.tavernTurn(session, transcript, history, system, config);
+		const tavern = await this.tavernTurn(session, seeded, history, system, config, trigger);
+		if (tavern?.buckets.overflowed && config.wiOverflowAlert && !this.overflowWarned.has(session.id)) {
+			this.overflowWarned.add(session.id);
+			this.notice(
+				ref,
+				`World info budget reached after ${tavern.activated.length} entries — the rest were left out. Raise "Context %", give the book fewer entries, or tick "Ignore budget" on the ones that must always be sent.`,
+			);
+		}
 		const state: RunState = {
 			ref,
 			sessionId: session.id,
 			policy: session.policy,
-			transcript,
+			transcript: seeded,
 			// With no tavern content configured this is exactly `[system, …history]`, so the port is
 			// invisible until a character, book, persona or preset is actually selected.
 			messages: tavern && !tavern.inert ? tavern.messages : [{ role: 'system', content: system }, ...history],
@@ -196,8 +277,12 @@ export class Agent extends Service {
 			gateReason: '',
 			confirmed: null,
 			samplers: tavern?.samplers,
+			trigger,
+			prior,
+			continueInto,
+			swipes,
 		};
-		session.transcript = transcript;
+		session.transcript = seeded;
 		this.ctx.sessions.save(session);
 		this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000) });
 		return this.execute(session, state, input.signal);
@@ -370,7 +455,60 @@ export class Agent extends Service {
 	}
 
 	private finish(session: Session, state: RunState): void {
-		session.transcript = state.transcript;
+		const answer = lastAssistant(state.transcript);
+		const reply = answer?.content.trim() ? answer.content : '';
+		if (state.trigger === 'quiet') {
+			// Upstream's quiet generation: the prompt and the reply are for the caller, not for the
+			// transcript, which goes back to exactly what it was before the turn.
+			session.transcript = state.prior;
+		} else if (state.trigger === 'continue' && reply && state.continueInto !== undefined) {
+			// A continuation extends the reply it continues: one message, one swipe, nothing truncated.
+			const merged = [...state.transcript];
+			const previous = merged[state.continueInto];
+			if (previous) {
+				const grown = `${previous.content}${joins(previous.content, reply)}`;
+				merged[state.continueInto] = {
+					...previous,
+					content: grown,
+					// The variant that is showing grows with it, so switching versions cannot show stale text.
+					swipes: previous.swipes?.map((variant, index) => (index === (previous.swipeId ?? 0) ? grown : variant)),
+					continued: true,
+					at: answer?.at ?? previous.at,
+				};
+			}
+			session.transcript = merged.slice(0, state.continueInto + 1);
+		} else if (state.trigger === 'impersonate' && reply) {
+			// The model wrote your side of the conversation: it is recorded as your message, and
+			// nothing the assistant said on the way there stays behind.
+			session.transcript = [...session.transcript, { role: 'user', content: reply, at: answer?.at ?? Date.now() }];
+		} else if (state.swipes && reply) {
+			// A swipe or a regenerate: the variants the reader already saw are kept, and upstream's rule
+			// is that only the very first variant is ever overwritten.
+			const swipes = [...state.swipes.swipes];
+			if (state.trigger === 'regenerate' && swipes.length <= 1) {
+				swipes[0] = reply;
+			} else {
+				swipes.push(reply);
+			}
+			const swipeId = swipes.length - 1;
+			const message = state.transcript[lastReplyIndex(state.transcript)];
+			if (message) {
+				message.content = reply;
+				message.swipes = swipes;
+				message.swipeId = swipeId;
+				// One record per version, as upstream keeps them. The versions that were already there
+				// keep the little a transcript can still say about them.
+				const records = [...state.swipes.swipeInfo];
+				while (records.length < swipes.length - 1) {
+					records.push({});
+				}
+				records.push({ gen_started: message.startedAt ?? null, gen_finished: message.at ?? null, extra: { gen_id: Date.now() } });
+				message.swipeInfo = records.slice(-swipes.length);
+			}
+			session.transcript = state.transcript;
+		} else {
+			session.transcript = state.transcript;
+		}
 		session.turnIndex += 1;
 		session.cursor = null;
 		session.policy = state.policy;
@@ -604,16 +742,20 @@ export class Agent extends Service {
 				const base = request.fork && parentSession ? parentSession.transcript : [];
 				const inherited = request.fork ? parent.messages.filter((message) => message.role !== 'system') : [];
 				const subId = `sub-${randomUUID()}`;
+				const subTranscript: Message[] = [...base, { role: 'user', content: request.prompt }];
 				const state: RunState = {
 					ref: { sessionId: subId },
 					sessionId: subId,
 					policy,
-					transcript: [...base, { role: 'user', content: request.prompt }],
+					transcript: subTranscript,
 					messages: [{ role: 'system', content: system }, ...inherited, { role: 'user', content: request.prompt }],
 					toolCalls: [],
 					gateReason: '',
 					confirmed: null,
 					filter: { allow },
+					// A subagent is an ordinary generation of its own; nothing about it is swiped or quieted.
+					trigger: 'normal',
+					prior: [...base],
 				};
 				const abort = new AbortController();
 				const link = () => abort.abort();
@@ -653,13 +795,14 @@ export class Agent extends Service {
 	 * The tavern layer's contribution to one turn: the chat's character, persona, world books and
 	 * preset composed around the agent's identity block. Returns `undefined` when the layer is off.
 	 */
-	private tavernTurn(
+	private async tavernTurn(
 		session: Session,
 		transcript: Message[],
 		history: Message[],
 		identity: string,
 		config: Config,
-	): ComposeResult | undefined {
+		trigger: GenerationTrigger,
+	): Promise<ComposeResult | undefined> {
 		if (!config.tavernEnabled) {
 			return undefined;
 		}
@@ -669,19 +812,23 @@ export class Agent extends Service {
 				.reverse()
 				.filter((message): message is Message & { role: 'user' | 'assistant' } => message.role === 'user' || message.role === 'assistant')
 				.map((message) => ({ role: message.role, text: message.content }));
+			const binding = {
+				character: session.character ?? config.tavernCharacter,
+				persona: session.persona ?? config.tavernPersona,
+				lorebooks: session.lorebooks ?? config.tavernLorebooks,
+				preset: session.preset ?? config.tavernPreset,
+				authorNote: session.authorNote,
+				effects: session.tavernEffects,
+			};
+			const external = await this.vectorHits(session, scan);
 			const composed = this.ctx.tavern.compose({
 				identity,
 				history,
-				binding: {
-					character: session.character ?? config.tavernCharacter,
-					persona: session.persona ?? config.tavernPersona,
-					lorebooks: session.lorebooks ?? config.tavernLorebooks,
-					preset: session.preset ?? config.tavernPreset,
-					authorNote: session.authorNote,
-					effects: session.tavernEffects,
-				},
+				binding,
 				scan,
 				turn: transcript.length,
+				trigger,
+				external,
 				model: session.policy.model,
 				contextSize: session.contextLimit || config.contextLimit || 0,
 			});
@@ -694,11 +841,84 @@ export class Agent extends Service {
 				comment: (hit.entry.comment ?? '').trim(),
 				reason: hit.reason,
 			}));
+			session.tavernOverflow = composed.buckets.overflowed;
+			void this.automate(session, composed, { sessionId: session.id });
 			return composed;
 		} catch (error) {
 			// A broken card or book must never cost the user a turn.
 			this.ctx.log.message(`tavern: compose failed: ${describe(error)}`);
 			return undefined;
+		}
+	}
+
+	/**
+	 * The entries a vector search picks for this turn, as `<book>.<uid>`, which is the shape the scan's
+	 * buffer uses. Nothing here can fail the turn: with the vectors off, or an endpoint that will not
+	 * answer, the set is simply empty and the scan runs on keys alone.
+	 */
+	private async vectorHits(session: Session, scan: readonly { role: 'user' | 'assistant'; text: string }[]): Promise<ReadonlySet<string> | undefined> {
+		const settings = this.ctx.settings.vectors();
+		if (!settings.enabled) {
+			return undefined;
+		}
+		const books = this.ctx.tavern.booksFor(session.id);
+		const found = await this.ctx.vectors.activate({ books, messages: scan }, settings);
+		if (!found.size) {
+			return undefined;
+		}
+		const keys = new Set<string>();
+		for (const [book, uids] of found) {
+			for (const uid of uids) {
+				keys.add(`${book}.${uid}`);
+			}
+		}
+		return keys;
+	}
+
+	/**
+	 * Upstream's *Automation ID*: when an entry that names one activates, that automation runs — a
+	 * Quick Reply in SillyTavern, and here the `WorldInfoActivated` hook plus a slash command of the
+	 * same name. A name nothing is registered under is simply ignored, and the whole thing is off
+	 * unless the setting says otherwise: a name is enough to run a command.
+	 */
+	private async automate(session: Session, composed: ComposeResult, ref: TurnRef): Promise<void> {
+		if (!this.ctx.settings.get().wiAutomation) {
+			return;
+		}
+		const surface = {
+			markdown: (text: string) => this.notice(ref, text),
+			progress: (text: string) => this.notice(ref, text),
+		};
+		const seen = new Set<string>();
+		for (const hit of composed.activated) {
+			const id = (hit.entry.automationId ?? '').trim();
+			if (!id || seen.has(id)) {
+				continue;
+			}
+			seen.add(id);
+			try {
+				await this.ctx.hooks.fire('WorldInfoActivated', undefined, {
+					session_id: session.id,
+					automation_id: id,
+					book: hit.book,
+					uid: hit.entry.uid,
+					comment: (hit.entry.comment ?? '').trim(),
+				});
+				if (!this.ctx.commands.get(id) && !this.ctx.catalog.command(id)) {
+					continue;
+				}
+				const outcome = await this.ctx.commands.handle(id, '', surface);
+				if (outcome.done) {
+					if (outcome.result) {
+						this.notice(ref, outcome.result);
+					}
+					continue;
+				}
+				// An automation that asked for a generation cannot start one from inside a turn.
+				this.notice(ref, `Automation "${id}" belongs to a generation type — run /${id} to use it.`);
+			} catch (error) {
+				this.notice(ref, `Automation "${id}" failed: ${describe(error)}`);
+			}
 		}
 	}
 
