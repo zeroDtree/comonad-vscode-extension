@@ -1,0 +1,518 @@
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Service, type Context } from 'cordis';
+import type { ContextForm } from '../lib/prompt';
+import type { Message, ReasoningEffort, SessionPolicy } from '../lib/types';
+
+/** Session persistence and the active-session pointer. One JSON document per chat. */
+
+export interface SessionUsage {
+	inputTokens: number;
+	outputTokens: number;
+	requests: number;
+	cost: number;
+}
+
+export interface Mark {
+	turn: number;
+	checkpointId: string;
+	length: number;
+	at: number;
+	text: string;
+}
+
+export interface Cursor {
+	node: string;
+	payload: unknown;
+	step: number;
+	state: unknown;
+}
+
+export interface Session {
+	id: string;
+	title: string;
+	createdAt: number;
+	updatedAt: number;
+	policy: SessionPolicy;
+	/** How much of the transcript this chat sends back (new chats start from the Context setting). */
+	contextForm?: ContextForm;
+	/** Thinking effort for this chat (new chats start from the Reasoning effort setting). */
+	reasoningEffort?: ReasoningEffort;
+	/** Estimated token budget for the history this chat sends; 0 keeps everything. */
+	contextLimit?: number;
+	transcript: Message[];
+	turnIndex: number;
+	cursor: Cursor | null;
+	marks: Mark[];
+	usage: SessionUsage;
+	/** Instruction files loaded into the last system prompt. */
+	instructions?: string[];
+	/** Tavern selection: a character and persona by id, world books by name, a preset by id. */
+	character?: string;
+	persona?: string;
+	lorebooks?: string[];
+	preset?: string;
+	/** Standing text for the author's-note slot, when the chat sets its own. */
+	authorNote?: string;
+	/** Which of the character's greetings this chat opened with (0 is the card's own). */
+	greetingIndex?: number;
+	/** World-info sticky/cooldown windows carried across turns. */
+	tavernEffects?: Record<string, { activatedAt: number; stickyUntil?: number; cooldownUntil?: number }>;
+	/** What the books contributed to the last turn, for the chat's readout. */
+	tavernActivated?: Array<{ book: string; comment: string; reason: string }>;
+}
+
+export function threadTitle(text: string): string {
+	const line = text.split('\n').map((part) => part.trim()).find(Boolean) ?? 'New session';
+	return line.length > 80 ? `${line.slice(0, 79)}…` : line;
+}
+
+export function newSessionId(): string {
+	return randomUUID();
+}
+
+export function safeId(id: string): string {
+	if (!id || id.length > 200 || /[/\\\0]/.test(id) || id.includes('..')) {
+		throw new Error(`invalid session id: ${id}`);
+	}
+	return id;
+}
+
+const UNTITLED = 'New session';
+
+/**
+ * The conversation's base title: fork markers (`(fork)`, `(fork 2)`, `(2)`, ` 2`) are stripped so
+ * every fork of a conversation continues one numbering series.
+ */
+export function forkBase(title: string): string {
+	return title.replace(/(?:\s*\(fork(?:\s*\d+)?\)|\s*\(\d+\)|\s+\d+)+$/iu, '').trim() || 'Chat';
+}
+
+/**
+ * A chat that was created but never used: nothing worth keeping in the history. A character's
+ * opening line counts as content, so a chat that shows one comes back after a reload — with the
+ * character, its book and the greeting still in place.
+ */
+export function unusedChat(session: Session): boolean {
+	return !session.transcript.length && !session.usage.requests && session.title === UNTITLED;
+}
+
+/** The newest message that mentions `needle`, as a one-line excerpt. */
+function matchSnippet(session: Session, needle: string): string | undefined {
+	for (let index = session.transcript.length - 1; index >= 0; index -= 1) {
+		const content = session.transcript[index].content ?? '';
+		const at = content.toLowerCase().indexOf(needle);
+		if (at < 0) {
+			continue;
+		}
+		const start = Math.max(0, at - 40);
+		const end = Math.min(content.length, at + needle.length + 80);
+		const body = content.slice(start, end).replace(/\s+/g, ' ').trim();
+		return `${start > 0 ? '…' : ''}${body}${end < content.length ? '…' : ''}`;
+	}
+	return undefined;
+}
+
+function emptyUsage(): SessionUsage {
+	return { inputTokens: 0, outputTokens: 0, requests: 0, cost: 0 };
+}
+
+export class SessionStore {
+	constructor(private readonly dir: string) {
+		mkdirSync(dir, { recursive: true });
+	}
+
+	list(): Session[] {
+		const sessions: Session[] = [];
+		let names: string[] = [];
+		try {
+			names = readdirSync(this.dir);
+		} catch {
+			return sessions;
+		}
+		for (const name of names) {
+			if (!name.endsWith('.json')) {
+				continue;
+			}
+			try {
+				sessions.push(this.normalize(JSON.parse(readFileSync(join(this.dir, name), 'utf8')) as Session));
+			} catch {
+				continue;
+			}
+		}
+		return sessions.sort((left, right) => right.updatedAt - left.updatedAt);
+	}
+
+	get(id: string): Session | undefined {
+		try {
+			return this.normalize(JSON.parse(readFileSync(this.file(id), 'utf8')) as Session);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Builds the document for a new chat without writing it — unused chats are never persisted. */
+	build(
+		policy: SessionPolicy,
+		id: string = newSessionId(),
+		defaults: { contextForm?: ContextForm; reasoningEffort?: ReasoningEffort; contextLimit?: number } = {},
+	): Session {
+		const now = Date.now();
+		return {
+			id: safeId(id),
+			title: UNTITLED,
+			createdAt: now,
+			updatedAt: now,
+			policy: { ...policy },
+			contextForm: defaults.contextForm ?? 'rendered',
+			reasoningEffort: defaults.reasoningEffort ?? 'auto',
+			contextLimit: defaults.contextLimit ?? 0,
+			transcript: [],
+			turnIndex: 0,
+			cursor: null,
+			marks: [],
+			usage: emptyUsage(),
+		};
+	}
+
+	/** Drops chats that were created but never used, so they never show up in the history. */
+	prune(): number {
+		let dropped = 0;
+		for (const session of this.list()) {
+			if (!unusedChat(session)) {
+				continue;
+			}
+			try {
+				unlinkSync(this.file(session.id));
+				dropped += 1;
+			} catch {
+				continue;
+			}
+		}
+		return dropped;
+	}
+
+	/**
+	 * Rewrites the legacy `(fork)` titles into the numbered scheme (`Title (fork 1)`, `(fork 2)`, …)
+	 * in creation order, so forks made by earlier versions stop stacking “(fork)” onto “(fork)”.
+	 */
+	tidyForkTitles(): number {
+		const sessions = this.list();
+		const used = new Set(sessions.map((session) => session.title));
+		let renamed = 0;
+		for (const session of [...sessions].sort((left, right) => left.createdAt - right.createdAt)) {
+			if (!/\(fork\)/i.test(session.title)) {
+				continue;
+			}
+			const base = forkBase(session.title);
+			let number = 1;
+			while (used.has(`${base} (fork ${number})`)) {
+				number += 1;
+			}
+			used.delete(session.title);
+			session.title = `${base} (fork ${number})`;
+			used.add(session.title);
+			this.save(session);
+			renamed += 1;
+		}
+		return renamed;
+	}
+
+	/** Fork a session: same conversation, fresh identity, empty checkpoints. */
+	copy(source: Session, id: string = newSessionId(), title?: string): Session {
+		const clean = safeId(id);
+		if (this.get(clean)) {
+			throw new Error(`session ${clean} already exists`);
+		}
+		const now = Date.now();
+		const session: Session = {
+			...structuredClone(source),
+			id: clean,
+			title: title ?? `${source.title} (fork)`,
+			createdAt: now,
+			updatedAt: now,
+			cursor: null,
+			marks: [],
+			usage: emptyUsage(),
+		};
+		this.save(session);
+		return session;
+	}
+
+	save(session: Session): void {
+		session.updatedAt = Date.now();
+		mkdirSync(this.dir, { recursive: true });
+		writeFileSync(this.file(session.id), JSON.stringify(session));
+	}
+
+	remove(id: string): void {
+		try {
+			unlinkSync(this.file(id));
+		} catch {
+			return;
+		}
+	}
+
+	private file(id: string): string {
+		return join(this.dir, `${safeId(id)}.json`);
+	}
+
+	private normalize(session: Session): Session {
+		return {
+			...session,
+			title: session.title || UNTITLED,
+			transcript: session.transcript ?? [],
+			turnIndex: session.turnIndex ?? 0,
+			cursor: session.cursor ?? null,
+			marks: session.marks ?? [],
+			usage: session.usage ?? emptyUsage(),
+			instructions: session.instructions ?? [],
+		};
+	}
+}
+
+declare module 'cordis' {
+	interface Context {
+		sessions: Sessions;
+	}
+}
+
+/**
+ * The session service owns the store and the active pointer, and announces changes as
+ * `sessions/changed` events so every surface refreshes without being wired together.
+ */
+export class Sessions extends Service {
+	static inject = ['host', 'settings', 'log'];
+
+	private _store: SessionStore | undefined;
+	private _activeId: string | null = null;
+	/** A chat that has been created but never used yet: it stays in memory until its first turn. */
+	private _draft: Session | null = null;
+
+	constructor(ctx: Context) {
+		super(ctx, 'sessions');
+	}
+
+	private get store(): SessionStore {
+		if (!this._store) {
+			this._store = new SessionStore(this.ctx.host.storage.sessions);
+			const dropped = this._store.prune();
+			if (dropped) {
+				this.ctx.log.message(`sessions: dropped ${dropped} unused chat(s)`);
+			}
+			const renamed = this._store.tidyForkTitles();
+			if (renamed) {
+				this.ctx.log.message(`sessions: numbered ${renamed} legacy fork(s)`);
+			}
+		}
+		return this._store;
+	}
+
+	changed(id?: string): void {
+		this.ctx.emit('sessions/changed', id);
+	}
+
+	/** The history: chats that have been used. An unused draft is not part of it. */
+	list(): Session[] {
+		return this.store.list();
+	}
+
+	get(id: string): Session | undefined {
+		return this._draft?.id === id ? this._draft : this.store.get(id);
+	}
+
+	require(id: string): Session {
+		const session = this.get(id);
+		if (!session) {
+			throw new Error(`unknown session ${id}`);
+		}
+		return session;
+	}
+
+	/** Persists a chat — unless it is still an unused draft, which would only add noise. */
+	save(session: Session): void {
+		if (this._draft?.id === session.id && unusedChat(session)) {
+			return;
+		}
+		this.store.save(session);
+		if (this._draft?.id === session.id) {
+			this._draft = null;
+		}
+	}
+
+	/** Chats whose title or transcript mentions `query`, most recently updated first. */
+	search(query: string, limit = 40): { id: string; title: string; updatedAt: number; snippet?: string }[] {
+		const needle = query.trim().toLowerCase();
+		if (!needle) {
+			return [];
+		}
+		const hits: { id: string; title: string; updatedAt: number; snippet?: string }[] = [];
+		for (const session of this.list()) {
+			const snippet = matchSnippet(session, needle);
+			if (!snippet && !session.title.toLowerCase().includes(needle)) {
+				continue;
+			}
+			hits.push({ id: session.id, title: session.title, updatedAt: session.updatedAt, snippet });
+			if (hits.length >= limit) {
+				break;
+			}
+		}
+		return hits;
+	}
+
+	active(): Session | undefined {
+		if (!this._activeId) {
+			this._activeId = this.list()[0]?.id ?? null;
+		}
+		return this._activeId ? this.get(this._activeId) : undefined;
+	}
+
+	/** Returns the active session, creating one if the workspace has none yet. */
+	ensureActive(policy: SessionPolicy): Session {
+		const current = this.active();
+		if (current) {
+			return current;
+		}
+		return this.create(policy);
+	}
+
+	setActive(id: string): void {
+		this._activeId = id;
+		this.changed(id);
+	}
+
+	create(policy: SessionPolicy, id?: string): Session {
+		const config = this.ctx.settings.get();
+		const session = this.store.build(policy, id, {
+			contextForm: config.contextForm,
+			reasoningEffort: config.reasoningEffort,
+			contextLimit: config.contextLimit,
+		});
+		this._draft = session;
+		this._activeId = session.id;
+		this.changed(session.id);
+		return session;
+	}
+
+	fork(sourceId?: string): Session {
+		const source = (sourceId ? this.get(sourceId) : undefined) ?? this.active();
+		if (!source) {
+			return this.create({
+				workMode: 'sw',
+				approval: 'manual',
+				network: false,
+				workingDirectory: '',
+				commandTimeout: 60,
+				denyReadPaths: [],
+				model: 'auto',
+			});
+		}
+		const copy = this.store.copy(source, undefined, this.forkTitle(source.title));
+		this._activeId = copy.id;
+		this.changed(copy.id);
+		return copy;
+	}
+
+	/** The next free `(fork N)` for this conversation, counting forks of forks in the same series. */
+	private forkTitle(source: string): string {
+		const base = forkBase(source);
+		let highest = 0;
+		for (const session of this.list()) {
+			const match = /^(.+?) \(fork (\d+)\)$/iu.exec(session.title);
+			if (match && match[1] === base) {
+				highest = Math.max(highest, Number(match[2]));
+			}
+		}
+		return `${base} (fork ${highest + 1})`;
+	}
+
+	remove(id: string): void {
+		if (this._draft?.id === id) {			this._draft = null;
+		} else {
+			this.store.remove(id);
+		}
+		if (this._activeId === id) {
+			this._activeId = null;
+		}
+		this.changed(id);
+	}
+
+	/** Truncates a session for rewind. `at` also drops later checkpoint marks. */
+	truncate(id: string, length: number, at?: number): void {
+		const session = this.require(id);
+		session.transcript = session.transcript.slice(0, length);
+		if (at !== undefined) {
+			session.marks = session.marks.filter((mark) => mark.at <= at);
+		}
+		session.cursor = null;
+		this.save(session);
+		this.changed(id);
+	}
+
+	/**
+	 * Fork the conversation as it stood after `length` transcript messages — the "fork from this
+	 * message" action: same policy and generation settings, fresh id, empty checkpoints.
+	 */
+	forkAt(sourceId: string | undefined, length: number): Session {
+		const copy = this.fork(sourceId);
+		if (length > 0 && length < copy.transcript.length) {
+			this.truncate(copy.id, length);
+			// `truncate` works on the stored copy, so hand back that object.
+			return this.require(copy.id);
+		}
+		return copy;
+	}
+
+	/**
+	 * Drops the last user turn (its message and everything the model answered with) and returns the
+	 * prompt, so the surface can run it again. Returns '' when there is nothing to re-run.
+	 */
+	replayLast(id: string): string {
+		const session = this.require(id);
+		if (session.cursor) {
+			return '';
+		}
+		let at = session.transcript.length - 1;
+		while (at >= 0 && session.transcript[at]!.role !== 'user') {
+			at -= 1;
+		}
+		if (at < 0) {
+			return '';
+		}
+		const text = session.transcript[at]!.content;
+		session.transcript = session.transcript.slice(0, at);
+		this.save(session);
+		return text;
+	}
+
+	/**
+	 * Sets a character's opening line as the first turn of a chat that has not said anything yet.
+	 * A chat that already holds a real message is never rewritten: the caller reports that instead.
+	 */
+	greet(id: string, text: string, index = 0): boolean {
+		const session = this.require(id);
+		const content = text.trim();
+		if (!content || session.cursor || session.transcript.some((message) => !message.greeting)) {
+			return false;
+		}
+		session.transcript = [{ role: 'assistant', content, greeting: true, at: Date.now() }];
+		session.greetingIndex = index;
+		this.save(session);
+		this.changed(id);
+		return true;
+	}
+
+	/** Which of a character's greetings a chat opened with, for the UI to show. */
+	greeted(id: string): number | undefined {
+		return this.get(id)?.greetingIndex;
+	}
+
+	addMark(id: string, mark: Mark): void {
+		const session = this.require(id);
+		session.marks.push(mark);
+		this.save(session);
+	}
+}
+
+export const sessionsPlugin = Sessions;

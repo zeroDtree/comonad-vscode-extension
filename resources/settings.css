@@ -1,0 +1,417 @@
+/* Comonad settings webview — VS Code theme variables only, no external assets. */
+
+body {
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size, 13px);
+	color: var(--vscode-foreground);
+	background: var(--vscode-editor-background);
+	margin: 0;
+	padding: 10px 20px 24px;
+}
+
+.grow {
+	flex: 1;
+}
+
+/* ------------------------------------------------------------------ header */
+
+#bar {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	margin-bottom: 14px;
+}
+
+#tabs {
+	display: flex;
+	gap: 6px;
+}
+
+.tab {
+	background: transparent;
+	color: var(--vscode-foreground);
+	border: 0;
+	border-radius: 999px;
+	padding: 4px 13px;
+	font: inherit;
+	font-size: 12.5px;
+	opacity: 0.75;
+	cursor: pointer;
+}
+
+.tab:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.16));
+	opacity: 1;
+}
+
+.tab.is-on {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	opacity: 1;
+}
+
+.link {
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	color: var(--vscode-foreground);
+	font: inherit;
+	font-size: 12.5px;
+	padding: 4px 12px;
+	opacity: 0.85;
+	cursor: pointer;
+}
+
+.link:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.16));
+	opacity: 1;
+}
+
+.link.is-dirty {
+	color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+	opacity: 1;
+}
+
+section[hidden] {
+	display: none;
+}
+
+/* ------------------------------------------------------------------ form */
+
+.grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+	gap: 12px 24px;
+	align-items: start;
+}
+
+.field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+}
+
+.field.wide {
+	grid-column: 1 / -1;
+}
+
+.field > label {
+	font-size: 12px;
+	opacity: 0.8;
+}
+
+.control {
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.25));
+	border-radius: 4px;
+	padding: 5px 8px;
+	font: inherit;
+	font-size: 12.5px;
+	width: 100%;
+	box-sizing: border-box;
+}
+
+textarea.control {
+	min-height: 110px;
+	resize: vertical;
+	font-family: var(--vscode-editor-font-family, monospace);
+	line-height: 1.45;
+}
+
+input.control:focus,
+select.control:focus,
+textarea.control:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.hint {
+	margin: 0;
+	font-size: 11.5px;
+	opacity: 0.6;
+}
+
+.hint.error {
+	color: var(--vscode-errorForeground);
+	opacity: 1;
+}
+
+.row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+}
+
+.check {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12.5px;
+}
+
+button.secondary {
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.16));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	border: 0;
+	border-radius: 4px;
+	padding: 5px 12px;
+	font: inherit;
+	font-size: 12.5px;
+	cursor: pointer;
+}
+
+button.secondary:hover {
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.26));
+}
+
+/* ------------------------------------------------- path picker (working dir) */
+
+.combo {
+	position: relative;
+}
+
+#dirs {
+	position: absolute;
+	z-index: 20;
+	top: calc(100% + 4px);
+	left: 0;
+	right: 0;
+	max-height: 320px;
+	overflow: auto;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+	border-radius: 6px;
+	box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.4));
+}
+
+#dirs[hidden] {
+	display: none;
+}
+
+#dirs .path {
+	padding: 6px 10px;
+	font-size: 11.5px;
+	opacity: 0.7;
+	border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.25));
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+#dirs .filter {
+	display: block;
+	width: calc(100% - 16px);
+	margin: 8px;
+	padding: 4px 6px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.25));
+	border-radius: 4px;
+	font: inherit;
+	font-size: 12px;
+	box-sizing: border-box;
+}
+
+#dirs .entry {
+	display: block;
+	width: 100%;
+	background: transparent;
+	border: 0;
+	color: inherit;
+	font: inherit;
+	font-size: 12.5px;
+	text-align: left;
+	padding: 5px 10px;
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+#dirs .entry:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.16));
+}
+
+#dirs .use {
+	display: block;
+	width: 100%;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border: 0;
+	border-top: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.25));
+	padding: 7px;
+	font: inherit;
+	font-size: 12.5px;
+	cursor: pointer;
+}
+
+#dirs .use:hover {
+	background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+
+/* ------------------------------------------------------------------ graph */
+
+#graph-wrap {
+	display: grid;
+	grid-template-columns: minmax(280px, min(46%, 520px)) 1fr;
+	gap: 16px;
+	align-items: stretch;
+}
+
+#graph-wrap textarea.control {
+	min-height: 340px;
+	height: 100%;
+}
+
+#preview {
+	min-height: 340px;
+}
+
+#flow {
+	min-height: 460px;
+	/* The gate flow is a long spine: give it the height it needs before it scrolls. */
+	max-height: 82vh;
+}
+
+/* Mermaid output: the graph preview and the gate flow. Block layout, so an svg with `width: 100%`
+   resolves against the pane instead of collapsing inside a shrink-to-fit flex box. */
+.diagram {
+	border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.25));
+	border-radius: 4px;
+	padding: 10px;
+	min-height: 240px;
+	max-height: 70vh;
+	overflow: auto;
+	text-align: center;
+}
+
+.diagram:empty::after {
+	content: 'The diagram appears here.';
+	font-size: 12px;
+	opacity: 0.45;
+}
+
+.diagram svg {
+	max-width: 100%;
+	height: auto;
+}
+
+/* The flow tab's mode legend: `Name — calls it grants` per mode. */
+.legend {
+	list-style: none;
+	margin: 8px 0 0;
+	padding: 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 16px;
+	font-size: 12px;
+	opacity: 0.85;
+}
+
+.legend li {
+	white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ tables */
+
+table {
+	border-collapse: collapse;
+	width: 100%;
+	font-size: 12px;
+}
+
+th,
+td {
+	text-align: left;
+	padding: 4px 8px;
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+	vertical-align: top;
+}
+
+th {
+	font-weight: 600;
+	opacity: 0.75;
+}
+
+td.mono {
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+/* ------------------------------------------------------------- prompts tab */
+
+#prompts {
+	margin-top: 10px;
+	table-layout: auto;
+}
+
+#prompts th:first-child,
+#prompts td:first-child {
+	width: 1%;
+	white-space: nowrap;
+}
+
+#prompts td select.control,
+#prompts td input.control {
+	padding: 2px 4px;
+	font-size: 12px;
+}
+
+#prompts td input[type='number'] {
+	width: 60px;
+}
+
+#prompts tr.is-fixed td:first-child::after {
+	content: '★';
+	margin-left: 2px;
+	opacity: 0.5;
+}
+
+#prompts td.prompt-move {
+	white-space: nowrap;
+}
+
+#prompts td.prompt-move .link {
+	padding: 0 4px;
+	font-size: 13px;
+}
+
+#prompts td.prompt-move .link:disabled {
+	opacity: 0.25;
+	cursor: default;
+}
+
+#prompts tbody tr:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+#preset-name {
+	max-width: 240px;
+}
+
+.row .inline {
+	font-size: 12.5px;
+	opacity: 0.8;
+}
+
+/* ------------------------------------------------------------------ status */
+
+#status {
+	min-height: 16px;
+	margin-top: 14px;
+	font-size: 12px;
+	opacity: 0.8;
+}
+
+#status.error {
+	color: var(--vscode-errorForeground);
+	opacity: 1;
+}
+
+@media (max-width: 720px) {
+	#graph-wrap {
+		grid-template-columns: 1fr;
+	}
+}

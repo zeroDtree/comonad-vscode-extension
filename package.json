@@ -1,23 +1,915 @@
 {
   "name": "comonad",
-  "displayName": "comonad",
-  "description": "Agent",
-  "version": "0.0.1",
+  "displayName": "Comonad Agent",
+  "description": "Local-first, auditable coding agent: graph-orchestrated tool loop, sandboxed shell, checkpoints, hooks, subagents and MCP.",
+  "version": "0.2.0",
+  "publisher": "comonad",
   "engines": {
-    "vscode": "^1.140.0"
+    "vscode": "^1.137.0"
   },
   "categories": [
+    "AI",
+    "Chat",
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
+    "chatParticipants": [
+      {
+        "id": "comonad",
+        "name": "comonad",
+        "fullName": "Comonad",
+        "description": "Agentic coding with tools, approvals, checkpoints and MCP",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "plan",
+            "description": "Research read-only, then write a plan"
+          },
+          {
+            "name": "review",
+            "description": "Review pending changes without editing"
+          },
+          {
+            "name": "compact",
+            "description": "Summarize the conversation"
+          },
+          {
+            "name": "clear",
+            "description": "Start a fresh session"
+          },
+          {
+            "name": "new",
+            "description": "Start a fresh session"
+          },
+          {
+            "name": "fork",
+            "description": "Fork this session"
+          },
+          {
+            "name": "context",
+            "description": "Show the token budget breakdown"
+          },
+          {
+            "name": "status",
+            "description": "Show mode, model, workspace and usage"
+          },
+          {
+            "name": "cost",
+            "description": "Show token usage"
+          },
+          {
+            "name": "permissions",
+            "description": "Show capabilities and permission rules"
+          },
+          {
+            "name": "model",
+            "description": "Switch the active model"
+          },
+          {
+            "name": "help",
+            "description": "List commands"
+          },
+          {
+            "name": "init",
+            "description": "Create a COMONAD.md project file"
+          },
+          {
+            "name": "rewind",
+            "description": "Rewind files and conversation"
+          },
+          {
+            "name": "export",
+            "description": "Export this session as markdown"
+          },
+          {
+            "name": "resume",
+            "description": "Resume a suspended turn"
+          }
+        ]
+      }
+    ],
     "commands": [
       {
-        "command": "comonad.helloWorld",
-        "title": "Hello World"
+        "command": "comonad.openContent",
+        "title": "Comonad: Manage Content",
+        "category": "Comonad",
+        "icon": "$(library)"
+      },
+      {
+        "command": "comonad.revealContentLibrary",
+        "title": "Comonad: Open the Content Folder",
+        "category": "Comonad",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "comonad.exportCharacter",
+        "title": "Comonad: Export Character as a PNG Card",
+        "category": "Comonad",
+        "icon": "$(desktop-download)"
+      },
+      {
+        "command": "comonad.pickCharacter",
+        "title": "Comonad: Pick Character",
+        "category": "Comonad",
+        "icon": "$(person)"
+      },
+      {
+        "command": "comonad.pickLorebooks",
+        "title": "Comonad: Pick World Books",
+        "category": "Comonad",
+        "icon": "$(book)"
+      },
+      {
+        "command": "comonad.reloadTavern",
+        "title": "Comonad: Reload Characters, Books and Presets",
+        "category": "Comonad",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "comonad.pickPersona",
+        "title": "Comonad: Pick Persona",
+        "category": "Comonad",
+        "icon": "$(account)"
+      },
+      {
+        "command": "comonad.pickTavernPreset",
+        "title": "Comonad: Pick Prompt Preset",
+        "category": "Comonad",
+        "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "comonad.newSession",
+        "title": "Comonad: New Session",
+        "category": "Comonad",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "comonad.stop",
+        "title": "Comonad: Stop",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.resumeTurn",
+        "title": "Comonad: Resume Suspended Turn",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.pickPreset",
+        "title": "Comonad: Select Preset",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.pickMode",
+        "title": "Comonad: Select Mode",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.pickApproval",
+        "title": "Comonad: Select Approval Policy",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.toggleNetwork",
+        "title": "Comonad: Toggle Network",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.pickModel",
+        "title": "Comonad: Select Model",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.configureModel",
+        "title": "Comonad: Configure Model Provider",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.review",
+        "title": "Comonad: Review Pending Changes",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.keepAll",
+        "title": "Comonad: Keep All Changes",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.undoAll",
+        "title": "Comonad: Undo All Changes",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.revertFiles",
+        "title": "Comonad: Revert Files to Checkpoint",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.rewind",
+        "title": "Comonad: Rewind Conversation and Files",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.exportSession",
+        "title": "Comonad: Export Session",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.openSettings",
+        "title": "Comonad: Open Settings",
+        "category": "Comonad",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "comonad.toggleHistory",
+        "title": "Comonad: Recent Chats",
+        "category": "Comonad",
+        "icon": "$(history)"
+      },
+      {
+        "command": "comonad.reloadMcp",
+        "title": "Comonad: Reload MCP Servers",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.showLog",
+        "title": "Comonad: Show Log",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.openSession",
+        "title": "Comonad: Open Session",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.forkSession",
+        "title": "Comonad: Fork Session",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.renameSession",
+        "title": "Comonad: Rename Session",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.deleteSession",
+        "title": "Comonad: Delete Session",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.selectWorkingDirectory",
+        "title": "Comonad: Select Working Directory",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.readTaskOutput",
+        "title": "Comonad: Show Task Output",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.stopTask",
+        "title": "Comonad: Stop Task",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.explainSelection",
+        "title": "Comonad: Explain Selection",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.fixSelection",
+        "title": "Comonad: Fix or Improve Selection",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.openChat",
+        "title": "Comonad: Open Chat",
+        "category": "Comonad",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "comonad.openChatWindow",
+        "title": "Comonad: Open Chat in a New Window",
+        "category": "Comonad"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "comonad",
+          "title": "Comonad",
+          "icon": "resources/comonad.svg"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "comonadChat",
+          "title": "Comonad",
+          "icon": "resources/comonad.svg"
+        }
+      ]
+    },
+    "views": {
+      "comonad": [
+        {
+          "id": "comonad.sessions",
+          "name": "Sessions"
+        },
+        {
+          "id": "comonad.tasks",
+          "name": "Tasks"
+        }
+      ],
+      "comonadChat": [
+        {
+          "id": "comonad.chat",
+          "name": "Chat",
+          "type": "webview",
+          "icon": "resources/comonad.svg"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "comonad.openChat",
+          "when": "view == comonad.sessions",
+          "group": "navigation@0"
+        },
+        {
+          "command": "comonad.newSession",
+          "when": "view == comonad.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "comonad.openSettings",
+          "when": "view == comonad.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "comonad.selectWorkingDirectory",
+          "when": "view == comonad.sessions",
+          "group": "navigation@3"
+        },
+        {
+          "command": "comonad.toggleHistory",
+          "when": "view == comonad.chat",
+          "group": "navigation@0"
+        },
+        {
+          "command": "comonad.openContent",
+          "when": "view == comonad.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "comonad.openSettings",
+          "when": "view == comonad.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "comonad.newSession",
+          "when": "view == comonad.chat",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "comonad.toggleHistory",
+          "when": "activeWebviewPanelId == comonad.chat",
+          "group": "navigation@0"
+        },
+        {
+          "command": "comonad.openContent",
+          "when": "activeWebviewPanelId == comonad.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "comonad.openSettings",
+          "when": "activeWebviewPanelId == comonad.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "comonad.newSession",
+          "when": "activeWebviewPanelId == comonad.chat",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "comonad.openSession",
+          "when": "view == comonad.sessions && viewItem == comonad.session",
+          "group": "inline@1"
+        },
+        {
+          "command": "comonad.forkSession",
+          "when": "view == comonad.sessions && viewItem == comonad.session",
+          "group": "1_manage@1"
+        },
+        {
+          "command": "comonad.renameSession",
+          "when": "view == comonad.sessions && viewItem == comonad.session",
+          "group": "1_manage@2"
+        },
+        {
+          "command": "comonad.deleteSession",
+          "when": "view == comonad.sessions && viewItem == comonad.session",
+          "group": "1_manage@3"
+        },
+        {
+          "command": "comonad.readTaskOutput",
+          "when": "view == comonad.tasks && viewItem == comonad.task",
+          "group": "inline@1"
+        },
+        {
+          "command": "comonad.stopTask",
+          "when": "view == comonad.tasks && viewItem == comonad.task",
+          "group": "1_manage@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "comonad.explainSelection",
+          "when": "editorHasSelection",
+          "group": "comonad@1"
+        },
+        {
+          "command": "comonad.fixSelection",
+          "when": "editorHasSelection",
+          "group": "comonad@2"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "comonad.newSession",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+n",
+        "when": "comonad.chatFocused || focusedView == comonad.chat || focusedView == comonad.sessions || focusedView == comonad.tasks || activeWebviewPanelId == comonad.chat || (auxiliaryBarFocus && activeAuxiliary == workbench.view.extension.comonadChat)"
+      },
+      {
+        "command": "comonad.openChat",
+        "key": "ctrl+alt+c",
+        "mac": "cmd+alt+c"
+      },
+      {
+        "command": "comonad.stop",
+        "key": "ctrl+alt+.",
+        "mac": "cmd+alt+."
+      },
+      {
+        "command": "comonad.review",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d"
+      }
+    ],
+    "configuration": {
+      "title": "Comonad",
+      "properties": {
+        "comonad.mode": {
+          "type": "string",
+          "enum": [
+            "chat",
+            "ro",
+            "sw",
+            "aw",
+            "pl"
+          ],
+          "default": "sw",
+          "markdownDescription": "Tool capabilities. `chat` no tools at all · `ro` read files, read-only shell · `sw` write files, read-only shell · `aw` write files, full shell · `pl` read files, read-only shell, plan files only."
+        },
+        "comonad.approval": {
+          "type": "string",
+          "enum": [
+            "manual",
+            "universal_reject",
+            "blacklist_reject",
+            "whitelist_accept",
+            "universal_accept"
+          ],
+          "default": "manual",
+          "markdownDescription": "What happens after the mode allows a tool call: `manual` asks for every call, `whitelist_accept` runs the whitelisted calls (`permissions.allow`, plus read-only calls by default) and asks for the rest, `blacklist_reject` rejects the write-capable calls by default (plus whatever `permissions.deny` names) and runs the rest, `universal_accept` runs everything the mode allows, `universal_reject` runs nothing."
+        },
+        "comonad.network": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow tools that need network access, and network inside the shell sandbox."
+        },
+        "comonad.workingDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Working directory for file and shell tools. Empty uses the first workspace folder."
+        },
+        "comonad.commandTimeout": {
+          "type": "number",
+          "default": 60,
+          "description": "Shell command timeout in seconds."
+        },
+        "comonad.denyReadPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            ".env",
+            "**/.env"
+          ],
+          "description": "Workspace-relative paths or basenames that file and shell tools must not read or write."
+        },
+        "comonad.maxSteps": {
+          "type": "number",
+          "default": 48,
+          "description": "Maximum graph steps per turn."
+        },
+        "comonad.planDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Workspace-relative folder for plan files. Empty uses .comonad/plans."
+        },
+        "comonad.graph": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Mermaid flowchart describing the agent loop. Empty uses the built-in default graph."
+        },
+        "comonad.model": {
+          "type": "string",
+          "default": "auto",
+          "description": "`auto` for the first profile, a profile id for its default model, or `profile:model` for a model the endpoint lists."
+        },
+        "comonad.profiles": {
+          "type": "array",
+          "default": [
+            {
+              "id": "deepseek",
+              "label": "DeepSeek Flash",
+              "base": "https://api.deepseek.com",
+              "model": "deepseek-flash",
+              "keyEnv": "DEEPSEEK_API_KEY",
+              "thinkingOff": "thinking",
+              "includeUsage": true,
+              "pricingIn": 0.3,
+              "pricingCachedIn": 0.006,
+              "pricingOut": 1.2
+            },
+            {
+              "id": "deepseek-pro",
+              "label": "DeepSeek V4 Pro",
+              "base": "https://api.deepseek.com",
+              "model": "deepseek-v4-pro",
+              "keyEnv": "DEEPSEEK_API_KEY",
+              "thinkingOff": "thinking",
+              "includeUsage": true,
+              "pricingIn": 1.32,
+              "pricingCachedIn": 0.044,
+              "pricingOut": 3.96
+            },
+            {
+              "id": "gemini",
+              "label": "Gemini 3.8 Flash",
+              "base": "https://generativelanguage.googleapis.com/v1beta/openai",
+              "model": "gemini-3.8-flash",
+              "modelPrefix": "models/",
+              "modelSkip": "computer-use|deep-research|antigravity|aqa|-image|imagen|veo|embedding|-tts|live",
+              "keyEnv": [
+                "GEMINI_API_KEY",
+                "GOOGLE_API_KEY"
+              ],
+              "thinkingOff": "effort",
+              "includeUsage": true
+            }
+          ],
+          "markdownDescription": "OpenAI-compatible endpoints to chat with. The model menu is read from each endpoint (`GET /models`), so a new model needs no configuration; a profile's `model` is what a bare profile id selects. Empty uses the shipped profiles (DeepSeek Flash first, so **Auto** runs on it); keys come from the variables in `keyEnv` unless a key is stored with **Comonad: Configure Model Provider**.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "model"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string",
+                "description": "Model adapter to run this profile; `openai` is the built-in one."
+              },
+              "base": {
+                "type": "string",
+                "description": "OpenAI-compatible base URL."
+              },
+              "model": {
+                "type": "string",
+                "description": "The model a bare profile id selects; the menu itself lists what the endpoint reports."
+              },
+              "modelPrefix": {
+                "type": "string",
+                "description": "Prefix the endpoint puts on the ids it reports, stripped so the menu and requests use the plain name (Gemini: `models/`)."
+              },
+              "modelSkip": {
+                "type": "string",
+                "description": "Regex of reported model ids to leave out of the menu — providers list models that cannot run a chat turn."
+              },
+              "keyEnv": {
+                "type": [
+                  "string",
+                  "array"
+                ],
+                "items": {
+                  "type": "string"
+                },
+                "description": "Environment variable(s) holding the API key, in order, when no key is stored in the OS keychain."
+              },
+              "thinkingOff": {
+                "type": "string",
+                "enum": [
+                  "thinking",
+                  "effort"
+                ],
+                "description": "How this endpoint turns thinking off for the `none` reasoning effort: DeepSeek's `thinking` field, or `reasoning_effort: \"none\"` (`effort`)."
+              },
+              "temperature": {
+                "type": "number"
+              },
+              "maxTokens": {
+                "type": "number"
+              },
+              "includeUsage": {
+                "type": "boolean"
+              },
+              "pricingIn": {
+                "type": "number",
+                "description": "USD per million input tokens (cache miss), for /cost estimates."
+              },
+              "pricingCachedIn": {
+                "type": "number",
+                "description": "USD per million input tokens served from the provider's prompt cache."
+              },
+              "pricingOut": {
+                "type": "number",
+                "description": "USD per million output tokens, for /cost estimates."
+              }
+            }
+          }
+        },
+        "comonad.mcpServers": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "MCP servers keyed by name: `{ \"name\": { \"command\": \"npx\", \"args\": [\"-y\", \"@modelcontextprotocol/server-filesystem\", \".\"], \"capability\": \"ro\" } }`."
+        },
+        "comonad.permissions": {
+          "type": "object",
+          "default": {
+            "allow": [],
+            "ask": [],
+            "deny": []
+          },
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ask": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "Permission rules such as `run_shell(npm run test:*)`, `read_file(./.env)`, `fetch_url(domain:example.com)`."
+        },
+        "comonad.instructions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Load COMONAD.md, AGENTS.md and .comonad/rules into the system prompt (trusted workspaces only)."
+        },
+        "comonad.skills": {
+          "type": "boolean",
+          "default": true,
+          "description": "Discover skills under .comonad/skills and ~/.comonad/skills."
+        },
+        "comonad.memory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Load and let the agent update project memory."
+        },
+        "comonad.checkpoints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Snapshot the workspace with a shadow git repository before every user message."
+        },
+        "comonad.chatWindow": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open the Comonad chat in its own floating window when it is opened as an editor tab."
+        },
+        "comonad.contextForm": {
+          "type": "string",
+          "enum": [
+            "rendered",
+            "token",
+            "raw"
+          ],
+          "default": "rendered",
+          "markdownDescription": "What a chat sends back to the model: `rendered` trims long tool output, `token` sends only user/assistant text, `raw` sends the full record. New chats start here; the composer's Context pill changes it per chat."
+        },
+        "comonad.displayForm": {
+          "type": "string",
+          "enum": [
+            "rendered",
+            "token",
+            "raw"
+          ],
+          "default": "rendered",
+          "markdownDescription": "How a reply is shown: `rendered` folds thoughts and tool calls, `token` shows assistant text only, `raw` shows the full record. New replies start here; the tabs above a reply switch just that reply."
+        },
+        "comonad.reasoningEffort": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "none",
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "auto",
+          "markdownDescription": "Thinking effort for models that support `reasoning_effort`. New chats start here; the model menu changes it per chat."
+        },
+        "comonad.contextLimit": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Estimated token budget for the history a chat sends; older turns are dropped whole and `0` keeps everything. New chats start here; the model menu changes it per chat."
+        },
+        "comonad.autoCompactChars": {
+          "type": "number",
+          "default": 400000,
+          "description": "Automatically compact the conversation when it grows past this many characters (0 disables)."
+        },
+        "comonad.budgetUsd": {
+          "type": "number",
+          "default": 0,
+          "description": "Warn when the estimated session cost passes this many USD (0 disables). Profiles need pricingIn/pricingOut."
+        },
+        "comonad.filterSensitiveEnv": {
+          "type": "boolean",
+          "default": true,
+          "description": "Remove API keys, tokens and other secrets from the environment of sandboxed commands and background tasks."
+        },
+        "comonad.allowFullAccess": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer the unrestricted preset. Set to false to keep the agent behind approvals and sandboxing."
+        },
+        "comonad.tavernEnabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Layer a character, world books, a persona and a preset on top of the agent prompt. With this off nothing from the content layer reaches a request."
+        },
+        "comonad.tavernSource": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Deprecated and ignored: content is read from Comonad's own library (`.comonad/{characters,lorebooks,presets,personas}` and `~/.comonad/…`), in SillyTavern's file formats."
+        },
+        "comonad.tavernCharacter": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Default character for new chats: the card's file name or its `name`. Use **Comonad: Pick Character** to choose per chat."
+        },
+        "comonad.tavernPersona": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Default user persona for new chats, by file name or title."
+        },
+        "comonad.tavernUserName": {
+          "type": "string",
+          "default": "User",
+          "description": "What the {{user}} macro expands to when no persona is selected."
+        },
+        "comonad.tavernLorebooks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "World books scanned for every chat that does not pick its own."
+        },
+        "comonad.tavernPreset": {
+          "type": "string",
+          "default": "",
+          "description": "Default OpenAI preset (prompts, order and samplers) for new chats, by file name."
+        },
+        "comonad.tavernAuthorNote": {
+          "type": "string",
+          "default": "",
+          "description": "Standing instruction injected into the chat at comonad.tavernNoteDepth, like Author's Note."
+        },
+        "comonad.tavernNoteDepth": {
+          "type": "number",
+          "default": 4,
+          "description": "How many messages from the end the author's note is injected at."
+        },
+        "comonad.tavernWiFormat": {
+          "type": "string",
+          "default": "{0}",
+          "markdownDescription": "Wrapper applied to activated world-book entries, e.g. `[Details: {0}]`."
+        },
+        "comonad.tavernScenarioFormat": {
+          "type": "string",
+          "default": "{{scenario}}",
+          "description": "Wrapper applied to the card's scenario before it is injected."
+        },
+        "comonad.tavernPersonalityFormat": {
+          "type": "string",
+          "default": "{{personality}}",
+          "description": "Wrapper applied to the card's personality before it is injected."
+        },
+        "comonad.tavernRegex": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "default": [],
+          "markdownDescription": "Regex scripts applied to the prompt or to replies. The same shape SillyTavern stores: `{ scriptName, findRegex, replaceString, placement, disabled, markdownOnly, promptOnly, runOnEdit, minDepth, maxDepth, trimStrings }`."
+        },
+        "comonad.wiScanDepth": {
+          "type": "number",
+          "default": 2,
+          "description": "How many recent messages the world-info scan reads for keywords."
+        },
+        "comonad.wiBudget": {
+          "type": "number",
+          "default": 25,
+          "description": "Percentage of the context window world-book entries may occupy (0 disables the budget)."
+        },
+        "comonad.wiBudgetCap": {
+          "type": "number",
+          "default": 0,
+          "description": "Hard cap in tokens on world-book entries, whatever the percentage allows (0 disables the cap)."
+        },
+        "comonad.wiRecursive": {
+          "type": "boolean",
+          "default": false,
+          "description": "Let activated entries scan the newest messages in turn and activate more."
+        },
+        "comonad.wiMaxRecursionSteps": {
+          "type": "number",
+          "default": 0,
+          "description": "Recursion depth (0 means unlimited passes)."
+        },
+        "comonad.wiMinActivations": {
+          "type": "number",
+          "default": 0,
+          "description": "Keep scanning further back until this many entries are active (0 disables)."
+        },
+        "comonad.wiMaxActivationsDepth": {
+          "type": "number",
+          "default": 0,
+          "description": "How far back the minimum-activations scan may look, in messages."
+        },
+        "comonad.wiCaseSensitive": {
+          "type": "boolean",
+          "default": false,
+          "description": "Match world-book keys case-sensitively."
+        },
+        "comonad.wiMatchWholeWords": {
+          "type": "boolean",
+          "default": false,
+          "description": "Require whole words when matching world-book keys."
+        },
+        "comonad.wiIncludeNames": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefix injected world-book entries with their title."
+        },
+        "comonad.wiCharacterStrategy": {
+          "type": "number",
+          "default": 0,
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "markdownDescription": "Order of equal-priority books: `0` character first, `1` global first, `2` evenly."
+        },
+        "comonad.wiGroupScoring": {
+          "type": "boolean",
+          "default": false,
+          "description": "Score a group's entries together instead of keeping only its strongest member."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
@@ -26,27 +918,30 @@
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "npm run check-types && npm run lint && node esbuild.js --production",
-    "compile-tests": "tsc -p . --outDir out",
-    "watch-tests": "tsc -p . -w --outDir out",
-    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "compile-tests": "node esbuild.js --tests",
+    "watch-tests": "node esbuild.js --tests --watch",
+    "pretest": "npm run compile && npm run compile-tests",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.140.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
-    "typescript-eslint": "^8.61.1",
-    "eslint": "^10.5.0",
+    "@types/vscode": "^1.137.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
     "esbuild": "^0.28.1",
+    "eslint": "^10.5.0",
     "npm-run-all": "^4.1.5",
     "typescript": "^6.0.3",
-    "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0"
+    "typescript-eslint": "^8.61.1"
   },
   "overrides": {
     "diff": "^8.0.4",
     "serialize-javascript": "^7.0.6"
+  },
+  "dependencies": {
+    "cordis": "^4.0.0-rc.10"
   }
 }

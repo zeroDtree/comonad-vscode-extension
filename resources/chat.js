@@ -1,0 +1,1621 @@
+// Comonad chat panel — runs inside the VS Code webview, talks to the extension over postMessage.
+(function () {
+	'use strict';
+
+	const vscode = acquireVsCodeApi();
+	const $ = (id) => document.getElementById(id);
+	const messagesEl = $('messages');
+	const input = $('input');
+	const networkChip = $('network');
+	const changesChip = $('changes');
+	const loreChip = $('lore');
+	const barEl = $('bar');
+	const chatsEl = $('chats');
+	const chatsList = $('chats-list');
+	const searchBox = $('search');
+	const tip = $('tip');
+
+	const FORMS = [
+		['rendered', 'Rendered', 'folded thoughts and tool calls'],
+		['token', 'Token', 'assistant text only'],
+		['raw', 'Raw', 'the full record'],
+	];
+	const CONTEXTS = [
+		{ id: 'rendered', label: 'Rendered', description: 'text, thoughts and tool results' },
+		{ id: 'token', label: 'Token', description: 'assistant text only' },
+		{ id: 'raw', label: 'Raw', description: 'the full record' },
+	];
+
+	/* ------------------------------------------------------------------ tooltips */
+
+	// A VS Code-style hover tip; each control carries its explanation in `data-tip`.
+
+	let tipFor = null;
+
+	function showTip(target) {
+		const text = target.dataset.tip;
+		if (!text) {
+			return;
+		}
+		tipFor = target;
+		tip.textContent = text;
+		tip.hidden = false;
+		const rect = target.getBoundingClientRect();
+		const width = tip.offsetWidth;
+		const height = tip.offsetHeight;
+		// While a pill menu is open the tip anchors to the menu itself, so it stays
+		// put while the mouse moves between choices.
+		const menu = target.closest('.pill-menu');
+		const anchor = menu ? menu.getBoundingClientRect() : rect;
+		let left;
+		let top;
+		if (menu && anchor.right + 8 + width <= window.innerWidth - 8) {
+			left = anchor.right + 8;
+			top = anchor.top;
+		} else if (menu && anchor.left - 8 - width >= 8) {
+			left = anchor.left - 8 - width;
+			top = anchor.top;
+		} else {
+			left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+			top = anchor.top - height - 6 >= 8 ? anchor.top - height - 6 : anchor.bottom + 6;
+		}
+		tip.style.left = left + 'px';
+		tip.style.top = Math.max(8, Math.min(top, window.innerHeight - height - 8)) + 'px';
+	}
+
+	function hideTip() {
+		tipFor = null;
+		tip.hidden = true;
+	}
+
+	function refreshTip() {
+		if (tipFor && !tipFor.isConnected) {
+			hideTip();
+			return;
+		}
+		if (tipFor) {
+			showTip(tipFor);
+		}
+	}
+
+	document.addEventListener('mouseover', (event) => {
+		const target = event.target.closest?.('[data-tip]');
+		if (!target) {
+			hideTip();
+			return;
+		}
+		if (target !== tipFor) {
+			showTip(target);
+		}
+	});
+	document.addEventListener('mouseout', (event) => {
+		const target = event.target.closest?.('[data-tip]');
+		if (target && !target.contains(event.relatedTarget)) {
+			hideTip();
+		}
+	});
+	document.addEventListener('mousedown', (event) => {
+		hideTip();
+		if (!event.target.closest?.('.pill') && !modelFlyout.contains(event.target)) {
+			closeMenus();
+		}
+		// The chat list behaves like a popover: clicking anywhere else folds it away.
+		if (!event.target.closest?.('#chats') && !event.target.closest?.('#history')) {
+			closeChats();
+		}
+	});
+	window.addEventListener('blur', () => {
+		hideTip();
+		hideFlyout();
+		closeChats();
+	});
+
+	/* ------------------------------------------------------------------ pill menus */
+
+	// The send-bar pills open their own menu instead of a native select, so every
+	// choice can carry an explanation on hover.
+
+	const pills = new Map();
+
+	function setupPill(control, send) {
+		const root = document.querySelector('.pill[data-control="' + control + '"]');
+		const trigger = root.querySelector('.pill-trigger');
+		const menu = root.querySelector('.pill-menu');
+		const entry = { root, trigger, menu, send, current: '' };
+		pills.set(control, entry);
+		trigger.addEventListener('click', () => {
+			if (menu.hidden) {
+				openMenu(entry);
+			} else {
+				closeMenu(entry);
+			}
+		});
+		return entry;
+	}
+
+	function openMenu(entry) {
+		closeMenus();
+		entry.menu.hidden = false;
+		entry.trigger.setAttribute('aria-expanded', 'true');
+		entry.onOpen?.();
+	}
+
+	function closeMenu(entry) {
+		entry.menu.hidden = true;
+		entry.trigger.setAttribute('aria-expanded', 'false');
+		hideFlyout();
+	}
+
+	function closeMenus() {
+		let closed = false;
+		for (const entry of pills.values()) {
+			if (!entry.menu.hidden) {
+				closeMenu(entry);
+				closed = true;
+			}
+		}
+		return closed;
+	}
+
+	function fillPill(entry, items, current, purpose) {
+		entry.current = current;
+		entry.trigger.querySelector('.pill-label').textContent = choiceLabel(items, current);
+		entry.trigger.dataset.tip = purpose + '\nCurrent: ' + choiceTitle(items, current);
+		entry.menu.innerHTML = '';
+		for (const item of items || []) {
+			const row = document.createElement('button');
+			row.type = 'button';
+			row.className = 'pill-choice';
+			row.dataset.value = item.id;
+			row.dataset.tip = item.description ? item.label + ' — ' + item.description : item.label;
+			row.innerHTML = '<span class="pill-choice-label">' + esc((item.id === current ? '✓ ' : '') + (item.label || item.id)) + '</span>';
+			row.classList.toggle('is-on', item.id === current);
+			row.addEventListener('click', () => {
+				closeMenu(entry);
+				if (item.id !== entry.current) {
+					entry.send(item.id);
+				}
+			});
+			entry.menu.appendChild(row);
+		}
+	}
+
+	const modePill = setupPill('mode', (mode) => vscode.postMessage({ type: 'setMode', mode }));
+	const approvalPill = setupPill('approval', (approval) => vscode.postMessage({ type: 'setApproval', approval }));
+	const contextPill = setupPill('context', (context) => vscode.postMessage({ type: 'setContext', context }));
+	// Display is global: it re-renders the whole transcript instead of one reply at a time.
+	const displayPill = setupPill('display', (display) => vscode.postMessage({ type: 'setDisplay', display }));
+	const DISPLAYS = FORMS.map(([id, label, description]) => ({ id, label, description }));
+
+	/* The model pill: Reasoning effort, Context budget and Model, Cursor-style. */
+
+	const REASONING = [
+		{ id: 'auto', label: 'Auto', description: 'use the provider default' },
+		{ id: 'none', label: 'None', description: 'answer without extra thinking' },
+		{ id: 'low', label: 'Low', description: 'a quick pass of thinking' },
+		{ id: 'medium', label: 'Medium', description: 'balanced thinking' },
+		{ id: 'high', label: 'High', description: 'the deepest thinking the model offers' },
+	];
+	const LIMITS = [
+		{ id: 0, label: 'Auto', description: 'send as much history as the model accepts' },
+		{ id: 32768, label: '32K', description: 'keep about 32k tokens of history' },
+		{ id: 65536, label: '64K', description: 'keep about 64k tokens of history' },
+		{ id: 131072, label: '128K', description: 'keep about 128k tokens of history' },
+		{ id: 262144, label: '256K', description: 'keep about 256k tokens of history' },
+	];
+
+	const modelPill = setupPill('model', (value) => {
+		if (value && typeof value === 'object') {
+			vscode.postMessage(value);
+		} else {
+			vscode.postMessage({ type: 'setModel', model: value });
+		}
+	});
+
+	const modelState = { models: [], model: '', modelLabel: 'auto', reasoningEffort: 'auto', contextLimit: 0 };
+
+	// Hovering Reasoning / Context / Model expands the choices in a flyout on the right.
+	const modelFlyout = document.createElement('div');
+	modelFlyout.className = 'pill-menu pill-flyout';
+	modelFlyout.hidden = true;
+	document.body.append(modelFlyout);
+	let flyoutPage = '';
+	let flyoutShowTimer = 0;
+	let flyoutHideTimer = 0;
+
+	function formatLimit(value) {
+		const tokens = Number(value) || 0;
+		return tokens > 0 ? Math.round(tokens / 1024) + 'K' : 'Auto';
+	}
+
+	function pageItems(page) {
+		if (page === 'reasoning') {
+			return REASONING;
+		}
+		if (page === 'context') {
+			return LIMITS;
+		}
+		return modelState.models;
+	}
+
+	function pageCurrent(page) {
+		if (page === 'reasoning') {
+			return modelState.reasoningEffort;
+		}
+		if (page === 'context') {
+			return modelState.contextLimit;
+		}
+		return modelState.model;
+	}
+
+	function pagePick(page, id) {
+		if (page === 'reasoning') {
+			modelPill.send({ type: 'setReasoningEffort', effort: id });
+		} else if (page === 'context') {
+			modelPill.send({ type: 'setContextLimit', limit: id });
+		} else {
+			modelPill.send(id);
+		}
+	}
+
+	function placeFlyout(row) {
+		const menu = modelPill.menu.getBoundingClientRect();
+		const rect = row.getBoundingClientRect();
+		const width = modelFlyout.offsetWidth;
+		const height = modelFlyout.offsetHeight;
+		let left = menu.right + 6;
+		if (left + width > window.innerWidth - 8) {
+			left = Math.max(8, window.innerWidth - 8 - width);
+		}
+		// Align with the row, but never reach past the menu's bottom — a flyout that
+		// is taller than the rest of the menu grows upward instead.
+		let top = Math.min(rect.top - 4, menu.bottom - height);
+		top = Math.max(8, Math.min(top, window.innerHeight - 8 - height));
+		modelFlyout.style.left = left + 'px';
+		modelFlyout.style.top = top + 'px';
+	}
+
+	function showFlyout(page, row) {
+		clearTimeout(flyoutShowTimer);
+		clearTimeout(flyoutHideTimer);
+		hideTip();
+		flyoutPage = page;
+		modelFlyout.innerHTML = '';
+		for (const item of pageItems(page)) {
+			modelFlyout.append(choiceRow(item, pageCurrent(page), (id) => pagePick(page, id)));
+		}
+		if (page === 'model') {
+			// The way out when there is no profile yet: the wizard writes `comonad.profiles` and the key.
+			modelFlyout.append(
+				choiceRow(
+					{ id: '__configure', label: '⚙ Configure a provider…', description: 'add an OpenAI-compatible endpoint' },
+					'',
+					() => modelPill.send({ type: 'configureModel' }),
+				),
+			);
+		}
+		modelFlyout.hidden = false;
+		placeFlyout(row);
+	}
+
+	function scheduleFlyout(page, row) {
+		clearTimeout(flyoutHideTimer);
+		clearTimeout(flyoutShowTimer);
+		flyoutShowTimer = setTimeout(() => showFlyout(page, row), 80);
+	}
+
+	function scheduleHideFlyout(delay = 180) {
+		clearTimeout(flyoutShowTimer);
+		clearTimeout(flyoutHideTimer);
+		flyoutHideTimer = setTimeout(hideFlyout, delay);
+	}
+
+	function hideFlyout() {
+		clearTimeout(flyoutShowTimer);
+		clearTimeout(flyoutHideTimer);
+		flyoutPage = '';
+		modelFlyout.hidden = true;
+		modelFlyout.innerHTML = '';
+	}
+
+	modelPill.menu.addEventListener('mouseleave', (event) => {
+		if (!modelFlyout.contains(event.relatedTarget)) {
+			scheduleHideFlyout();
+		}
+	});
+	modelFlyout.addEventListener('mouseenter', () => {
+		clearTimeout(flyoutShowTimer);
+		clearTimeout(flyoutHideTimer);
+	});
+	modelFlyout.addEventListener('mouseleave', (event) => {
+		if (!modelPill.menu.contains(event.relatedTarget)) {
+			scheduleHideFlyout(120);
+		}
+	});
+
+	function choiceRow(item, current, pick) {
+		const row = document.createElement('button');
+		row.type = 'button';
+		row.className = 'pill-choice';
+		row.dataset.tip = item.description ? item.label + ' — ' + item.description : item.label;
+		row.innerHTML = '<span class="pill-choice-label">' + esc((item.id === current ? '✓ ' : '') + (item.label || item.id)) + '</span>';
+		row.classList.toggle('is-on', item.id === current);
+		row.addEventListener('click', () => {
+			closeMenu(modelPill);
+			pick(item.id);
+		});
+		return row;
+	}
+
+	function flyoutRow(page, label, value) {
+		const row = document.createElement('button');
+		row.type = 'button';
+		row.className = 'pill-choice pill-choice-section';
+		row.innerHTML =
+			'<span class="pill-choice-label">' +
+			esc(label) +
+			'</span><span class="pill-choice-value">' +
+			esc(value) +
+			'</span><span class="pill-choice-arrow">›</span>';
+		row.addEventListener('mouseenter', () => scheduleFlyout(page, row));
+		row.addEventListener('click', () => {
+			if (flyoutPage === page && !modelFlyout.hidden) {
+				hideFlyout();
+			} else {
+				showFlyout(page, row);
+			}
+		});
+		return row;
+	}
+
+	function renderModelMenu() {
+		const menu = modelPill.menu;
+		menu.innerHTML = '';
+		menu.append(flyoutRow('reasoning', 'Reasoning', choiceLabel(REASONING, modelState.reasoningEffort)));
+		menu.append(flyoutRow('context', 'Context', formatLimit(modelState.contextLimit)));
+		menu.append(flyoutRow('model', 'Model', modelState.modelLabel));
+	}
+
+	function updateModelPill() {
+		modelPill.trigger.querySelector('.pill-label').textContent = modelState.modelLabel;
+		modelPill.trigger.dataset.tip = 'Model — the model for new turns\nCurrent: ' + modelState.modelLabel;
+		if (!modelPill.menu.hidden) {
+			renderModelMenu();
+		}
+	}
+
+	modelPill.onOpen = () => {
+		renderModelMenu();
+	};
+
+	/* The character pill: who the chat speaks as, who you are, its books and its preset. */
+
+	const tavernPill = setupPill('tavern', (action) => vscode.postMessage({ type: 'tavern', action }));
+	const tavernState = { enabled: true, character: '', persona: '', books: 0, bookNames: [], preset: '', activated: [], hasContent: false };
+
+	function tavernRow(action, label, value, tip) {
+		const row = document.createElement('button');
+		row.type = 'button';
+		row.className = 'pill-choice pill-choice-section';
+		row.dataset.tip = tip;
+		row.innerHTML =
+			'<span class="pill-choice-label">' +
+			esc(label) +
+			'</span><span class="pill-choice-value">' +
+			esc(value || '—') +
+			'</span><span class="pill-choice-arrow">›</span>';
+		row.addEventListener('click', () => {
+			closeMenu(tavernPill);
+			tavernPill.send(action);
+		});
+		return row;
+	}
+
+	function renderTavernMenu() {
+		const menu = tavernPill.menu;
+		menu.innerHTML = '';
+		const books = tavernState.books ? tavernState.bookNames.join(', ') : '';
+		menu.append(tavernRow('character', 'Character', tavernState.character, 'Write this chat as a character card, and open it with its greeting'));
+		menu.append(tavernRow('persona', 'Persona', tavernState.persona, 'Who the user is in this chat — the {{user}} name and description'));
+		menu.append(tavernRow('books', 'World books', books || (tavernState.books ? tavernState.books + ' book(s)' : ''), 'World books scanned for keywords each turn'));
+		menu.append(tavernRow('preset', 'Preset', tavernState.preset, 'Prompt collection, order and samplers'));
+		menu.append(
+			choiceRow({ id: 'reload', label: '↻ Reload content', description: 're-read .comonad/characters, lorebooks, presets and personas' }, '', () => tavernPill.send('reload')),
+		);
+		menu.append(choiceRow({ id: 'manage', label: '✎ Manage content…', description: 'create and edit cards, books, personas and presets' }, '', () => tavernPill.send('manage')));
+		if (!tavernState.hasContent) {
+			menu.append(
+				choiceRow(
+					{ id: 'help', label: 'Create content in Comonad: Manage Content', description: 'cards in .comonad/characters, books in .comonad/lorebooks' },
+					'',
+					() => undefined,
+				),
+			);
+		}
+	}
+
+	function renderTavern() {
+		const label = tavernState.character || (tavernState.enabled ? 'No character' : 'Tavern off');
+		const summary = [
+			tavernState.character || 'no character',
+			tavernState.persona ? 'as ' + tavernState.persona : '',
+			tavernState.books ? tavernState.books + ' book' + (tavernState.books === 1 ? '' : 's') : '',
+			tavernState.preset || '',
+		]
+			.filter(Boolean)
+			.join(' · ');
+		tavernPill.trigger.querySelector('.pill-label').textContent = label;
+		tavernPill.trigger.dataset.tip = 'Character — the content layered on this chat\nCurrent: ' + summary;
+		if (!tavernPill.menu.hidden) {
+			renderTavernMenu();
+		}
+	}
+
+	tavernPill.onOpen = () => {
+		renderTavernMenu();
+	};
+
+	let state = null;
+	let running = false;
+	let pinned = true;
+	/** Tool step per call id, so a result can be written back into the step that asked for it. */
+	const toolCards = new Map();
+
+	/* ------------------------------------------------------------------ markdown */
+
+	const esc = (s) =>
+		String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+	function inline(text) {
+		const codes = [];
+		const links = [];
+		let s = String(text).replace(/`([^`]+)`/g, (_, code) => {
+			codes.push(code);
+			return '\u0000' + (codes.length - 1) + '\u0000';
+		});
+		s = esc(s);
+		s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+			links.push('<a href="#" data-url="' + url + '">' + label + '</a>');
+			return '\u0001' + (links.length - 1) + '\u0001';
+		});
+		s = s.replace(/(https?:\/\/[^\s<)"']+)/g, (_, url) => {
+			links.push('<a href="#" data-url="' + url + '">' + url + '</a>');
+			return '\u0001' + (links.length - 1) + '\u0001';
+		});
+		s = s
+			.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+			.replace(/(^|[^\w*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+			.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+		s = s.replace(/\u0001(\d+)\u0001/g, (_, index) => links[Number(index)]);
+		s = s.replace(/\u0000(\d+)\u0000/g, (_, index) => '<code>' + esc(codes[Number(index)]) + '</code>');
+		return s;
+	}
+
+	function codeBlock(lang, code) {
+		return (
+			'<div class="codeblock"><div class="codehead"><span>' +
+			esc(lang) +
+			'</span><button class="copy" type="button">Copy</button></div><pre><code>' +
+			esc(code) +
+			'</code></pre></div>'
+		);
+	}
+
+	function cells(line) {
+		return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+	}
+
+	function table(header, rows) {
+		let html = '<table><thead><tr>' + header.map((cell) => '<th>' + inline(cell) + '</th>').join('') + '</tr></thead><tbody>';
+		for (const row of rows) {
+			html += '<tr>' + row.map((cell) => '<td>' + inline(cell) + '</td>').join('') + '</tr>';
+		}
+		return html + '</tbody></table>';
+	}
+
+	function md(src) {
+		const lines = String(src).replace(/\r\n/g, '\n').split('\n');
+		const out = [];
+		let i = 0;
+		let list = null;
+		const closeList = () => {
+			if (list) {
+				out.push(list === 'ul' ? '</ul>' : '</ol>');
+				list = null;
+			}
+		};
+		while (i < lines.length) {
+			const line = lines[i];
+			const fence = line.match(/^```\s*([\w+-]*)\s*$/);
+			if (fence) {
+				closeList();
+				const body = [];
+				i += 1;
+				while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+					body.push(lines[i]);
+					i += 1;
+				}
+				i += 1;
+				out.push(codeBlock(fence[1] || 'text', body.join('\n')));
+				continue;
+			}
+			const heading = line.match(/^(#{1,5})\s+(.*)$/);
+			if (heading) {
+				closeList();
+				const n = heading[1].length;
+				out.push('<h' + n + '>' + inline(heading[2]) + '</h' + n + '>');
+				i += 1;
+				continue;
+			}
+			if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+				closeList();
+				out.push('<hr/>');
+				i += 1;
+				continue;
+			}
+			if (/^>\s?/.test(line)) {
+				closeList();
+				const quote = [];
+				while (i < lines.length && /^>\s?/.test(lines[i])) {
+					quote.push(lines[i].replace(/^>\s?/, ''));
+					i += 1;
+				}
+				out.push('<blockquote>' + md(quote.join('\n')) + '</blockquote>');
+				continue;
+			}
+			const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
+			const number = line.match(/^\s*\d+[.)]\s+(.*)$/);
+			if (bullet || number) {
+				const want = bullet ? 'ul' : 'ol';
+				if (list !== want) {
+					closeList();
+					out.push(want === 'ul' ? '<ul>' : '<ol>');
+					list = want;
+				}
+				out.push('<li>' + inline((bullet || number)[1]) + '</li>');
+				i += 1;
+				continue;
+			}
+			if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+				closeList();
+				const header = cells(line);
+				const rows = [];
+				i += 2;
+				while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+					rows.push(cells(lines[i]));
+					i += 1;
+				}
+				out.push(table(header, rows));
+				continue;
+			}
+			if (line.trim() === '') {
+				closeList();
+				i += 1;
+				continue;
+			}
+			closeList();
+			const paragraph = [line];
+			i += 1;
+			while (i < lines.length && lines[i].trim() !== '' && !/^(#{1,5}\s|```|>|\s*[-*+]\s|\s*\d+[.)]\s)/.test(lines[i])) {
+				paragraph.push(lines[i]);
+				i += 1;
+			}
+			out.push('<p>' + paragraph.map(inline).join('<br/>') + '</p>');
+		}
+		closeList();
+		return out.join('\n');
+	}
+
+	/* ------------------------------------------------------------------ message bricks */
+
+	function scroll(force) {
+		if (force || pinned) {
+			messagesEl.scrollTop = messagesEl.scrollHeight;
+		}
+	}
+
+	messagesEl.addEventListener('scroll', () => {
+		pinned = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 48;
+	});
+
+	function add(cls, html) {
+		const el = document.createElement('div');
+		el.className = 'msg ' + cls;
+		el.innerHTML = html;
+		messagesEl.appendChild(el);
+		scroll();
+		return el;
+	}
+
+	const ICONS = {
+		copy: '<svg viewBox="0 0 16 16"><rect x="5.6" y="5.6" width="8" height="8" rx="1.6"/><path d="M10.4 3.4A1.6 1.6 0 0 0 8.8 2.4H4a1.6 1.6 0 0 0-1.6 1.6v4.8c0 .7.4 1.3 1 1.5"/></svg>',
+		check: '<svg viewBox="0 0 16 16"><path d="M3.4 8.6l3 3 6.2-6.6"/></svg>',
+		fork: '<svg viewBox="0 0 16 16"><circle cx="4.6" cy="3.8" r="1.8"/><circle cx="4.6" cy="12.2" r="1.8"/><circle cx="11.4" cy="3.8" r="1.8"/><path d="M4.6 5.6v4.8M11.4 5.6c0 2.4-2 3.2-4.2 3.6"/></svg>',
+		again: '<svg viewBox="0 0 16 16"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.8"/><path d="M13.4 2.6v3.3h-3.3"/></svg>',
+	};
+
+	function actionRow(actions) {
+		const row = document.createElement('div');
+		row.className = 'msg-actions';
+		for (const { key, icon, tip, run } of actions) {
+			const button = document.createElement('button');
+			button.type = 'button';
+			button.className = 'act';
+			button.dataset.act = key;
+			button.dataset.tip = tip;
+			button.innerHTML = ICONS[icon];
+			button.addEventListener('click', () => run(button));
+			row.appendChild(button);
+		}
+		return row;
+	}
+
+	/** Copies a message and flashes a check, like Cursor's copy button. */
+	function copyAction(button, text) {
+		vscode.postMessage({ type: 'copy', text });
+		if (button.classList.contains('is-done')) {
+			return;
+		}
+		const icon = button.innerHTML;
+		button.innerHTML = ICONS.check;
+		button.classList.add('is-done');
+		setTimeout(() => {
+			button.innerHTML = icon;
+			button.classList.remove('is-done');
+		}, 1_200);
+	}
+
+	function addCommand(text) {
+		add('command', '<div class="bubble md">' + md(text) + '</div>');
+	}
+
+	function addNotice(text) {
+		add('notice', '<div class="line">' + esc(text) + '</div>');
+	}
+
+	/* ------------------------------------------------------------------ turns */
+
+	// The transcript is a list of turns: one prompt plus the steps the agent took for it — its
+	// thoughts, its text and its tool calls, in the order they happened. A live turn is built with
+	// the same builders a replayed one is, so what you watch streaming is what a reload shows, and
+	// a turn is never split in two by a refresh.
+
+	let turns = [];
+	let live = null;
+
+	function currentView() {
+		return state && (state.display === 'token' || state.display === 'raw') ? state.display : 'rendered';
+	}
+
+	function turnTools(turn) {
+		return (turn.steps || []).filter((step) => step.kind === 'tool').length;
+	}
+
+	function turnAnswer(turn) {
+		const steps = (turn.steps || []).filter((step) => step.kind === 'text' && (step.text || '').trim());
+		return steps.length ? steps[steps.length - 1].text : '';
+	}
+
+	function turnRaw(turn) {
+		return (turn.steps || [])
+			.map((step) => {
+				if (step.kind === 'thought') {
+					return 'Thought\n' + (step.text || '');
+				}
+				if (step.kind === 'tool') {
+					return '> ' + (step.name || 'tool') + ' ' + (step.args || '') + '\n' + (step.result || '');
+				}
+				return step.text || '';
+			})
+			.filter(Boolean)
+			.join('\n\n');
+	}
+
+	/** `840ms`, `3.4s`, `1m 12s` — short enough to sit beside a label. */
+	function formatDuration(ms) {
+		const value = Math.max(0, Number(ms) || 0);
+		if (value < 1_000) {
+			return Math.round(value) + 'ms';
+		}
+		if (value < 60_000) {
+			return (value / 1_000).toFixed(value < 10_000 ? 1 : 0) + 's';
+		}
+		const minutes = Math.floor(value / 60_000);
+		const seconds = Math.round((value % 60_000) / 1_000);
+		return minutes + 'm ' + seconds + 's';
+	}
+
+	function toolCard(step) {
+		const card = document.createElement('div');
+		const failed = step.status === 'error' || /^Error:/.test(step.result || '');
+		const mark = step.result === undefined ? 'spin' : failed ? 'bad' : 'good';
+		card.className = 'card collapsed';
+		card.innerHTML =
+			'<div class="card-head"><span class="' +
+			mark +
+			'">' +
+			(step.result === undefined ? '' : failed ? '✗' : '✓') +
+			'</span><b>' +
+			esc(step.name || 'tool') +
+			'</b><span class="args">' +
+			esc(step.args || '') +
+			'</span><span class="timer"></span><span class="chev">▾</span></div><pre class="out"></pre>';
+		card.querySelector('.out').textContent = step.result || '';
+		// Folded by default whatever the size: the head already says which call it was, whether it
+		// worked, what it ran and how long it took. A click shows the output.
+		step._card = card;
+		step._timer = card.querySelector('.timer');
+		return card;
+	}
+
+	/** One element for one step; the single place a thought, a text block or a call is drawn. */
+	function stepEl(step, busy) {
+		if (step.kind === 'thought') {
+			const fold = document.createElement('details');
+			fold.className = 'thinking';
+			fold.innerHTML =
+				'<summary><span class="label">' + (busy ? 'Thinking…' : 'Thought') + '</span><span class="timer"></span></summary><div class="think"></div>';
+			fold.querySelector('.think').textContent = step.text || '';
+			step._think = fold.querySelector('.think');
+			step._summary = fold.querySelector('.label');
+			step._timer = fold.querySelector('.timer');
+			return fold;
+		}
+		if (step.kind === 'tool') {
+			return toolCard(step);
+		}
+		// The markdown body is re-rendered on every text delta, so the duration sits beside it in a
+		// wrapper rather than inside — otherwise the streaming repaint would wipe its own timer.
+		const wrap = document.createElement('div');
+		wrap.className = 'step-text';
+		const body = document.createElement('div');
+		body.className = 'body md';
+		body.innerHTML = md(step.text || '');
+		wrap.appendChild(body);
+		if (step.ms !== undefined || step.at !== undefined) {
+			const timer = document.createElement('span');
+			timer.className = 'timer step-timer';
+			wrap.appendChild(timer);
+			step._timer = timer;
+		}
+		step._body = body;
+		return wrap;
+	}
+
+	/**
+	 * Writes a step's duration: the settled value the host reported, else — while the step is still
+	 * running — how long it has been going, so a slow call shows a ticking number rather than a spinner.
+	 */
+	function paintTimer(step, live, now) {
+		if (!step._timer) {
+			return;
+		}
+		const ms = step.ms ?? (live ? now - (step.startedAt ?? now) : undefined);
+		step._timer.textContent = ms === undefined ? '' : formatDuration(ms);
+	}
+
+	/** Stops a step's clock at the local measurement; the host's number replaces it at `turn-end`. */
+	function freeze(step) {
+		if (!step) {
+			return;
+		}
+		if (step.ms === undefined && step.startedAt !== undefined) {
+			step.ms = Math.max(0, Date.now() - step.startedAt);
+		}
+		// A thought that nothing is writing any more is a thought that is over: it reads in the past
+		// tense from the moment the next step starts, not only once the whole turn ends.
+		if (step.kind === 'thought' && step._summary) {
+			step._summary.textContent = 'Thought';
+		}
+	}
+
+	/**
+	 * Writes the open buffers to the DOM. Called before a pointer moves on: `paint` runs on the next
+	 * frame, and a step closed within the same frame as its last delta would otherwise keep the empty
+	 * text it was created with — the whole thought lost because a tool call followed immediately.
+	 */
+	function flushOpen() {
+		paint();
+	}
+
+	function appendStep(turn, step, busy) {
+		turn._steps.appendChild(stepEl(step, busy));
+		return step;
+	}
+
+	function renderSteps(turn) {
+		const view = currentView();
+		turn._steps.innerHTML = '';
+		if (view === 'raw') {
+			const pre = document.createElement('pre');
+			pre.className = 'trace-pre';
+			pre.textContent = turnRaw(turn) || '(empty)';
+			turn._steps.appendChild(pre);
+			return;
+		}
+		let tools = 0;
+		for (const step of turn.steps || []) {
+			if (step.kind === 'tool') {
+				tools += 1;
+				if (view === 'token') {
+					continue;
+				}
+			} else if (view === 'token' && step.kind !== 'text') {
+				continue;
+			}
+			appendStep(turn, step, false);
+		}
+		if (view === 'token' && tools) {
+			const line = document.createElement('p');
+			line.className = 'muted';
+			line.textContent = tools + (tools === 1 ? ' tool call' : ' tool calls');
+			turn._steps.appendChild(line);
+		}
+		if (!turn._steps.children.length) {
+			const empty = document.createElement('p');
+			empty.className = 'muted';
+			empty.textContent = '(no reply text)';
+			turn._steps.appendChild(empty);
+		}
+		// A turn built from the transcript carries the durations the host measured.
+		const now = Date.now();
+		for (const step of turn.steps || []) {
+			paintTimer(step, false, now);
+		}
+	}
+
+	/** The turn's dated footer: how long it worked, how many tools it used, what it offers. */
+	function renderFoot(turn) {
+		const foot = turn._foot;
+		if (!foot) {
+			return;
+		}
+		foot.innerHTML = '';
+		if (turn.command) {
+			return;
+		}
+		const busy = Boolean(live && live.turn === turn);
+		const meta = document.createElement('span');
+		meta.className = 'foot-meta';
+		if (busy) {
+			meta.textContent = 'Working…';
+		} else {
+			const tools = turnTools(turn);
+			const seconds = turn.startedAt && turn.endedAt ? Math.max(0, Math.round((turn.endedAt - turn.startedAt) / 1000)) : 0;
+			meta.textContent = [
+				turn.stopped ? 'Stopped' : seconds >= 1 ? 'Worked for ' + seconds + 's' : 'Worked',
+				tools ? tools + (tools === 1 ? ' tool' : ' tools') : '',
+			]
+				.filter(Boolean)
+				.join(' · ');
+		}
+		foot.appendChild(meta);
+		foot.appendChild(
+			actionRow([
+				{ key: 'copy', icon: 'copy', tip: 'Copy reply', run: (button) => copyAction(button, turnAnswer(turn) || turnRaw(turn)) },
+				{
+					key: 'fork',
+					icon: 'fork',
+					tip: 'Fork chat from here — this turn and everything before it, as a new chat',
+					run: () => vscode.postMessage({ type: 'fork', turn: turn.index }),
+				},
+				{
+					key: 'again',
+					icon: 'again',
+					tip: 'Regenerate — run the last prompt again',
+					run: () => vscode.postMessage({ type: 'regenerate', turn: turn.index }),
+				},
+			]),
+		);
+	}
+
+	/** Builds the turn's frame: the prompt bubble, the step column and the footer. */
+	function turnEl(turn) {
+		const root = document.createElement('div');
+		root.className = 'turn';
+		turn._root = root;
+
+		const prompt = document.createElement('div');
+		prompt.className = 'msg user';
+		prompt.innerHTML = '<div class="bubble">' + esc(turn.prompt).replace(/\n/g, '<br/>') + '</div>';
+		if (!turn.command) {
+			prompt.appendChild(
+				actionRow([{ key: 'copy', icon: 'copy', tip: 'Copy message', run: (button) => copyAction(button, turn.prompt) }]),
+			);
+		}
+		if (turn.greeting) {
+			// A character's opening line has no prompt behind it: the bubble would be empty.
+			root.classList.add('greeting');
+		} else {
+			root.appendChild(prompt);
+		}
+
+		const reply = document.createElement('div');
+		reply.className = 'msg assistant';
+		const steps = document.createElement('div');
+		steps.className = 'steps';
+		reply.appendChild(steps);
+		const foot = document.createElement('div');
+		foot.className = 'foot';
+		reply.appendChild(foot);
+		root.appendChild(reply);
+		turn._steps = steps;
+		turn._foot = foot;
+		messagesEl.appendChild(root);
+		return root;
+	}
+
+	/** Only the last turn may be regenerated, and never while a turn is running or without a prompt. */
+	function refreshActions() {
+		const last = turns.length ? turns[turns.length - 1] : null;
+		for (const button of messagesEl.querySelectorAll('.foot .act[data-act="again"]')) {
+			button.hidden = !last || button.closest('.turn') !== last._root || running || Boolean(last.greeting);
+		}
+	}
+
+	function welcome() {
+		add(
+			'welcome',
+			'<h2>◉ Comonad</h2><p>Ask for a change, a review or an explanation. Tools run against <code>' +
+				esc((state && state.workspace) || 'no workspace') +
+				'</code>.</p><p class="muted">Type <code>/help</code> for commands. Writes and shell commands ask for approval first.</p>',
+		);
+	}
+
+	/** Draws a whole transcript: the one path used by a reload, a chat switch and a display change. */
+	function renderTurns(list) {
+		turns = list || [];
+		live = null;
+		toolCards.clear();
+		messagesEl.innerHTML = '';
+		if (!turns.length) {
+			welcome();
+			return;
+		}
+		for (const turn of turns) {
+			turnEl(turn);
+			renderSteps(turn);
+			renderFoot(turn);
+		}
+		refreshActions();
+		pinned = true;
+		scroll(true);
+	}
+
+	/* ------------------------------------------------------------------ streaming */
+
+	// A live turn is a turn like any other: events push new steps into it, in order, so a thought
+	// that follows a tool call stays after it instead of being folded into one block.
+
+	function beginTurn(message) {
+		const replacing = turns.find((turn) => turn.index === message.replaces);
+		if (replacing) {
+			turns = turns.filter((turn) => turn !== replacing);
+			replacing._root?.remove();
+		}
+		if (messagesEl.querySelector('.msg.welcome')) {
+			messagesEl.innerHTML = '';
+		}
+		const last = turns.length ? turns[turns.length - 1] : null;
+		const turn = {
+			index: last ? last.index + 1 : 0,
+			prompt: message.text || '',
+			steps: [],
+			at: 0,
+			startedAt: Date.now(),
+			endedAt: undefined,
+			command: false,
+			stopped: false,
+		};
+		turns.push(turn);
+		turnEl(turn);
+		// The live marker goes up first: the footer reads it to show "Working…" while the turn runs.
+		live = { turn, thought: null, text: null, think: '', pending: false };
+		renderFoot(turn);
+		refreshActions();
+		scroll(true);
+	}
+
+	/** Writes the buffers of the open steps into the DOM; text is re-rendered as markdown. */
+	function paint() {
+		if (!live) {
+			return;
+		}
+		live.pending = false;
+		if (live.thought) {
+			live.thought._think.textContent = live.think;
+		}
+		if (live.text) {
+			live.text._body.innerHTML = md(live.text.text);
+		}
+		scroll();
+	}
+
+	function schedule() {
+		if (!live || live.pending) {
+			return;
+		}
+		live.pending = true;
+		requestAnimationFrame(() => {
+			if (live) {
+				paint();
+			}
+		});
+	}
+
+	// One interval for the whole live turn: it walks the open timers so a slow call shows a number
+	// that climbs, like the work it stands for. `endTurn` settles every step from the host's numbers.
+	let ticker = 0;
+
+	function tick() {
+		const paint2 = () => {
+			const now = Date.now();
+			for (const step of live ? live.turn.steps : []) {
+				if (step.ms === undefined && step.startedAt !== undefined) {
+					paintTimer(step, true, now);
+				}
+			}
+		};
+		paint2();
+		if (!ticker) {
+			ticker = setInterval(paint2, 100);
+		}
+	}
+
+	function appendText(text) {
+		if (!live) {
+			return;
+		}
+		flushOpen();
+		freeze(live.thought);
+		live.thought = null;
+		if (!live.text) {
+			live.text = appendStep(live.turn, { kind: 'text', text: '', startedAt: Date.now(), at: Date.now() }, true);
+			live.turn.steps.push(live.text);
+			tick();
+		}
+		live.text.text += text;
+		schedule();
+	}
+
+	function appendReasoning(text) {
+		if (!live) {
+			return;
+		}
+		flushOpen();
+		freeze(live.text);
+		live.text = null;
+		if (!live.thought) {
+			live.thought = appendStep(live.turn, { kind: 'thought', text: '', startedAt: Date.now(), at: Date.now() }, true);
+			live.turn.steps.push(live.thought);
+			tick();
+		}
+		live.thought.text += text;
+		live.think += text;
+		schedule();
+	}
+
+	function toolStart(message) {
+		if (!live) {
+			return;
+		}
+		flushOpen();
+		freeze(live.thought);
+		freeze(live.text);
+		live.thought = null;
+		live.text = null;
+		const step = appendStep(
+			live.turn,
+			{ kind: 'tool', id: message.id, name: message.name, args: message.args || '', status: 'running', startedAt: Date.now(), at: Date.now() },
+			true,
+		);
+		live.turn.steps.push(step);
+		toolCards.set(message.id, step);
+		tick();
+		scroll(true);
+	}
+
+	function toolResult(message) {
+		const step = toolCards.get(message.id);
+		if (!step) {
+			addNotice(message.output || '');
+			return;
+		}
+		step.result = message.output || '';
+		step.status = /^Error:/.test(step.result) ? 'error' : 'ok';
+		freeze(step);
+		// Redraw the card in place: `toolCard` stores the new element on the step, so the old one has
+		// to be held first or the swapped-out card would replace itself.
+		const card = step._card;
+		card.replaceWith(toolCard(step));
+		paintTimer(step, false, Date.now());
+		scroll();
+	}
+
+	function endTurn(message) {
+		if (!live) {
+			return;
+		}
+		const turn = live.turn;
+		paint();
+		clearInterval(ticker);
+		ticker = 0;
+		// The host reports what each step actually cost, so a settled turn reads the same whether it
+		// was watched live or reloaded afterwards.
+		const settled = Array.isArray(message.steps) ? message.steps : [];
+		turn.steps.forEach((step, index) => {
+			const report = settled[index];
+			if (report && report.kind === step.kind && (report.id ?? '') === (step.id ?? '')) {
+				step.ms = report.ms;
+			}
+		});
+		const settledAt = Date.now();
+		for (const step of turn.steps) {
+			paintTimer(step, true, settledAt);
+		}
+		// The window too: the footer then reads the same whether it was watched or reloaded.
+		turn.startedAt = message.startedAt ?? turn.startedAt;
+		turn.endedAt = message.endedAt ?? settledAt;
+		turn.stopped = Boolean(message.stopped);
+		turn.command = Boolean(message.command);
+		// A folded thought is no longer being written, exactly as on a replayed turn.
+		for (const step of turn.steps) {
+			if (step._summary) {
+				step._summary.textContent = 'Thought';
+			}
+		}
+		// Providers may stream empty thinking chunks; a blank fold is not a step on a replayed turn
+		// either, so drop it here rather than let the live turn differ.
+		turn.steps = turn.steps.filter((step) => {
+			if (step.kind === 'thought' && !(step.text || '').trim()) {
+				step._summary?.closest('details')?.remove();
+				return false;
+			}
+			return true;
+		});
+		live = null;
+		if (currentView() !== 'rendered') {
+			renderSteps(turn);
+		}
+		renderFoot(turn);
+		refreshActions();
+		scroll();
+	}
+
+	/* ------------------------------------------------------------------ approvals */
+
+	function approval(message) {
+		const calls = (message.calls || [])
+			.map((call) => '<li><b>' + esc(call.name) + '</b><span>' + esc(call.args || '') + '</span></li>')
+			.join('');
+		const root = document.createElement('div');
+		root.className = 'msg approval';
+		root.dataset.id = message.id;
+		root.innerHTML =
+			'<div class="card"><div class="a-title">⚠ Approval required</div><div class="a-reason">' +
+			esc(message.reason || '') +
+			'</div><ul class="calls">' +
+			calls +
+			'</ul><div class="actions"><button class="primary" data-d="allow">Allow once</button><button data-d="always">Always allow</button><button class="ghost" data-d="deny">Deny</button></div></div>';
+		// The question belongs to the turn that asked it, so it sits with that turn's steps.
+		if (live) {
+			live.turn._steps.appendChild(root);
+		} else {
+			messagesEl.appendChild(root);
+		}
+		scroll(true);
+	}
+
+	/* ------------------------------------------------------------------ event delegation */
+
+	messagesEl.addEventListener('click', (event) => {
+		const copy = event.target.closest('button.copy');
+		if (copy) {
+			const code = copy.closest('.codeblock').querySelector('code');
+			const text = code ? code.textContent : '';
+			Promise.resolve()
+				.then(() => navigator.clipboard.writeText(text))
+				.catch(() => vscode.postMessage({ type: 'copy', text }));
+			copy.textContent = 'Copied';
+			setTimeout(() => {
+				copy.textContent = 'Copy';
+			}, 1200);
+			return;
+		}
+		const head = event.target.closest('.card-head');
+		if (head) {
+			head.parentElement.classList.toggle('collapsed');
+			return;
+		}
+		const link = event.target.closest('a[data-url]');
+		if (link) {
+			event.preventDefault();
+			vscode.postMessage({ type: 'openUrl', url: link.dataset.url });
+			return;
+		}
+		const decision = event.target.closest('.approval button[data-d]');
+		if (decision) {
+			const card = decision.closest('.approval');
+			for (const button of card.querySelectorAll('button')) {
+				button.disabled = true;
+			}
+			decision.classList.add('chosen');
+			vscode.postMessage({ type: 'approve', id: card.dataset.id, decision: decision.dataset.d });
+		}
+	});
+
+	/* ------------------------------------------------------------------ state & history */
+
+	function setRunning(value) {
+		running = value;
+		$('send').hidden = value;
+		$('stop').hidden = !value;
+		refreshActions();
+	}
+
+	function choiceTitle(items, current) {
+		const item = (items || []).find((entry) => entry.id === current);
+		if (!item) {
+			return current || '';
+		}
+		return item.description ? item.label + ' — ' + item.description : item.label;
+	}
+
+	function choiceLabel(items, current) {
+		const item = (items || []).find((entry) => entry.id === current);
+		return item ? item.label : current || '';
+	}
+
+	// Codex-style chat list: folded away until the `comonad.toggleHistory` title-bar icon opens it.
+	let chatsOpen = false;
+	// The display form the transcript was drawn with; changing it redraws every turn.
+	let shownView = '';
+	let chatsAll = false;
+	let searchQuery = '';
+	let searchTimer = 0;
+	let searchHits = { query: '', items: [] };
+
+	function ago(at) {
+		const minutes = Math.round(Math.max(0, Date.now() - (at || 0)) / 60_000);
+		if (minutes < 1) {
+			return 'now';
+		}
+		if (minutes < 60) {
+			return minutes + 'm';
+		}
+		const hours = Math.round(minutes / 60);
+		if (hours < 24) {
+			return hours + 'h';
+		}
+		const days = Math.round(hours / 24);
+		if (days < 7) {
+			return days + 'd';
+		}
+		const weeks = Math.round(days / 7);
+		if (weeks < 5) {
+			return weeks + 'w';
+		}
+		const months = Math.round(days / 30);
+		return months < 12 ? months + 'mo' : Math.round(days / 365) + 'y';
+	}
+
+	function chatRow(item) {
+		const active = item.id === (state && state.sessionId);
+		const row = document.createElement('button');
+		row.type = 'button';
+		row.className = 'chat' + (active ? ' is-active' : '');
+		row.dataset.tip =
+			item.title + '\nUpdated ' + new Date(item.updatedAt).toLocaleString() + ' — click to continue this chat';
+		row.innerHTML =
+			'<span class="text"><span class="name">' +
+			esc(item.title) +
+			'</span>' +
+			(item.snippet ? '<span class="snippet">' + esc(item.snippet) + '</span>' : '') +
+			'</span><span class="ago">' +
+			ago(item.updatedAt) +
+			'</span>';
+		row.addEventListener('click', () => vscode.postMessage({ type: 'switchSession', id: item.id }));
+		return row;
+	}
+
+	/** Folds the chat list away — clicking outside it, Escape, or losing the panel's focus. */
+	function closeChats() {
+		if (!chatsOpen) {
+			return;
+		}
+		chatsOpen = false;
+		renderChats();
+	}
+
+	function renderChats() {
+		chatsEl.hidden = !chatsOpen;
+		// The list is the whole header: with it closed the panel starts straight at the transcript.
+		barEl.hidden = !chatsOpen;
+		if (!chatsOpen) {
+			return;
+		}
+		const items = (state && state.sessions) || [];
+		chatsList.innerHTML = '';
+		if (searchQuery) {
+			for (const hit of searchHits.items) {
+				chatsList.append(chatRow(hit));
+			}
+			if (!searchHits.items.length) {
+				const empty = document.createElement('p');
+				empty.className = 'muted';
+				empty.textContent = 'No chats match “' + searchQuery + '”';
+				chatsList.append(empty);
+			}
+			return;
+		}
+		for (const item of chatsAll ? items : items.slice(0, 3)) {
+			chatsList.append(chatRow(item));
+		}
+		if (items.length > 3 || chatsAll) {
+			const more = document.createElement('button');
+			more.type = 'button';
+			more.id = 'more';
+			more.textContent = chatsAll ? 'Show less' : 'View all (' + (state.sessionTotal ?? items.length) + ')';
+			more.dataset.tip = chatsAll ? 'Collapse the chat list' : 'Show every chat in this workspace';
+			more.addEventListener('click', () => {
+				chatsAll = !chatsAll;
+				renderChats();
+			});
+			chatsList.append(more);
+			if (chatsAll) {
+				const hidden = (state.sessionTotal ?? items.length) - items.length;
+				if (hidden > 0) {
+					const note = document.createElement('p');
+					note.className = 'muted';
+					note.textContent = hidden + ' older chat(s) — search to reach them';
+					chatsList.append(note);
+				}
+			}
+		}
+	}
+
+	function renderState() {
+		if (!state) {
+			return;
+		}
+		renderChats();
+		fillPill(modePill, state.modes, state.mode, 'Work mode — what the agent may do');
+		fillPill(approvalPill, state.approvals, state.approval, 'Approval — what runs without asking');
+		fillPill(contextPill, CONTEXTS, state.context, 'Context — what this chat sends back to the model');
+		fillPill(displayPill, DISPLAYS, currentView(), 'Display — how every turn is shown');
+		Object.assign(tavernState, state.tavern || {});
+		renderTavern();
+		renderLore();
+		// Switching the display form redraws what is on screen — never during a turn, where the
+		// transcript is being written to.
+		if (shownView && shownView !== currentView() && !running && !live) {
+			renderTurns(turns);
+		}
+		shownView = currentView();
+		modelState.models = state.models || [];
+		modelState.model = state.model;
+		modelState.modelLabel = state.modelLabel || state.model || 'auto';
+		modelState.reasoningEffort = state.reasoningEffort || 'auto';
+		modelState.contextLimit = Number(state.contextLimit) || 0;
+		updateModelPill();
+		networkChip.classList.toggle('is-on', Boolean(state.network));
+		networkChip.dataset.tip =
+			'Network — allow network tools and network inside the shell sandbox\nCurrent: ' + (state.network ? 'on' : 'off');
+		refreshTip();
+		const detail = [state.detail, state.suspended ? '⏸ waiting for approval — send /resume' : ''].filter(Boolean).join('  ·  ');
+		$('status').textContent = detail;
+		renderTodos();
+		setRunning(Boolean(state.running));
+	}
+
+	function renderChanges(count) {
+		if (!count) {
+			changesChip.hidden = true;
+			changesChip.textContent = '';
+			return;
+		}
+		changesChip.hidden = false;
+		changesChip.textContent = '⊞ ' + count + (count === 1 ? ' change' : ' changes');
+		changesChip.dataset.tip =
+			'Review pending changes — ' + count + (count === 1 ? ' file has' : ' files have') + ' changed since the last checkpoint';
+	}
+
+	/** What the last turn's world-book scan injected, so the readout mirrors the request. */
+	function renderLore() {
+		const hits = tavernState.activated || [];
+		if (!hits.length) {
+			loreChip.hidden = true;
+			loreChip.textContent = '';
+			return;
+		}
+		loreChip.hidden = false;
+		loreChip.textContent = '◈ ' + hits.length + (hits.length === 1 ? ' lore entry' : ' lore entries');
+		loreChip.dataset.tip = 'World-book entries injected into the last turn:\n' + hits.join('\n') + '\n\nClick to pick the books this chat scans';
+	}
+
+	function renderTodos() {
+		const list = (state && state.todos) || [];
+		const node = $('todos');
+		if (!list.length) {
+			node.hidden = true;
+			node.innerHTML = '';
+			return;
+		}
+		const done = list.filter((todo) => todo.status === 'completed').length;
+		const glyph = (status) => (status === 'completed' ? '✔' : status === 'in_progress' ? '◐' : '○');
+		node.hidden = false;
+		node.innerHTML =
+			'<span class="todo-head">Todos ' +
+			done +
+			'/' +
+			list.length +
+			'</span>' +
+			list
+				.slice(0, 6)
+				.map((todo) => '<span class="todo ' + esc(todo.status) + '">' + glyph(todo.status) + ' ' + esc(todo.text) + '</span>')
+				.join('');
+	}
+
+	/* ------------------------------------------------------------------ inbound messages */
+
+	window.addEventListener('message', (event) => {
+		const message = event.data;
+		switch (message.type) {
+			case 'state':
+				state = message;
+				renderState();
+				break;
+			case 'toggleHistory':
+				// The title-bar icon (comonad.toggleHistory) flips the chat list.
+				chatsOpen = !chatsOpen;
+				renderChats();
+				break;
+			case 'changes':
+				renderChanges(message.count || 0);
+				break;
+			case 'turns':
+				renderTurns(message.turns || []);
+				break;
+			case 'search':
+				// Only the surface that asked renders these hits.
+				if (message.query === searchQuery) {
+					searchHits = { query: message.query, items: message.items || [] };
+					renderChats();
+				}
+				break;
+			case 'command':
+				addCommand(message.text);
+				break;
+			case 'notice':
+				addNotice(message.text);
+				break;
+			case 'turn-start':
+				setRunning(true);
+				beginTurn(message);
+				break;
+			case 'turn-resume': {
+				// A resumed turn is the same turn: keep appending its steps to the last one.
+				const turn = turns.length ? turns[turns.length - 1] : null;
+				if (turn) {
+					live = { turn, thought: null, text: null, think: '', pending: false };
+					renderFoot(turn);
+				}
+				break;
+			}
+			case 'text':
+				appendText(message.text);
+				break;
+			case 'reasoning':
+				appendReasoning(message.text);
+				break;
+			case 'tool-start':
+				toolStart(message);
+				break;
+			case 'tool-result':
+				toolResult(message);
+				break;
+			case 'approval':
+				approval(message);
+				break;
+			case 'turn-end':
+				setRunning(false);
+				endTurn(message);
+				break;
+			case 'focus':
+				input.focus();
+				break;
+		}
+		scroll();
+	});
+
+	/* ------------------------------------------------------------------ outbound actions */
+
+	function submit() {
+		const text = input.value.trim();
+		if (!text || running) {
+			return;
+		}
+		input.value = '';
+		vscode.postMessage({ type: 'send', text });
+		input.focus();
+	}
+
+	$('send').addEventListener('click', submit);
+	$('stop').addEventListener('click', () => vscode.postMessage({ type: 'stop' }));
+	input.addEventListener('keydown', (event) => {
+		if (event.key === 'Enter' && !event.shiftKey) {
+			event.preventDefault();
+			submit();
+		}
+	});
+	document.addEventListener('keydown', (event) => {
+		if (event.key !== 'Escape') {
+			return;
+		}
+		if (!modelFlyout.hidden) {
+			hideFlyout();
+			return;
+		}
+		if (closeMenus()) {
+			return;
+		}
+		if (chatsOpen) {
+			closeChats();
+			return;
+		}
+		vscode.postMessage({ type: 'stop' });
+	});
+	// The header controls (recent chats, settings, new session) are title-bar commands now.
+	// Searching goes through the extension, which also matches message text.
+	searchBox.addEventListener('input', () => {
+		clearTimeout(searchTimer);
+		searchTimer = setTimeout(() => {
+			searchQuery = searchBox.value.trim();
+			vscode.postMessage({ type: 'search', query: searchQuery });
+		}, 140);
+	});
+	searchBox.addEventListener('keydown', (event) => {
+		if (event.key !== 'Escape') {
+			return;
+		}
+		event.stopPropagation();
+		if (!searchBox.value) {
+			closeChats();
+			return;
+		}
+		searchBox.value = '';
+		searchQuery = '';
+		searchHits = { query: '', items: [] };
+		renderChats();
+	});
+	networkChip.addEventListener('click', () => vscode.postMessage({ type: 'toggleNetwork' }));
+	changesChip.addEventListener('click', () => vscode.postMessage({ type: 'review' }));
+	loreChip.addEventListener('click', () => tavernPill.send('books'));
+	for (const chip of document.querySelectorAll('#chips button')) {
+		chip.addEventListener('click', () => {
+			input.value = chip.dataset.cmd;
+			if (chip.dataset.cmd.endsWith(' ')) {
+				input.focus();
+			} else {
+				submit();
+			}
+		});
+	}
+
+	/* ------------------------------------------------------------------ focus */
+
+	// The host turns this into the `comonad.chatFocused` context key. A chord pressed inside a
+	// webview is resolved against the workbench's root context, where the part-scoped keys
+	// (`auxiliaryBarFocus`, `focusedView`) are out of scope — so the guest is the only reliable
+	// witness that the keyboard is in the chat, which is what scopes Cmd+N to the chat.
+	const reportFocus = (focused) => vscode.postMessage({ type: 'focusState', focused });
+	window.addEventListener('focus', () => reportFocus(true));
+	window.addEventListener('blur', () => reportFocus(false));
+	document.addEventListener('focusin', () => reportFocus(true));
+	document.addEventListener('mousedown', () => reportFocus(true));
+	document.addEventListener('visibilitychange', () => reportFocus(document.hasFocus() && document.visibilityState === 'visible'));
+
+	vscode.postMessage({ type: 'ready' });
+	input.focus();
+	reportFocus(document.hasFocus());
+})();

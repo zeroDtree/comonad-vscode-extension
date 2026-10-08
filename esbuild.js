@@ -2,6 +2,7 @@ const esbuild = require("esbuild");
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
+const tests = process.argv.includes('--tests');
 
 /**
  * @type {import('esbuild').Plugin}
@@ -24,24 +25,34 @@ const esbuildProblemMatcherPlugin = {
 };
 
 async function main() {
-	const ctx = await esbuild.context({
-		entryPoints: [
-			'src/extension.ts'
-		],
+	const common = {
 		bundle: true,
 		format: 'cjs',
-		minify: production,
-		sourcemap: !production,
-		sourcesContent: false,
 		platform: 'node',
-		outfile: 'dist/extension.js',
 		external: ['vscode'],
 		logLevel: 'silent',
 		plugins: [
 			/* add to the end of plugins array */
 			esbuildProblemMatcherPlugin,
 		],
-	});
+	};
+	const ctx = await esbuild.context(
+		tests
+			? {
+					...common,
+					entryPoints: ['src/test/extension.test.ts', 'src/test/activation.test.ts'],
+					outdir: 'out/test',
+					sourcemap: true,
+				}
+			: {
+					...common,
+					entryPoints: ['src/main.ts'],
+					outfile: 'dist/extension.js',
+					minify: production,
+					sourcemap: !production,
+					sourcesContent: false,
+				},
+	);
 	if (watch) {
 		await ctx.watch();
 	} else {

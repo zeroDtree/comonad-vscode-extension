@@ -21,7 +21,27 @@
             "type": "npm",
             "script": "watch:esbuild",
             "group": "build",
-            "problemMatcher": "$esbuild-watch",
+            "problemMatcher": {
+                "owner": "esbuild",
+                "fileLocation": ["relative", "${workspaceFolder}"],
+                "pattern": [
+                    {
+                        "regexp": "^✘ \\[ERROR\\] (.+)$",
+                        "message": 1
+                    },
+                    {
+                        "regexp": "^    (.+):(\\d+):(\\d+):$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3
+                    }
+                ],
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^\\[watch\\] build started$",
+                    "endsPattern": "^\\[watch\\] build finished$"
+                }
+            },
             "isBackground": true,
             "label": "npm: watch:esbuild",
             "presentation": {
@@ -59,6 +79,24 @@
 				"npm: watch-tests"
 			],
 			"problemMatcher": []
+		},
+		{
+			"label": "host-tests",
+			"type": "shell",
+			"command": "npm test",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "silent"
+			}
+		},
+		{
+			"label": "verify",
+			"type": "shell",
+			"command": "npm run check-types && npm run lint && npm run compile-tests && npx mocha --ui tdd out/test/extension.test.js",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "silent"
+			}
 		}
 	]
 }
