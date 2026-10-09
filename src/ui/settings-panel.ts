@@ -6,7 +6,7 @@ import type { Context } from 'cordis';
 import { compileGraphs } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { APPROVAL_LABELS, gateFlow, modeCapabilities, MODE_LABELS, parseRule } from '../lib/policy';
-import type { ContextForm } from '../lib/prompt';
+import { estimateTokens, type ContextForm } from '../lib/prompt';
 import { INJECTION_POSITION } from '../lib/tavern/types';
 import { describe } from '../lib/util';
 import { profileKeyEnvs, type Config, type Profile } from '../services/settings';
@@ -220,6 +220,41 @@ export function settingsPanel(ctx: Context): void {
 		});
 	};
 
+	/**
+	 * Every prompt the model can be given: the agent's own blocks, each tool's definition, and the
+	 * SillyTavern collection the active chat would send. Read on demand — it reads instruction files and
+	 * memory from disk — so the tab asks for it rather than every state push carrying it.
+	 */
+	const promptsSlice = async (): Promise<Record<string, unknown>> => {
+		const session = ctx.sessions.active();
+		const visible = new Set(session ? ctx.tools.visible(session.policy).map((tool) => tool.name) : []);
+		return {
+			chat: session ? { title: session.title, mode: session.policy.workMode, approval: session.policy.approval } : null,
+			comonad: session
+				? (await ctx.agent.promptBlocks(session)).map((block) => ({ name: block.name, text: block.text, tokens: estimateTokens(block.text) }))
+				: [],
+			tools: ctx.tools.all().map((tool) => ({
+				name: tool.name,
+				capability: tool.capability,
+				description: tool.description,
+				parameters: tool.parameters,
+				visible: visible.has(tool.name),
+				tokens: estimateTokens(tool.description),
+			})),
+			st: ctx.tavern.promptsFor(session?.id).map((prompt) => ({
+				identifier: prompt.identifier,
+				name: prompt.name || prompt.identifier,
+				role: prompt.role,
+				content: prompt.content ?? '',
+				enabled: prompt.enabled,
+				marker: prompt.marker === true,
+				inChat: Number(prompt.injection_position ?? 0) === INJECTION_POSITION.absolute,
+				depth: prompt.injection_depth,
+				tokens: estimateTokens(String(prompt.content ?? '')),
+			})),
+		};
+	};
+
 	const handle = async (message: Record<string, unknown>): Promise<void> => {
 		if (!panel) {
 			return;
@@ -260,6 +295,10 @@ export function settingsPanel(ctx: Context): void {
 					await ctx.mcp.reload();
 					void panel.webview.postMessage({ type: 'ok', message: 'MCP servers reloaded.' });
 					break;
+				case 'prompts': {
+					void panel.webview.postMessage({ type: 'prompts', prompts: await promptsSlice() });
+					break;
+				}
 				case 'content': {
 					const note = await content.action(message);
 					if (note) {
@@ -493,9 +532,9 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri, tab: string): s
       <button class="tab" type="button" role="tab" data-tab="agent" title="Agent — preset, model, policy, workspace">Agent</button>
       <button class="tab" type="button" role="tab" data-tab="st" title="ST — characters, world books, personas, presets and their settings">ST</button>
       <button class="tab" type="button" role="tab" data-tab="rules" title="Rules — allow, ask and deny rules for tool calls">Rules</button>
-      <button class="tab" type="button" role="tab" data-tab="flow" title="Flow — how one tool call is gated">Flow</button>
       <button class="tab" type="button" role="tab" data-tab="mcp" title="MCP — servers and their status">MCP</button>
       <button class="tab" type="button" role="tab" data-tab="tools" title="Tools — what a turn may run">Tools</button>
+      <button class="tab" type="button" role="tab" data-tab="inspect" title="Inspect — the tool policy flow and every prompt the model can be given">Inspect</button>
     </nav>
     <span class="grow"></span>
     <button class="primary" id="save" type="button" title="Save — write these settings to this workspace">Save</button>
@@ -618,7 +657,7 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri, tab: string): s
         <div id="wi-top">
           <div class="wi-block">
             <small class="wi-label">Active World(s) for all chats</small>
-            <select id="wi-worlds" multiple size="4" title="Books every chat scans, whatever else is selected"></select>
+            <div id="wi-worlds" role="group" aria-label="Active worlds" title="Books every chat scans; tick any number, or none"></div>
           </div>
           <div class="wi-block">
             <small class="wi-label">Global World Info/Lorebook activation settings</small>
@@ -781,13 +820,13 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri, tab: string): s
               <div class="wi-field"><small>Automation ID</small><input class="wi-automation" type="text" list="wi-automation-options" placeholder="Automation ID" spellcheck="false" /></div>
               <div class="wi-field wi-wide">
                 <small>Filter to Generation Triggers</small>
-                <select class="wi-triggers" multiple size="4"></select>
+                <div class="wi-triggers wi-checks" role="group" aria-label="Generation triggers"></div>
               </div>
             </div>
             <div class="wi-line">
               <div class="wi-field wi-wide">
                 <small>Filter to Characters or Tags <label class="wi-inline" title="Turn the filter around: these characters and tags are excluded"><input type="checkbox" class="wi-filter-exclude" /> Exclude</label></small>
-                <select class="wi-filter" multiple size="4"></select>
+                <div class="wi-filter wi-checks" role="group" aria-label="Characters or tags"></div>
               </div>
             </div>
             <div class="wi-foot">
@@ -984,14 +1023,39 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri, tab: string): s
     </div>
   </section>
 
-  <section data-pane="flow" hidden>
-    <div class="field wide">
-      <label>Tool call gate</label>
-      <p class="hint">Every call walks the gates in order and leaves at the first one that stops it. The framed part is what you configure: the rules from the <strong>Rules</strong> tab, then the approval policy for the calls no rule matched.</p>
-      <ul class="legend" id="flow-legend"></ul>
-      <p class="hint">Red ends the call, amber asks you first, green runs without asking.</p>
+  <section data-pane="inspect" hidden>
+    <nav id="inspect-tabs" role="tablist" aria-label="Inspect">
+      <button class="subtab" type="button" role="tab" data-inspect="flow" title="Tool Policy Flow — how one tool call is gated">Tool Policy Flow (TPF)</button>
+      <button class="subtab" type="button" role="tab" data-inspect="prompts" title="Prompts — every prompt the model can be given">Prompts</button>
+    </nav>
+
+    <div data-inspect-pane="flow">
+      <div class="field wide">
+        <label>Tool Policy Flow</label>
+        <p class="hint">Every call walks the gates in order and leaves at the first one that stops it. The framed part is what you configure: the rules from the <strong>Rules</strong> tab, then the approval policy for the calls no rule matched.</p>
+        <ul class="legend" id="flow-legend"></ul>
+        <p class="hint">Red ends the call, amber asks you first, green runs without asking.</p>
+      </div>
+      <div id="flow" class="diagram"></div>
     </div>
-    <div id="flow" class="diagram"></div>
+
+    <div data-inspect-pane="prompts" hidden>
+      <div id="pr-wrap">
+        <div class="field">
+          <label>Prompts</label>
+          <p class="hint">Every prompt the model can be given: Comonad's own blocks, each tool's definition, and the SillyTavern collection this chat would send. Pick one to read it.</p>
+          <div id="pr-list"></div>
+        </div>
+        <div class="field">
+          <label id="pr-title">Preview</label>
+          <p class="hint" id="pr-meta"></p>
+          <pre id="pr-view" class="pr-view"></pre>
+        </div>
+      </div>
+      <div class="row">
+        <button class="secondary" id="pr-refresh" type="button" title="Read the prompts again">Refresh</button>
+      </div>
+    </div>
   </section>
 
   <section data-pane="mcp" hidden>

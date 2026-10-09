@@ -446,15 +446,25 @@ button.secondary.danger:hover {
 }
 
 /* The preset manager's own row: the template picker and the three file verbs, as one group. */
+/* One line of its own, under the chat/file actions: the picker and its three verbs never break apart. */
 #st-form .preset-tools {
 	display: flex;
-	flex-wrap: wrap;
+	flex: 1 1 100%;
+	flex-wrap: nowrap;
+	justify-content: flex-end;
 	gap: 6px;
 	align-items: center;
+	min-width: 0;
 }
 
 #st-form .preset-tools select {
+	flex: 0 1 200px;
+	min-width: 0;
 	max-width: 200px;
+}
+
+#st-form .preset-tools button {
+	white-space: nowrap;
 }
 
 #st-form .prompt-list {
@@ -476,6 +486,21 @@ button.secondary.danger:hover {
 
 #st-form .prompt-item.is-editing {
 	border-color: var(--st-accent);
+}
+
+/* A block can be dragged to a new place; the identity block stays where it is. */
+#st-form .prompt-item[draggable='true'] {
+	cursor: grab;
+}
+
+#st-form .prompt-item.is-dragging {
+	opacity: 0.4;
+}
+
+/* The line a dragged block would land on: a border on the side it would be dropped at. */
+#st-form .prompt-item.is-drop-target {
+	border-color: var(--st-accent);
+	box-shadow: inset 0 2px 0 var(--st-accent);
 }
 
 /* Comonad's own block leads the list and cannot be switched off: it reads as the fixed thing it is. */
@@ -610,9 +635,27 @@ button.secondary.danger:hover {
 	color: var(--st-muted);
 }
 
-#st-form .prompt-field select[multiple] {
+/* The Triggers tick-box list: scrolls instead of growing, like the world-book lists. */
+#st-form .prompt-field .pe-checks {
 	min-height: 92px;
+	max-height: 140px;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
 	padding: 2px;
+}
+
+#st-form .prompt-field .pe-check {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 6px;
+	cursor: pointer;
+	user-select: none;
+}
+
+#st-form .prompt-field .pe-check input {
+	margin: 0;
 }
 
 #st-form .prompt-text-label {
@@ -641,6 +684,62 @@ button.secondary.danger:hover {
 }
 
 #st-form .prompt-edit-footer button.reset {
+	color: var(--st-warning);
+}
+
+/* The prompt library — one entry box for the shared library and the preset's own. The small button on
+   the left switches which one it shows, the picker finds an entry, and the picked one is edited in the
+   space right below, so there is no separate list to keep in step with it. */
+#st-form .library-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 4px 0 8px;
+	padding-bottom: 5px;
+	border-bottom: 1px solid var(--st-border-soft);
+}
+
+#st-form .library-head h2 {
+	flex: 1;
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+
+#st-form .library-box {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 6px 0 4px;
+	min-width: 0;
+}
+
+#st-form .library-box > button.library-scope {
+	flex: none;
+	min-width: 108px;
+	text-align: left;
+}
+
+#st-form .library-box > select {
+	flex: 1 1 auto;
+	min-width: 0;
+	max-width: 300px;
+}
+
+#st-form .library-box > button {
+	flex: none;
+}
+
+/* The picked entry's editor has no row to live in, so it carries a frame of its own. */
+#st-form .library-edit {
+	margin-top: 6px;
+	border: 1px solid var(--st-border-soft);
+	border-radius: var(--st-radius-sm);
+	background: var(--st-surface-2);
+}
+
+#st-form .prompt-edit-footer button.library-delete {
+	margin-right: auto;
 	color: var(--st-warning);
 }
 

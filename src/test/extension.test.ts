@@ -16,16 +16,19 @@ import { SessionStore, unusedChat } from '../services/sessions';
 import { formatModelId, parseModelId, shapeModels } from '../services/llm';
 import { CONFIG_KEYS, DEPRECATED_CONFIG_KEYS, profileKeyEnvs } from '../services/settings';
 import { toolset } from '../services/tools';
+import { promptText } from '../services/agent';
 import { blankPng, cardTextFromPng, characterToCard, greetingsOf, loadCard, normaliseCard, parseCard, readPngText, writePngText } from '../lib/tavern/card';
 import { adoptBook, adoptCharacter, adoptPersona, adoptPreset, blankBook, blankCharacter, blankPersona, blankPreset, entryToJson } from '../lib/tavern/authoring';
 import { readBookFile } from '../services/tavern';
 import { convertCharacterToPersona } from '../lib/tavern/personas';
 import { parseExamples, substituteMacros } from '../lib/tavern/macro';
 import { parsePreset, presetSamplers, presetToJson } from '../lib/tavern/preset';
+import { builtInBlocks, librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from '../lib/tavern/library';
 import { PRESET_TEMPLATES } from '../lib/tavern/templates/presets';
 import { PROMPT_BLOCKS } from '../lib/tavern/templates/blocks';
-import { DEFAULT_ORDER, DEFAULT_PROMPTS, IDENTITY_PROMPT, movePrompt, promptCollection, setEnabled, shippedPrompt, triggersGeneration } from '../lib/tavern/prompts';
+import { DEFAULT_ORDER, DEFAULT_PROMPTS, IDENTITY_PROMPT, movePrompt, promptCollection, setEnabled, shippedPrompt, triggersGeneration, withoutIdentityBlock } from '../lib/tavern/prompts';
 import { activateLore, toWorldBook, worldInfoToBook, type LoreBook, type LoreInput } from '../lib/tavern/lore';
+import type { TavernPreset } from '../lib/tavern/types';
 import { assemble, exampleMessages, injectAtDepth } from '../lib/tavern/assemble';
 import { applyRegex, makeScript } from '../lib/tavern/regex';
 import { ruleOf, searchEntries, visibleEntries } from '../lib/tavern/search';
@@ -47,7 +50,7 @@ import {
 	tagIdsOf,
 	tagsOf,
 } from '../lib/tavern/tags';
-import { REGEX_PLACEMENT, WI_LOGIC, WI_POSITION, WI_ROLE, WI_SETTINGS_DEFAULTS, WI_STRATEGY, worldEntry, type GenerationTrigger, type WorldEntry } from '../lib/tavern/types';
+import { REGEX_PLACEMENT, PROMPT_LIBRARY_KEY, WI_LOGIC, WI_POSITION, WI_ROLE, WI_SETTINGS_DEFAULTS, WI_STRATEGY, worldEntry, type GenerationTrigger, type WorldEntry } from '../lib/tavern/types';
 import { createTestKernel } from './harness';
 import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, countMessages, countRaw, countTokens, encodingForModel, guesstimate, setEncoder } from '../lib/tokens';
 import { planFor } from '../services/tokenizers';
@@ -553,6 +556,97 @@ suite('Comonad domain', () => {
 		const host = readFileSync(join(dir, 'content.js'), 'utf8');
 		assert.match(host, /window\.comonadPersonas/, 'the content pane loads it');
 		assert.match(host, /kind === 'personas' && personaPane/, 'and hands the kind over');
+	});
+
+	test('the prompt pane saves before it inserts, and keeps both libraries straight', () => {
+		const dir = join(__dirname, '..', '..', 'resources');
+		const pane = readFileSync(join(dir, 'content.js'), 'utf8');
+		// A new entry is *saved* first: the two entry boxes carry *+ New*, and only their *Insert* puts a
+		// saved one into the list, at the top, right after Comonad’s own block.
+		assert.match(pane, /'Built-in'/, 'the built-in library is a labelled entry box');
+		assert.match(pane, /'Custom'/, 'and this preset’s custom library is one too');
+		assert.match(pane, /addToPresetLibrary/, 'the custom box’s *+ New* saves rather than inserts');
+		assert.match(pane, /insertFromLibrary/, 'inserting copies a library entry into the list');
+		assert.match(pane, /promptLibrarySave/, 'a system-library change is written straight through');
+		assert.match(pane, /editingLibrary/, 'each library entry has an editor of its own');
+		assert.match(pane, /builtInPrompts/, 'the built-in library comes from the top-level host slice, whatever kind is showing');
+		const serviceSource = readFileSync(join(__dirname, '..', '..', 'src', 'services', 'tavern.ts'), 'utf8');
+		assert.match(serviceSource, /prompts\.filter\(\(prompt\) => prompt\.identifier !== IDENTITY_PROMPT\)/, 'a saved preset never carries the identity block');
+		assert.match(pane, /block\.draggable = true/, 'a prompt card can be dragged to reorder the list');
+		assert.match(pane, /moveTo\(from, index\)/, 'a drop moves the card to its new index');
+		assert.match(readFileSync(join(dir, 'content.css'), 'utf8'), /is-drop-target/, 'the drop target is shown while dragging');
+		const host = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'tavern-content.ts'), 'utf8');
+		assert.match(host, /builtInPrompts:\s*ctx\.tavern\.promptLibrary/, 'the host sends it at the top level, not inside the presets-only slice');
+		assert.doesNotMatch(host, /systemPrompts/, 'the old kind-gated field is gone');
+		assert.match(pane, /uniqueId\(/, 'an inserted identifier is made unique');
+		// The item the pane is editing has to survive a push: the shared library saves while the preset
+		// may still be dirty, and the panel answers every content message with a fresh state.
+		assert.match(pane, /item = dirty && same \? item : incoming;/, 'a dirty form keeps the item it is editing');
+
+		const css = readFileSync(join(dir, 'content.css'), 'utf8');
+		assert.match(css, /\.library-head\s*\{/, 'the library section has a header of its own');
+		// One entry box holds both libraries: a picker, *+ New* and *Insert*, with the picked entry edited
+		// in the space right below it — there is no separate list to keep in step.
+		assert.match(css, /\.library-box\s*\{/, 'the entry box is styled');
+		assert.match(css, /\.library-scope\s*\{/, 'and its small button switches which library it shows');
+		assert.match(css, /\.library-edit\s*\{/, 'and the picked entry gets a framed editor of its own');
+		assert.match(pane, /libraryScope/, 'the box remembers the library it is showing');
+	});
+
+	test('the agent’s system prompt is named blocks, joined exactly as the model receives it', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			const blocks = await kernel.ctx.agent.promptBlocks(session);
+			assert.ok(blocks.length, 'there is always at least the identity block');
+			assert.strictEqual(blocks[0].name, 'Identity', 'and it leads');
+			assert.strictEqual(new Set(blocks.map((block) => block.name)).size, blocks.length, 'no block is named twice');
+			// The identity block is the part a refactor must never disturb: its lines are the agent’s contract.
+			const identity = blocks[0].text.split('\n');
+			assert.strictEqual(identity[0], 'You are Comonad, an agentic coding assistant running inside VS Code.');
+			assert.match(identity[1], /Inspect the workspace with the provided tools/);
+			assert.strictEqual(identity[2], 'Never ask the user for permission in your reply; the host asks whenever a tool needs approval.');
+			assert.match(identity[3], /^Mode: .+; approval: .+; network: (on|off)\.$/);
+			assert.match(identity[4], /^Today: \d{4}-\d{2}-\d{2}\.$/);
+			// The joiner is the only thing that turns blocks into wire text, and it is one blank line.
+			assert.strictEqual(promptText(blocks), blocks.map((block) => block.text).join('\n\n'));
+			assert.ok(!promptText(blocks).includes('\n\n\n'), 'blocks are separated by exactly one blank line');
+			assert.ok(!promptText(blocks).startsWith('\n') && !promptText(blocks).endsWith('\n'), 'with no padding');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the Inspect tab holds the tool policy flow and every prompt the model can be given', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		// One top-level tab, two sub-tabs: the flow and the prompt list live together under Inspect.
+		assert.match(panel, /data-tab="inspect"/, 'the panel has an Inspect tab');
+		assert.match(panel, /data-pane="inspect"/, 'and a pane for it');
+		assert.match(panel, /data-inspect="flow"[^>]*>Tool Policy Flow \(TPF\)</, 'the flow is its first sub-tab, under its new name');
+		assert.match(panel, /data-inspect="prompts"/, 'and Prompts is the second');
+		assert.match(panel, /data-inspect-pane="flow"/, 'the flow has a pane of its own');
+		assert.match(panel, /data-inspect-pane="prompts" hidden/, 'so does the prompt list, hidden to start');
+		assert.ok(!/data-tab="flow"/.test(panel) && !/data-tab="prompts"/.test(panel), 'and neither is a top-level tab any more');
+
+		assert.match(panel, /case 'prompts'/, 'the host answers the prompt list’s request on demand');
+		assert.match(panel, /ctx\.agent\.promptBlocks/, 'with the agent’s own named blocks');
+		assert.match(panel, /ctx\.tavern\.promptsFor/, 'the SillyTavern collection the chat would send');
+		assert.match(panel, /parameters: tool\.parameters/, 'and each tool’s definition, schema included');
+
+		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
+		assert.match(guest, /function showInspect/, 'the guest switches the sub-tabs');
+		assert.match(guest, /function renderPrompts/, 'renders the prompt list');
+		assert.match(guest, /case 'prompts':/, 'and handles the reply');
+		for (const group of ['Comonad', 'Tools', 'SillyTavern']) {
+			assert.ok(guest.includes(`group: '${group}'`), `the list is grouped: ${group}`);
+		}
+		// Mermaid measures its container, so the flow may only be drawn while it is on screen.
+		assert.match(guest, /activeTab !== 'inspect' \|\| activeInspect !== 'flow'/, 'the flow only draws while its sub-tab shows');
+
+		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.css'), 'utf8');
+		assert.match(css, /#inspect-tabs\s*\{/, 'the sub-tab strip has its own rule');
+		assert.match(css, /#pr-wrap\s*\{/, 'the pane has its own layout');
+		assert.match(css, /\.pr-row\s*\{/, 'with a row per prompt');
 	});
 
 	test('every setting the manifest declares is one the code actually reads', () => {
@@ -1529,6 +1623,97 @@ suite('Tavern content', () => {
 		const saved = JSON.parse(presetToJson(preset)) as Record<string, unknown>;
 		assert.strictEqual(saved.unknown_key, 'kept');
 		assert.strictEqual((saved.prompt_order as Array<{ order: unknown[] }>)[0].order.length, 3);
+	});
+
+	test('a preset keeps its own prompt library, and Comonad’s shared library is seeded', async () => {
+		// The key is Comonad's own: SillyTavern never writes it, so a save keeps every ST field beside it.
+		const preset = parsePreset(
+			JSON.stringify({
+				temperature: 0.8,
+				prompts: [{ identifier: 'main', content: 'hi' }],
+				[PROMPT_LIBRARY_KEY]: [
+					{ identifier: 'loreVoice', name: 'Lore voice', role: 'system', content: 'Keep the lore factual.' },
+					{ nope: true },
+				],
+				unknown_key: 'kept',
+			}),
+			'Saved',
+			'saved',
+		);
+		assert.deepStrictEqual(preset.promptLibrary?.map((entry) => entry.identifier), ['loreVoice'], 'an entry with no identifier is not a prompt');
+		const written = JSON.parse(presetToJson(preset)) as Record<string, unknown>;
+		assert.strictEqual(written.unknown_key, 'kept', 'the keys we do not model are kept');
+		assert.deepStrictEqual((written[PROMPT_LIBRARY_KEY] as Array<{ identifier: string }>).map((entry) => entry.identifier), ['loreVoice']);
+		// A preset that never used a library does not grow the key.
+		const bare = parsePreset(JSON.stringify({ prompts: [{ identifier: 'main', content: 'hi' }] }), 'Bare', 'bare');
+		assert.strictEqual(bare.promptLibrary, undefined);
+		assert.ok(!(PROMPT_LIBRARY_KEY in (JSON.parse(presetToJson(bare)) as Record<string, unknown>)), 'an unused library is not written');
+
+		// A preset saved before the identity block stopped being written: the block is taken out of every
+		// order and the prompt list, and a preset without it is handed back untouched.
+		const stale = { id: 'stale', name: 'Stale', raw: {}, prompts: [{ identifier: 'comonad', role: 'system' as const, marker: true }, { identifier: 'main', role: 'system' as const, content: 'hi' }], promptOrder: [{ identifier: 'comonad', enabled: true }, { identifier: 'main', enabled: true }], promptOrders: { 'Alice': [{ identifier: 'comonad', enabled: true }] } } as unknown as TavernPreset;
+		const cleaned = withoutIdentityBlock(stale);
+		assert.deepStrictEqual(cleaned.prompts?.map((prompt) => prompt.identifier), ['main'], 'the list keeps every other block');
+		assert.deepStrictEqual(cleaned.promptOrder?.map((entry) => entry.identifier), ['main']);
+		assert.deepStrictEqual(cleaned.promptOrders?.Alice, [], 'a character order loses it too');
+		assert.strictEqual(withoutIdentityBlock(cleaned), cleaned, 'a clean preset is returned as it is');
+
+		// A pane is untrusted input: what it sends back is filtered before it can be written.
+		assert.deepStrictEqual(sanitisePromptLibrary([{ identifier: 'ok', content: 'x' }, { content: 'no id' }, null]).map((entry) => entry.identifier), ['ok']);
+
+		// The built-in library is the blocks the templates carry beyond the defaults, and its file round-trips them.
+		const seed = librarySeed();
+		assert.deepStrictEqual(seed.map((entry) => entry.identifier), PROMPT_BLOCKS.map((block) => block.id));
+		assert.ok(seed.every((entry) => !DEFAULT_PROMPTS.some((prompt) => prompt.identifier === entry.identifier)), 'the shipped defaults are not in the library');
+		assert.ok(seed.every((entry) => entry.description && entry.content), 'every seeded block explains itself and says something');
+		assert.deepStrictEqual(parsePromptLibrary(promptLibraryJson(seed)).map((entry) => entry.identifier), seed.map((entry) => entry.identifier));
+		assert.deepStrictEqual(parsePromptLibrary('[]'), [], 'a bare array is tolerated');
+
+		const kernel = await createTestKernel();
+		try {
+			// The service reads its library as it is constructed. A window that never sees a `.comonad`
+			// change must still find the shared library seeded — without this the ST pane opened on an
+			// empty system library and the seed file was never written.
+			await kernel.ctx.tavern.ready;
+			const file = kernel.ctx.tavern.promptLibraryFile();
+			assert.ok(existsSync(file), 'the shared library is seeded as the service loads, so the file exists to be edited');
+			assert.deepStrictEqual(kernel.ctx.tavern.promptLibrary.map((entry) => entry.identifier), PROMPT_BLOCKS.map((block) => block.id));
+
+			// The built-in library can be edited but not grown: an added entry is dropped on save, and an
+			// edit to a built-in one is kept across a reload.
+			const first = kernel.ctx.tavern.promptLibrary[0]!;
+			const writtenFile = await kernel.ctx.tavern.savePromptLibrary([
+				{ ...first, content: 'Edited text.' },
+				{ identifier: 'mine', name: 'Mine', role: 'system', content: 'Keep it short.' },
+			]);
+			assert.strictEqual(writtenFile, file);
+			assert.ok(!kernel.ctx.tavern.promptLibrary.some((entry) => entry.identifier === 'mine'), 'a new entry cannot be added to the built-in library');
+			await kernel.ctx.tavern.reload();
+			assert.strictEqual(kernel.ctx.tavern.promptLibrary.find((entry) => entry.identifier === first.identifier)?.content, 'Edited text.', 'an edit to a built-in entry survives a reload');
+			assert.deepStrictEqual(kernel.ctx.tavern.promptLibrary.map((entry) => entry.identifier), builtInBlocks().map((entry) => entry.identifier), 'the set stays the same');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a reload waits for the read before it instead of racing it', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'characters'), { recursive: true });
+			writeFileSync(
+				join(library, 'characters', 'late.json'),
+				JSON.stringify({ spec: 'chara_card_v2', spec_version: '2.0', data: { name: 'Late', description: 'Late is here.' } }),
+			);
+			// The service's own first read started before that card existed. This reload has to settle after
+			// it, not beside it: two reads in flight can finish in either order, and the older one — the one
+			// that saw an empty library — would then be the state every pane reads until something else
+			// happens to reload it.
+			await Promise.all([kernel.ctx.tavern.reload(), kernel.ctx.tavern.ready]);
+			assert.ok(kernel.ctx.tavern.character('late'), 'the card is there once both reads are done');
+		} finally {
+			await kernel.dispose();
+		}
 	});
 
 	test('the prompt collection can be switched and reordered, the identity block cannot', () => {
@@ -2608,12 +2793,14 @@ suite('Tavern content', () => {
 		const preset = adoptPreset({
 			name: 'Edited',
 			prompts: [{ identifier: 'main', content: 'hi' }, { nope: true }],
+			promptLibrary: [{ identifier: 'saved', name: 'Saved', role: 'system', content: 'Keep it short.' }, { content: 'no identifier' }],
 			temperature: 0.5,
 			top_p: 'high',
 			maxTokens: 800,
 		});
 		assert.strictEqual(preset.id, 'Edited');
 		assert.deepStrictEqual(preset.prompts?.map((prompt) => prompt.identifier), ['main'], 'a prompt without an identifier is dropped');
+		assert.deepStrictEqual(preset.promptLibrary?.map((entry) => entry.identifier), ['saved'], 'a library entry is sanitised like a prompt');
 		assert.deepStrictEqual(preset.promptOrder, [{ identifier: 'main', enabled: true }]);
 		assert.strictEqual(preset.temperature, 0.5);
 		assert.strictEqual(preset.top_p, undefined, 'a sampler with the wrong type is not written');

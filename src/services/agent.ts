@@ -922,9 +922,19 @@ export class Agent extends Service {
 		}
 	}
 
-	private async systemPrompt(session: Session, contexts: string[]): Promise<string> {		const config = this.ctx.settings.get();
+	private async systemPrompt(session: Session, contexts: string[]): Promise<string> {
+		return promptText(await this.promptBlocks(session, contexts));
+	}
+
+	/**
+	 * The blocks of the system prompt this chat sends, in order, each with the name of what it is — so a
+	 * panel can show the model's instructions and where each came from. `contexts` is the turn's own
+	 * attached context, which only exists while a turn is being built.
+	 */
+	async promptBlocks(session: Session, contexts: string[] = []): Promise<PromptBlock[]> {
+		const config = this.ctx.settings.get();
 		const host = this.ctx.host;
-		const lines = [
+		const identity = [
 			'You are Comonad, an agentic coding assistant running inside VS Code.',
 			MODE_CAPS[session.policy.workMode].size
 				? 'Inspect the workspace with the provided tools before editing. Prefer apply_edits for precise changes and write_file for new files or full rewrites.'
@@ -934,52 +944,64 @@ export class Agent extends Service {
 			`Today: ${new Date().toISOString().slice(0, 10)}.`,
 		];
 		if (!session.policy.workingDirectory) {
-			lines.push('This session has no working directory: file, shell and task tools are unavailable.');
+			identity.push('This session has no working directory: file, shell and task tools are unavailable.');
 		}
+		const blocks: PromptBlock[] = [{ name: 'Identity', text: identity.join('\n') }];
 		if (config.instructions) {
 			const layers = await loadInstructions(session.policy.workingDirectory, host.home(), host.trusted());
 			session.instructions = layers.map((layer) => layer.source);
 			const text = formatInstructions(layers);
 			if (text) {
-				lines.push('', text);
+				blocks.push({ name: 'Instructions', text });
 			}
 		}
 		if (config.memory) {
 			const memory = await readMemory(memoryDir(host.storage.root, session.policy.workingDirectory));
 			if (memory.trim()) {
-				lines.push('', `Memory from earlier sessions:\n${memory}`);
+				blocks.push({ name: 'Memory', text: `Memory from earlier sessions:\n${memory}` });
 			}
 		}
 		const todos = this.todoLists.get(session.id) ?? [];
 		if (todos.length) {
-			lines.push('', `Current todo list:\n${formatTodos(todos)}`);
+			blocks.push({ name: 'Todos', text: `Current todo list:\n${formatTodos(todos)}` });
 		}
 		if (config.skills) {
 			const index = skillIndex(this.ctx.catalog.skills);
 			if (index) {
-				lines.push('', index);
+				blocks.push({ name: 'Skills', text: index });
 			}
 		}
 		const agents = agentIndex(this.ctx.catalog.agents);
 		if (agents) {
-			lines.push('', agents);
+			blocks.push({ name: 'Sub-agents', text: agents });
 		}
 		if (config.tavernEnabled) {
 			// The books a chat can look up: without this the model cannot know `lore_lookup` has anything.
 			const books = this.ctx.tavern.loreIndex(session.id);
 			if (books) {
-				lines.push('', books);
+				blocks.push({ name: 'Lore index', text: books });
 			}
 		}
 		if (contexts.length) {
-			lines.push('', `Context:\n${contexts.join('\n\n')}`);
+			blocks.push({ name: 'Context', text: `Context:\n${contexts.join('\n\n')}` });
 		}
-		return lines.join('\n');
+		return blocks;
 	}
 
 	private notice(ref: TurnRef, text: string): void {
 		this.ctx.emit('agent/notice', ref, text);
 	}
+}
+
+/** One named part of the system prompt, in the order the model receives it. */
+export interface PromptBlock {
+	name: string;
+	text: string;
+}
+
+/** The wire text of a block list: the blocks separated by a blank line, as the model receives them. */
+export function promptText(blocks: readonly PromptBlock[]): string {
+	return blocks.map((block) => block.text).join('\n\n');
 }
 
 export const agentPlugin = Agent;

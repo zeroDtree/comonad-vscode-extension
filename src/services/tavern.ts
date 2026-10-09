@@ -10,8 +10,9 @@ import { activateLore, loreIndex, toWorldBook, worldInfoToBook, type LoreBook, t
 import { substituteMacros, type MacroContext } from '../lib/tavern/macro';
 import { applyRegex, regexScriptsFrom } from '../lib/tavern/regex';
 import { emptyStore, mergeStores, readStore, renameKey, storeJson, tagIdsOf, tagsOf, type Tag, type TagStore } from '../lib/tavern/tags';
+import { librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from '../lib/tavern/library';
 import { loadPreset, presetSamplers, presetToJson, type PresetSamplers } from '../lib/tavern/preset';
-import { applyCardOverrides, promptCollection, withoutRoleplayScaffolding, type ActivePrompt } from '../lib/tavern/prompts';
+import { applyCardOverrides, IDENTITY_PROMPT, promptCollection, withoutIdentityBlock, withoutRoleplayScaffolding, type ActivePrompt } from '../lib/tavern/prompts';
 import { assemble, type AssembleBlocks } from '../lib/tavern/assemble';
 import {
 	PERSONA_POSITION,
@@ -22,6 +23,7 @@ import {
 	type Character,
 	type Persona,
 	type PromptItem,
+	type PromptLibraryEntry,
 	type RegexScript,
 	type TavernPreset,
 	type GenerationTrigger,
@@ -118,13 +120,39 @@ export class Tavern extends Service {
 	personas: Persona[] = [];
 	/** The tag registry: SillyTavern keeps it beside the settings, Comonad in `.comonad/tags.json`. */
 	tags: TagStore = emptyStore();
+	/**
+	 * The shared prompt library: `.comonad/prompt-library.json`, seeded from the built-in blocks.
+	 * Every preset can insert its entries; a preset's own library rides inside the preset's file.
+	 */
+	promptLibrary: PromptLibraryEntry[] = [];
+
+	/**
+	 * The first read, in flight from the moment the service exists. Nothing else fills the library, so a
+	 * window that never sees a `.comonad` change would otherwise open every content surface — and the
+	 * shared prompt library — empty until something happened to trigger a reload. Await it to be sure.
+	 */
+	readonly ready: Promise<void>;
+
+	/**
+	 * The reads run one at a time: two in flight would race, and the one that started first could land
+	 * last — a startup read of an empty library undoing the reload a pane just asked for.
+	 */
+	private reading: Promise<void> = Promise.resolve();
 
 	constructor(ctx: Context) {
 		super(ctx, 'tavern');
+		this.ready = this.reload();
 	}
 
-	/** Re-reads every source. A broken file is logged and skipped, never fatal. */
-	async reload(): Promise<void> {
+	/** Re-reads every source, after the read before it has finished. */
+	reload(): Promise<void> {
+		const next = this.reading.then(() => this.read());
+		this.reading = next.catch(() => undefined);
+		return next;
+	}
+
+	/** One read of every source. A broken file is logged and skipped, never fatal. */
+	private async read(): Promise<void> {
 		const host = this.ctx.host;
 		const characters: Character[] = [];
 		const books: LoadedBook[] = [];
@@ -133,13 +161,15 @@ export class Tavern extends Service {
 		for (const root of this.roots()) {
 			await this.readLibrary(root, { characters, books, presets, personas });
 		}
+		await this.cleanIdentityBlocks(presets);
 		this.tags = await this.readTags();
+		this.promptLibrary = await this.loadPromptLibrary();
 		this.characters = uniqueBy(characters, (character) => character.id);
 		this.books = uniqueBy(books, (book) => book.name.toLowerCase());
 		this.presets = uniqueBy(presets, (preset) => preset.id);
 		this.personas = uniqueBy(personas, (persona) => persona.id);
 		this.ctx.log.message(
-			`tavern: ${this.characters.length} character(s), ${this.books.length} lorebook(s), ${this.presets.length} preset(s), ${this.personas.length} persona(s)`,
+			`tavern: ${this.characters.length} character(s), ${this.books.length} lorebook(s), ${this.presets.length} preset(s), ${this.personas.length} persona(s), ${this.promptLibrary.length} prompt(s) in the library`,
 		);
 		this.ctx.emit('tavern/changed');
 	}
@@ -189,6 +219,53 @@ export class Tavern extends Service {
 		await writeFile(file, storeJson(this.tags), 'utf8');
 		this.tags = await this.readTags();
 		this.ctx.emit('tavern/changed');
+	}
+
+	/** Where the shared prompt library lives: beside the registry, in the same writable root. */
+	promptLibraryFile(): string {
+		return join(this.writeRoot(), 'prompt-library.json');
+	}
+
+	/**
+	 * Reads the shared prompt library. A library that is not there yet is seeded with the built-in
+	 * blocks and written, so the file exists to be edited; one that is there but unreadable is logged
+	 * and left alone rather than overwritten.
+	 */
+	private async loadPromptLibrary(): Promise<PromptLibraryEntry[]> {
+		const file = this.promptLibraryFile();
+		let json: string;
+		try {
+			json = await readFile(file, 'utf8');
+		} catch {
+			const seeded = librarySeed();
+			try {
+				await mkdir(dirname(file), { recursive: true });
+				await writeFile(file, promptLibraryJson(seeded), 'utf8');
+			} catch (error) {
+				this.ctx.log.message(`tavern: could not seed the prompt library: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return seeded;
+		}
+		try {
+			return mergeBuiltIn(parsePromptLibrary(json));
+		} catch (error) {
+			this.ctx.log.message(`tavern: the prompt library could not be read: ${error instanceof Error ? error.message : String(error)}`);
+			return [];
+		}
+	}
+
+	/**
+	 * Writes the shared prompt library and re-reads it, so what a pane sees next is what is on disk.
+	 * Every entry is sanitised first: what a webview sends is untrusted input.
+	 */
+	async savePromptLibrary(entries: readonly PromptLibraryEntry[]): Promise<string> {
+		const file = this.promptLibraryFile();
+		await mkdir(dirname(file), { recursive: true });
+		// The set of built-in entries is fixed: a save may edit them, never add or remove one.
+		await writeFile(file, promptLibraryJson(mergeBuiltIn(sanitisePromptLibrary(entries))), 'utf8');
+		this.promptLibrary = await this.loadPromptLibrary();
+		this.ctx.emit('tavern/changed');
+		return file;
 	}
 
 	/** The tags a character carries, in the registry's order. */
@@ -304,12 +381,14 @@ export class Tavern extends Service {
 		const id = slugId(name, 'preset');
 		// The base supplies the samplers and the unknown keys; the file is the one the *new* id owns,
 		// so "save as" never overwrites the preset it was copied from.
+		// Comonad's identity block is added at runtime, so it is never written into a preset file.
+		const stored = prompts.filter((prompt) => prompt.identifier !== IDENTITY_PROMPT);
 		const preset: TavernPreset = {
 			...(base ?? this.preset(id) ?? { id, name }),
 			id,
 			name: name.trim() || id,
-			prompts: prompts.map((prompt) => prompt as unknown as PromptItem),
-			promptOrder: prompts.map((prompt) => ({ identifier: prompt.identifier, enabled: prompt.enabled })),
+			prompts: stored.map((prompt) => prompt as unknown as PromptItem),
+			promptOrder: stored.map((prompt) => ({ identifier: prompt.identifier, enabled: prompt.enabled })),
 			raw: base?.raw ?? this.preset(id)?.raw ?? {},
 		};
 		await this.savePresetValue(preset, this.preset(id)?.source);
@@ -490,6 +569,18 @@ export class Tavern extends Service {
 		await rm(file, { force: true });
 		// The picture is the persona's too: leaving it behind would name a file nobody owns.
 		await this.dropAvatar(dirname(file), basename(file, extname(file)));
+		// Upstream clears the default persona and any chat that locked it, so nothing names a ghost.
+		const gone = persona?.id ?? id;
+		if (this.ctx.settings.get().tavernPersona === gone) {
+			await this.ctx.settings.update('tavernPersona', '');
+		}
+		for (const session of this.ctx.sessions.list()) {
+			if (session.persona === gone) {
+				session.persona = undefined;
+				this.ctx.sessions.save(session);
+				this.ctx.sessions.changed(session.id);
+			}
+		}
 		await this.reload();
 		return true;
 	}
@@ -903,6 +994,36 @@ export class Tavern extends Service {
 			return message;
 		}
 		return { ...message, content: applyRegex(scripts, message.content, { placement, isPrompt: true }) };
+	}
+
+	/**
+	 * A one-time cleanup: presets saved before the identity block stopped being written still carry it.
+	 * Each such file is rewritten without it, and a marker beside the library records that this ran, so
+	 * it never repeats. A file that cannot be read is logged and left alone.
+	 */
+	private async cleanIdentityBlocks(presets: TavernPreset[]): Promise<void> {
+		const marker = join(this.writeRoot(), '.identity-cleaned');
+		if (await stat(marker).then(() => true, () => false)) {
+			return;
+		}
+		let cleaned = 0;
+		for (const preset of presets) {
+			const clean = withoutIdentityBlock(preset);
+			if (clean === preset || !preset.source) {
+				continue;
+			}
+			try {
+				await writeFile(preset.source, presetToJson(clean), 'utf8');
+				cleaned += 1;
+			} catch (error) {
+				this.warn(preset.source, error);
+			}
+		}
+		await mkdir(dirname(marker), { recursive: true });
+		await writeFile(marker, `${new Date().toISOString()}\n`, 'utf8');
+		if (cleaned) {
+			this.ctx.log.message(`tavern: removed the identity block from ${cleaned} preset(s)`);
+		}
 	}
 
 	/** Reads one `.comonad` library root. */

@@ -71,6 +71,25 @@ export const DEFAULT_ORDER: readonly PromptOrderEntry[] = [
  */
 export const IDENTITY_PROMPT = 'comonad';
 
+/**
+ * A preset with Comonad's identity block taken out of its prompt list and every order. Returns the
+ * same object when there is nothing to remove, so a caller can tell a change from no change.
+ */
+export function withoutIdentityBlock(preset: TavernPreset): TavernPreset {
+	const has = (entries: readonly { identifier: string }[] | undefined) => (entries ?? []).some((entry) => entry.identifier === IDENTITY_PROMPT);
+	const orders = preset.promptOrders ? Object.fromEntries(Object.entries(preset.promptOrders).map(([key, order]) => [key, order.filter((entry) => entry.identifier !== IDENTITY_PROMPT)])) : undefined;
+	const ordersHad = Object.values(preset.promptOrders ?? {}).some((order) => has(order));
+	if (!has(preset.prompts) && !has(preset.promptOrder) && !ordersHad) {
+		return preset;
+	}
+	return {
+		...preset,
+		prompts: preset.prompts?.filter((prompt) => prompt.identifier !== IDENTITY_PROMPT),
+		promptOrder: preset.promptOrder?.filter((entry) => entry.identifier !== IDENTITY_PROMPT),
+		promptOrders: orders,
+	};
+}
+
 /** Upstream's `shouldTrigger`: a block with no trigger list is sent for every generation type. */
 export function triggersGeneration(prompt: Pick<PromptItem, 'injection_trigger'>, trigger: string | undefined): boolean {
 	return !trigger || !prompt.injection_trigger?.length || prompt.injection_trigger.includes(trigger);

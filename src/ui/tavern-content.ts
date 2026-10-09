@@ -18,10 +18,9 @@ import {
 } from '../lib/tavern/authoring';
 import { blankPng, cardToJson, cardToPng, loadCard } from '../lib/tavern/card';
 import { convertCharacterToPersona, connectionKeys } from '../lib/tavern/personas';
-import { PROMPT_BLOCKS } from '../lib/tavern/templates/blocks';
 import { PRESET_TEMPLATES, presetTemplate } from '../lib/tavern/templates/presets';
 import { parsePreset, presetId, presetToJson } from '../lib/tavern/preset';
-import { DEFAULT_PROMPTS, promptCollection } from '../lib/tavern/prompts';
+import { DEFAULT_PROMPTS, IDENTITY_PROMPT, promptCollection } from '../lib/tavern/prompts';
 import { estimateTokens } from '../lib/prompt';
 import { DEFAULT_SORT, SEARCH_SORT, SORT_RULES, visibleEntries } from '../lib/tavern/search';
 import {
@@ -38,7 +37,7 @@ import {
 	sorted,
 	tagPatch,
 } from '../lib/tavern/tags';
-import type { TavernPreset, WorldBook, WorldEntry } from '../lib/tavern/types';
+import type { PromptLibraryEntry, TavernPreset, WorldBook, WorldEntry } from '../lib/tavern/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, PERSONA_POSITION } from '../lib/tavern/types';
 import { describe } from '../lib/util';
 import type { Config } from '../services/settings';
@@ -328,7 +327,8 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 
 	/**
 	 * The prompt slice: what each block costs, the total the list shows above it, the shipped blocks a
-	 * *Reset* puts back, and the generation types a block's *Triggers* may name.
+	 * *Reset* puts back, the generation types a block's *Triggers* may name, and the two libraries —
+	 * the shared one every preset may insert from, and the one this preset keeps for itself.
 	 */
 	const presetState = (): Record<string, unknown> => {
 		const preset = item('presets', current) as TavernPreset | null;
@@ -354,14 +354,17 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 		book: kind === 'lorebooks' ? bookState() : undefined,
 		personas: kind === 'personas' ? personaState() : undefined,
 		preset: kind === 'presets' ? presetState() : undefined,
-		// The preset picker lists the templates that ship, and the blocks *Add prompt* can insert.
+		// The built-in library is shared by every preset, so it is sent whatever kind is showing: the
+		// pane's entry box must not depend on which tab was last open. The description rides along so
+		// the picker can explain an entry.
+		builtInPrompts: ctx.tavern.promptLibrary.map((entry) => ({ ...entry })),
+		// The preset picker lists the templates that ship.
 		presetTemplates: PRESET_TEMPLATES.map((entry) => ({
 			id: entry.id,
 			name: entry.name,
 			description: entry.description,
 			inLibrary: Boolean(ctx.tavern.preset(entry.id)),
 		})),
-		promptBlocks: PROMPT_BLOCKS.map((entry) => ({ id: entry.id, name: entry.name, description: entry.description, role: entry.role, content: entry.content })),
 		tags: tagState(),
 		adopted: adopted(),
 		counts: {
@@ -1496,10 +1499,12 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				if (answer !== 'Restore') {
 					return null;
 				}
+				// The identity block is added at runtime, so the restored file leaves it out.
+				const shipped = promptCollection().filter((prompt) => prompt.identifier !== IDENTITY_PROMPT);
 				await ctx.tavern.savePresetValue({
 					...preset,
-					prompts: promptCollection().map((prompt) => ({ ...prompt })),
-					promptOrder: promptCollection().map((prompt) => ({ identifier: prompt.identifier, enabled: prompt.enabled })),
+					prompts: shipped.map((prompt) => ({ ...prompt })),
+					promptOrder: shipped.map((prompt) => ({ identifier: prompt.identifier, enabled: prompt.enabled })),
 					promptOrders: undefined,
 				});
 				return { refresh: true, message: 'The shipped prompts are back.' };
@@ -1507,6 +1512,21 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 			default:
 				return null;
 		}
+	};
+
+	/**
+	 * The shared prompt library is a file of its own, so it writes straight through instead of waiting
+	 * for the preset form's Save: the pane posts the whole library after every change, and a quiet note
+	 * keeps the status line out of the way while the next state push re-renders it.
+	 */
+	const promptLibraryAction = async (message: Record<string, unknown>): Promise<ContentNote | null> => {
+		const entries = Array.isArray(message.prompts) ? (message.prompts as PromptLibraryEntry[]) : [];
+		try {
+			await ctx.tavern.savePromptLibrary(entries);
+		} catch (error) {
+			return { message: `The prompt library could not be saved: ${describe(error)}`, error: true };
+		}
+		return { quiet: true };
 	};
 
 	const action = async (message: Record<string, unknown>): Promise<ContentNote | null> => {
@@ -1521,6 +1541,9 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 		if (String(message.action ?? '').startsWith('preset') && PRESET_ACTIONS.has(String(message.action))) {
 			kind = wanted;
 			return await presetAction(message);
+		}
+		if (message.action === 'promptLibrarySave') {
+			return await promptLibraryAction(message);
 		}
 		if (String(message.action ?? '').startsWith('character') && CHARACTER_ACTIONS.has(String(message.action))) {
 			kind = wanted;

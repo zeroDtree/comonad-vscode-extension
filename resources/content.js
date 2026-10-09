@@ -768,6 +768,15 @@ window.comonadContentPane = function contentPane(options) {
 	/** The prompt the *Edit* panel is open on. Upstream's pencil opens one just like it. */
 	let editingPrompt = null;
 
+	/** The library entry the box has picked: its editor unfolds right below the box. */
+	let editingLibrary = null;
+
+	/** Which library the entry box is showing: the shared `system` one, or this preset's own. */
+	let libraryScope = 'system';
+
+	/** The shared prompt library the host last sent: every preset inserts from it. */
+	let systemLibrary = [];
+
 	/** The token count of a prompt's text, in the same shape the host's counter reports one. */
 	const promptTokens = (prompt) => Math.ceil(new TextEncoder().encode(String(prompt.content ?? '')).length / 4);
 
@@ -822,12 +831,221 @@ window.comonadContentPane = function contentPane(options) {
 		}
 	}
 
+	/* ------------------------------------------------------------------ prompt libraries */
+
+	/** An identifier that is not taken yet: `base`, else `base-2`, `base-3`… */
+	function uniqueId(list, base) {
+		const taken = new Set((list || []).map((entry) => entry.identifier));
+		if (!taken.has(base)) {
+			return base;
+		}
+		let n = 2;
+		while (taken.has(`${base}-${n}`)) {
+			n += 1;
+		}
+		return `${base}-${n}`;
+	}
+
+	/** This preset's own library, made on demand: it lives inside the preset and is saved with it. */
+	function presetLibrary() {
+		if (!Array.isArray(item.promptLibrary)) {
+			item.promptLibrary = [];
+		}
+		return item.promptLibrary;
+	}
+
+	/** The shared library is a file of its own, so the pane posts the whole thing and the host writes it. */
+	function saveSystemLibrary() {
+		post({ type: 'promptLibrarySave', kind: 'presets', prompts: systemLibrary });
+	}
+
+	/** A copy of a library entry, with the fields that only belong to a library stripped off. */
+	function libraryCopy(entry) {
+		const copy = { ...structuredClone(entry) };
+		delete copy.description;
+		delete copy.tokens;
+		return copy;
+	}
+
+	/** A name no other entry in the list already has, so new entries never look like duplicates. */
+	function uniqueName(list, base) {
+		const taken = new Set(list.map((entry) => entry.name));
+		if (!taken.has(base)) {
+			return base;
+		}
+		let n = 2;
+		while (taken.has(`${base} ${n}`)) {
+			n += 1;
+		}
+		return `${base} ${n}`;
+	}
+
+	/**
+	 * Saves a copy of a system block — or an empty one — into this preset's own library. Nothing reaches
+	 * the prompt list: an entry that lands there by accident is the one mistake this pane can make, so
+	 * the status line says out loud what happened and the new editor is scrolled into view.
+	 */
+	function addToPresetLibrary(entry) {
+		const copy = entry ? libraryCopy(entry) : { name: uniqueName(presetLibrary(), 'New prompt'), role: 'system', system_prompt: true, content: '' };
+		copy.identifier = uniqueId(presetLibrary(), entry ? entry.identifier : 'prompt');
+		presetLibrary().push(copy);
+		editingLibrary = { scope: 'preset', id: copy.identifier };
+		markDirty();
+		render();
+		revealLibraryEditor();
+		status('Saved to this preset’s own library. It is not in the prompt list — insert it when you want it there.');
+	}
+
+	/** A library entry's editor sits below the fold, so a new or edited one is brought into view. */
+	function revealLibraryEditor() {
+		const node = document.getElementById('le-name');
+		if (node && typeof node.scrollIntoView === 'function') {
+			node.scrollIntoView({ block: 'nearest' });
+		}
+	}
+
+	/** Copies one library entry into the prompt list, right after Comonad's own block. */
+	function insertFromLibrary(entry) {
+		const copy = libraryCopy(entry);
+		copy.identifier = uniqueId(item.prompts, entry.identifier);
+		// The identity block leads the collection, so a library entry goes straight after it.
+		item.prompts.splice(1, 0, copy);
+		markDirty();
+		render();
+		status(`Inserted “${copy.name || copy.identifier}” at the top of the prompt list.`);
+	}
+
+	/**
+	 * A library entry's editor: its name, its role and its text. The positioned-in-chat fields belong
+	 * to a block once it is in the list, and are edited there. A preset entry keeps its edits until the
+	 * preset is saved; a system entry is written as soon as the field is left, because the shared file
+	 * is not the preset's to hold.
+	 */
+	function libraryEditor(entry, scope) {
+		const panel = document.createElement('section');
+		panel.className = 'prompt-edit library-edit';
+		const heading = document.createElement('h3');
+		heading.textContent = scope === 'system' ? 'Edit built-in prompt' : 'Edit custom prompt';
+		panel.append(heading);
+
+		const commit = () => {
+			if (scope === 'system') {
+				saveSystemLibrary();
+			} else {
+				markDirty();
+			}
+		};
+		const field = (label, hint, node) => {
+			const wrap = document.createElement('div');
+			wrap.className = 'prompt-field';
+			const text = document.createElement('label');
+			text.textContent = label;
+			wrap.append(text, node);
+			if (hint) {
+				wrap.append(hintEl(hint));
+			}
+			return wrap;
+		};
+
+		const name = document.createElement('input');
+		name.id = 'le-name';
+		name.className = 'control';
+		name.type = 'text';
+		name.spellcheck = false;
+		name.value = entry.name || '';
+		name.addEventListener('input', () => {
+			entry.name = name.value;
+		});
+		name.addEventListener('blur', commit);
+
+		const role = document.createElement('select');
+		role.id = 'le-role';
+		role.className = 'control';
+		for (const [value, text] of [
+			['system', 'System'],
+			['user', 'User'],
+			['assistant', 'AI Assistant'],
+		]) {
+			const option = document.createElement('option');
+			option.value = value;
+			option.textContent = text;
+			option.selected = (entry.role || 'system') === value;
+			role.append(option);
+		}
+		role.addEventListener('change', () => {
+			entry.role = role.value;
+			entry.system_prompt = role.value === 'system';
+			commit();
+		});
+
+		const content = document.createElement('textarea');
+		content.id = 'le-content';
+		content.className = 'control';
+		content.rows = 6;
+		content.spellcheck = false;
+		content.placeholder = 'The prompt to be sent.';
+		content.value = entry.content ?? '';
+		content.disabled = entry.marker === true;
+		content.addEventListener('input', () => {
+			entry.content = content.value;
+		});
+		content.addEventListener('blur', commit);
+
+		const rows = document.createElement('div');
+		rows.className = 'prompt-edit-rows';
+		rows.append(field('Name', 'A name for this prompt.', name), field('Role', 'To whom this message will be attributed.', role));
+		const textLabel = document.createElement('div');
+		textLabel.className = 'prompt-text-label';
+		const textTitle = document.createElement('label');
+		textTitle.textContent = 'Prompt';
+		textLabel.append(textTitle);
+		panel.append(rows, textLabel, content);
+		if (entry.marker) {
+			panel.append(hintEl('The content of this prompt is pulled from elsewhere and cannot be edited here.'));
+		}
+
+		const footer = document.createElement('div');
+		footer.className = 'prompt-edit-footer';
+		const remove = document.createElement('button');
+		remove.type = 'button';
+		remove.className = 'library-delete';
+		remove.textContent = 'Delete';
+		remove.title = 'Remove this prompt from this preset’s custom library.';
+		// A built-in entry cannot be deleted: the set is fixed by the templates, so only custom ones go.
+		remove.hidden = scope === 'system';
+		remove.addEventListener('click', () => {
+			const list = presetLibrary();
+			const index = list.findIndex((candidate) => candidate.identifier === entry.identifier);
+			if (index >= 0) {
+				list.splice(index, 1);
+			}
+			editingLibrary = null;
+			markDirty();
+			render();
+			status('Removed from this preset’s custom library.');
+		});
+		const close = document.createElement('button');
+		close.type = 'button';
+		close.className = 'secondary';
+		close.textContent = 'Close';
+		close.addEventListener('click', () => {
+			commit();
+			editingLibrary = null;
+			render();
+		});
+		footer.append(remove, close);
+		panel.append(footer);
+		return panel;
+	}
+
 	function renderPrompts() {
 		const focus = captureFocus();
 		const host = $('st-form');
 		host.innerHTML = '';
 		host.append(sectionEl('Preset', [fieldEl({ key: 'name', label: 'Preset name', type: 'text' })]));
 		const prompts = Array.isArray(item.prompts) ? item.prompts : (item.prompts = []);
+		// This preset's own library, made on demand: it lives inside the preset and is saved with it.
+		const presetEntries = presetLibrary();
 		const slice = state.preset || {};
 		const known = (prompt) => Object.prototype.hasOwnProperty.call(slice.tokens || {}, prompt.identifier);
 		// The open block counts itself, so the number follows what is being typed.
@@ -862,15 +1080,21 @@ window.comonadContentPane = function contentPane(options) {
 		list.append(head);
 
 		const move = (index, delta) => {
-			const target = index + delta;
-			if (target < 1 || target >= prompts.length) {
+			moveTo(index, index + delta);
+		};
+
+		// A drop lands at the target index; the identity block stays first, so nothing goes above it.
+		const moveTo = (from, to) => {
+			if (from === to || from < 1 || to < 1 || from >= prompts.length || to >= prompts.length) {
 				return;
 			}
-			const moved = prompts.splice(index, 1)[0];
-			prompts.splice(target, 0, moved);
+			const moved = prompts.splice(from, 1)[0];
+			prompts.splice(to, 0, moved);
 			markDirty();
 			render();
 		};
+		// The index of the card being dragged, set while a drag is in progress.
+		let dragFrom = null;
 
 		prompts.forEach((prompt, index) => {
 			// One block is one card: the row, and — while it is open — its editor, so the two read as the
@@ -880,7 +1104,43 @@ window.comonadContentPane = function contentPane(options) {
 			const identity = prompt.identifier === 'comonad';
 			if (identity) {
 				block.classList.add('is-fixed');
+			} else {
+				// Any other block can be dragged to a new place in the list; the identity block cannot move.
+				block.draggable = true;
+				block.addEventListener('dragstart', (event) => {
+					dragFrom = index;
+					block.classList.add('is-dragging');
+					event.dataTransfer.effectAllowed = 'move';
+					// Firefox will not start a drag without some data on the transfer.
+					event.dataTransfer.setData('text/plain', prompt.identifier);
+				});
+				block.addEventListener('dragend', () => {
+					dragFrom = null;
+					block.classList.remove('is-dragging');
+					list.querySelectorAll('.is-drop-target').forEach((node) => node.classList.remove('is-drop-target'));
+				});
 			}
+			// A card accepts a drop only from another card in this list, and never above the identity block.
+			block.addEventListener('dragover', (event) => {
+				if (dragFrom === null || identity) {
+					return;
+				}
+				event.preventDefault();
+				event.dataTransfer.dropEffect = 'move';
+				block.classList.add('is-drop-target');
+			});
+			block.addEventListener('dragleave', () => {
+				block.classList.remove('is-drop-target');
+			});
+			block.addEventListener('drop', (event) => {
+				if (dragFrom === null || identity) {
+					return;
+				}
+				event.preventDefault();
+				const from = dragFrom;
+				dragFrom = null;
+				moveTo(from, index);
+			});
 			if (prompt.identifier === editingPrompt) {
 				block.classList.add('is-editing');
 			}
@@ -960,7 +1220,7 @@ window.comonadContentPane = function contentPane(options) {
 				render();
 			});
 			control('⧉', 'Duplicate this block', () => {
-				const copy = { ...structuredClone(prompt), identifier: `${prompt.identifier}-copy` };
+				const copy = { ...structuredClone(prompt), identifier: uniqueId(prompts, `${prompt.identifier}-copy`) };
 				copy.name = `${prompt.name || prompt.identifier} (copy)`;
 				prompts.splice(index + 1, 0, copy);
 				markDirty();
@@ -1004,46 +1264,11 @@ window.comonadContentPane = function contentPane(options) {
 		});
 		section.append(heading, hint, list);
 
-		// The toolbar above the list: *Add prompt*, the restore, and the total the list costs.
+		// The toolbar under the list: the restore, and what the list costs. Adding and inserting both live
+		// in the two entry boxes below, so nothing up here can put a block in the list by accident.
 		const tools = document.createElement('div');
 		tools.className = 'prompt-tools';
-		const add = document.createElement('select');
-		add.className = 'control';
-		const placeholder = document.createElement('option');
-		placeholder.value = '';
-		placeholder.textContent = 'Add prompt…';
-		placeholder.selected = true;
-		add.append(placeholder);
-		for (const block of state.promptBlocks || []) {
-			const option = document.createElement('option');
-			option.value = block.id;
-			option.textContent = block.name;
-			option.title = block.description;
-			add.append(option);
-		}
-		const blank = document.createElement('option');
-		blank.value = 'blank';
-		blank.textContent = 'Empty block';
-		add.append(blank);
-		add.addEventListener('change', () => {
-			const wanted = add.value;
-			add.value = '';
-			if (!wanted) {
-				return;
-			}
-			const block = (state.promptBlocks || []).find((entry) => entry.id === wanted);
-			const created = {
-				identifier: block ? block.id : `${item.id || 'preset'}-prompt-${prompts.length + 1}`,
-				name: block ? block.name : 'New prompt',
-				role: block ? block.role : 'system',
-				system_prompt: (block ? block.role : 'system') === 'system',
-				content: block ? block.content : '',
-			};
-			prompts.push(created);
-			editingPrompt = created.identifier;
-			markDirty();
-			render();
-		});
+
 		const restore = document.createElement('button');
 		restore.type = 'button';
 		restore.className = 'secondary';
@@ -1053,11 +1278,105 @@ window.comonadContentPane = function contentPane(options) {
 		totalNode = document.createElement('span');
 		totalNode.className = 'prompt-total';
 		totalNode.textContent = `Total Tokens: ${total}`;
-		tools.append(add, restore, totalNode);
+		tools.append(restore, totalNode);
 		// The toolbar belongs to the list, so it keeps the section's own spacing instead of butting up
 		// against whatever group of settings comes next.
 		section.append(tools);
 		host.append(section);
+
+		// One entry box for both libraries: a small button on the left switches which library it shows, and
+		// that library's entries are listed under it, so an entry a *+ New* made is where the eye already is.
+		const libraries = document.createElement('section');
+		const libraryHead = document.createElement('div');
+		libraryHead.className = 'library-head';
+		const libraryHeading = document.createElement('h2');
+		libraryHeading.textContent = 'Prompt library';
+		libraryHead.append(libraryHeading);
+		libraries.append(
+			libraryHead,
+			hintEl('Pick an entry and Insert it, or add a new one. The button switches between the built-in library and this preset’s custom one; the picked entry is edited right below, and nothing reaches the prompt list until it is inserted.'),
+		);
+		const activeScope = libraryScope;
+		const entries = activeScope === 'system' ? systemLibrary : presetEntries;
+		const picked = editingLibrary && editingLibrary.scope === activeScope ? entries.find((entry) => entry.identifier === editingLibrary.id) || null : null;
+
+		const box = document.createElement('div');
+		box.className = 'library-box';
+		// The small button *is* the label: it names the library the box is showing, and clicking it swaps to
+		// the other one. A system entry writes straight through, so an open one is saved before the swap.
+		const toggle = document.createElement('button');
+		toggle.type = 'button';
+		toggle.className = 'secondary library-scope';
+		// The ⇅ glyph marks it as a switch rather than the name of an entry.
+		toggle.textContent = (activeScope === 'system' ? 'Built-in' : 'Custom') + ' ⇅';
+		toggle.title = 'Switch between the shared library and this preset’s own.';
+		toggle.addEventListener('click', () => {
+			if (editingLibrary && editingLibrary.scope === 'system') {
+				saveSystemLibrary();
+			}
+			libraryScope = activeScope === 'system' ? 'preset' : 'system';
+			editingLibrary = null;
+			render();
+		});
+		// The picker is the finder: choosing an entry opens its editor in the space right below the box.
+		const select = document.createElement('select');
+		select.className = 'control';
+		select.title = activeScope === 'system' ? 'Pick a prompt from the built-in library.' : 'Pick a prompt from this preset’s custom library.';
+		const placeholder = document.createElement('option');
+		placeholder.value = '';
+		placeholder.textContent = entries.length ? 'Pick an entry…' : 'Nothing saved yet';
+		placeholder.selected = !picked;
+		select.append(placeholder);
+		for (const entry of entries) {
+			const option = document.createElement('option');
+			option.value = entry.identifier;
+			option.textContent = entry.name || entry.identifier;
+			option.title = entry.description || '';
+			option.selected = Boolean(picked && picked.identifier === entry.identifier);
+			select.append(option);
+		}
+		select.addEventListener('change', () => {
+			// A system entry writes straight through, so it is saved before another one is picked.
+			if (editingLibrary && editingLibrary.scope === 'system' && editingLibrary.id !== select.value) {
+				saveSystemLibrary();
+			}
+			editingLibrary = select.value ? { scope: activeScope, id: select.value } : null;
+			render();
+		});
+		// The built-in library is fixed by the templates: its entries can be edited and inserted, never added.
+		// Only the custom library grows, so only its box carries *+ New*.
+		const create = document.createElement('button');
+		create.type = 'button';
+		create.className = 'secondary';
+		create.textContent = '+ New';
+		create.title = 'Add a new empty prompt to this preset’s custom library.';
+		create.addEventListener('click', () => addToPresetLibrary(null));
+		create.hidden = activeScope === 'system';
+		const insert = document.createElement('button');
+		insert.type = 'button';
+		insert.className = 'secondary';
+		insert.textContent = 'Insert';
+		insert.title = 'Insert the picked entry at the top of the prompt list.';
+		// Nothing is insertable until an entry is picked, so the button says so instead of failing on click.
+		insert.disabled = !picked;
+		insert.addEventListener('click', () => {
+			const wanted = select.value;
+			const entry = wanted ? entries.find((candidate) => candidate.identifier === wanted) : null;
+			if (!entry) {
+				status('Pick an entry first, then Insert.', true);
+				return;
+			}
+			insertFromLibrary(entry);
+		});
+		box.append(toggle, select, create, insert);
+
+		// The picked entry is edited in the space right below the box: the picker is how you find one, so
+		// there is no separate list to keep in step with it.
+		libraries.append(box);
+		if (picked) {
+			libraries.append(libraryEditor(picked, activeScope));
+		}
+		host.append(libraries);
 		restoreFocus(focus);
 	}
 
@@ -1112,22 +1431,27 @@ window.comonadContentPane = function contentPane(options) {
 
 		// *Triggers*: a block limited to some generation types is left out of the others. An empty
 		// selection is upstream's "All types (default)".
-		const triggers = document.createElement('select');
+		// A native multi-select cannot be cleared with a plain click, so this is a list of tick boxes.
+		const triggers = document.createElement('div');
 		triggers.id = 'pe-triggers';
-		triggers.className = 'control';
-		triggers.multiple = true;
-		triggers.size = 6;
+		triggers.className = 'control pe-checks';
+		triggers.setAttribute('role', 'group');
 		for (const generation of slice.generations || []) {
-			const option = document.createElement('option');
-			option.value = generation.value;
-			option.textContent = generation.label;
-			option.selected = Array.isArray(prompt.injection_trigger) && prompt.injection_trigger.includes(generation.value);
-			triggers.append(option);
+			const row = document.createElement('label');
+			row.className = 'pe-check';
+			const box = document.createElement('input');
+			box.type = 'checkbox';
+			box.value = generation.value;
+			box.checked = Array.isArray(prompt.injection_trigger) && prompt.injection_trigger.includes(generation.value);
+			const text = document.createElement('span');
+			text.textContent = generation.label;
+			row.append(box, text);
+			triggers.append(row);
 		}
 		triggers.addEventListener('change', () => {
 			write(
 				'injection_trigger',
-				[...triggers.selectedOptions].map((option) => option.value),
+				[...triggers.querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value),
 			);
 		});
 
@@ -1656,7 +1980,19 @@ window.comonadContentPane = function contentPane(options) {
 		render(content) {
 			state = content;
 			kind = content.kind;
-			item = content.item;
+			// The built-in library is fed on every push, whatever kind is showing: it is a file of its own,
+			// written straight through, so what the host last read is the truth.
+			// While a built-in entry is open, its editor holds live objects in this array; replacing the array
+			// under it would drop keystrokes typed after the push, so the local copy stays until it is closed.
+			if (!(editingLibrary && editingLibrary.scope === 'system') && Array.isArray(content.builtInPrompts)) {
+				systemLibrary = content.builtInPrompts;
+			}
+			// The item the pane is editing is its own. Every content message is answered with a fresh
+			// state, so a push while the form is dirty — a shared-library save, say — must not replace it
+			// with the copy on disk, or the unsaved edits would vanish.
+			const incoming = content.item;
+			const same = Boolean(incoming && item && incoming.id === item.id);
+			item = dirty && same ? item : incoming;
 			selection = item && item.id ? item.id : kind === 'lorebooks' && item ? item.name : null;
 			renderKinds();
 			$('st-pane').dataset.kind = kind;

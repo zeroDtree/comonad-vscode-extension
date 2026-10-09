@@ -82,7 +82,6 @@ window.comonadWorldInfo = function worldInfo(options) {
 	const plain = new Set(store.get().wiPlain || []);
 	let dirty = false;
 	let pending = null;
-	let pendingSetting = null;
 	let pendingRebuild = false;
 	let focusUid = null;
 	let shape = '';
@@ -133,6 +132,29 @@ window.comonadWorldInfo = function worldInfo(options) {
 	}
 
 	/* ---------------------------------------------------------------- small DOM helpers */
+
+	/**
+	 * One tick box in a list of them. A native multi-select cannot be cleared with a plain click (that
+	 * replaces the selection), so every multi-choice list here is a list of independent check boxes.
+	 */
+	function tickRow(value, label, checked, type) {
+		const row = document.createElement('label');
+		row.className = 'wi-world';
+		const box = document.createElement('input');
+		box.type = 'checkbox';
+		box.value = value;
+		box.checked = checked;
+		if (type) {
+			box.dataset.type = type;
+		}
+		const name = document.createElement('span');
+		name.textContent = label;
+		row.append(box, name);
+		return row;
+	}
+
+	/** The values of the ticked boxes inside a list, in the order the list shows them. */
+	const tickedIn = (container) => [...container.querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value);
 
 	function fillOptions(select, choices, value) {
 		select.replaceChildren();
@@ -190,10 +212,11 @@ window.comonadWorldInfo = function worldInfo(options) {
 			node.classList.toggle('is-off', row.disable === true);
 		};
 		kill.title = "Toggle the entry's active state";
+		// A button fires `click`, never `change`: listening for `change` made this toggle dead.
 		bind(kill, () => {
 			row.disable = row.disable !== true;
 			paintKill();
-		});
+		}, 'click');
 		paintKill();
 
 		const fold = node.querySelector('.wi-fold');
@@ -360,13 +383,14 @@ window.comonadWorldInfo = function worldInfo(options) {
 				input.value = '';
 			}
 		});
-		bind(area, () => {
+		// Typing here must not redraw the box: rewriting it mid-list would trim a comma or space away.
+		area.addEventListener('input', () => {
 			row[field] = area.value
 				.split(',')
 				.map((value) => value.trim())
 				.filter(Boolean);
-			draw();
-		}, 'input');
+			touch();
+		});
 		toggle.addEventListener('click', () => {
 			if (plain.has(field)) {
 				plain.delete(field);
@@ -487,21 +511,24 @@ window.comonadWorldInfo = function worldInfo(options) {
 			filter.replaceChildren();
 			// A tag the entry names but the registry no longer has is not offered — upstream lists what
 			// exists and leaves the stored value alone.
-			for (const item of [...characters, ...tags]) {
-				const option = document.createElement('option');
-				option.value = item.value;
-				option.textContent = item.label;
-				option.dataset.type = item.type;
-				option.selected = item.type === 'character' ? current.names.includes(item.value) : current.tags.includes(item.value);
-				filter.append(option);
+			const items = [...characters, ...tags];
+			if (!items.length) {
+				const none = document.createElement('small');
+				none.className = 'wi-label';
+				none.textContent = 'No characters or tags yet.';
+				filter.append(none);
+			}
+			for (const item of items) {
+				const checked = item.type === 'character' ? current.names.includes(item.value) : current.tags.includes(item.value);
+				filter.append(tickRow(item.value, item.label, checked, item.type));
 			}
 			exclude.checked = current.isExclude;
 		};
 		const readFilter = () => {
-			const picked = [...filter.selectedOptions];
+			const picked = [...filter.querySelectorAll('input:checked')];
 			row.characterFilter = {
-				names: picked.filter((option) => option.dataset.type === 'character').map((option) => option.value),
-				tags: picked.filter((option) => option.dataset.type === 'tag').map((option) => option.value),
+				names: picked.filter((box) => box.dataset.type === 'character').map((box) => box.value),
+				tags: picked.filter((box) => box.dataset.type === 'tag').map((box) => box.value),
 				isExclude: exclude.checked,
 			};
 		};
@@ -524,14 +551,11 @@ window.comonadWorldInfo = function worldInfo(options) {
 		const triggerOptions = state?.book?.generations ?? [];
 		triggers.replaceChildren();
 		for (const item of triggerOptions) {
-			const option = document.createElement('option');
-			option.value = item.value;
-			option.textContent = item.label;
-			option.selected = Array.isArray(row.triggers) && row.triggers.includes(item.value);
-			triggers.append(option);
+			triggers.append(tickRow(item.value, item.label, Array.isArray(row.triggers) && row.triggers.includes(item.value)));
 		}
-		bind(triggers, () => {
-			row.triggers = [...triggers.selectedOptions].map((option) => option.value);
+		triggers.addEventListener('change', () => {
+			row.triggers = tickedIn(triggers);
+			touch();
 		});
 
 		const sources = node.querySelector('.wi-sources-head');
@@ -734,9 +758,14 @@ window.comonadWorldInfo = function worldInfo(options) {
 		post({ type: 'setting', key, value });
 	}
 
+	/** One timer per key: a single shared timer would cancel the write of an earlier, different key. */
+	const pendingSettings = new Map();
 	function sendSettingSoon(key, value) {
-		clearTimeout(pendingSetting);
-		pendingSetting = setTimeout(() => sendSetting(key, value), SETTING_MS);
+		clearTimeout(pendingSettings.get(key));
+		pendingSettings.set(key, setTimeout(() => {
+			pendingSettings.delete(key);
+			sendSetting(key, value);
+		}, SETTING_MS));
 	}
 
 	function wireGlobal() {
@@ -796,8 +825,14 @@ window.comonadWorldInfo = function worldInfo(options) {
 			toggle.setAttribute('aria-expanded', String(!drawer.hidden));
 			toggle.classList.toggle('is-open', !drawer.hidden);
 		});
+		// Each book is its own checkbox, so any number of them may be active, including none.
 		const worlds = $('wi-worlds');
-		bind(worlds, () => sendSetting('tavernLorebooks', [...worlds.selectedOptions].map((option) => option.value)));
+		worlds.addEventListener('change', () => sendSetting('tavernLorebooks', checkedWorlds()));
+	}
+
+	/** The names of the books whose checkbox is ticked, in the order the list shows them. */
+	function checkedWorlds() {
+		return [...$('wi-worlds').querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value);
 	}
 
 	function renderGlobal(wi, active) {
@@ -844,22 +879,33 @@ window.comonadWorldInfo = function worldInfo(options) {
 		}
 		const worlds = $('wi-worlds');
 		const chosen = new Set(active ?? []);
-		for (const option of worlds.options) {
-			option.selected = chosen.has(option.value);
+		for (const box of worlds.querySelectorAll('input[type="checkbox"]')) {
+			box.checked = chosen.has(box.value);
 		}
 	}
 
 	function renderPicks(catalog) {
 		const books = catalog.lorebooks ?? [];
 		const worlds = $('wi-worlds');
-		const picked = new Set([...worlds.selectedOptions].map((option) => option.value));
+		const picked = new Set(checkedWorlds());
 		worlds.replaceChildren();
+		if (!books.length) {
+			const none = document.createElement('small');
+			none.className = 'wi-label';
+			none.textContent = 'No world books yet.';
+			worlds.append(none);
+		}
 		for (const item of books) {
-			const option = document.createElement('option');
-			option.value = item.name;
-			option.textContent = item.name;
-			option.selected = picked.has(item.name);
-			worlds.append(option);
+			const label = document.createElement('label');
+			label.className = 'wi-world';
+			const box = document.createElement('input');
+			box.type = 'checkbox';
+			box.value = item.name;
+			box.checked = picked.has(item.name);
+			const name = document.createElement('span');
+			name.textContent = item.name;
+			label.append(box, name);
+			worlds.append(label);
 		}
 		const pick = $('wi-pick');
 		pick.replaceChildren();
@@ -1085,7 +1131,7 @@ window.comonadWorldInfo = function worldInfo(options) {
 			ui.total = message.total;
 		}
 		if (message.entry !== undefined) {
-			open.add(Number(message.entry));
+			// Jump to the new row, but leave it folded: the user unfolds it when they want to edit.
 			focusUid = Number(message.entry);
 		}
 		if (message.book) {

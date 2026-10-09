@@ -1,6 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
-import { GENERATION_TRIGGERS, INJECTION_POSITION, type LogitBiasSet, type PromptItem, type PromptOrderEntry, type TavernPreset } from './types';
+import {
+	GENERATION_TRIGGERS,
+	INJECTION_POSITION,
+	PROMPT_LIBRARY_KEY,
+	type LogitBiasSet,
+	type PromptItem,
+	type PromptOrderEntry,
+	type TavernPreset,
+} from './types';
 
 /**
  * OpenAI presets, read and written under their SillyTavern names: sampler settings, the prompt
@@ -173,6 +181,15 @@ export function parsePreset(json: string, name: string, id: string): TavernPrese
 			preset.prompts = prompts;
 		}
 	}
+	// Comonad's own library for this preset. SillyTavern never writes the key, so it only ever holds
+	// what a save here put there; the entries are ordinary prompts.
+	const storedLibrary = raw[PROMPT_LIBRARY_KEY];
+	if (Array.isArray(storedLibrary)) {
+		const library = storedLibrary.map(normalisePrompt).filter((item): item is PromptItem => item !== null);
+		if (library.length) {
+			preset.promptLibrary = library;
+		}
+	}
 	return preset;
 }
 
@@ -219,6 +236,9 @@ export function presetToJson(preset: TavernPreset): string {
 	if (preset.prompts) {
 		set('prompts', preset.prompts);
 	}
+	// The preset's own prompt library, under the key SillyTavern ignores. `set` drops the key when the
+	// library is empty, so a preset that never used one keeps its file exactly as it arrived.
+	set(PROMPT_LIBRARY_KEY, preset.promptLibrary);
 	if (preset.promptOrder || preset.promptOrders) {
 		// The default block comes first, then the per-character ones, and any block we did not
 		// understand — a SillyTavern character index, say — is kept exactly where it was.

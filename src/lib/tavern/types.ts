@@ -430,6 +430,12 @@ export const INJECTION_POSITION = {
 	absolute: 1,
 } as const;
 
+/**
+ * The key a preset stores its own prompt library under. SillyTavern does not know it and ignores it,
+ * which is how the preset keeps every ST field untouched beside it.
+ */
+export const PROMPT_LIBRARY_KEY = 'comonad_prompt_library';
+
 /** One entry of the prompt manager: a block, where it goes, and whether it is on. */
 export interface PromptItem {
 	identifier: string;
@@ -451,6 +457,17 @@ export interface PromptItem {
 	injection_trigger?: string[];
 	forbid_overrides?: boolean;
 	extension?: boolean;
+}
+
+/**
+ * A prompt saved in one of the two prompt libraries rather than in the ordered list. A *system*
+ * entry lives in the shared `.comonad/prompt-library.json` and every preset can use it; a *preset*
+ * entry lives in the preset's own file under {@link PROMPT_LIBRARY_KEY}, and only that preset can.
+ * `description` is Comonad's own — SillyTavern's `PromptItem` has no such field — and rides only in
+ * the shared file, where it is shown beside the name.
+ */
+export interface PromptLibraryEntry extends PromptItem {
+	description?: string;
 }
 
 /** The per-character order: which prompts, in which order, enabled or not. */
@@ -503,6 +520,11 @@ export interface TavernPreset {
 	useSysprompt?: boolean;
 	/** Prompts as the user arranged them; the shipped order applies when absent. */
 	prompts?: PromptItem[];
+	/**
+	 * This preset's own prompt library: entries saved for this preset alone, ready to be inserted
+	 * into `prompts`. Stored in the file under {@link PROMPT_LIBRARY_KEY}, which SillyTavern ignores.
+	 */
+	promptLibrary?: PromptLibraryEntry[];
 	/** The order the default character uses. */
 	promptOrder?: PromptOrderEntry[];
 	/** Per-character orders, keyed by character, the way upstream keys its blocks by character id. */

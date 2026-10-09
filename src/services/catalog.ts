@@ -72,11 +72,25 @@ export class Catalog extends Service {
 	agents: AgentDefinition[] = BUILTIN_AGENTS;
 	commands: CustomCommand[] = [];
 
+	/** The first read, in flight from the moment the service exists: see `Tavern.ready`. */
+	readonly ready: Promise<void>;
+
+	/** The reads run one at a time, so the read that started first cannot land last: see `Tavern`. */
+	private reading: Promise<void> = Promise.resolve();
+
 	constructor(ctx: Context) {
 		super(ctx, 'catalog');
+		this.ready = this.reload();
 	}
 
-	async reload(): Promise<void> {
+	/** Re-reads every skill, agent and command, after the read before it has finished. */
+	reload(): Promise<void> {
+		const next = this.reading.then(() => this.read());
+		this.reading = next.catch(() => undefined);
+		return next;
+	}
+
+	private async read(): Promise<void> {
 		const host = this.ctx.host;
 		const trusted = host.trusted();
 		const project = trusted ? host.workspace() : undefined;

@@ -49,12 +49,46 @@
 
 #wi-worlds {
 	min-height: 76px;
+	max-height: 112px;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
 	background: var(--st-surface);
 	color: inherit;
 	border: 1px solid var(--st-border);
 	border-radius: var(--st-radius-sm);
 	padding: 2px;
-	font: inherit;
+	font-size: var(--st-text);
+}
+
+.wi-world {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 6px;
+	cursor: pointer;
+	user-select: none;
+}
+
+.wi-world:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.wi-world input {
+	margin: 0;
+}
+
+/* A list of tick boxes that stands in for a multi-select: scrolls instead of growing. */
+.wi-checks {
+	min-height: 76px;
+	max-height: 112px;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	background: var(--st-surface);
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	padding: 2px;
 	font-size: var(--st-text);
 }
 
@@ -487,17 +521,20 @@
 	gap: 2px;
 }
 
+/* Every field's label takes the same height, so the controls under them start on one line across a row. */
 .wi-field > small {
 	display: flex;
 	align-items: center;
 	gap: 8px;
 	justify-content: space-between;
+	min-height: 18px;
 	font-size: var(--st-label);
 	color: var(--st-muted);
 }
 
 .wi-field.wi-thin {
-	flex: 0 0 104px;
+	flex: 0 1 104px;
+	min-width: 90px;
 }
 
 .wi-field.wi-keys {
@@ -530,6 +567,15 @@
 	resize: vertical;
 }
 
+/* Single-line controls share one height, so a select and a text box in the same row line up. */
+.wi-field input[type='text'],
+.wi-field input[type='number'],
+.wi-field select,
+.wi-chip-input {
+	height: 26px;
+	padding: 0 6px;
+}
+
 .wi-field input:focus,
 .wi-field select:focus,
 .wi-field textarea:focus,
@@ -552,7 +598,7 @@
 
 .wi-content-head {
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	justify-content: space-between;
 	gap: 10px;
 	flex-wrap: wrap;
@@ -580,7 +626,7 @@
 	display: flex;
 	flex-wrap: wrap;
 	gap: 4px;
-	min-height: 26px;
+	min-height: 0;
 	align-items: center;
 	border-radius: var(--st-radius-sm);
 }
@@ -603,6 +649,12 @@
 .wi-chip-input {
 	width: 100%;
 	box-sizing: border-box;
+}
+
+/* `display: flex` above would otherwise win over the `hidden` attribute set in plaintext mode. */
+.wi-chips[hidden],
+.wi-chip-input[hidden] {
+	display: none;
 }
 
 /* The fancy/plaintext switch sits on the field's own label row, at the right. */

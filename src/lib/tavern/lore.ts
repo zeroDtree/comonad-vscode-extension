@@ -474,11 +474,14 @@ function scanBooks(sorted: readonly ScanEntry[], input: LoreInput, state: ScanSt
 		});
 
 		let kept = 0;
+		let recursable = 0;
 		for (const scan of ordered) {
 			const entry = scan.entry;
 			const key = effectKey(scan);
 			const probability = entry.useProbability === false ? 100 : (entry.probability ?? 100);
-			if (probability < 100 && random() * 100 > probability) {
+			// SillyTavern never re-rolls an entry whose window is still open: a sticky entry stays.
+			const stickyNow = isActive(state.effects[key], 'stickyUntil', input.turn);
+			if (!stickyNow && probability < 100 && random() * 100 > probability) {
 				state.failed.add(key);
 				continue;
 			}
@@ -505,11 +508,15 @@ function scanBooks(sorted: readonly ScanEntry[], input: LoreInput, state: ScanSt
 				};
 			}
 			state.activated.set(key, { book: scan.book, entry, reason: reasonFor(scan, state.effects[key], input.turn, input), content });
-			state.text += `\n${content}`;
+			// Only entries that do not prevent recursion feed the next recursive scan, as in SillyTavern.
+			if (!entry.preventRecursion) {
+				state.text += `\n${content}`;
+				recursable += 1;
+			}
 			kept += 1;
 		}
 
-		if (!settings.recursive || kept === 0) {
+		if (!settings.recursive || recursable === 0) {
 			break;
 		}
 		if (!recursion) {

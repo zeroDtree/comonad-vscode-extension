@@ -6,6 +6,47 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **An Inspect tab: what the model is told, and how a tool call is gated.** The read-only views now live
+  under one top-level tab, **Inspect**, with two sub-tabs of its own:
+  - **Tool Policy Flow (TPF)** — the old **Flow** tab under a name that says what it draws; the chart is
+    only rendered while this sub-tab is on screen, since Mermaid measures its container.
+  - **Prompts** — every prompt in one place, grouped by where it comes from — **Comonad** (the agent's
+    own named system-prompt blocks: Identity, Instructions, Memory, Todos, Skills, Sub-agents, Lore
+    index, and the turn's Context), **Tools** (each tool's definition, description and parameter schema,
+    marked when the chat's work mode leaves it out), and **SillyTavern** (the collection the active chat
+    would send, with its real order, on/off state, markers and injection depth). Pick a row to read the
+    prompt in full; **Refresh** re-reads it. The slice is read on demand rather than on every state push.
+
+  Remembering which sub-tab you were on is part of the panel's saved state, and neither view can change
+  anything.
+  - The agent's prompt is now built as **named blocks** and joined the way the model receives it, so the
+    tab and the request can never disagree.
+
+- **A prompt is saved before it is inserted.** Nothing adds a block to the preset's list any more: the
+  **Prompt library** is one entry box whose small button switches between **Built-in** (shared by
+  every preset) and **Custom** (this preset's own), holding a picker with **+ New** and
+  **Insert**. *Insert* copies the picked entry to the top of the list, right after Comonad's own
+  identity block (which still leads the collection); *+ New* saves a new entry into the library the box
+  is showing and opens its editor, scrolled into view with the status line saying what happened.
+  - There are two libraries. The **system library** lives in `.comonad/prompt-library.json`, is seeded
+    from the eight built-in blocks, and is edited in place (rename and delete) — a change there reaches
+    every preset. A **preset's own library** is stored inside the preset's file under
+    `comonad_prompt_library`, a key SillyTavern ignores, so it travels with the preset and every ST
+    field is written back untouched.
+  - Picking an entry opens its editor in the space right below the box — name, role and text — with a
+    **Delete** button. There is no separate list to keep in step with the picker, and identifiers are
+    made unique on insert, so the same block can be inserted twice.
+
+- **The library is read at startup.** `Tavern` and `Catalog` had no initial load at all — `reactions`
+  only watches — so they were read for the first time only when a `.comonad` file changed or a setting
+  was saved. The ST pane therefore opened on an empty shared prompt library, and its seed file was never
+  written. Each service now reads its own library as it is constructed, and `Tavern.ready` is that first
+  read so a caller can wait for it.
+  - Each library entry has its own small editor (name, role, text) and can be renamed in place. A
+    system entry writes straight through to the shared file; a preset entry is saved with the preset.
+  - The pane keeps the item it is editing: a state push while the form is dirty (which a
+    shared-library save causes) no longer replaces it with the copy on disk, so unsaved edits survive.
+
 - **The ST tab is one design now.** Its pages were built one after another and it showed: five kinds of
   button, three field sizes, icons floating in the middle of a row, a header line that did not sit over
   the columns it named. They now share one scale, declared once as tokens in `settings.css` — every

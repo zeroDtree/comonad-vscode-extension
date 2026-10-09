@@ -204,8 +204,16 @@ edit, duplicate and delete every kind, then use it in this chat or make it the d
   its picture; **Convert a character…** makes one out of a card, swapping `{{char}}`/`{{user}}` if you
   say so; deleting a persona takes its picture with it.
 - **Presets.** A chat-completion preset is the whole of upstream's OpenAI settings, edited in the
-  **Presets** tab: the prompt list (switch a block off, move it, duplicate it, delete it, add one of
-  eight blocks worth having to hand, restore the shipped list, and **edit any entry** — which opens
+  **Presets** tab: a block is **saved before it is inserted** — the **Prompt library** is one entry box
+  whose small button switches between **Built-in** (shared by every preset) and **Custom**
+  (this preset's own), with a picker and **+ New** / **Insert**; *Insert* copies the picked entry to the
+  top of the list, right after Comonad's own block, and *+ New* saves one into the library being shown
+  with its editor opened in place. The **system library** lives in `.comonad/prompt-library.json`,
+  seeded from the eight built-in blocks; a preset's **own library** is stored inside the preset's file,
+  so it travels with the preset. Picking an entry opens its editor in the space right below the box,
+  with a **Delete** button. The prompt list
+  itself follows (switch a block off, move it,
+  duplicate it, delete it, restore the shipped list, and **edit any entry** — which opens
   under its own row, as a world-book entry does — its name, its role, the **generation types** it
   fires for, *Relative* / *In-chat @ depth*, its depth and order, its text and **Forbid Overrides**,
   with upstream's own hints and its *Reset* putting a shipped block back; a marker says its text is
@@ -424,12 +432,15 @@ The default agent loop is a Mermaid graph (`comonad.graph`); edit it in **Comona
 The panel is tabbed — **Graph** (Mermaid source beside a live preview, Max steps, parsed Nodes /
 Routes), **Agent** (model, work mode, approval, display, context, network, working directory,
 command timeout, plan directory, deny read paths), **Rules** (the `comonad.permissions` allow / ask /
-deny lists, one rule per line, validated on save), **Flow** (the tool-call gate as a Mermaid
-diagram: the work-mode, network and workspace checks, then two frames — **your rules** and the
-**approval policy**, whose five settings each get their own node — with the built-in unsandboxed /
-dangerous-command escalation between them; every gate ends in its own **Rejected** / **Asks you** /
-**Runs** node right beside it, so the chart never draws an edge across itself; generated from the
-policy tables, so it cannot drift from the code), **MCP** and **Tools** —
+deny lists, one rule per line, validated on save), **Inspect** (a read-only tab with two sub-tabs:
+**Tool Policy Flow (TPF)** — the tool-call gate as a Mermaid diagram: the work-mode, network and
+workspace checks, then two frames — **your rules** and the **approval policy**, whose five settings each
+get their own node — with the built-in unsandboxed / dangerous-command escalation between them; every
+gate ends in its own **Rejected** / **Asks you** / **Runs** node right beside it, so the chart never
+draws an edge across itself; generated from the policy tables, so it cannot drift from the code — and
+**Prompts** — every prompt the model can be given: Comonad's own named blocks, each tool's definition
+with its parameter schema, and the SillyTavern collection this chat would send; pick one to read it),
+**MCP**, and **Tools** —
 remembers the tab you were on, validates the graph as you type, and applies the form only when you
 press **Save**. Plan files live under `comonad.planDirectory` (empty keeps `.comonad/plans`).
 The built-in flow is `llm.complete → agent.after-llm → agent.tools / agent.confirm / agent.reject → …`.

@@ -108,6 +108,16 @@ input.control,
 	font-weight: 500;
 }
 
+/* The Inspect tab's own sub-tabs: the tool policy flow and the prompt list. `.subtab` itself comes from
+   the content pane's stylesheet, which this document also loads. */
+#inspect-tabs {
+	display: flex;
+	gap: 2px;
+	flex-wrap: wrap;
+	border-bottom: 1px solid var(--st-border);
+	margin-bottom: 10px;
+}
+
 /* A button that reads as a link: the toolbar's quiet actions, and every row's own controls. */
 .link {
 	background: transparent;
@@ -545,6 +555,98 @@ button.icon.danger:hover {
 	height: auto;
 }
 
+/* ------------------------------------------------------------------ prompts */
+
+/* The Prompts tab: a list of every prompt beside the one that is picked. */
+#pr-wrap {
+	display: grid;
+	grid-template-columns: minmax(260px, min(42%, 460px)) 1fr;
+	gap: 16px;
+	align-items: start;
+}
+
+#pr-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	max-height: 62vh;
+	overflow: auto;
+	border: 1px solid var(--st-border-soft);
+	border-radius: var(--st-radius-sm);
+	padding: 4px;
+}
+
+#pr-list h3 {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 6px 4px 2px;
+	font-size: var(--st-label);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--st-muted);
+}
+
+#pr-list .pr-count {
+	font-weight: 400;
+	opacity: 0.7;
+}
+
+.pr-row {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	background: none;
+	border: 0;
+	border-radius: var(--st-radius-sm);
+	padding: 4px 6px;
+	color: inherit;
+	font: inherit;
+	font-size: var(--st-text);
+	text-align: left;
+	cursor: pointer;
+}
+
+.pr-row:hover {
+	background: var(--st-surface-2);
+}
+
+.pr-row.is-on {
+	background: var(--vscode-list-activeSelectionBackground, var(--st-surface-2));
+}
+
+.pr-row .pr-name {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pr-row .pr-note {
+	flex: none;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+}
+
+/* The prompt itself: monospace, wrapped, and scrollable — a system prompt is long. */
+.pr-view {
+	margin: 0;
+	padding: 10px;
+	min-height: 340px;
+	max-height: 62vh;
+	overflow: auto;
+	border: 1px solid var(--st-border-soft);
+	border-radius: var(--st-radius-sm);
+	background: var(--st-surface-2);
+	font-family: var(--st-mono);
+	font-size: var(--st-small);
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
 /* The flow tab's mode legend: `Name — calls it grants` per mode. */
 .legend {
 	list-style: none;
@@ -614,7 +716,8 @@ th.num {
 }
 
 @media (max-width: 720px) {
-	#graph-wrap {
+	#graph-wrap,
+	#pr-wrap {
 		grid-template-columns: 1fr;
 	}
 }

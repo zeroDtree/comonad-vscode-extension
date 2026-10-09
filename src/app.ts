@@ -96,6 +96,6 @@ export function apply(ctx: Context, config: ComonadConfig): void {
 	ctx.plugin(chatPanel);
 	ctx.plugin(participant);
 
-	// Environment reactions (watchers, initial loads).
+	// Environment reactions (watchers). Each service reads its own library when it is constructed.
 	ctx.plugin(reactions);
 }

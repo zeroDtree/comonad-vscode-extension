@@ -1,4 +1,5 @@
 import { DEFAULT_ORDER, DEFAULT_PROMPTS } from './prompts';
+import { sanitisePromptLibrary } from './library';
 import {
 	PERSONA_DEPTH_DEFAULT,
 	PERSONA_POSITION,
@@ -176,11 +177,15 @@ export function adoptPreset(raw: unknown): TavernPreset {
 	const prompts: (PromptItem & { enabled?: boolean })[] = Array.isArray(value.prompts)
 		? (value.prompts as (PromptItem & { enabled?: boolean })[]).filter((prompt) => prompt && typeof prompt.identifier === 'string')
 		: [];
+	// This preset's own prompt library: what the pane saved for this preset alone. An empty library
+	// leaves the key out entirely, so a preset that never used one keeps its file as it arrived.
+	const promptLibrary = sanitisePromptLibrary((value as { promptLibrary?: unknown }).promptLibrary);
 	const preset: TavernPreset = {
 		...(value as TavernPreset),
 		id,
 		name: asText(value.name).trim() || id,
 		prompts,
+		promptLibrary: promptLibrary.length ? promptLibrary : undefined,
 		promptOrder: prompts.map((prompt) => ({ identifier: prompt.identifier, enabled: prompt.enabled !== false })),
 		raw: asObject(value.raw),
 	};

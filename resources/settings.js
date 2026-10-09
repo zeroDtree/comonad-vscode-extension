@@ -15,6 +15,8 @@
 	const askedTab = document.querySelector('script[data-tab]');
 	let activeTab = (vscode.getState() || {}).tab || (askedTab && askedTab.dataset.tab) || 'agent';
 	let activeSt = (vscode.getState() || {}).st || 'characters';
+	// The Inspect tab's own sub-tab: the tool policy flow, or the prompt list.
+	let activeInspect = (vscode.getState() || {}).inspect || 'flow';
 	let graphInfo = { nodes: [], routes: [], error: '' };
 	let dirs = { path: '', parent: '', entries: [], error: '' };
 	let dirFilter = '';
@@ -69,12 +71,40 @@
 		button.addEventListener('click', () => showSt(button.dataset.st));
 	}
 
+	/* The Inspect tab's own sub-tabs: the tool policy flow and the prompt list. */
+	function showInspect(name) {
+		if (!document.querySelector('.subtab[data-inspect="' + name + '"]')) {
+			name = 'flow';
+		}
+		activeInspect = name;
+		store.set({ tab: activeTab, st: activeSt, inspect: name });
+		for (const button of document.querySelectorAll('.subtab[data-inspect]')) {
+			const on = button.dataset.inspect === name;
+			button.classList.toggle('is-on', on);
+			button.setAttribute('aria-selected', String(on));
+		}
+		for (const pane of document.querySelectorAll('[data-inspect-pane]')) {
+			pane.hidden = pane.dataset.inspectPane !== name;
+		}
+		if (name === 'prompts') {
+			// Show what was read last — or say it is being read — before asking for a fresh slice, so
+			// reopening the sub-tab is never a blank pane.
+			renderPrompts();
+			post({ type: 'prompts' });
+		}
+		scheduleFlow();
+	}
+
+	for (const button of document.querySelectorAll('.subtab[data-inspect]')) {
+		button.addEventListener('click', () => showInspect(button.dataset.inspect));
+	}
+
 	function showTab(name) {
 		if (!document.querySelector('.tab[data-tab="' + name + '"]')) {
 			name = 'agent';
 		}
 		activeTab = name;
-		store.set({ tab: name, st: activeSt });
+		store.set({ tab: name, st: activeSt, inspect: activeInspect });
 		for (const tab of document.querySelectorAll('.tab')) {
 			const on = tab.dataset.tab === name;
 			tab.classList.toggle('is-on', on);
@@ -82,6 +112,9 @@
 		}
 		for (const pane of document.querySelectorAll('section[data-pane]')) {
 			pane.hidden = pane.dataset.pane !== name;
+		}
+		if (name === 'inspect') {
+			showInspect(activeInspect);
 		}
 		schedulePreview();
 		scheduleFlow();
@@ -237,6 +270,7 @@
 	}
 
 	$('model-refresh').addEventListener('click', () => post({ type: 'refresh' }));
+	$('pr-refresh').addEventListener('click', () => post({ type: 'prompts' }));
 	$('model-add').addEventListener('click', () => post({ type: 'configureModel' }));
 	$('graph-reset').addEventListener('click', () => {
 		$('graph').value = state ? state.defaultGraph : '';
@@ -432,7 +466,7 @@
 	let flowDrawn = false;
 
 	function scheduleFlow() {
-		if (activeTab !== 'flow' || !state || (state.flow === flowSource && flowDrawn)) {
+		if (activeTab !== 'inspect' || activeInspect !== 'flow' || !state || (state.flow === flowSource && flowDrawn)) {
 			return;
 		}
 		flowSource = state.flow;
@@ -550,6 +584,105 @@
 		]));
 	}
 
+	/* ------------------------------------------------------------------ prompts */
+
+	// Every prompt the model can be given, grouped by where it comes from: Comonad's own system-prompt
+	// blocks, each tool's definition, and the SillyTavern collection this chat would send. The host reads
+	// the slice on demand; the row that is picked is remembered with the tab.
+	let promptsData = null;
+
+	function promptRows(data) {
+		const rows = [];
+		for (const block of data.comonad || []) {
+			rows.push({
+				group: 'Comonad',
+				id: 'comonad:' + block.name,
+				name: block.name,
+				note: block.tokens + ' tokens',
+				meta: "Comonad — " + block.name,
+				text: block.text,
+			});
+		}
+		for (const tool of data.tools || []) {
+			rows.push({
+				group: 'Tools',
+				id: 'tool:' + tool.name,
+				name: tool.name,
+				note: (tool.visible ? '' : 'not offered · ') + tool.capability + ' · ' + tool.tokens + ' tokens',
+				meta: 'Tool — ' + tool.capability + (tool.visible ? '' : ' (not offered in this chat’s mode)'),
+				text: (tool.description || '') + '\n\n' + JSON.stringify(tool.parameters || {}, null, 2),
+			});
+		}
+		for (const prompt of data.st || []) {
+			const bits = [prompt.role];
+			if (prompt.enabled === false) {
+				bits.push('off');
+			}
+			if (prompt.marker) {
+				bits.push('marker');
+			}
+			if (prompt.inChat) {
+				bits.push('@ ' + Number(prompt.depth ?? 4));
+			}
+			bits.push(prompt.tokens + ' tokens');
+			rows.push({
+				group: 'SillyTavern',
+				id: 'st:' + prompt.identifier,
+				name: prompt.name,
+				note: bits.join(' · '),
+				meta: 'SillyTavern — ' + prompt.identifier + ' · ' + prompt.role,
+				text: prompt.content,
+			});
+		}
+		return rows;
+	}
+
+	function renderPrompts(data) {
+		if (data) {
+			promptsData = data;
+		}
+		const list = $('pr-list');
+		const view = $('pr-view');
+		list.innerHTML = '';
+		if (!promptsData) {
+			list.innerHTML = '<p class="hint">Reading the prompts…</p>';
+			view.textContent = '';
+			return;
+		}
+		const rows = promptRows(promptsData);
+		const picked = (vscode.getState() || {}).prompt || '';
+		const shown = rows.find((row) => row.id === picked) || rows[0];
+		let group = '';
+		for (const row of rows) {
+			if (row.group !== group) {
+				group = row.group;
+				const heading = document.createElement('h3');
+				heading.textContent = group;
+				const count = rows.filter((entry) => entry.group === group).length;
+				heading.append(Object.assign(document.createElement('span'), { className: 'pr-count', textContent: String(count) }));
+				list.append(heading);
+			}
+			const line = document.createElement('button');
+			line.type = 'button';
+			line.className = 'pr-row' + (row === shown ? ' is-on' : '');
+			line.append(
+				Object.assign(document.createElement('span'), { className: 'pr-name', textContent: row.name }),
+				Object.assign(document.createElement('span'), { className: 'pr-note', textContent: row.note }),
+			);
+			line.addEventListener('click', () => {
+				store.set({ prompt: row.id });
+				renderPrompts();
+			});
+			list.append(line);
+		}
+		if (!rows.length) {
+			list.innerHTML = '<p class="hint">Nothing to show yet.</p>';
+		}
+		$('pr-title').textContent = shown ? shown.meta : 'Preview';
+		$('pr-meta').textContent = shown ? shown.name + ' · ' + shown.note : '';
+		view.textContent = shown ? shown.text || '(empty)' : 'Pick a prompt on the left.';
+	}
+
 	/* ------------------------------------------------------------------ inbound */
 
 	window.addEventListener('message', (event) => {
@@ -577,6 +710,9 @@
 				} else {
 					scheduleFlow();
 				}
+				break;
+			case 'prompts':
+				renderPrompts(message.prompts);
 				break;
 			case 'models':
 				fillModels(message.models, state ? state.config.model : '');
