@@ -1,5 +1,5 @@
-import { estimateTokens } from '../prompt';
-import { WI_LOGIC, WI_POSITION, WI_ROLE, WI_STRATEGY, worldEntry, type GenerationTrigger, type WiRole, type WorldBook, type WorldEntry, type WorldInfoSettings } from './types';
+import { estimateTokens } from '@comonad/lib/prompt';
+import { WI_LOGIC, WI_POSITION, WI_ROLE, WI_STRATEGY, worldEntry, type GenerationTrigger, type WiRole, type WorldBook, type WorldEntry, type WorldInfoSettings } from '@comonad/lib/tavern/types';
 
 /**
  * The world-info engine: which entries a message activates, and where they go in the prompt.

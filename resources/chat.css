@@ -694,19 +694,6 @@ footer {
 	background: var(--vscode-sideBar-background, transparent);
 }
 
-#chips {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 6px;
-	margin-bottom: 7px;
-}
-
-#chips button {
-	font-size: 11px;
-	padding: 2px 9px;
-	opacity: 0.85;
-}
-
 #todos {
 	display: flex;
 	flex-wrap: wrap;
@@ -767,6 +754,17 @@ footer {
 	flex-wrap: wrap;
 	gap: 6px;
 	padding: 4px 8px 6px;
+}
+
+/* Send, the chips and the generation caret belong to the right edge of the box, and stay together
+   when the row wraps on a narrow panel. */
+#sendbar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 6px;
+	margin-left: auto;
 }
 
 /* The send-bar pills: a trigger that opens its own menu, so every choice can

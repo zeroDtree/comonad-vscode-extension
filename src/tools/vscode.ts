@@ -124,6 +124,10 @@ export const vscodeTools = toolset([
 				return `Error: ${path} is protected from edits by policy`;
 			}
 			const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+			// Unsaved text is the user's, not the agent's: refuse rather than save it to disk.
+			if (document.isDirty) {
+				return `Error: ${path} has unsaved changes in the editor — save it first, then retry`;
+			}
 			const edit = new vscode.WorkspaceEdit();
 			for (const change of edits) {
 				const range = new vscode.Range(change.startLine - 1, change.startColumn - 1, change.endLine - 1, change.endColumn - 1);
@@ -132,9 +136,24 @@ export const vscodeTools = toolset([
 				}
 				edit.replace(document.uri, range, change.text);
 			}
-			const applied = await vscode.workspace.applyEdit(edit);
-			if (!applied) {
-				return `Error: the editor rejected the edits`;
+			// The editor writes this file, so the journal reads the disk around it: the unsaved text is
+			// what the user would lose on a revert, which is why the review refuses a dirty document.
+			const write = async () => {
+				const applied = await vscode.workspace.applyEdit(edit);
+				if (!applied) {
+					throw new Error('the editor rejected the edits');
+				}
+				// The edit is applied in the buffer; save it so the disk and the journal agree.
+				await document.save();
+			};
+			try {
+				if (ctx.edit) {
+					await ctx.edit(target, write);
+				} else {
+					await write();
+				}
+			} catch (error) {
+				return `Error: ${error instanceof Error ? error.message : String(error)}`;
 			}
 			return `applied ${edits.length} edit(s) to ${path}`;
 		},

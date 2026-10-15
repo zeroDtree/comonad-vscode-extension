@@ -51,10 +51,13 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 	let content = '';
 	let reasoning = '';
 	let usage: CompletionUsage | undefined;
+	// Gemini 3 answers a 400 when a function call in the history has no thought signature, so a call
+	// that never had one is sent back with Google's bypass instead.
+	const bypass = demandsSignature(request.model) ? SKIP_SIGNATURE : undefined;
 
 	const body: Record<string, unknown> = {
 		model: request.model,
-		messages: request.messages.map(toOpenAi),
+		messages: request.messages.map((message) => toOpenAi(message, bypass)),
 		stream: true,
 	};
 	if (request.temperature !== undefined) {
@@ -187,6 +190,11 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 					}
 					current.name += call.function?.name ?? '';
 					current.arguments += call.function?.arguments ?? '';
+					// A thinking model's signature arrives with the call — usually in an earlier chunk than
+					// its name — and is kept exactly as it came so the next request can hand it back.
+					if (!current.extraContent && call.extra_content) {
+						current.extraContent = call.extra_content;
+					}
 					toolCalls.set(slot.emitIndex, current);
 					if (call.function?.name || call.function?.arguments) {
 						request.onToolDelta?.({
@@ -250,7 +258,7 @@ export async function listEndpointModels(request: { base: string; key: string; s
 	return [...new Set(ids)].sort();
 }
 
-function toOpenAi(message: Message): Record<string, unknown> {
+function toOpenAi(message: Message, bypass: Record<string, unknown> | undefined): Record<string, unknown> {
 	if (message.role === 'tool') {
 		return { role: 'tool', content: message.content, tool_call_id: message.toolCallId };
 	}
@@ -262,15 +270,39 @@ function toOpenAi(message: Message): Record<string, unknown> {
 			body.reasoning_content = message.reasoning;
 		}
 		if (message.toolCalls?.length) {
-			body.tool_calls = message.toolCalls.map((call) => ({
-				id: call.id,
-				type: 'function',
-				function: { name: call.name, arguments: call.arguments },
-			}));
+			body.tool_calls = message.toolCalls.map((call) => {
+				const entry: Record<string, unknown> = {
+					id: call.id,
+					type: 'function',
+					function: { name: call.name, arguments: call.arguments },
+				};
+				// What the endpoint sent with the call goes back with it, the way Google's own layer emits
+				// it; a call that has nothing while the model demands a signature carries the bypass.
+				const extra = call.extraContent ?? bypass;
+				if (extra) {
+					entry.extra_content = extra;
+				}
+				return entry;
+			});
 		}
 		return body;
 	}
 	return { role: message.role, content: message.content };
+}
+
+/**
+ * Google's own last resort for a function call whose thought signature is unknown — one written before
+ * this was kept, or by another provider. Gemini 3 refuses the request without *something* in the field,
+ * so the placeholder is sent rather than losing the turn; SillyTavern sends it for the same reason.
+ */
+const SKIP_SIGNATURE: Record<string, unknown> = { google: { thought_signature: 'skip_thought_signature_validator' } };
+
+/**
+ * Whether this model demands a thought signature back with every function call. Gemini 3 and later do;
+ * 2.5's signatures are optional, and inventing one there would only cost the model performance.
+ */
+function demandsSignature(model: string): boolean {
+	return /(^|[^a-z])gemini-[3-9]/i.test(model);
 }
 
 interface StreamEvent {
@@ -278,7 +310,13 @@ interface StreamEvent {
 		delta?: {
 			content?: string | null;
 			reasoning_content?: string | null;
-			tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
+			tool_calls?: {
+				index?: number;
+				id?: string;
+				function?: { name?: string; arguments?: string };
+				/** Google's OpenAI-compatible layer puts the thinking model's signature here. */
+				extra_content?: Record<string, unknown> | null;
+			}[];
 		};
 	}[];
 	usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number } | null;

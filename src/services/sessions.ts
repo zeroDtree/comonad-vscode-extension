@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 
 import { join } from 'node:path';
 import { Service, type Context } from 'cordis';
 import type { ContextForm } from '../lib/prompt';
+import { turnsOf } from '../lib/turns';
 import type { Message, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
 
 /** Session persistence and the active-session pointer. One JSON document per chat. */
@@ -21,9 +22,11 @@ export interface SessionUsage {
 	cost: number;
 }
 
+/** A rewind point: the journal position and the transcript length at the end of one turn. */
 export interface Mark {
 	turn: number;
-	checkpointId: string;
+	/** Journal entries that existed at this point; rewinding keeps these and undoes the rest. */
+	entryCount: number;
 	length: number;
 	at: number;
 	text: string;
@@ -274,7 +277,8 @@ export class SessionStore {
 			transcript: session.transcript ?? [],
 			turnIndex: session.turnIndex ?? 0,
 			cursor: session.cursor ?? null,
-			marks: session.marks ?? [],
+			// Marks from the shadow-snapshot era have no journal to rewind to, so they are dropped.
+			marks: (session.marks ?? []).filter((mark) => typeof mark.entryCount === 'number'),
 			usage: session.usage ?? emptyUsage(),
 			instructions: session.instructions ?? [],
 		};
@@ -447,7 +451,7 @@ export class Sessions extends Service {
 		this.changed(id);
 	}
 
-	/** Truncates a session for rewind. `at` also drops later checkpoint marks. */
+	/** Truncates a session for rewind. `at` also drops the marks recorded after that point. */
 	truncate(id: string, length: number, at?: number): void {
 		const session = this.require(id);
 		session.transcript = session.transcript.slice(0, length);
@@ -498,10 +502,15 @@ export class Sessions extends Service {
 	/**
 	 * The index of the reply a swipe talks about: the last thing the assistant said in full. A turn
 	 * that ended in a tool call has no reply of its own, so the answer is the last message with text
-	 * and no calls hanging off it.
+	 * and no calls hanging off it. `turn` narrows the search to one turn, which is what the `‹ n/m ›`
+	 * nav on a reply that is no longer the last one needs.
 	 */
-	private replyIndex(session: Session): number {
-		for (let at = session.transcript.length - 1; at >= 0; at -= 1) {
+	private replyIndex(session: Session, turn?: number): number {
+		const end =
+			turn === undefined
+				? session.transcript.length
+				: (turnsOf(session.transcript).find((item) => item.index === turn)?.at ?? session.transcript.length);
+		for (let at = end - 1; at >= 0; at -= 1) {
 			const message = session.transcript[at]!;
 			if (message.role === 'assistant' && !message.toolCalls?.length && message.content.trim()) {
 				return at;
@@ -528,10 +537,10 @@ export class Sessions extends Service {
 		};
 	}
 
-	/** Shows another variant of the last reply. This only moves the pointer: nothing is generated. */
-	setSwipe(id: string, index: number): boolean {
+	/** Shows another variant of a reply. This only moves the pointer: nothing is generated. */
+	setSwipe(id: string, index: number, turn?: number): boolean {
 		const session = this.require(id);
-		const at = this.replyIndex(session);
+		const at = this.replyIndex(session, turn);
 		if (at < 0) {
 			return false;
 		}

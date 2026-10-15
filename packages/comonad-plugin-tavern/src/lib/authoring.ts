@@ -14,7 +14,7 @@ import {
 	type TavernPreset,
 	type WorldBook,
 	type WorldEntry,
-} from './types';
+} from '@comonad/lib/tavern/types';
 
 /**
  * Authoring: blank items and the on-disk writers, all in SillyTavern's own formats so a file made

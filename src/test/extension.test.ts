@@ -1,6 +1,8 @@
 import * as assert from 'node:assert';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import * as vscode from 'vscode';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule } from '../lib/policy';
@@ -11,27 +13,38 @@ import { listEndpointModels, openAiChat } from '../lib/openai';
 import type { ApprovalRequest, Message, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
-import { parseUnified } from '../services/checkpoints';
+import { ChangedOutsideError, Checkpoints, DirtyEditorError, parseDiffs } from '../services/checkpoints';
+import { fsTools } from '../tools/fs';
+import { agentTools } from '../tools/misc';
+import { hostStorage, type Host } from '../services/host';
+import { Context, Service, type Plugin } from 'cordis';
 import { SessionStore, unusedChat } from '../services/sessions';
-import { formatModelId, parseModelId, shapeModels } from '../services/llm';
+import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
 import { CONFIG_KEYS, DEPRECATED_CONFIG_KEYS, profileKeyEnvs } from '../services/settings';
 import { toolset } from '../services/tools';
 import { promptText } from '../services/agent';
-import { blankPng, cardTextFromPng, characterToCard, greetingsOf, loadCard, normaliseCard, parseCard, readPngText, writePngText } from '../lib/tavern/card';
-import { adoptBook, adoptCharacter, adoptPersona, adoptPreset, blankBook, blankCharacter, blankPersona, blankPreset, entryToJson } from '../lib/tavern/authoring';
-import { readBookFile } from '../services/tavern';
-import { convertCharacterToPersona } from '../lib/tavern/personas';
-import { parseExamples, substituteMacros } from '../lib/tavern/macro';
-import { parsePreset, presetSamplers, presetToJson } from '../lib/tavern/preset';
-import { builtInBlocks, librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from '../lib/tavern/library';
-import { PRESET_TEMPLATES } from '../lib/tavern/templates/presets';
-import { PROMPT_BLOCKS } from '../lib/tavern/templates/blocks';
-import { DEFAULT_ORDER, DEFAULT_PROMPTS, IDENTITY_PROMPT, movePrompt, promptCollection, setEnabled, shippedPrompt, triggersGeneration, withoutIdentityBlock } from '../lib/tavern/prompts';
-import { activateLore, toWorldBook, worldInfoToBook, type LoreBook, type LoreInput } from '../lib/tavern/lore';
+import { PLUGINS, ROWS } from '../app';
+import * as ComonadApp from '../app';
+import type { Plugins, PluginDependency, PluginState } from '../services/plugins';
+import { pluginNodeStatus, pluginTree, type PluginNode } from '../lib/plugins';
+import { slashCommands } from '../ui/slash';
+import { harnessAliases, harnessCompat } from '../plugins/harness';
+import { pluginHost, readRows, writeRow } from '../services/plugins';
+import { blankPng, cardTextFromPng, characterToCard, greetingsOf, loadCard, normaliseCard, parseCard, readPngText, writePngText } from 'comonad-plugin-tavern/lib/card';
+import { adoptBook, adoptCharacter, adoptPersona, adoptPreset, blankBook, blankCharacter, blankPersona, blankPreset, entryToJson } from 'comonad-plugin-tavern/lib/authoring';
+import { readBookFile } from 'comonad-plugin-tavern/services/tavern';
+import { convertCharacterToPersona } from 'comonad-plugin-tavern/lib/personas';
+import { parseExamples, substituteMacros } from 'comonad-plugin-tavern/lib/macro';
+import { parsePreset, presetSamplers, presetToJson } from 'comonad-plugin-tavern/lib/preset';
+import { builtInBlocks, librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from 'comonad-plugin-tavern/lib/library';
+import { PRESET_TEMPLATES } from 'comonad-plugin-tavern/lib/templates/presets';
+import { PROMPT_BLOCKS } from 'comonad-plugin-tavern/lib/templates/blocks';
+import { DEFAULT_ORDER, DEFAULT_PROMPTS, IDENTITY_PROMPT, movePrompt, promptCollection, setEnabled, shippedPrompt, triggersGeneration, withoutIdentityBlock } from 'comonad-plugin-tavern/lib/prompts';
+import { activateLore, toWorldBook, worldInfoToBook, type LoreBook, type LoreInput } from 'comonad-plugin-tavern/lib/lore';
 import type { TavernPreset } from '../lib/tavern/types';
-import { assemble, exampleMessages, injectAtDepth } from '../lib/tavern/assemble';
-import { applyRegex, makeScript } from '../lib/tavern/regex';
-import { ruleOf, searchEntries, visibleEntries } from '../lib/tavern/search';
+import { assemble, exampleMessages, injectAtDepth } from 'comonad-plugin-tavern/lib/assemble';
+import { applyRegex, makeScript } from 'comonad-plugin-tavern/lib/regex';
+import { ruleOf, searchEntries, visibleEntries } from 'comonad-plugin-tavern/lib/search';
 import {
 	ANTI_TROLL_MAX_TAGS,
 	TAG_IMPORT,
@@ -49,8 +62,16 @@ import {
 	storeJson,
 	tagIdsOf,
 	tagsOf,
-} from '../lib/tavern/tags';
+} from 'comonad-plugin-tavern/lib/tags';
 import { REGEX_PLACEMENT, PROMPT_LIBRARY_KEY, WI_LOGIC, WI_POSITION, WI_ROLE, WI_SETTINGS_DEFAULTS, WI_STRATEGY, worldEntry, type GenerationTrigger, type WorldEntry } from '../lib/tavern/types';
+/** The tavern plugin is a package beside the host: its files are read from there, not from `src/`. */
+const PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-tavern');
+const PACKAGE_SRC = join(PACKAGE, 'src');
+const PACKAGE_RESOURCES = join(PACKAGE, 'resources');
+import tavernEntry from 'comonad-plugin-tavern';
+import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
+import { settingsDocument } from '../ui/settings-panel';
+import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
 import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, countMessages, countRaw, countTokens, encodingForModel, guesstimate, setEncoder } from '../lib/tokens';
 import { planFor } from '../services/tokenizers';
@@ -297,11 +318,12 @@ suite('Comonad domain', () => {
 			' const c = 3;',
 			'',
 		].join('\n');
-		const files = parseUnified(patch);
-		assert.strictEqual(files.length, 1);
-		assert.strictEqual(files[0]!.path, 'src/a.ts');
-		assert.strictEqual(files[0]!.additions, 1);
-		assert.ok(files[0]!.hunks.length >= 1);
+		const files = parseDiffs(patch);
+		assert.strictEqual(files.size, 1);
+		const file = files.get('src/a.ts');
+		assert.ok(file, 'the diff is keyed by its path');
+		assert.strictEqual(file.additions, 1);
+		assert.ok(file.hunks.length >= 1);
 	});
 
 	test('dangerous commands are detected', () => {
@@ -395,6 +417,87 @@ suite('Comonad domain', () => {
 			assert.strictEqual(sent.role, 'assistant');
 			assert.strictEqual(sent.content, 'the answer');
 			assert.strictEqual(sent.reasoning_content, 'thinking hard', 'thinking mode with tools requires it back');
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
+	test('a thinking model\u2019s function-call signature is kept and sent back with the call', async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const original = globalThis.fetch;
+		globalThis.fetch = (async (_url: string, init: { body: string }): Promise<Response> => {
+			bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+			// Gemini hands the signature over with the function call, in `extra_content` — and often in an
+			// earlier chunk than the call's own name and arguments.
+			const sse = [
+				'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","extra_content":{"google":{"thought_signature":"SIG-1"}}}]}}]}',
+				'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"run_shell_readonly","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}',
+				'data: [DONE]',
+				'',
+			].join('\n\n');
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						controller.enqueue(new TextEncoder().encode(sse));
+						controller.close();
+					},
+				}),
+				{ status: 200 },
+			);
+		}) as unknown as typeof fetch;
+		const request = (messages: Message[]): Parameters<typeof openAiChat>[0] => ({
+			base: 'https://generativelanguage.googleapis.com/v1beta/openai',
+			key: 'k',
+			model: 'gemini-3.8-flash',
+			messages,
+			tools: [],
+			signal: new AbortController().signal,
+		});
+		const sentCalls = (index: number): Record<string, unknown>[] =>
+			((bodies[index]!.messages as Record<string, unknown>[])[1]!.tool_calls ?? []) as Record<string, unknown>[];
+		try {
+			const first = await openAiChat(request([{ role: 'user', content: 'ls it' }]));
+			assert.strictEqual(first.toolCalls[0]?.name, 'run_shell_readonly');
+			assert.deepStrictEqual(
+				first.toolCalls[0]?.extraContent,
+				{ google: { thought_signature: 'SIG-1' } },
+				'the signature stays with the call it came on',
+			);
+
+			// The tool result goes back with that assistant turn, and the signature goes with it: without
+			// it Gemini 3 fails the whole turn with "Function call is missing a thought_signature".
+			await openAiChat(
+				request([
+					{ role: 'user', content: 'ls it' },
+					{ role: 'assistant', content: '', toolCalls: first.toolCalls },
+					{ role: 'tool', toolCallId: 'call_1', content: 'a.txt' },
+				]),
+			);
+			assert.deepStrictEqual(sentCalls(1)[0]!.extra_content, { google: { thought_signature: 'SIG-1' } }, 'sent back the way it came');
+
+			// A call that never had one — an older transcript, or one another provider wrote — carries
+			// Google's own bypass rather than losing the turn.
+			await openAiChat(
+				request([
+					{ role: 'user', content: 'ls it' },
+					{ role: 'assistant', content: '', toolCalls: [{ id: 'c9', name: 'run_shell_readonly', arguments: '{}' }] },
+					{ role: 'tool', toolCallId: 'c9', content: 'a.txt' },
+				]),
+			);
+			assert.deepStrictEqual(sentCalls(2)[0]!.extra_content, { google: { thought_signature: 'skip_thought_signature_validator' } });
+
+			// A model that does not demand one is never sent the bypass, and keeps what it was given.
+			await openAiChat({
+				...request([{ role: 'user', content: 'hi' }]),
+				base: 'https://api.deepseek.com',
+				model: 'deepseek-flash',
+				messages: [
+					{ role: 'user', content: 'ls it' },
+					{ role: 'assistant', content: '', toolCalls: [{ id: 'c9', name: 'run_shell_readonly', arguments: '{}' }] },
+					{ role: 'tool', toolCallId: 'c9', content: 'a.txt' },
+				],
+			});
+			assert.ok(!('extra_content' in sentCalls(3)[0]!), 'no signature demanded, none invented');
 		} finally {
 			globalThis.fetch = original;
 		}
@@ -535,7 +638,7 @@ suite('Comonad domain', () => {
 	});
 
 	test('the persona page takes the personas kind over, and the item list steps aside', () => {
-		const dir = join(__dirname, '..', '..', 'resources');
+		const dir = PACKAGE_RESOURCES;
 		// The persona page is a guest module of its own, like the world-book page: it saves as it is
 		// edited, so it owns the tile list and the connection editor while the kind is showing.
 		const pane = readFileSync(join(dir, 'persona.js'), 'utf8');
@@ -559,7 +662,7 @@ suite('Comonad domain', () => {
 	});
 
 	test('the prompt pane saves before it inserts, and keeps both libraries straight', () => {
-		const dir = join(__dirname, '..', '..', 'resources');
+		const dir = PACKAGE_RESOURCES;
 		const pane = readFileSync(join(dir, 'content.js'), 'utf8');
 		// A new entry is *saved* first: the two entry boxes carry *+ New*, and only their *Insert* puts a
 		// saved one into the list, at the top, right after Comonad’s own block.
@@ -570,12 +673,12 @@ suite('Comonad domain', () => {
 		assert.match(pane, /promptLibrarySave/, 'a system-library change is written straight through');
 		assert.match(pane, /editingLibrary/, 'each library entry has an editor of its own');
 		assert.match(pane, /builtInPrompts/, 'the built-in library comes from the top-level host slice, whatever kind is showing');
-		const serviceSource = readFileSync(join(__dirname, '..', '..', 'src', 'services', 'tavern.ts'), 'utf8');
+		const serviceSource = readFileSync(join(PACKAGE_SRC, 'services', 'tavern.ts'), 'utf8');
 		assert.match(serviceSource, /prompts\.filter\(\(prompt\) => prompt\.identifier !== IDENTITY_PROMPT\)/, 'a saved preset never carries the identity block');
 		assert.match(pane, /block\.draggable = true/, 'a prompt card can be dragged to reorder the list');
 		assert.match(pane, /moveTo\(from, index\)/, 'a drop moves the card to its new index');
 		assert.match(readFileSync(join(dir, 'content.css'), 'utf8'), /is-drop-target/, 'the drop target is shown while dragging');
-		const host = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'tavern-content.ts'), 'utf8');
+		const host = readFileSync(join(PACKAGE_SRC, 'panel', 'controller.ts'), 'utf8');
 		assert.match(host, /builtInPrompts:\s*ctx\.tavern\.promptLibrary/, 'the host sends it at the top level, not inside the presets-only slice');
 		assert.doesNotMatch(host, /systemPrompts/, 'the old kind-gated field is gone');
 		assert.match(pane, /uniqueId\(/, 'an inserted identifier is made unique');
@@ -630,7 +733,7 @@ suite('Comonad domain', () => {
 
 		assert.match(panel, /case 'prompts'/, 'the host answers the prompt list’s request on demand');
 		assert.match(panel, /ctx\.agent\.promptBlocks/, 'with the agent’s own named blocks');
-		assert.match(panel, /ctx\.tavern\.promptsFor/, 'the SillyTavern collection the chat would send');
+		assert.match(panel, /tavern\(\)\?\.promptsFor/, 'the SillyTavern collection the chat would send, when its plugin is loaded');
 		assert.match(panel, /parameters: tool\.parameters/, 'and each tool’s definition, schema included');
 
 		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
@@ -740,6 +843,48 @@ suite('Cordis kernel', () => {
 		}
 	});
 
+	test('a continue and an impersonation ask as the user, never ending on the model\u2019s own turn', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const seen: { role: string; content: string }[][] = [];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request: AdapterRequest) {
+					seen.push(request.messages.map((message) => ({ role: message.role, content: message.content })));
+					return { message: { role: 'assistant' as const, content: 'grown.' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'ask');
+			kernel.ctx.sessions.save(session);
+			await kernel.ctx.agent.runTurn({ text: '你好', sessionId: 'ask' });
+
+			// Gemini refuses a request whose last turn is the model's own ("Requests ending with a model
+			// turn are not supported"), which is exactly what a continue and an impersonation look like
+			// until the ask is said as the user.
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'continue', sessionId: 'ask' });
+			const continued = seen[1]!;
+			assert.strictEqual(continued[continued.length - 1]!.role, 'user', 'a continue ends on the user');
+			assert.match(continued[continued.length - 1]!.content, /Continue the last message/);
+			assert.strictEqual(continued[0]!.role, 'system');
+			assert.match(continued[0]!.content, /Continue the last message/, 'the system prompt keeps the standing instruction');
+
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'impersonate', sessionId: 'ask' });
+			const asked = seen[2]!;
+			assert.strictEqual(asked[asked.length - 1]!.role, 'user', 'an impersonation ends on the user');
+			assert.match(asked[asked.length - 1]!.content, /Write the next message of this conversation/);
+
+			// Quiet answers the prompt it was given, so that is the turn the request ends on — and the
+			// transcript is still left exactly as it was.
+			const before = kernel.ctx.sessions.require('ask').transcript;
+			await kernel.ctx.agent.runTurn({ text: 'answer this privately', trigger: 'quiet', sessionId: 'ask' });
+			const quiet = seen[3]!;
+			assert.deepStrictEqual(quiet[quiet.length - 1], { role: 'user', content: 'answer this privately' });
+			assert.deepStrictEqual(kernel.ctx.sessions.require('ask').transcript, before, 'a quiet prompt is never written down');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('a chat can be forked from a turn and have its last turn replayed', async () => {
 		const kernel = await createTestKernel();
 		try {
@@ -769,7 +914,721 @@ suite('Cordis kernel', () => {
 			// An empty chat has nothing to re-run, and says so instead of throwing.
 			kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'empty');
 			assert.strictEqual(kernel.ctx.sessions.replayLast('empty'), '');
+
+			// The fork the panel offers is per turn: from the middle turn of three, the copy stops where
+			// that turn ended and the turns after it stay behind.
+			const three = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'three');
+			three.transcript.push(
+				{ role: 'user', content: 'q1' },
+				{ role: 'assistant', content: 'a1' },
+				{ role: 'user', content: 'q2' },
+				{ role: 'assistant', content: 'a2' },
+				{ role: 'user', content: 'q3' },
+				{ role: 'assistant', content: 'a3' },
+			);
+			kernel.ctx.sessions.save(three);
+			const middle = turnsOf(kernel.ctx.sessions.get('three')!.transcript)[1]!;
+			assert.strictEqual(middle.at, 4, 'the boundary sits at the end of the turn that was clicked');
+			const half = kernel.ctx.sessions.forkAt('three', middle.at);
+			assert.deepStrictEqual(half.transcript.map((message) => message.content), ['q1', 'a1', 'q2', 'a2']);
+			assert.strictEqual(kernel.ctx.sessions.get('three')?.transcript.length, 6, 'and the chat it came from is whole');
 		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the plugin host mounts rows, and a cordis.yml is what decides them', async () => {
+		const kernel = await createTestKernel();
+		try {
+			// A probe plugin: registering a tool is an effect, so it is visible while the row is loaded
+			// and gone the moment it is not — which is the whole promise of a plugin row.
+			const probe = (tool: string, log: string[]): Plugin => ({
+				name: tool,
+				// Injection is declared, never inferred: cordis refuses a property that was not asked for.
+				inject: ['tools'],
+				apply: (ctx: Context) => {
+					log.push(`load ${tool}`);
+					ctx.effect(() => () => void log.push(`unload ${tool}`));
+					ctx.tools.register({
+						name: tool,
+						description: 'probe',
+						capability: 'ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						parameters: objectSchema({}),
+						execute: async () => 'ok',
+					});
+				},
+			});
+			const log: string[] = [];
+			await kernel.ctx.plugin(pluginHost, {
+				rows: [{ id: 'alpha' }, { id: 'beta' }],
+				plugins: { alpha: probe('probe_alpha', log), beta: probe('probe_beta', log) },
+			});
+			const plugins = kernel.ctx.plugins;
+			assert.deepStrictEqual(log, ['load probe_alpha', 'load probe_beta']);
+			assert.ok(kernel.ctx.tools.get('probe_alpha'), 'a row provides what its plugin provides');
+			assert.deepStrictEqual(
+				plugins.state().map((state) => [state.id, state.source, state.loaded]),
+				[['alpha', 'builtin', true], ['beta', 'builtin', true]],
+			);
+
+			// A user's list turns a row off, gives another a config, and adds one of its own — the file
+			// beside the yml, exactly as a Cordis row names it.
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(library, { recursive: true });
+			writeFileSync(
+				join(library, 'probe.js'),
+				`module.exports = { name: 'gamma', inject: ['tools'], apply: (ctx) => { ctx.tools.register({ name: 'probe_gamma', description: 'probe', capability: 'ro', needsNetwork: false, needsWorkspace: false, parameters: { type: 'object', properties: {}, required: [], additionalProperties: false }, execute: async () => 'ok' }); } };`,
+			);
+			writeRow(join(library, 'cordis.yml'), { id: 'gamma', name: './probe.js' });
+			writeRow(join(library, 'cordis.yml'), { id: 'beta', disabled: true });
+			assert.deepStrictEqual(
+				readRows(join(library, 'cordis.yml')).map((row) => [row.id, row.name, row.disabled]),
+				[['gamma', './probe.js', false], ['beta', undefined, true]],
+			);
+
+			await plugins.reload();
+			assert.deepStrictEqual(
+				log.slice(2),
+				['unload probe_beta', 'unload probe_alpha', 'load probe_alpha'],
+				'only the rows that are on are loaded',
+			);
+			assert.ok(kernel.ctx.tools.get('probe_alpha'), 'the row that is on is back');
+			assert.ok(!kernel.ctx.tools.get('probe_beta'), 'a disabled row is not loaded');
+			assert.ok(kernel.ctx.tools.get('probe_gamma'), 'a plugin from the workspace is loaded beside the built-ins');
+			const gamma = plugins.state().find((state) => state.id === 'gamma');
+			assert.deepStrictEqual([gamma?.source, gamma?.loaded], ['project', true]);
+
+			// Turning a row back on is written into the project's own yml, and applied at once.
+			await plugins.set('beta', { disabled: false });
+			assert.ok(kernel.ctx.tools.get('probe_beta'));
+			assert.strictEqual(readRows(join(library, 'cordis.yml')).find((row) => row.id === 'beta')?.disabled, false);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a plugin is only loaded from the workspace once the workspace is trusted', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(library, { recursive: true });
+			writeFileSync(join(library, 'probe.js'), `module.exports = { name: 'probe', apply: () => {} };`);
+			writeRow(join(library, 'cordis.yml'), { id: 'gamma', name: './probe.js' });
+
+			kernel.host.trusted = () => false;
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			const plugins = kernel.ctx.plugins;
+			assert.deepStrictEqual(plugins.state(), [], 'an untrusted workspace contributes no rows');
+
+			kernel.host.trusted = () => true;
+			await plugins.mount();
+			assert.strictEqual(plugins.state()[0]?.id, 'gamma', 'and a trusted one does');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the dependency graph reads what each row provides, needs and is needed by', async () => {
+		const kernel = await createTestKernel();
+		try {
+			// A service is provided either by the row itself or by a plugin the row mounts; both are rows
+			// as far as the graph is concerned.
+			class Shelf extends Service {
+				constructor(ctx: Context) {
+					super(ctx, 'shelf');
+				}
+			}
+			class Ledger extends Service {
+				constructor(ctx: Context) {
+					super(ctx, 'ledger');
+				}
+			}
+			await kernel.ctx.plugin(pluginHost, {
+				rows: [{ id: 'service' }, { id: 'nested', group: 'kernel' }, { id: 'consumer' }, { id: 'pending' }, { id: 'lonely' }],
+				plugins: {
+					service: Shelf,
+					nested: { name: 'nested', inject: ['tools'], apply: (ctx: Context) => void ctx.plugin(Ledger) },
+					consumer: { name: 'consumer', inject: ['ledger'], apply: () => void 0 },
+					pending: { name: 'pending', inject: ['not-provided'], apply: () => void 0 },
+					lonely: () => void 0,
+				},
+			});
+			const graph = new Map(kernel.ctx.plugins.dependencies().map((row) => [row.id, row]));
+			assert.deepStrictEqual(graph.get('service')?.provides, ['shelf'], 'a service row says what it provides');
+			assert.deepStrictEqual(graph.get('nested')?.provides, ['ledger'], 'so does a row whose own plugin provides one');
+			assert.deepStrictEqual(graph.get('nested')?.usedBy, ['consumer'], 'and who needs it');
+			assert.deepStrictEqual(
+				graph.get('consumer')?.requires,
+				[{ name: 'ledger', provider: 'nested' }],
+				'the arrow carries the service name and the row that provides it',
+			);
+			assert.deepStrictEqual(graph.get('pending')?.requires, [{ name: 'not-provided' }], 'a service nobody provides has no source');
+			// What the kernel provides is not a hole in the tree: the platform is not a row.
+			assert.deepStrictEqual(
+				graph.get('nested')?.requires,
+				[{ name: 'tools', external: true }],
+				'a service the platform provides is marked as external rather than as missing',
+			);
+			assert.deepStrictEqual(graph.get('nested')?.usedBy, ['consumer'], 'and a row names the rows that stop with it');
+			assert.deepStrictEqual(graph.get('pending')?.injects, ['not-provided']);
+			assert.deepStrictEqual(graph.get('lonely')?.requires, [], 'a row that needs nothing depends on nothing');
+			assert.strictEqual(graph.get('nested')?.group, 'kernel', 'and a row keeps the layer it declared');
+
+			// A row that is turned off still says what it provides: that is what its dependents wait for.
+			await kernel.ctx.plugins.set('nested', { disabled: true });
+			const off = new Map(kernel.ctx.plugins.dependencies().map((row) => [row.id, row]));
+			assert.deepStrictEqual(off.get('nested')?.provides, ['ledger'], 'the service it provided is remembered');
+			assert.deepStrictEqual(off.get('consumer')?.requires, [{ name: 'ledger', provider: 'nested' }], 'so the arrow still has a source');
+			assert.deepStrictEqual(off.get('nested')?.usedBy, ['consumer'], 'and what it would stop');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the dependency tree says what a row stands on, and the whole chain that stops with it', () => {
+		const nodes: PluginNode[] = [
+			{ id: 'tavern', status: 'off', provides: ['tavern'], requires: [], usedBy: ['ui-tavern-commands'] },
+			{
+				id: 'ui-tavern-commands',
+				status: 'waiting',
+				provides: [],
+				requires: [{ name: 'tavern', provider: 'tavern' }, { name: 'sessions', provider: 'sessions' }, { name: 'bookkeeping', provider: 'ledger' }],
+				usedBy: [],
+			},
+			{ id: 'sessions', status: 'loaded', provides: ['sessions'], requires: [], usedBy: ['ui-tavern-commands'] },
+			{ id: 'ledger', status: 'loaded', provides: ['ledger'], requires: [], usedBy: ['ui-tavern-commands'] },
+			{ id: 'mine', status: 'failed', provides: [], requires: [{ name: 'nobody-makes-this' }], usedBy: [] },
+		];
+
+		const tree = pluginTree(nodes, 'tavern');
+		assert.match(tree, /^tavern — off — provides tavern/, 'the tree starts with the row itself');
+		assert.match(tree, /used by\n  └─ ui-tavern-commands/, 'then what stands on it');
+		assert.match(pluginTree(nodes, 'mine'), /waits for \?nobody-makes-this — nobody provides it/, 'and a service nothing provides is named as such');
+		assert.ok(!pluginTree(nodes, 'mine').includes('requires'), 'a row that needs nothing has nothing to require');
+		assert.strictEqual(pluginTree(nodes, 'nope'), '', 'a row that is not there has no tree');
+
+		// The chain, not one hop: a row two rows away still stops with this one.
+		const chain = pluginTree(
+			[
+				{ id: 'a', status: 'loaded', provides: ['a'], requires: [], usedBy: ['b'] },
+				{ id: 'b', status: 'loaded', provides: [], requires: [{ name: 'a', provider: 'a' }], usedBy: ['c'] },
+				{ id: 'c', status: 'waiting', provides: [], requires: [{ name: 'b', provider: 'b' }], usedBy: [] },
+			],
+			'a',
+		);
+		assert.match(chain, /turning this row off also stops\n  └─ b, c/, 'the whole chain, not one hop');
+
+		// What the table colours: off, waiting on a service, failed on its own.
+		assert.strictEqual(pluginNodeStatus({ enabled: false, loaded: false }), 'off');
+		assert.strictEqual(pluginNodeStatus({ enabled: true, loaded: true }), 'loaded');
+		assert.strictEqual(pluginNodeStatus({ enabled: true, loaded: false, error: 'pending: waiting for tools' }), 'waiting');
+		assert.strictEqual(pluginNodeStatus({ enabled: true, loaded: false, error: 'boom' }), 'failed');
+	});
+
+	test('a toggle applies that row on its own, and a row that others inject takes them with it', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const log: string[] = [];
+			// A service of a plugin's own, the way the tavern layer is one: rows that want it declare it.
+			class Ledger extends Service {
+				constructor(ctx: Context) {
+					super(ctx, 'ledger');
+				}
+			}
+			const plugins = () =>
+				(
+					[
+						['provider', true],
+						['dependent', true],
+						['independent', true],
+					] as const
+				).map(([id, expected]) => [id, kernel.ctx.plugins.state().find((row) => row.id === id)?.loaded === expected]);
+			await kernel.ctx.plugin(pluginHost, {
+				rows: [{ id: 'provider' }, { id: 'dependent' }, { id: 'independent' }],
+				plugins: {
+					provider: {
+						name: 'provider',
+						apply: (ctx: Context) => {
+							ctx.plugin(Ledger);
+							ctx.effect(() => () => void log.push('unload provider'));
+						},
+					},
+					dependent: { name: 'dependent', inject: ['ledger'], apply: () => void log.push('load dependent') },
+					independent: {
+						name: 'independent',
+						apply: (ctx: Context) => ctx.effect(() => () => void log.push('unload independent')),
+					},
+				},
+			});
+			assert.deepStrictEqual(
+				kernel.ctx.plugins.state().map((row) => [row.id, row.loaded]),
+				[['provider', true], ['dependent', true], ['independent', true]],
+			);
+
+			// Turning a row off is that row's business: the surface asking for it — the settings panel, in
+			// the real tree — is a row of the same tree and must survive the click.
+			await kernel.ctx.plugins.set('provider', { disabled: true });
+			const after = kernel.ctx.plugins.state();
+			assert.deepStrictEqual(
+				after.map((row) => [row.id, row.enabled, row.loaded]),
+				[['provider', false, false], ['dependent', true, false], ['independent', true, true]],
+				'a row that was turned off takes the rows that inject it with it',
+			);
+			assert.match(after[1]?.error ?? '', /waiting for ledger/, 'and the row says what it is waiting for');
+			assert.deepStrictEqual(log, ['load dependent', 'unload provider'], 'the row that was turned off went, and nothing else did');
+
+			// And it comes back the same way, with the rows that want it.
+			await kernel.ctx.plugins.set('provider', { disabled: false });
+			assert.deepStrictEqual(
+				kernel.ctx.plugins.state().map((row) => [row.id, row.loaded]),
+				[['provider', true], ['dependent', true], ['independent', true]],
+				'a row that came back brought its dependents back',
+			);
+			assert.deepStrictEqual(log, ['load dependent', 'unload provider', 'load dependent'], 'so the row was applied again');
+
+			// The host's own write reaches the watcher too, and is not mistaken for someone editing the file.
+			await kernel.ctx.plugins.fileChanged(kernel.ctx.plugins.patchFile);
+			assert.deepStrictEqual(log, ['load dependent', 'unload provider', 'load dependent'], 'and the list was not applied a second time for it');
+
+			// A file someone else wrote is applied line by line: the row that changed moves, and the rows
+			// that did not are left running — an open panel is not collateral of someone's editor.
+			writeRow(kernel.ctx.plugins.patchFile, { id: 'independent', disabled: true });
+			await kernel.ctx.plugins.fileChanged(kernel.ctx.plugins.patchFile);
+			const edited = kernel.ctx.plugins.state();
+			assert.strictEqual(edited.find((row) => row.id === 'independent')?.enabled, false, 'the edited row was applied');
+			assert.deepStrictEqual(
+				edited.map((row) => [row.id, row.loaded]),
+				[['provider', true], ['dependent', true], ['independent', false]],
+				'and the rows the edit did not mention are exactly where they were',
+			);
+			assert.deepStrictEqual(
+				log,
+				['load dependent', 'unload provider', 'load dependent', 'unload independent'],
+				'only the edited row was applied, and the rows the edit did not mention were left running',
+			);
+
+			// The button is the blunt one: a plugin's own file may have changed, which no diff can see.
+			await kernel.ctx.plugins.reload();
+			assert.ok(log.includes('unload provider'), 'a reload takes the whole list down and applies it again');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a toggle is written where it can be read: the project when trusted, your own list when not', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(library, { recursive: true });
+			kernel.host.trusted = () => false;
+			await kernel.ctx.plugin(pluginHost, { rows: [{ id: 'probe' }], plugins: { probe: () => void 0 } });
+			const plugins = kernel.ctx.plugins;
+
+			// An untrusted workspace's own list is not read *and* not written: the toggle lands in the
+			// user's library, which is the list that is read there.
+			assert.strictEqual(plugins.projectFile, join(library, 'cordis.yml'));
+			assert.strictEqual(plugins.patchFile, plugins.userFile);
+			await plugins.set('probe', { disabled: true });
+			assert.deepStrictEqual(readRows(plugins.userFile).map((row) => [row.id, row.disabled]), [['probe', true]]);
+			assert.ok(!existsSync(plugins.projectFile), 'nothing was written into the workspace');
+			assert.strictEqual(plugins.state().find((row) => row.id === 'probe')?.loaded, false, 'and the list was applied again');
+
+			// Once the workspace is trusted the change belongs to the project, where a user would look for it.
+			kernel.host.trusted = () => true;
+			assert.strictEqual(plugins.patchFile, plugins.projectFile);
+			await plugins.set('probe', { disabled: false });
+			assert.deepStrictEqual(readRows(plugins.projectFile).map((row) => [row.id, row.disabled]), [['probe', false]]);
+			assert.strictEqual(plugins.state().find((row) => row.id === 'probe')?.loaded, true);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a row mounted while the tree is still being applied is up by the time the list says so', async () => {
+		const kernel = await createTestKernel();
+		try {
+			// The shape of Comonad's own activation: the application's `apply` mounts the plugin host, and
+			// the host mounts the rows — so a row is created while its own parent fiber is still loading.
+			class Library extends Service {
+				constructor(ctx: Context) {
+					super(ctx, 'library');
+				}
+			}
+			let rows: PluginState[] = [];
+			await kernel.ctx.plugin(async function app(ctx: Context) {
+				await ctx.plugin(pluginHost, {
+					rows: [{ id: 'content' }],
+					plugins: {
+						content: async (row: Context) => {
+							await row.plugin(Library);
+						},
+					},
+				});
+				rows = (ctx.get('plugins') as Plugins).state();
+			});
+			assert.deepStrictEqual(
+				rows.map((row) => [row.id, row.loaded, row.error]),
+				[['content', true, undefined]],
+				'a row that has loaded is not reported as loading',
+			);
+			assert.ok(kernel.ctx.get('library'), 'and what it provided is there');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the settings panel is where the plugin list is read and changed', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		const script = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
+		assert.match(panel, /data-tab="plugins"/, 'the panel has a Plugins tab');
+		assert.match(panel, /data-pane="plugins"/, 'and a pane for it');
+		// The host is what mounts this row, so the list has to be read when the tab is drawn.
+		assert.match(panel, /ctx\.get\('plugins'\)/, 'the row that draws it does not inject the host’s own service');
+		assert.match(panel, /case 'plugins'/, 'the host answers the pane');
+		assert.match(panel, /pluginHost\(\)\?\.set\(/, 'a toggle goes through the host, so it is written down');
+		assert.match(script, /function renderPlugins\(/, 'the pane renders the list');
+		assert.match(script, /action: 'toggle'/, 'with a button per row');
+		assert.match(script, /plugin-error/, 'and a row that did not load says so');
+	});
+
+	test('the Inspect tab holds the dependency table, and no diagram of it', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		const script = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
+		assert.match(panel, /data-inspect="plugins"/, 'Inspect has a Plugins sub-tab');
+		assert.match(panel, /data-inspect-pane="plugins" hidden/, 'and a pane for it');
+		assert.match(panel, /case 'pluginTree'/, 'the host answers the per-row drill-down');
+		assert.match(panel, /dependencies: pluginDependencies\(\)/, 'and pushes what the table is built from');
+		assert.match(script, /function renderPluginDeps\(/, 'the pane is a table');
+		assert.match(script, /action: \'pluginTree\'|type: 'pluginTree'/, 'whose rows can be picked');
+		// The diagram was asked for and then not wanted: nothing here may draw the tree as Mermaid.
+		assert.ok(!/pg-graph|pluginGraph|schedulePluginGraph/.test(panel), 'the host sends no diagram');
+		assert.ok(!/pg-graph|pluginGraph|schedulePluginGraph|pg-focus/.test(script), 'and the pane draws none');
+	});
+
+	test('a plugin that cannot be loaded is reported rather than fatal', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(library, { recursive: true });
+			writeRow(join(library, 'cordis.yml'), { id: 'missing', name: './not-there.js' });
+			await kernel.ctx.plugin(pluginHost, { rows: [{ id: 'good' }], plugins: { good: () => void 0 } });
+			const plugins = kernel.ctx.plugins;
+			const state = new Map(plugins.state().map((row) => [row.id, row]));
+			assert.match(state.get('missing')?.error ?? '', /no plugin at/);
+			assert.strictEqual(state.get('missing')?.loaded, false);
+			assert.strictEqual(state.get('good')?.loaded, true, 'the rest of the tree is mounted anyway');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a plugin is installed by copying its folder and writing a row, and it requires the host’s modules', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			// What a plugin author hands over: a folder with a manifest and its build, requiring the
+			// modules a plugin is loaded *with* rather than carrying a copy of them.
+			const source = join(kernel.root, 'download', 'mine');
+			mkdirSync(join(source, 'dist'), { recursive: true });
+			writeFileSync(join(source, 'package.json'), JSON.stringify({ name: 'mine', main: './dist/index.js', comonad: { plugin: true } }));
+			writeFileSync(
+				join(source, 'dist', 'index.js'),
+				[
+					"const { Service } = require('cordis');",
+					'class Ledger extends Service {',
+					"	constructor(ctx) { super(ctx, 'ledger'); this.rows = []; }",
+					'}',
+					'module.exports = function plugin(ctx) { ctx.plugin(Ledger); };',
+					'module.exports.inject = [];',
+				].join('\n'),
+			);
+
+			const state = await kernel.ctx.plugins.install(source);
+			const row = state.find((entry) => entry.id === 'mine');
+			assert.ok(row, 'the row is part of the list now');
+			assert.strictEqual(row?.loaded, true, 'and it is loaded: `install` applies the list again');
+			assert.ok(kernel.ctx.get('ledger'), 'its service came up, from the host’s own cordis');
+			// The two things an install does, both visible on disk: the files, and the row.
+			assert.ok(existsSync(join(kernel.ctx.plugins.library, 'mine', 'dist', 'index.js')), 'the folder is copied into the library');
+			assert.ok(existsSync(join(kernel.ctx.plugins.library, 'node_modules', 'cordis', 'package.json')), 'and the modules it requires are lent beside it');
+			const written = readRows(join(kernel.host.home(), '.comonad', 'cordis.yml'));
+			assert.deepStrictEqual(written.map((entry) => [entry.id, entry.name]), [['mine', './plugins/mine/dist/index.js']], 'the row names the copy in your library');
+
+			// Uninstalling is deleting the row, exactly as the tab writes it.
+			await kernel.ctx.plugins.set('mine', { disabled: true });
+			assert.strictEqual(kernel.ctx.get('ledger'), undefined, 'a disabled row provides nothing');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a harness plugin runs as written: its imports resolve, its hooks fire, its tools register', async () => {
+		const kernel = await createTestKernel({ config: { checkpoints: true } });
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(library, { recursive: true });
+			// An ES module plugin, imports and all, as the harness cookbook writes one.
+			writeFileSync(
+				join(library, 'policy.mjs'),
+				[
+					"import { Service } from '@deepseek-ai/cordis';",
+					"import { defineTool } from '@deepseek-ai/dsh-tools';",
+					'',
+					"export const name = 'policy';",
+					"export const inject = ['tools'];",
+					'',
+					'class Ledger extends Service {',
+					"\tconstructor(ctx) { super(ctx, 'ledger'); this.calls = []; }",
+					'}',
+					'',
+					'export function apply(ctx) {',
+					'\tctx.plugin(Ledger);',
+					"\tctx.on('tools/pre-execute', (exec, next) =>",
+					"\t\texec.name === 'write_file' && String(exec.arguments?.path ?? '').endsWith('sealed.txt')",
+					"\t\t\t? { kind: 'deny', reason: 'sealed.txt is sealed by the policy plugin' }",
+					'\t\t\t: next(),',
+					'\t);',
+					'\tctx.tools.register(defineTool({',
+					"\t\tname: 'harness_echo',",
+					"\t\tdescription: 'Echo a value back.',",
+					'\t\tparameters: { type: "object", properties: { value: { type: "string" } } },',
+					'\t\toutput: { schema: { type: "string" } },',
+					'\t\texecute: async (args) => ({ echoed: args.value }),',
+					'\t}));',
+					'}',
+					'',
+				].join('\n'),
+			);
+			// A CommonJS plugin, which resolves by `require`, through the other half of the redirection.
+			writeFileSync(
+				join(library, 'ledger.cjs'),
+				[
+					"const { Service } = require('@deepseek-ai/cordis');",
+					'',
+					'module.exports = {',
+					"\tname: 'ledger',",
+					"\tinject: ['tools'],",
+					'\tapply(ctx) {',
+					'\t\tconst seen = [];',
+					'\t\tclass Book extends Service { constructor(ctx) { super(ctx, "book"); this.seen = seen; } }',
+					'\t\tctx.plugin(Book);',
+					"\t\t// The listener keeps the array it owns: reading the service back needs an inject of its own.",
+					"\t\tctx.on('tools/result', (exec, result) => seen.push(`${exec.name}:${result.isError}`));",
+					'\t},',
+					'};',
+					'',
+				].join('\n'),
+			);
+			writeRow(join(library, 'cordis.yml'), { id: 'policy', name: './policy.mjs' });
+			writeRow(join(library, 'cordis.yml'), { id: 'ledger', name: './ledger.cjs' });
+
+			writeFileSync(join(kernel.host.workspace(), 'sealed.txt'), 'original\n');
+			await kernel.ctx.plugin(pluginHost, {
+				rows: [{ id: 'harness', config: { shimDirectory: join(kernel.root, 'shims') } }],
+				plugins: { harness: harnessCompat },
+			});
+			const plugins = kernel.ctx.plugins;
+			assert.deepStrictEqual(
+				plugins.state().map((state) => [state.id, state.loaded]),
+				[['harness', true], ['policy', true], ['ledger', true]],
+				`both plugins loaded, and the shims were in place before their first import ran — ${JSON.stringify(plugins.state().filter((state) => !state.loaded))}`,
+			);
+			assert.deepStrictEqual(
+				harnessAliases().map((alias) => alias.name),
+				['@deepseek-ai/cordis', '@deepseek-ai/schemastery', '@deepseek-ai/dsh-brand', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-llm'],
+			);
+			// The services the plugins built are real services, which they are only if `Service` was ours.
+			assert.strictEqual((kernel.ctx.get('ledger') as { constructor: { name: string } } | undefined)?.constructor.name, 'Ledger');
+			assert.strictEqual((kernel.ctx.get('book') as { constructor: { name: string } } | undefined)?.constructor.name, 'Book');
+
+			let told = '';
+			kernel.ctx.llm.use({
+				name: 'caller',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'tool') {
+						told = last.content;
+						return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					const asked = request.messages.filter((message) => message.role === 'user').length;
+					const call: ToolCall =
+						asked === 1
+							? { id: 'w', name: 'write_file', arguments: JSON.stringify({ path: 'sealed.txt', content: 'hacked\n' }) }
+							: { id: 'e', name: 'harness_echo', arguments: JSON.stringify({ value: 'hi' }) };
+					return { message: { role: 'assistant', content: '', toolCalls: [call] }, toolCalls: [call], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			const turn = await kernel.ctx.agent.runTurn({ text: 'write it', surface: 'test' });
+			assert.strictEqual(readFileSync(join(kernel.host.workspace(), 'sealed.txt'), 'utf8'), 'original\n', 'the policy plugin refused the write');
+			assert.ok(
+				/sealed by the policy plugin/.test(told),
+				`the model reads the plugin's reason: told=${JSON.stringify(told)} turn=${JSON.stringify(turn)} transcript=${JSON.stringify(
+					kernel.ctx.sessions.require(turn.sessionId).transcript.map((message) => `${message.role}:${message.content.slice(0, 80)}`),
+				)}`,
+			);
+
+			await kernel.ctx.agent.runTurn({ text: 'echo it', surface: 'test' });
+			assert.ok(/echoed/.test(told), `a tool from a harness definition answers as JSON text: ${told}`);
+			assert.deepStrictEqual(
+				(kernel.ctx.get('book') as { seen: string[] }).seen,
+				['write_file:true', 'harness_echo:false'],
+				'a plugin that only imports and observes saw every settled call',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the tavern feature is a plugin: without it a turn is plain and the commands are gone', async () => {
+		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
+		try {
+			assert.strictEqual(kernel.ctx.get('tavern'), undefined, 'the row is off, so nothing provides the library');
+			// The agent composes a request without the layer: a system prompt and the history, nothing else.
+			let asked: Message[] = [];
+			kernel.ctx.llm.use({
+				name: 'plain',
+				async chat(request) {
+					asked = request.messages;
+					return { message: { role: 'assistant', content: 'hello', toolCalls: [] }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const turn = await kernel.ctx.agent.runTurn({ text: 'hello', surface: 'test' });
+			assert.deepStrictEqual(asked.map((message) => message.role), ['system', 'user'], 'a plain request, in one system prompt and the user’s turn');
+			assert.match(kernel.ctx.sessions.require(turn.sessionId).transcript[1]?.content ?? '', /hello/, 'and the turn still ran');
+
+			// A continue still has words of its own, because the fallback is not the preset's to provide.
+			asked = [];
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'continue', surface: 'test' });
+			assert.strictEqual(asked[asked.length - 1]?.role, 'user', 'a request never ends on the model’s own turn');
+
+			// What the plugin adds is missing, and what Comonad ships is not.
+			await kernel.ctx.plugin(slashCommands);
+			const slash = kernel.ctx.commands.list().map((command) => command.name);
+			assert.ok(slash.includes('help'), 'the slash commands loaded without the tavern plugin');
+			for (const name of ['status', 'rewind', 'continue']) {
+				assert.ok(slash.includes(name), `/${name} is still there`);
+			}
+			for (const name of ['char', 'persona', 'lore', 'preset']) {
+				assert.ok(!slash.includes(name), `/${name} came with the tavern plugin, so it is gone`);
+			}
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the tavern is an installable plugin: the shipped tree has no row for it, and mounting one brings it back', async () => {
+		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
+		try {
+			// Not built in: nothing in the shipped tree names it, so a fresh window has no library, no
+			// tool and no ST tab — and nothing to turn off, either.
+			assert.ok(!ROWS.some((row) => row.id === 'tavern'), 'the shipped rows mount no tavern');
+			assert.strictEqual(PLUGINS.tavern, undefined, 'and no built-in plugin to name');
+			assert.strictEqual(kernel.ctx.get('tavern'), undefined, 'so a tree without the row has no library');
+			assert.ok(!kernel.ctx.tools.all().some((tool) => tool.name === 'lore_lookup'), 'and no lore tool');
+
+			// A row of one's own, mounted the way a `cordis.yml` mounts it: the plugin package's entry.
+			await kernel.ctx.plugin(panesPlugin);
+			assert.ok(kernel.ctx.panes, 'the panel’s pane list is its own service, and it is mounted first');
+			await kernel.ctx.plugin(tavernEntry);
+			assert.ok(kernel.ctx.tavern, 'the row provides the library');
+			assert.ok(kernel.ctx.tools.all().some((tool) => tool.name === 'lore_lookup'), 'and its tool');
+
+			const pane = kernel.ctx.panes.list().find((spec) => spec.id === 'st');
+			assert.ok(pane, 'the row draws the ST tab');
+			assert.strictEqual(pane?.label, 'ST');
+			assert.strictEqual(pane?.command, 'comonad.openContent', 'with the command that reveals it');
+			// The client files travel beside the package's build: a separately installed plugin is one
+			// folder, and `__dirname` inside its own bundle is what finds them.
+			assert.deepStrictEqual(
+				(pane?.scripts ?? []).map((file) => basename(file)),
+				['worldinfo.js', 'persona.js', 'content.js', 'st.js'],
+				'the pane loads its guest pages first, and registers itself last',
+			);
+			assert.deepStrictEqual((pane?.styles ?? []).map((file) => basename(file)), ['content.css', 'worldinfo.css', 'persona.css']);
+			for (const file of [...(pane?.scripts ?? []), ...(pane?.styles ?? [])]) {
+				assert.ok(existsSync(join(PACKAGE_RESOURCES, basename(file))), `${basename(file)} ships with the plugin`);
+			}
+			assert.match(pane?.markup ?? '', /id="st-pane"/, 'the markup the panel writes verbatim is the package’s');
+
+			// The pane owns its settings keys: it validates what the webview sent and claims nothing else.
+			const host = { uri: () => '', refresh: () => undefined };
+			const controller = pane?.controller?.(host);
+			assert.ok(controller, 'the pane brings an editor');
+			const owned = controller?.patch?.(
+				{ tavernCharacter: '  kestrel ', tavernLorebooks: 'one\ntwo, three', tavernNoteDepth: '4', wiRecursive: true, mode: 'full' },
+				kernel.ctx.settings.get(),
+			) ?? {};
+			assert.strictEqual(owned.tavernCharacter, 'kestrel', 'text is trimmed');
+			assert.deepStrictEqual(owned.tavernLorebooks, ['one', 'two', 'three'], 'a book list takes lines and commas');
+			assert.strictEqual(owned.tavernNoteDepth, 4, 'a count is read as a number');
+			assert.strictEqual(owned.wiRecursive, true, 'a checkbox is a boolean');
+			assert.ok(!('mode' in owned), 'the panel’s own keys are left to the panel');
+			const slice = controller?.state?.() ?? {};
+			assert.deepStrictEqual(Object.keys(slice).sort(), ['catalog', 'content', 'tavern'], 'the slices it pushes');
+			assert.ok('wi' in (slice.tavern as Record<string, unknown>), 'the catalog and the settings travel together');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the plugin that ships with Comonad installs from its own folder and loads', async () => {
+		// The real thing, end to end: the package as it is packaged (its `dist` bundle, built by
+		// `npm run compile`), copied into the library the way the panel's Install… does it, and loaded by
+		// the host from there — so the bundle's own `require('cordis')` and `require('vscode')` are the
+		// modules Comonad lends it, and its resources are found beside its build.
+		const extension = vscode.extensions.getExtension('comonad.comonad');
+		assert.ok(extension, 'the extension is installed in the test host');
+		const source = join(extension!.extensionUri.fsPath, 'packages', 'comonad-plugin-tavern');
+		assert.ok(existsSync(join(source, 'dist', 'index.js')), 'the plugin bundle is built beside the extension');
+
+		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
+		try {
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			await kernel.ctx.plugin(panesPlugin);
+			const state = await kernel.ctx.plugins.install(source);
+			const row = state.find((entry) => entry.id === 'comonad-plugin-tavern');
+			assert.strictEqual(row?.loaded, true, `the shipped plugin loads from the library (${row?.error ?? ''})`);
+			assert.ok(kernel.ctx.get('tavern'), 'and it brought the content library with it');
+			const pane = kernel.ctx.panes.list().find((spec) => spec.id === 'st');
+			assert.ok(pane, 'and its ST tab');
+			for (const file of [...(pane?.scripts ?? []), ...(pane?.styles ?? [])]) {
+				assert.ok(existsSync(file), `${basename(file)} is found beside the installed build`);
+			}
+			assert.ok(kernel.ctx.tools.all().some((tool) => tool.name === 'lore_lookup'), 'and the lore tool');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the settings document is built from the panes the tree registered', async () => {
+		const kernel = await createTestKernel();
+		const root = join(__dirname, '..', '..');
+		const panel = vscode.window.createWebviewPanel('comonad.test.settings', 'settings', vscode.ViewColumn.Active, {
+			enableScripts: true,
+			localResourceRoots: [vscode.Uri.file(root)],
+		});
+		try {
+			const pane = tavernPane(kernel.ctx);
+			// Nothing but a plain pane in the host's document: its tab, its markup, its styles and its
+			// scripts, with the host's client loaded first because it is what hands a pane its channel.
+			const document = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [pane]);
+			assert.match(document, /<button class="tab" type="button" role="tab" data-tab="st" title="ST —/, 'the pane is a tab');
+			assert.match(document, /<section data-pane="st" hidden>/, 'and a section of its own');
+			assert.match(document, /id="st-pane"/, 'holding the markup it brought');
+			const scripts = [...document.matchAll(/<script nonce="[^"]*" src="([^"]+)"/g)].map((match) => basename(decodeURIComponent(match[1])));
+			assert.deepStrictEqual(scripts, ['settings.js', 'worldinfo.js', 'persona.js', 'content.js', 'st.js'], 'the host’s client comes first, and the pane’s last');
+			assert.match(document, /id="plugins-install"/, 'and the host’s own tabs are still there');
+
+			// A tab and its markup are the pane's own strings, so they are escaped rather than trusted.
+			const hostile = { ...pane, id: 'x"><script>alert(1)</script>', label: '<b>no</b>', title: '" onload="alert(1)' };
+			const escaped = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [hostile]);
+			assert.ok(!escaped.includes('<script>alert(1)</script>'), 'a pane cannot close the attribute and open a script');
+			assert.match(escaped, /&lt;b&gt;no&lt;\/b&gt;/, 'and its label is text, not markup');
+		} finally {
+			panel.dispose();
 			await kernel.dispose();
 		}
 	});
@@ -3504,7 +4363,7 @@ suite('Tavern content', () => {
 		assert.deepStrictEqual(activated('quiet'), ['Always.']);
 	});
 
-	test('a continue extends one message, a quiet turn writes none, and an impersonation writes yours', async () => {
+	test('a continue extends one message, while a quiet turn and an impersonation write none', async () => {
 		const kernel = await createTestKernel();
 		try {
 			const replies = ['first.', 'second.', 'yours.', 'unwritten.'];
@@ -3536,16 +4395,76 @@ suite('Tavern content', () => {
 			assert.strictEqual(quiet.text, 'yours.', 'a quiet generation still answers');
 			assert.deepStrictEqual(kernel.ctx.sessions.require('types').transcript, before, 'and leaves no trace');
 
-			// Impersonate: the model writes your side of the conversation, so that is what is recorded.
-			await kernel.ctx.agent.runTurn({ text: '', trigger: 'impersonate', sessionId: 'types' });
-			const impersonated = kernel.ctx.sessions.require('types').transcript;
-			assert.strictEqual(impersonated[impersonated.length - 1]?.role, 'user', 'what the model wrote for you is your message');
-			assert.strictEqual(impersonated[impersonated.length - 1]?.content, 'unwritten.');
-			assert.strictEqual(
-				impersonated.filter((message) => message.role === 'assistant').length,
-				1,
-				'and nothing the assistant said on the way there stays behind',
-			);
+			// Impersonate: upstream streams your next message into the composer, so the chat keeps
+			// exactly what it had and the text comes back to the caller to edit and send.
+			const beforeImpersonation = kernel.ctx.sessions.require('types').transcript;
+			const impersonated = await kernel.ctx.agent.runTurn({ text: '', trigger: 'impersonate', sessionId: 'types' });
+			assert.strictEqual(impersonated.text, 'unwritten.', 'the text the model wrote for you comes back to the caller');
+			assert.deepStrictEqual(kernel.ctx.sessions.require('types').transcript, beforeImpersonation, 'and the chat is left alone until you send it');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a continue grows only the last reply, and never cuts the transcript', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const replies = ['still here.'];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant' as const, content: replies.shift() ?? 'x' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const written = (id: string): string[] => kernel.ctx.sessions.require(id).transcript.map((message) => `${message.role}:${message.content}`);
+
+			// A turn waiting on a tool call has no reply of its own. Merging the continuation into an
+			// *older* reply would slice away everything the turn did leave behind.
+			const cut = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'cut');
+			cut.transcript = [
+				{ role: 'user', content: 'the first thing' },
+				{ role: 'assistant', content: '', toolCalls: [{ id: 'call-1', name: 'read_file', arguments: '{"path":"a.txt"}' }] },
+			];
+			kernel.ctx.sessions.save(cut);
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'continue', sessionId: 'cut' });
+			assert.deepStrictEqual(written('cut'), ['user:the first thing', 'assistant:', 'assistant:still here.'], 'the answer is a turn of its own');
+
+			// A chat that has said nothing has nothing to carry on: a reply with no prompt to hang on
+			// is a reply no view can draw.
+			const empty = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'empty');
+			kernel.ctx.sessions.save(empty);
+			const refused = await kernel.ctx.agent.runTurn({ text: '', trigger: 'continue', sessionId: 'empty' });
+			assert.strictEqual(refused.text, 'There is nothing to continue yet.');
+			assert.deepStrictEqual(written('empty'), [], 'and nothing was written');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a swipe switches the turn the nav belongs to, not whatever replied last', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const replies = ['one.', 'two.', 'later.'];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant' as const, content: replies.shift() ?? 'x' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'nav');
+			kernel.ctx.sessions.save(session);
+			await kernel.ctx.agent.runTurn({ text: 'the first question', sessionId: 'nav' });
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'swipe', sessionId: 'nav' });
+			await kernel.ctx.agent.runTurn({ text: 'a second question', sessionId: 'nav' });
+
+			const transcript = (): Message[] => kernel.ctx.sessions.require('nav').transcript;
+			const first = turnsOf(transcript())[0]!;
+			assert.deepStrictEqual(first.swipes, ['one.', 'two.'], 'the nav is drawn on the turn that carries the versions');
+			assert.strictEqual(kernel.ctx.sessions.setSwipe('nav', 0, first.index), true);
+			assert.strictEqual(transcript()[1]!.content, 'one.', 'the reply with the versions is the one the nav moves');
+			assert.strictEqual(transcript()[transcript().length - 1]!.content, 'later.', 'and the last reply is left alone');
+			assert.strictEqual(kernel.ctx.sessions.setSwipe('nav', 7, first.index), false, 'there is no eighth version of that reply');
+			assert.strictEqual(transcript()[1]!.content, 'one.', 'a refused switch writes nothing');
 		} finally {
 			await kernel.dispose();
 		}
@@ -3604,5 +4523,474 @@ suite('Tavern content', () => {
 		} finally {
 			await kernel.dispose();
 		}
+	});
+});
+/**
+ * The per-file journal against a real shadow repository on a temporary disk. These tests cover
+ * what the review relies on: nothing outside the journal is touched, unsaved text and outside
+ * edits refuse before any write, and rewinds restore exactly the files written after a point.
+ */
+
+interface Harness {
+	ctx: Context;
+	root: string;
+	work: string;
+	checkpoints: Checkpoints;
+	dispose(): void;
+}
+
+async function harness(): Promise<Harness> {
+	const root = mkdtempSync(join(tmpdir(), 'comonad-journal-'));
+	const work = join(root, 'ws');
+	mkdirSync(work, { recursive: true });
+	const host = {
+		storage: hostStorage(join(root, 'storage')),
+		extensionUri: undefined,
+		home: () => root,
+		workspace: () => work,
+		trusted: () => true,
+		config: () => ({}),
+		update: async () => undefined,
+		secret: async () => undefined,
+		setSecret: async () => undefined,
+		env: () => undefined,
+		ask: async () => [],
+		notify: () => undefined,
+	} as unknown as Host;
+	const ctx = new Context();
+	ctx.provide('host', host);
+	const fiber = ctx.plugin(
+		function journal(child: Context) {
+			child.plugin(Checkpoints);
+		},
+	);
+	await fiber;
+	const checkpoints = ctx.checkpoints;
+	return {
+		ctx,
+		root,
+		work,
+		checkpoints,
+		dispose() {
+			rmSync(root, { recursive: true, force: true });
+		},
+	};
+}
+
+/** Writes a file the way the agent's tools do: journal the before, write, journal the after. */
+async function agentWrite(h: Harness, sessionId: string, turn: number, rel: string, content: string | null): Promise<void> {
+	const before = await h.checkpoints.store(h.work, sessionId, rel);
+	if (content === null) {
+		rmSync(join(h.work, rel), { force: true });
+	} else {
+		mkdirSync(join(h.work, rel, '..'), { recursive: true });
+		writeFileSync(join(h.work, rel), content);
+	}
+	const after = await h.checkpoints.store(h.work, sessionId, rel);
+	await h.checkpoints.record(h.work, sessionId, turn, rel, before, after);
+}
+
+suite('Per-file checkpoints', () => {
+	test('a file the agent wrote shows up as pending, with its own diff, and nothing else', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'untouched.txt'), 'the user wrote this\n');
+			writeFileSync(join(h.work, 'a.txt'), 'one\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'one\ntwo\n');
+			const pending = await h.checkpoints.pending(h.work, 's');
+			assert.strictEqual(pending.available, true);
+			assert.deepStrictEqual(
+				pending.files.map((file) => file.path),
+				['a.txt'],
+				'only the journaled path is reviewed',
+			);
+			assert.strictEqual(pending.files[0]!.additions, 1);
+			assert.strictEqual(pending.files[0]!.deletions, 0);
+			assert.strictEqual(pending.files[0]!.created, false);
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('a file created by the agent is pending as new, and undo deletes it', async () => {
+		const h = await harness();
+		try {
+			await agentWrite(h, 's', 1, 'fresh.txt', 'hello\n');
+			const [file] = (await h.checkpoints.pending(h.work, 's')).files;
+			assert.strictEqual(file?.created, true);
+			await h.checkpoints.undo(h.work, 's', ['fresh.txt']);
+			assert.strictEqual(existsSync(join(h.work, 'fresh.txt')), false, 'the agent-made file is gone');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('keep makes the current content the baseline, and the file leaves the pending list', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'one\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'one\ntwo\n');
+			await h.checkpoints.keep(h.work, 's', ['a.txt']);
+			assert.strictEqual((await h.checkpoints.pending(h.work, 's')).files.length, 0);
+			// A later write by the agent is pending again, against the accepted baseline.
+			await agentWrite(h, 's', 2, 'a.txt', 'one\ntwo\nthree\n');
+			const [again] = (await h.checkpoints.pending(h.work, 's')).files;
+			assert.strictEqual(again?.additions, 1, 'only the write after the accept is pending');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('undo restores the content from before the agent first wrote the file', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'original\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'first\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'second\n');
+			await h.checkpoints.undo(h.work, 's', ['a.txt']);
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'original\n', 'back to before the first write of the turn');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('undo refuses, writing nothing, when the disk changed since the agent last wrote', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'original\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'agent\n');
+			writeFileSync(join(h.work, 'a.txt'), 'the user edited this\n');
+			await assert.rejects(
+				h.checkpoints.undo(h.work, 's', ['a.txt']),
+				(error: unknown) => error instanceof ChangedOutsideError && error.paths[0] === 'a.txt',
+			);
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'the user edited this\n', 'the user edit survives the refusal');
+			await h.checkpoints.undo(h.work, 's', ['a.txt'], { overwrite: 'all' });
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'original\n', 'an explicit overwrite restores it');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('undo refuses an unsaved editor document, and writes nothing', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'original\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'agent\n');
+			await assert.rejects(
+				h.checkpoints.undo(h.work, 's', ['a.txt'], { isDirty: (path) => path === 'a.txt' }),
+				(error: unknown) => error instanceof DirtyEditorError,
+			);
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'agent\n', 'the file was not touched');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('a rewind restores exactly the files written after its point, and keeps earlier ones', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'a0\n');
+			writeFileSync(join(h.work, 'b.txt'), 'b0\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'a1\n');
+			const mark = { entryCount: (await h.checkpoints.entries(h.work, 's')).length };
+			await agentWrite(h, 's', 2, 'a.txt', 'a2\n');
+			await agentWrite(h, 's', 2, 'b.txt', 'b2\n');
+			const report = await h.checkpoints.revert(h.work, 's', mark);
+			assert.deepStrictEqual(report.restored.sort(), ['a.txt', 'b.txt']);
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'a1\n', 'a goes back to the point, not to the start');
+			assert.strictEqual(readFileSync(join(h.work, 'b.txt'), 'utf8'), 'b0\n', 'b goes back to its content before turn 2');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('a rewind refuses as one unit when any file would be overwritten, and writes none', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'a0\n');
+			writeFileSync(join(h.work, 'b.txt'), 'b0\n');
+			const mark = { entryCount: 0 };
+			await agentWrite(h, 's', 1, 'a.txt', 'a1\n');
+			await agentWrite(h, 's', 1, 'b.txt', 'b1\n');
+			writeFileSync(join(h.work, 'b.txt'), 'the user edited b\n');
+			await assert.rejects(h.checkpoints.revert(h.work, 's', mark), ChangedOutsideError);
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'a1\n', 'a was not rewound either');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('a rewind can skip one file and keep its later entries', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'a0\n');
+			writeFileSync(join(h.work, 'b.txt'), 'b0\n');
+			const mark = { entryCount: 0 };
+			await agentWrite(h, 's', 1, 'a.txt', 'a1\n');
+			await agentWrite(h, 's', 1, 'b.txt', 'b1\n');
+			writeFileSync(join(h.work, 'b.txt'), 'the user edited b\n');
+			const report = await h.checkpoints.revert(h.work, 's', mark, { skip: ['b.txt'] });
+			assert.deepStrictEqual(report.restored, ['a.txt']);
+			assert.strictEqual(readFileSync(join(h.work, 'b.txt'), 'utf8'), 'the user edited b\n', 'the skipped file keeps the user edit');
+			assert.strictEqual((await h.checkpoints.pending(h.work, 's')).files.map((file) => file.path).join(','), 'b.txt', 'and it stays pending');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('a rewind refuses an unsaved document before anything is written', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'a0\n');
+			const mark = { entryCount: 0 };
+			await agentWrite(h, 's', 1, 'a.txt', 'a1\n');
+			await assert.rejects(h.checkpoints.revert(h.work, 's', mark, { isDirty: () => true }), DirtyEditorError);
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'a1\n');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('the review diff comes from one pass: created, changed and deleted files in a single listing', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'changed.txt'), 'old\n');
+			writeFileSync(join(h.work, 'gone.txt'), 'bye\n');
+			await agentWrite(h, 's', 1, 'changed.txt', 'new\n');
+			await agentWrite(h, 's', 1, 'made.txt', 'made\n');
+			await agentWrite(h, 's', 1, 'gone.txt', null);
+			const files = (await h.checkpoints.pending(h.work, 's')).files;
+			const byPath = new Map(files.map((file) => [file.path, file]));
+			assert.strictEqual(byPath.get('changed.txt')?.deletions, 1);
+			assert.strictEqual(byPath.get('made.txt')?.created, true);
+			assert.strictEqual(byPath.get('gone.txt')?.deleted, true);
+			assert.strictEqual(files.length, 3);
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('the journal is append-only: no entry is ever dropped by a keep', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'a0\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'a1\n');
+			await h.checkpoints.keep(h.work, 's', ['a.txt']);
+			await agentWrite(h, 's', 2, 'a.txt', 'a2\n');
+			assert.strictEqual((await h.checkpoints.entries(h.work, 's')).length, 2, 'both writes stay recorded');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('a subagent cannot write: its write tools are not offered, and a forced write is refused', async () => {
+		const kernel = await createTestKernel({ config: { checkpoints: true } });
+		try {
+			const workspace = kernel.host.workspace();
+			writeFileSync(join(workspace, 'guarded.txt'), 'original\n');
+			let subagentOffered: string[] = [];
+			let subagentResult = '';
+			let subagentRuns = 0;
+			kernel.ctx.llm.use({
+				name: 'delegator',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					// The subagent is told it is a subagent; it tries to write anyway, and reports what came back.
+					if (system.includes('subagent of Comonad')) {
+						subagentRuns += 1;
+						subagentOffered = (request.tools ?? []).map((tool) => tool.name);
+						const last = [...request.messages].reverse().find((message) => message.role === 'tool');
+						if (!last) {
+							const toolCall: ToolCall = { id: 'forced', name: 'write_file', arguments: JSON.stringify({ path: 'guarded.txt', content: 'hacked\n' }) };
+							return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+						}
+						subagentResult = last.content;
+						return { message: { role: 'assistant', content: 'report' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					// The parent delegates once, then reports.
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						const toolCall: ToolCall = { id: 'delegate', name: 'agent', arguments: JSON.stringify({ prompt: 'try to write', description: 'write' }) };
+						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.plugin(agentTools);
+			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
+
+			// Without this the next assertions could pass vacuously: the subagent must actually have run.
+			assert.ok(subagentRuns > 0, `the subagent ran (${subagentRuns} times)`);
+			assert.ok(subagentOffered.length > 0, 'the subagent was offered at least one tool');
+			assert.ok(!subagentOffered.includes('write_file'), `write_file is not offered to a subagent: ${subagentOffered.join(', ')}`);
+			assert.ok(!subagentOffered.includes('apply_patch'), 'apply_patch is not offered either');
+			assert.ok(/not available to this subagent/.test(subagentResult), `a forced write is refused: ${subagentResult}`);
+			assert.strictEqual(readFileSync(join(workspace, 'guarded.txt'), 'utf8'), 'original\n', 'the file was not written');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the journal is a feature plugin: without it, a write is just a write', async () => {
+		const kernel = await createTestKernel({ config: { checkpoints: true }, skip: ['checkpoints'] });
+		try {
+			assert.strictEqual(kernel.ctx.get('checkpoints'), undefined, 'the row is off, so nothing provides the journal');
+			const workspace = kernel.host.workspace();
+			kernel.ctx.llm.use({
+				name: 'writer',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						const toolCall: ToolCall = { id: `w${request.messages.length}`, name: 'write_file', arguments: JSON.stringify({ path: 'note.txt', content: 'written\n' }) };
+						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.agent.runTurn({ text: 'write it', surface: 'test' });
+			assert.strictEqual(readFileSync(join(workspace, 'note.txt'), 'utf8'), 'written\n', 'the write itself is unaffected');
+			assert.deepStrictEqual(kernel.ctx.sessions.require(kernel.ctx.sessions.active()?.id ?? '').marks, [], 'and nothing is journaled');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the tool pipeline is the harness pipeline: a plugin refuses, wraps, reshapes and observes', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const workspace = kernel.host.workspace();
+			writeFileSync(join(workspace, 'guarded.txt'), 'original\n');
+			// Written the way the harness cookbook writes a policy plugin.
+			kernel.ctx.on('tools/pre-execute', (exec, next) => {
+				const path = (exec.arguments as { path?: string }).path ?? '';
+				return exec.name === 'write_file' && path.includes('guarded') ? { kind: 'deny', reason: 'guarded.txt is under policy' } : next();
+			});
+			// A wrapper around dispatch: what a timeout or a metrics plugin does.
+			const wrapped: string[] = [];
+			kernel.ctx.on('tools/execute', async (exec, next) => {
+				wrapped.push(exec.name);
+				return next();
+			});
+			// A result shaper, and an observer that must see refusals too.
+			kernel.ctx.on('tools/post-execute', (exec, result, next) => (exec.name === 'read_file' ? { kind: 'accept', content: [{ text: `reshaped: ${result.content.length} chars` }] } : next()));
+			const observed: string[] = [];
+			kernel.ctx.on('tools/result', (exec, result) => observed.push(`${exec.name}:${result.isError}:${result.content.split('\n')[0] ?? ''}`));
+			// The tool definitions themselves came from the harness shape, not Comonad's.
+			kernel.ctx.tools.register({
+				name: 'echo',
+				description: 'Echo a value back.',
+				parameters: { type: 'object', properties: { value: { type: 'string' } } },
+				output: { schema: { type: 'string' } },
+				execute: (args) => ({ echoed: (args as { value?: string }).value ?? '' }),
+			});
+			let told = '';
+			kernel.ctx.llm.use({
+				name: 'caller',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'tool') {
+						told = last.content;
+						return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					const asked = request.messages.filter((message) => message.role === 'user').length;
+					const call: ToolCall =
+						asked === 1
+							? { id: 'w', name: 'write_file', arguments: JSON.stringify({ path: 'guarded.txt', content: 'hacked\n' }) }
+							: asked === 2
+								? { id: 'r', name: 'read_file', arguments: JSON.stringify({ path: 'guarded.txt' }) }
+								: { id: 'e', name: 'echo', arguments: JSON.stringify({ value: 'hi' }) };
+					return { message: { role: 'assistant', content: '', toolCalls: [call] }, toolCalls: [call], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.agent.runTurn({ text: 'write it', surface: 'test' });
+			assert.strictEqual(readFileSync(join(workspace, 'guarded.txt'), 'utf8'), 'original\n', 'the refused write never ran');
+			assert.ok(/under policy/.test(told), `the model reads the reason: ${told}`);
+
+			await kernel.ctx.agent.runTurn({ text: 'read it', surface: 'test' });
+			assert.ok(/^reshaped: \d+ chars$/.test(told), `post-execute replaced what the model sees: ${told}`);
+
+			await kernel.ctx.agent.runTurn({ text: 'echo it', surface: 'test' });
+			assert.ok(/echoed/.test(told), `a harness-shaped tool answers as JSON text: ${told}`);
+
+			assert.deepStrictEqual(wrapped, ['read_file', 'echo'], 'the wrapper saw exactly the calls that were dispatched');
+			assert.strictEqual(observed[0], 'write_file:true:Error: guarded.txt is under policy', 'a refusal is observed, not hidden');
+			assert.deepStrictEqual(
+				observed.map((line) => line.split(':').slice(0, 2).join(':')),
+				['write_file:true', 'read_file:false', 'echo:false'],
+				'every settled call is observed once',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the agent journals its own writes: one rewind point per turn, cut at the prompt', async () => {
+		const kernel = await createTestKernel({ config: { checkpoints: true } });
+		try {
+			const workspace = kernel.host.workspace();
+			writeFileSync(join(workspace, 'note.txt'), 'start\n');
+			kernel.ctx.llm.use({
+				name: 'writer',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					// A fresh user prompt asks for a write; once the tool has answered, the model stops.
+					if (last?.role === 'user') {
+						const toolCall: ToolCall = { id: `w${request.messages.length}`, name: 'write_file', arguments: JSON.stringify({ path: 'note.txt', content: `${last.content}\n` }) };
+						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			const first = await kernel.ctx.agent.runTurn({ text: 'one', surface: 'test' });
+			const second = await kernel.ctx.agent.runTurn({ text: 'two', surface: 'test' });
+
+			const id = first.sessionId;
+			const session = kernel.ctx.sessions.require(id);
+			// Diagnostic: what the agent actually did, so a missing mark is explained, not guessed at.
+			assert.strictEqual(session.marks.length, 2, 'each turn that wrote a file has a rewind point');
+			assert.strictEqual(session.marks[0]!.length, 0, 'turn one cuts to an empty transcript: its prompt is the first message');
+			// Turn one is user, assistant, tool, assistant (four messages); turn two's prompt is the fifth.
+			// Cutting at the prompt keeps all four and drops turn two.
+			assert.strictEqual(session.marks[1]!.length, 4, 'turn two cuts before its own prompt, keeping all of turn one');
+			assert.strictEqual(session.marks[0]!.entryCount, 0, 'no journal entry existed before turn one');
+			assert.strictEqual(session.marks[1]!.entryCount, 1, 'turn two starts after turn one’s single entry');
+
+			const pending = await kernel.ctx.checkpoints.pending(workspace, id);
+			assert.deepStrictEqual(pending.files.map((file) => file.path), ['note.txt'], 'the agent’s writes are pending');
+			assert.strictEqual(pending.files[0]!.created, false, 'note.txt existed before the agent');
+
+			// Rewinding to turn two restores what the file was before turn two's write.
+			await kernel.ctx.checkpoints.revert(workspace, id, { entryCount: session.marks[1]!.entryCount });
+			assert.strictEqual(readFileSync(join(workspace, 'note.txt'), 'utf8'), 'one\n', 'the file is back to its content before turn two');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('diff parsing counts additions and deletions per path, from one multi-file diff', () => {
+		const text = [
+			'diff --git a/x.txt b/x.txt',
+			'--- a/x.txt',
+			'+++ b/x.txt',
+			'@@ -1 +1 @@',
+			'-old',
+			'+new',
+			'diff --git a/y.txt b/y.txt',
+			'--- a/y.txt',
+			'+++ b/y.txt',
+			'@@ -0,0 +1 @@',
+			'+added',
+			'',
+		].join('\n');
+		const parsed = parseDiffs(text);
+		assert.strictEqual(parsed.get('x.txt')?.additions, 1);
+		assert.strictEqual(parsed.get('x.txt')?.deletions, 1);
+		assert.strictEqual(parsed.get('y.txt')?.additions, 1);
+		assert.strictEqual(parsed.get('y.txt')?.deletions, 0);
 	});
 });

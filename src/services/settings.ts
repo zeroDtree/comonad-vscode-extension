@@ -2,8 +2,7 @@ import { Service, type Context } from 'cordis';
 import { DEFAULT_GRAPH_SOURCE } from '../lib/mermaid';
 import { parseRules, type RuleSet } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
-import { WI_SETTINGS_DEFAULTS, type RegexScript } from '../lib/tavern/types';
-import { TAG_IMPORT } from '../lib/tavern/tags';
+import { TAG_IMPORT, WI_SETTINGS_DEFAULTS, type RegexScript } from '../lib/tavern/types';
 import type { Approval, Capability, ReasoningEffort, WorkMode } from '../lib/types';
 import type { Host } from './host';
 

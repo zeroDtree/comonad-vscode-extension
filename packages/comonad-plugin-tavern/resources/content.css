@@ -362,23 +362,25 @@ select.more-menu {
 /* The card's own actions: what the chat uses on the left, the file-level verbs on the right, each
    group wrapping as a unit so the row never breaks in the middle of one. */
 #st-form .actions {
-	display: flex;
-	gap: 6px 10px;
-	flex-wrap: wrap;
-	align-items: center;
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+	gap: 6px;
+	align-items: stretch;
 	margin-bottom: 16px;
 }
 
+/* Every action shares one column width, so the buttons and the *More…* menu line up. */
 #st-form .actions .group {
-	display: flex;
-	gap: 6px;
-	flex-wrap: wrap;
-	align-items: center;
+	display: contents;
 }
 
-#st-form .actions .group.push {
-	flex: 1 1 100%;
-	justify-content: flex-end;
+#st-form .actions button,
+#st-form .actions select.more-menu {
+	width: 100%;
+	min-width: 0;
+	max-width: none;
+	box-sizing: border-box;
+	margin: 0;
 }
 
 .list-rows {
@@ -449,8 +451,8 @@ button.secondary.danger:hover {
 /* One line of its own, under the chat/file actions: the picker and its three verbs never break apart. */
 #st-form .preset-tools {
 	display: flex;
-	flex: 1 1 100%;
-	flex-wrap: nowrap;
+	grid-column: 1 / -1;
+	flex-wrap: wrap;
 	justify-content: flex-end;
 	gap: 6px;
 	align-items: center;
@@ -464,6 +466,7 @@ button.secondary.danger:hover {
 }
 
 #st-form .preset-tools button {
+	width: auto;
 	white-space: nowrap;
 }
 

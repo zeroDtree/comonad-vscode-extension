@@ -15,14 +15,14 @@ import {
 	blankPreset,
 	nextUid,
 	slugId,
-} from '../lib/tavern/authoring';
-import { blankPng, cardToJson, cardToPng, loadCard } from '../lib/tavern/card';
-import { convertCharacterToPersona, connectionKeys } from '../lib/tavern/personas';
-import { PRESET_TEMPLATES, presetTemplate } from '../lib/tavern/templates/presets';
-import { parsePreset, presetId, presetToJson } from '../lib/tavern/preset';
-import { DEFAULT_PROMPTS, IDENTITY_PROMPT, promptCollection } from '../lib/tavern/prompts';
-import { estimateTokens } from '../lib/prompt';
-import { DEFAULT_SORT, SEARCH_SORT, SORT_RULES, visibleEntries } from '../lib/tavern/search';
+} from '../lib/authoring';
+import { blankPng, cardToJson, cardToPng, loadCard } from '../lib/card';
+import { convertCharacterToPersona, connectionKeys } from '../lib/personas';
+import { PRESET_TEMPLATES, presetTemplate } from '../lib/templates/presets';
+import { parsePreset, presetId, presetToJson } from '../lib/preset';
+import { DEFAULT_PROMPTS, IDENTITY_PROMPT, promptCollection } from '../lib/prompts';
+import { estimateTokens } from '@comonad/lib/prompt';
+import { DEFAULT_SORT, SEARCH_SORT, SORT_RULES, visibleEntries } from '../lib/search';
 import {
 	TAG_IMPORT,
 	addTags,
@@ -36,13 +36,13 @@ import {
 	renameTag,
 	sorted,
 	tagPatch,
-} from '../lib/tavern/tags';
-import type { PromptLibraryEntry, TavernPreset, WorldBook, WorldEntry } from '../lib/tavern/types';
-import { GENERATION_LABELS, GENERATION_TRIGGERS, PERSONA_POSITION } from '../lib/tavern/types';
-import { describe } from '../lib/util';
-import type { Config } from '../services/settings';
+} from '../lib/tags';
+import type { PromptLibraryEntry, TavernPreset, WorldBook, WorldEntry } from '@comonad/lib/tavern/types';
+import { GENERATION_LABELS, GENERATION_TRIGGERS, PERSONA_POSITION } from '@comonad/lib/tavern/types';
+import { describe } from '@comonad/lib/util';
+import type { Config } from '@comonad/services/settings';
 import type { ContentKind } from '../services/tavern';
-import { assignCharacter } from './tavern';
+import { assignCharacter } from '../commands';
 
 /**
  * The content editor, as the settings panel's **ST** tab uses it: the four kinds of tavern content

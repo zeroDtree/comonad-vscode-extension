@@ -1,0 +1,16 @@
+{
+	"name": "comonad-plugin-tavern",
+	"displayName": "SillyTavern content (ST)",
+	"description": "Characters, world books, personas, presets and their prompt assembly, as a Comonad plugin row.",
+	"version": "0.2.0",
+	"private": true,
+	"main": "./dist/index.js",
+	"comonad": {
+		"plugin": true,
+		"label": "SillyTavern content (ST)"
+	},
+	"files": [
+		"dist",
+		"resources"
+	]
+}

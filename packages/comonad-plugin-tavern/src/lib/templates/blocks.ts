@@ -1,4 +1,4 @@
-import type { PromptItem } from '../types';
+import type { PromptItem } from '@comonad/lib/tavern/types';
 
 /**
  * The prompt blocks Comonad offers to drop into a preset, written here rather than copied from

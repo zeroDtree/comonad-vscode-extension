@@ -8,6 +8,7 @@ import { turnsOf, type Step } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
 import type { Approval, ApprovalDecision, ReasoningEffort, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/tavern/types';
+import type { JournalApi } from '../services/checkpoints';
 import type { Session } from '../services/sessions';
 import { registerCommand } from './register';
 
@@ -18,25 +19,13 @@ const VIEW_ID = 'comonad.chat';
 const CONTAINER_ID = 'workbench.view.extension.comonadChat';
 
 /**
- * What the content pill shows: the character, persona, books and preset of this chat, plus the
- * entries the last turn's scan activated, so the model's injected lore is visible in the UI.
+ * What the content layer reports to the chat UI: the world-book entries the last turn's scan
+ * injected, so the lore the model was given is visible next to the composer.
  */
-function tavernState(ctx: Context, session: Session | undefined): Record<string, unknown> {
-	const config = ctx.settings.get();
-	const character = ctx.tavern.character(session?.character ?? config.tavernCharacter);
-	const persona = ctx.tavern.persona(session?.persona ?? config.tavernPersona);
-	const preset = ctx.tavern.preset(session?.preset ?? config.tavernPreset);
-	const books = session?.lorebooks ?? config.tavernLorebooks;
+function tavernState(session: Session | undefined): Record<string, unknown> {
 	return {
-		enabled: config.tavernEnabled,
-		character: character?.name ?? '',
-		persona: persona ? persona.title || persona.name : '',
-		books: books.length,
-		bookNames: books,
-		preset: preset?.name ?? '',
 		activated: (session?.tavernActivated ?? []).map((hit) => `${hit.book} — ${hit.comment || hit.reason} (${hit.reason})`),
 		overflow: session?.tavernOverflow === true,
-		hasContent: Boolean(ctx.tavern.characters.length || ctx.tavern.books.length || ctx.tavern.presets.length || ctx.tavern.personas.length),
 	};
 }
 
@@ -46,7 +35,6 @@ export function chatPanel(ctx: Context): void {
 	const attachments = new Map<vscode.Webview, vscode.Disposable>();
 	let view: vscode.WebviewView | null = null;
 	let panel: vscode.WebviewPanel | null = null;
-	let lastSessionId: string | null | undefined;
 	let running = false;
 	let streamed = false;
 	let stopped = false;
@@ -134,7 +122,7 @@ export function chatPanel(ctx: Context): void {
 			modelLabel: ctx.llm.describe(config.model),
 			models: await ctx.llm.availableModels(),
 			sessionTotal: all.length,
-			tavern: tavernState(ctx, session),
+			tavern: tavernState(session),
 			sessions: all
 				.slice(0, 60)
 				.map((item) => ({ id: item.id, title: item.title, active: item.id === session?.id, updatedAt: item.updatedAt })),
@@ -184,23 +172,71 @@ export function chatPanel(ctx: Context): void {
 		return last ? { steps: last.steps.map(stepPayload), startedAt: last.startedAt, endedAt: last.endedAt } : { steps: [] };
 	};
 
+	/** The transcript the panel was last handed: which chat, and how much of it. */
+	let published: { id: string; length: number } | null = null;
+
+	/** The one place the panel is handed a transcript: a reload, a chat switch, and every rewrite. */
+	const publishTurns = (session: Session | undefined): void => {
+		published = session ? { id: session.id, length: session.transcript.length } : null;
+		post({ type: 'turns', turns: history(session) });
+	};
+
 	const refresh = (): void => {
 		void refreshState();
 		void refreshChanges();
+	};
+
+	/**
+	 * A generation the transcript holds somewhere other than the turn that streamed it: a continue
+	 * grows the reply before it, an impersonation and a quiet turn are not written at all, and a swipe
+	 * keeps the reply as one variant among several. The panel has to be handed the transcript again, or
+	 * it keeps drawing a turn the session does not hold.
+	 */
+	const rewrote = (trigger: GenerationTrigger | undefined): boolean => trigger !== undefined && trigger !== 'normal';
+
+	/**
+	 * How a finished generation reaches the panel when it did not land where it streamed: an
+	 * impersonation is yours to send (the composer), a quiet turn is a notice — it is nowhere else —
+	 * and an error or an unstreamed reply is said outright. `null` means the streamed turn said it.
+	 */
+	const deliver = (trigger: GenerationTrigger, text: string): { type: 'notice' | 'command' | 'draft'; text: string } | null => {
+		if (text.startsWith('Error:') || text.startsWith('Blocked by hook')) {
+			return { type: 'notice', text };
+		}
+		if (trigger === 'impersonate') {
+			return { type: 'draft', text };
+		}
+		if (trigger === 'quiet') {
+			return { type: 'notice', text: text || '(no reply)' };
+		}
+		return streamed ? null : { type: 'command', text: text || '(no reply)' };
 	};
 
 	const refreshState = async (): Promise<void> => {
 		if (!clients.size) {
 			return;
 		}
+		// The session is read *after* the wait, never before it: a fork announces itself twice — as a new
+		// chat, and then as that copy with everything after the turn removed — and a snapshot taken
+		// before the wait would hand the panel the conversation as it stood before the cut.
+		post(await state());
 		const session = ctx.sessions.active();
 		if (panel) {
 			panel.title = session ? `Comonad · ${trimTitle(session.title)}` : 'Comonad';
 		}
-		post(await state());
-		if ((session?.id ?? null) !== lastSessionId) {
-			lastSessionId = session?.id ?? null;
-			post({ type: 'turns', turns: history(session) });
+		if (!session) {
+			if (published) {
+				publishTurns(undefined);
+			}
+			return;
+		}
+		// A different chat, or one that was cut shorter behind the panel's back — the fork above, or a
+		// rewind: the panel has to be handed the transcript again, not left drawing what is gone. A chat
+		// that merely grew is a turn the panel watched happen, with its own streaming to keep.
+		const moved = published?.id !== session.id;
+		const cut = published?.id === session.id && session.transcript.length < published.length;
+		if (moved || cut) {
+			publishTurns(session);
 		}
 	};
 
@@ -211,10 +247,13 @@ export function chatPanel(ctx: Context): void {
 		}
 		const session = ctx.sessions.active();
 		const workspace = session?.policy.workingDirectory;
+		// The journal is a feature plugin of its own: without it there is no chip, and nothing else
+		// changes — the composer simply has nothing pending to show.
+		const journal = ctx.get('checkpoints') as JournalApi | undefined;
 		let count = 0;
-		if (session && workspace) {
+		if (session && workspace && journal) {
 			try {
-				count = (await ctx.checkpoints.diff(workspace, session.id)).files.length;
+				count = (await journal.pending(workspace, session.id)).files.length;
 			} catch {
 				count = 0;
 			}
@@ -253,7 +292,8 @@ export function chatPanel(ctx: Context): void {
 	ctx.on('sessions/changed', refresh);
 	ctx.on('settings/changed', refresh);
 	ctx.on('checkpoints/changed', () => void refreshChanges());
-	// Content changes (a reload, a card added) only move the pill, never the transcript.
+	// Content changes (a reload, a card added) only move what the composer reads out, never the
+	// transcript.
 	ctx.on('tavern/changed', () => void refreshState());
 
 	// Approvals for panel turns are answered by the webview buttons.
@@ -282,20 +322,43 @@ export function chatPanel(ctx: Context): void {
 		streamed = false;
 		stopped = false;
 		let handledByCommand = false;
+		let rewrite = false;
+		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
 		post({ type: 'turn-start', text: input });
 		try {
+			// A command answers through the surface, and a redraw — `/compact` replaces the transcript —
+			// would wipe an answer that was already on screen. The answers are held back until the
+			// command is through; its progress is shown as it goes.
+			const answers: string[] = [];
+			const flush = (): void => {
+				for (const answer of answers.splice(0)) {
+					post({ type: 'command', text: answer });
+				}
+			};
 			const surface = {
-				markdown: (markdown: string) => post({ type: 'command', text: markdown }),
+				markdown: (markdown: string) => answers.push(markdown),
 				progress: (markdown: string) => post({ type: 'notice', text: markdown }),
 			};
+			const before = ctx.sessions.active()?.transcript.length ?? 0;
 			const handled = await ctx.commands.handle(undefined, input, surface);
 			if (handled.done) {
 				handledByCommand = true;
+				// A command can rewrite the chat itself: `/compact` swaps the transcript for a summary.
+				// A chat that still holds what the panel is drawing has to be handed the new transcript,
+				// before its own answer, which the redraw would wipe.
+				const active = ctx.sessions.active();
+				if (active && active.transcript.length !== before) {
+					publishTurns(active);
+				}
+				flush();
 				if (handled.result && !streamed) {
 					post({ type: 'command', text: handled.result });
 				}
 				return;
 			}
+			// A command that hands the turn over (`/plan`, `/review`) says what it printed first, and then
+			// the turn's own streaming takes over.
+			flush();
 			const result = await ctx.agent.runTurn({
 				text: handled.text ?? input,
 				sessionId: ctx.sessions.active()?.id,
@@ -303,15 +366,21 @@ export function chatPanel(ctx: Context): void {
 				trigger: handled.trigger,
 				surface: SURFACE,
 			});
-			if (result.text.startsWith('Error:') || result.text.startsWith('Blocked by hook')) {
-				post({ type: 'notice', text: result.text });
-			} else if (!streamed) {
-				post({ type: 'command', text: result.text || '(no reply)' });
-			}
+			// `/continue`, `/impersonate`, `/swipe`, `/regenerate` and `/quiet` are the ▾ menu from the
+			// keyboard, so their answer is delivered the same way the menu's is.
+			settled = deliver(handled.trigger ?? 'normal', result.text);
+			rewrite = rewrote(handled.trigger);
 		} finally {
 			running = false;
+			if (rewrite) {
+				publishTurns(ctx.sessions.active());
+			}
 			post({ type: 'turn-end', stopped, command: handledByCommand, ...settledTurn() });
 			stopped = false;
+			// After the redraw: a notice and a draft have nowhere else to be read.
+			if (settled) {
+				post(settled);
+			}
 			refresh();
 		}
 	};
@@ -322,45 +391,67 @@ export function chatPanel(ctx: Context): void {
 		if (!session || running) {
 			return;
 		}
+		const turns = turnsOf(session.transcript);
+		const last = turns[turns.length - 1];
 		if (trigger === 'swipe' || trigger === 'regenerate') {
-			const turns = turnsOf(session.transcript);
-			const last = turns[turns.length - 1];
 			if (!last || last.greeting) {
 				post({ type: 'notice', text: 'There is nothing to generate again yet.' });
 				return;
 			}
 		}
+		if (trigger === 'continue' && !last) {
+			// Nothing to carry on: the answer would have no message to be written into.
+			post({ type: 'notice', text: 'There is nothing to continue yet.' });
+			return;
+		}
+		if (trigger === 'quiet' && !text.trim()) {
+			// A quiet generation is never written down, so its prompt has to be the one in the box.
+			post({ type: 'notice', text: 'Quiet needs a prompt in the box — say what to ask privately.' });
+			return;
+		}
 		running = true;
 		streamed = false;
 		// A swipe and a regenerate replace the last reply in place: the webview swaps that turn for the
 		// streaming one, and the variants it had are handed over so nothing the reader saw is lost.
-		const replaces = trigger === 'swipe' || trigger === 'regenerate' ? turnsOf(session.transcript).slice(-1)[0]?.index : undefined;
-		post({ type: 'turn-start', text, replaces });
+		const replaces = trigger === 'swipe' || trigger === 'regenerate' ? last?.index : undefined;
+		// A continue is not a turn of its own: its reply is written into the message it carries on, so
+		// the webview grows that message instead of opening a second one.
+		const continues = trigger === 'continue' ? last?.index : undefined;
+		// An impersonation is not a turn of its own either: it is written into the composer, the way
+		// upstream's own button does, so the webview streams it there instead of into the chat.
+		post({ type: 'turn-start', text, replaces, continues, draft: trigger === 'impersonate' });
+		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
 		try {
 			const result = await ctx.agent.runTurn({ text, sessionId: session.id, trigger, surface: SURFACE });
-			if (result.text.startsWith('Error:') || result.text.startsWith('Blocked by hook')) {
-				post({ type: 'notice', text: result.text });
-			} else if (trigger === 'quiet') {
-				// A quiet generation is not in the transcript, so the only place it can be read is here.
-				post({ type: 'notice', text: result.text || '(no reply)' });
-			} else if (!streamed) {
-				post({ type: 'command', text: result.text || '(no reply)' });
-			}
+			settled = deliver(trigger, result.text);
 		} finally {
 			running = false;
+			// A continue, an impersonation, a quiet turn and the swipes all rewrite what the panel is
+			// drawing — the streamed turn is not the transcript. Hand it the transcript instead, the
+			// same way a reload or a chat switch does.
+			if (rewrote(trigger)) {
+				publishTurns(ctx.sessions.active());
+			}
 			post({ type: 'turn-end', stopped, ...settledTurn() });
 			stopped = false;
+			// After the redraw: a quiet reply, a draft and an error have nowhere else to be read.
+			if (settled) {
+				post(settled);
+			}
 			refresh();
 		}
 	};
 
-	/** Switches the last reply to one of its variants. Nothing is generated: the text is already there. */
-	const swipeTo = (index: number): void => {
+	/** Switches a reply to one of its variants. Nothing is generated: the text is already there. */
+	const swipeTo = (index: number, turn?: number): void => {
 		const session = ctx.sessions.active();
 		if (!session || running) {
 			return;
 		}
-		if (ctx.sessions.setSwipe(session.id, index)) {
+		if (ctx.sessions.setSwipe(session.id, index, turn)) {
+			// The variant that is showing is the transcript's own text, so the panel is handed the
+			// transcript it just moved rather than left with the one it was drawing.
+			publishTurns(ctx.sessions.active());
 			refresh();
 		}
 	};
@@ -405,7 +496,8 @@ export function chatPanel(ctx: Context): void {
 		try {
 			switch (message.type) {
 				case 'ready':
-					lastSessionId = undefined;
+					// A fresh guest has no transcript of its own: hand it the one the session holds.
+					published = null;
 					refresh();
 					break;
 				case 'focusState':
@@ -466,8 +558,10 @@ export function chatPanel(ctx: Context): void {
 					const index = Number(message.turn);
 					const turn = turnsOf(session.transcript).find((item) => item.index === index);
 					if (turn) {
-						// `forkAt` also makes the fork the active chat, so the panel switches to it.
-						ctx.sessions.forkAt(session.id, turn.at);
+						// `forkAt` also makes the fork the active chat, so the panel switches to it — and it is
+						// handed that copy here, because the fork is announced twice: once when it is made and
+						// again when it is cut to this turn, and only the second one is the chat that is wanted.
+						publishTurns(ctx.sessions.forkAt(session.id, turn.at));
 					}
 					break;
 				}
@@ -478,7 +572,7 @@ export function chatPanel(ctx: Context): void {
 					await generate(generationTrigger(message.trigger), String(message.text ?? ''));
 					break;
 				case 'setSwipe':
-					swipeTo(Number(message.index));
+					swipeTo(Number(message.index), Number.isFinite(Number(message.turn)) ? Number(message.turn) : undefined);
 					break;
 				case 'setMode':
 					if (typeof message.mode === 'string' && message.mode in MODE_LABELS) {
@@ -530,28 +624,9 @@ export function chatPanel(ctx: Context): void {
 				case 'review':
 					await vscode.commands.executeCommand('comonad.review');
 					break;
-				case 'tavern': {
-					// A fixed map, so the webview can never name an arbitrary command to run.
-					const action = String(message.action ?? '');
-					const command =
-						action === 'character'
-							? 'comonad.pickCharacter'
-							: action === 'persona'
-								? 'comonad.pickPersona'
-								: action === 'books'
-									? 'comonad.pickLorebooks'
-									: action === 'preset'
-										? 'comonad.pickTavernPreset'
-										: action === 'reload'
-											? 'comonad.reloadTavern'
-											: action === 'manage'
-												? 'comonad.openContent'
-												: '';
-					if (command) {
-						await vscode.commands.executeCommand(command);
-					}
+				case 'lorebooks':
+					await vscode.commands.executeCommand('comonad.pickLorebooks');
 					break;
-				}
 			}
 		} catch (error) {
 			ctx.log.message(`chat panel error: ${describe(error)}`);
@@ -635,7 +710,7 @@ export function chatPanel(ctx: Context): void {
 			webviewView.onDidChangeVisibility(() => {
 				if (webviewView.visible) {
 					// Messages posted while the view is hidden are dropped: resync from the session.
-					lastSessionId = undefined;
+					published = null;
 					refresh();
 				} else {
 					focusedClients.delete(webviewView.webview);
@@ -685,7 +760,7 @@ export function chatPanel(ctx: Context): void {
 	// The title-bar icons are commands; the chat list itself lives in the webview.
 	registerCommand(ctx, 'comonad.toggleHistory', () => post({ type: 'toggleHistory' }));
 }
-chatPanel.inject = ['sessions', 'agent', 'settings', 'llm', 'usage', 'commands', 'checkpoints', 'log', 'host', 'tavern'];
+chatPanel.inject = ['sessions', 'agent', 'settings', 'llm', 'usage', 'commands', 'log', 'host'];
 
 function splitChoices(labels: Record<string, string>): { id: string; label: string; description: string }[] {
 	return Object.entries(labels).map(([id, label]) => {
@@ -732,15 +807,6 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 </header>
 <main id="messages"></main>
 <footer>
-	<div id="chips">
-		<button data-cmd="/help" data-tip="List commands">/help</button>
-		<button data-cmd="/plan " data-tip="Research read-only, then write a plan">/plan</button>
-		<button data-cmd="/review" data-tip="Review pending changes without editing">/review</button>
-		<button data-cmd="/compact" data-tip="Summarize the conversation">/compact</button>
-		<button data-cmd="/status" data-tip="Show mode, model, workspace and usage">/status</button>
-		<button data-cmd="/cost" data-tip="Show token usage">/cost</button>
-		<button data-cmd="/context" data-tip="Show the token budget breakdown">/context</button>
-	</div>
 	<div id="todos" hidden></div>
 	<div id="editor">
 		<textarea id="input" rows="3" placeholder="Ask Comonad…  Enter to send · Shift+Enter for a new line · /help for commands"></textarea>
@@ -749,15 +815,17 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 				<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="pill-label"></span><span class="chev">▾</span></button>
 				<div class="pill-menu" hidden></div>
 			</div>
-			<span class="grow"></span>
-			<button id="lore" class="chip" hidden></button>
-			<button id="changes" class="chip" hidden></button>
-			<button id="stop" class="ghost" data-tip="Stop the running turn (Esc)" hidden>Stop</button>
-			<div class="pill pill-caret" data-control="generate">
-				<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false" data-tip="Generation type — Normal, Continue, Impersonate, Swipe, Regenerate, Quiet"><span class="chev">▾</span></button>
-				<div class="pill-menu" hidden></div>
+			<!-- What belongs at the right edge of the box: the chips, the generation menu and Send. -->
+			<div id="sendbar">
+				<button id="lore" class="chip" hidden></button>
+				<button id="changes" class="chip" hidden></button>
+				<button id="stop" class="ghost" data-tip="Stop the running turn (Esc)" hidden>Stop</button>
+				<div class="pill pill-caret" data-control="generate">
+					<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false" data-tip="Generation type — Normal, Continue, Impersonate, Swipe, Regenerate, Quiet"><span class="chev">▾</span></button>
+					<div class="pill-menu" hidden></div>
+				</div>
+				<button id="send" class="primary" data-tip="Send — Enter">Send</button>
 			</div>
-			<button id="send" class="primary" data-tip="Send — Enter">Send</button>
 		</div>
 	</div>
 	<div id="pills">
@@ -779,13 +847,6 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 		<div class="pill" data-control="display">
 			<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false">
 				<span class="pill-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M1.7 8S4.1 4.2 8 4.2 14.3 8 14.3 8 11.9 11.8 8 11.8 1.7 8 1.7 8z"/><circle cx="8" cy="8" r="1.8"/></svg></span>
-				<span class="pill-label"></span><span class="chev">▾</span>
-			</button>
-			<div class="pill-menu" hidden></div>
-		</div>
-		<div class="pill" data-control="tavern">
-			<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false">
-				<span class="pill-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="5.2" r="2.6"/><path d="M2.9 13.4c0-2.6 2.3-4.2 5.1-4.2s5.1 1.6 5.1 4.2"/></svg></span>
 				<span class="pill-label"></span><span class="chev">▾</span>
 			</button>
 			<div class="pill-menu" hidden></div>

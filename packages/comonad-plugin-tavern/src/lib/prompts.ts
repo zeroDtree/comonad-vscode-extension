@@ -1,4 +1,4 @@
-import { INJECTION_POSITION, type PromptItem, type PromptOrderEntry, type TavernPreset } from './types';
+import { INJECTION_POSITION, type PromptItem, type PromptOrderEntry, type TavernPreset } from '@comonad/lib/tavern/types';
 
 /**
  * The prompt collection: the twelve blocks SillyTavern ships, the default order, and the rules for

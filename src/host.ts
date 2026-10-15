@@ -18,7 +18,10 @@ export function host(ctx: Context, config: HostConfig): void {
 	const service: Host = {
 		storage: hostStorage(extension.globalStorageUri.fsPath),
 		extensionUri: extension.extensionUri,
-		home: () => homedir(),
+		// `COMONAD_HOME` moves everything Comonad keeps in a home of its own — the plugin library and its
+		// rows, the harness shims, the catalog, the instruction layers. The test host sets it so the
+		// plugins you run, and the rows you wrote for them, never change what a test sees.
+		home: () => process.env.COMONAD_HOME?.trim() || homedir(),
 		workspace: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
 		trusted: () => vscode.workspace.isTrusted,
 		config: () => {

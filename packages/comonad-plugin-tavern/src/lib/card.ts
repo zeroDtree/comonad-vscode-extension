@@ -1,8 +1,8 @@
 import { deflateSync } from 'node:zlib';
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
-import type { Character, CharacterCard, CharacterData, DepthPrompt, RegexScript } from './types';
-import { TALKATIVENESS_DEFAULT } from './types';
+import type { Character, CharacterCard, CharacterData, DepthPrompt, RegexScript } from '@comonad/lib/tavern/types';
+import { TALKATIVENESS_DEFAULT } from '@comonad/lib/tavern/types';
 
 /**
  * Character cards, read and written the way SillyTavern stores them: a PNG with the card in a `tEXt`

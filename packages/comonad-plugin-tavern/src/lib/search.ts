@@ -1,5 +1,5 @@
 import Fuse, { type IFuseOptions } from 'fuse.js';
-import type { WorldEntry } from './types';
+import type { WorldEntry } from '@comonad/lib/tavern/types';
 
 /**
  * Searching and ordering the entry list of a world book, the way SillyTavern's own panel does it.

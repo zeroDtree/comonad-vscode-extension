@@ -1,8 +1,8 @@
-import type { Message } from '../types';
+import type { Message } from '@comonad/lib/types';
 import { parseExamples } from './macro';
 import { IDENTITY_PROMPT, isInChat, type ActivePrompt } from './prompts';
 import { parseDecorators } from './lore';
-import { WI_ROLE } from './types';
+import { WI_ROLE } from '@comonad/lib/tavern/types';
 
 /**
  * The assembler: turns the prompt collection, the card, the world books and the conversation into

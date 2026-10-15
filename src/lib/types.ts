@@ -16,6 +16,12 @@ export interface ToolCall {
 	id: string;
 	name: string;
 	arguments: string;
+	/**
+	 * What an endpoint wants sent back *with* this call, verbatim. Google's OpenAI-compatible layer
+	 * puts the thought signature of its thinking models in `extra_content.google.thought_signature`, and
+	 * Gemini 3 refuses the next request without it; no other endpoint reads the field at all.
+	 */
+	extraContent?: Record<string, unknown>;
 }
 
 export interface Message {
@@ -113,6 +119,11 @@ export interface ToolContext {
 	spawnAgent: AgentSpawnFunction;
 	/** Remove secret-shaped environment variables from spawned commands. Defaults to true. */
 	sensitiveEnv?: boolean;
+	/**
+	 * Journal a write to one workspace file: its content before and after `write` runs. Every file
+	 * tool writes through this, so the per-file checkpoints see each change the agent makes.
+	 */
+	edit?(path: string, write: () => Promise<void>): Promise<void>;
 }
 
 export interface JsonSchema {

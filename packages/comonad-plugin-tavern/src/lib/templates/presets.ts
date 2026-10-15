@@ -1,5 +1,5 @@
 import { DEFAULT_ORDER, DEFAULT_PROMPTS } from '../prompts';
-import type { PromptItem, TavernPreset } from '../types';
+import type { PromptItem, TavernPreset } from '@comonad/lib/tavern/types';
 import { blockToPrompt, PROMPT_BLOCKS } from './blocks';
 
 /**

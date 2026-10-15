@@ -4,8 +4,6 @@ import { APPROVAL_LABELS, MODE_CAPS, MODE_LABELS } from '../lib/policy';
 import type { CommandSpec } from '../services/commands';
 import { formatUsage } from '../services/usage';
 import { sandboxStatus } from '../tools/shell';
-import { greetingsOf } from '../lib/tavern/card';
-import { assignCharacter } from './tavern';
 
 /** Built-in slash commands, available from every chat surface. */
 
@@ -33,16 +31,14 @@ const HELP = [
 	'| `/swipe` | generate another version of the last reply |',
 	'| `/regenerate` | generate the last reply again |',
 	'| `/quiet [text]` | generate a reply without adding it to the transcript |',
-	'| `/char [name]` | pick the character this chat speaks as |',
-	'| `/persona [name]` | pick who you are in this chat |',
-	'| `/lore [names]` | pick the world books this chat scans |',
-	'| `/preset [name]` | pick the prompt and sampler preset |',
-	"| `/note [text]` | set or clear the standing author's note |",
+];
+
+const HELP_TAIL = [
 	'',
 	'Custom commands come from `.comonad/commands/*.md`.',
 	'',
 	'Tip: open the dedicated panel with **Comonad: Open Chat** (⌘⌥C / Ctrl+Alt+C).',
-].join('\n');
+];
 
 export function slashCommands(ctx: Context): void {
 	const register = (name: string, description: string, run: CommandSpec['run']): void => {
@@ -50,7 +46,8 @@ export function slashCommands(ctx: Context): void {
 	};
 
 	register('help', 'List commands', (_args, surface) => {
-		surface.markdown(HELP);
+		// Read now, not at registration: a plugin's rows arrive with the plugin, which may be later.
+		surface.markdown([...HELP, ...ctx.commands.help(), ...HELP_TAIL].join('\n'));
 		return { done: true };
 	});
 
@@ -198,133 +195,8 @@ export function slashCommands(ctx: Context): void {
 	register('regenerate', 'Generate the last reply again', () => ({ done: false, text: '', trigger: 'regenerate' }));
 	register('quiet', 'Generate a reply without adding it to the transcript', (args) => ({ done: false, text: args, trigger: 'quiet' }));
 
-	register('char', 'Pick the character this chat speaks as', async (args, surface) => {
-		const session = ctx.sessions.active();
-		if (!session) {
-			surface.markdown('No active session yet.');
-			return { done: true };
-		}
-		const named = args.trim();
-		if (!named) {
-			await vscode.commands.executeCommand('comonad.pickCharacter');
-			return { done: true };
-		}
-		const character = ctx.tavern.findCharacter(named);
-		if (!character) {
-			const known = ctx.tavern.characters.map((entry) => entry.name).join(', ') || '(none found)';
-			surface.markdown(`No character named **${named}**. Known characters: ${known}.`);
-			return { done: true };
-		}
-		const opened = assignCharacter(ctx, session.id, character);
-		const greetings = greetingsOf(character).length;
-		surface.markdown(
-			`This chat speaks as **${character.name}**.` +
-				(opened ? ' It opens with the card’s greeting.' : greetings ? ' The chat already has messages, so the greeting was not inserted.' : ''),
-		);
-		return { done: true };
-	});
-
-	register('persona', 'Pick who you are in this chat', async (args, surface) => {
-		const session = ctx.sessions.active();
-		if (!session) {
-			surface.markdown('No active session yet.');
-			return { done: true };
-		}
-		const named = args.trim().toLowerCase();
-		if (!named) {
-			await vscode.commands.executeCommand('comonad.pickPersona');
-			return { done: true };
-		}
-		const persona = ctx.tavern.findPersona(named);
-		if (!persona) {
-			const known = ctx.tavern.personas.map((entry) => entry.title || entry.name).join(', ') || '(none found)';
-			surface.markdown(`No persona named **${args.trim()}**. Known personas: ${known}.`);
-			return { done: true };
-		}
-		session.persona = persona.id;
-		ctx.sessions.save(session);
-		ctx.sessions.changed(session.id);
-		surface.markdown(`You are **${persona.title || persona.name}** in this chat.`);
-		return { done: true };
-	});
-
-	register('lore', 'Pick the world books this chat scans', async (args, surface) => {
-		const session = ctx.sessions.active();
-		if (!session) {
-			surface.markdown('No active session yet.');
-			return { done: true };
-		}
-		const named = args.trim();
-		if (!named) {
-			await vscode.commands.executeCommand('comonad.pickLorebooks');
-			return { done: true };
-		}
-		if (named.toLowerCase() === 'none') {
-			session.lorebooks = [];
-			ctx.sessions.save(session);
-			ctx.sessions.changed(session.id);
-			surface.markdown('This chat scans no world books of its own.');
-			return { done: true };
-		}
-		const { found, missing } = ctx.tavern.resolveBooks(named.split(/[\s,]+/));
-		if (missing.length) {
-			const known = ctx.tavern.books.map((entry) => entry.name).join(', ') || '(none found)';
-			surface.markdown(`No world book named ${missing.map((name) => `**${name}**`).join(', ')}. Known books: ${known}.`);
-			return { done: true };
-		}
-		session.lorebooks = found;
-		ctx.sessions.save(session);
-		ctx.sessions.changed(session.id);
-		surface.markdown(`This chat scans: ${found.join(', ')}.`);
-		return { done: true };
-	});
-
-	register('preset', 'Pick the prompt and sampler preset', async (args, surface) => {
-		const named = args.trim();
-		if (!named) {
-			await vscode.commands.executeCommand('comonad.pickTavernPreset');
-			return { done: true };
-		}
-		const session = ctx.sessions.active();
-		if (!session) {
-			surface.markdown('No active session yet.');
-			return { done: true };
-		}
-		if (named.toLowerCase() === 'none') {
-			session.preset = undefined;
-			ctx.sessions.save(session);
-			ctx.sessions.changed(session.id);
-			surface.markdown('This chat uses the shipped prompt collection.');
-			return { done: true };
-		}
-		const preset = ctx.tavern.findPreset(named);
-		if (!preset) {
-			const known = ctx.tavern.presets.map((entry) => entry.name).join(', ') || '(none found)';
-			surface.markdown(`No preset named **${named}**. Known presets: ${known}.`);
-			return { done: true };
-		}
-		session.preset = preset.id;
-		ctx.sessions.save(session);
-		ctx.sessions.changed(session.id);
-		surface.markdown(`This chat uses **${preset.name}**.`);
-		return { done: true };
-	});
-
-	register('note', "Set or clear this chat's standing author's note", (args, surface) => {
-		const session = ctx.sessions.active();
-		if (!session) {
-			surface.markdown('No active session yet.');
-			return { done: true };
-		}
-		const text = args.trim();
-		session.authorNote = text || undefined;
-		ctx.sessions.save(session);
-		ctx.sessions.changed(session.id);
-		surface.markdown(text ? `Author's note set (depth ${ctx.settings.get().tavernNoteDepth}).` : 'Author’s note cleared.');
-		return { done: true };
-	});
 }
-slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage', 'tavern'];
+slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage'];
 
 async function statusText(ctx: Context): Promise<string> {
 	const config = ctx.settings.get();

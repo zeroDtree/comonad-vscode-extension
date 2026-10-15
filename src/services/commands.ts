@@ -40,6 +40,8 @@ export class Commands extends Service {
 	static inject = ['catalog', 'settings', 'log'];
 
 	private readonly specs = new Map<string, CommandSpec>();
+	/** Help lines per plugin id, so a feature's commands are listed while the feature is loaded. */
+	private readonly notes = new Map<string, string[]>();
 
 	constructor(ctx: Context) {
 		super(ctx, 'commands');
@@ -59,6 +61,24 @@ export class Commands extends Service {
 
 	list(): CommandSpec[] {
 		return [...this.specs.values()].sort((left, right) => left.name.localeCompare(right.name));
+	}
+
+	/**
+	 * Rows a plugin adds to `/help`'s table: the built-in table is written out, so a feature that
+	 * brings commands of its own brings their lines with it, and takes them away when it goes.
+	 */
+	addHelp(id: string, rows: string[]): void {
+		this.ctx.effect(() => {
+			this.notes.set(id, rows);
+			return () => {
+				this.notes.delete(id);
+			};
+		}, `ctx.commands.addHelp(${JSON.stringify(id)})`);
+	}
+
+	help(): string[] {
+		const rows = [...this.notes.values()];
+		return rows.length ? ['', ...rows.flat()] : [];
 	}
 
 	get(name: string): CommandSpec | undefined {

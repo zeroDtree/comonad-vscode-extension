@@ -14,9 +14,9 @@ import { tasksPlugin } from '../services/tasks';
 import { toolsPlugin } from '../services/tools';
 import { catalogPlugin } from '../services/catalog';
 import { commandsPlugin } from '../services/commands';
-import { tavernPlugin } from '../services/tavern';
+import { tavernPlugin } from 'comonad-plugin-tavern/services/tavern';
 import { vectorsPlugin } from '../services/vectors';
-import { loreToolPlugin } from '../tools/tavern';
+import { loreToolPlugin } from 'comonad-plugin-tavern/tools/tavern';
 import { llmPlugin } from '../services/llm';
 import { hooksPlugin } from '../services/hooks';
 import { approvalPlugin } from '../services/approval';
@@ -64,7 +64,13 @@ export function fakeHost(root: string, values: Record<string, unknown>, workspac
 	};
 }
 
-export async function createTestKernel(options: { config?: Record<string, unknown> } = {}): Promise<TestKernel> {
+/**
+ * A headless kernel. `skip` leaves a *feature* plugin out of the tree, which is how a test asks the
+ * question a user asks with `cordis.yml`: does everything else still work without it?
+ */
+export async function createTestKernel(
+	options: { config?: Record<string, unknown>; skip?: Array<'checkpoints' | 'tavern' | 'lore'> } = {},
+): Promise<TestKernel> {
 	const root = mkdtempSync(join(tmpdir(), 'comonad-'));
 	const workspace = join(root, 'ws');
 	mkdirSync(workspace, { recursive: true });
@@ -107,23 +113,49 @@ export async function createTestKernel(options: { config?: Record<string, unknow
 	function waitForServices(): void {
 		ready();
 	}
-	waitForServices.inject = ['host', 'settings', 'sessions', 'checkpoints', 'tools', 'llm', 'hooks', 'catalog', 'tavern', 'vectors', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log', 'commands', 'agent'];
+	const skipped = new Set<string>(options.skip ?? []);
+	waitForServices.inject = [
+		'host',
+		'settings',
+		'sessions',
+		'checkpoints',
+		'tools',
+		'llm',
+		'hooks',
+		'catalog',
+		'tavern',
+		'vectors',
+		'tokenizers',
+		'usage',
+		'tasks',
+		'approval',
+		'audit',
+		'log',
+		'commands',
+		'agent',
+	].filter((name) => !skipped.has(name));
 	const fiber: Fiber & PromiseLike<Fiber> = ctx.plugin(function kernel(child: Context) {
 		child.provide('host', host);
 		child.plugin(logPlugin);
 		child.plugin(settingsPlugin);
 		child.plugin(auditPlugin);
 		child.plugin(sessionsPlugin);
-		child.plugin(checkpointsPlugin);
+		if (!skipped.has('checkpoints')) {
+			child.plugin(checkpointsPlugin);
+		}
 		child.plugin(usagePlugin);
 		child.plugin(tasksPlugin);
 		child.plugin(toolsPlugin);
 		child.plugin(catalogPlugin);
-		child.plugin(tavernPlugin);
+		if (!skipped.has('tavern')) {
+			child.plugin(tavernPlugin);
+		}
 		child.plugin(vectorsPlugin);
 		child.plugin(commandsPlugin);
 		child.plugin(tokenizersPlugin);
-		child.plugin(loreToolPlugin);
+		if (!skipped.has('lore')) {
+			child.plugin(loreToolPlugin);
+		}
 		child.plugin(llmPlugin);
 		child.plugin(hooksPlugin);
 		child.plugin(approvalPlugin);

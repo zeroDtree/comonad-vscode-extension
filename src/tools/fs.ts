@@ -149,8 +149,15 @@ export const fsTools = toolset([
 		async execute(args, ctx) {
 			const { path, content } = args as { path: string; content: string };
 			const target = writable(ctx, path);
-			await mkdir(dirname(target), { recursive: true });
-			await writeFile(target, content);
+			const write = async () => {
+				await mkdir(dirname(target), { recursive: true });
+				await writeFile(target, content);
+			};
+			if (ctx.edit) {
+				await ctx.edit(target, write);
+			} else {
+				await write();
+			}
 			return `wrote ${path} (${content.length} chars)`;
 		},
 	},
@@ -168,7 +175,12 @@ export const fsTools = toolset([
 			if (!text.includes(old)) {
 				return `Error: the old text was not found in ${path}`;
 			}
-			await writeFile(target, text.replace(old, replacement));
+			const write = () => writeFile(target, text.replace(old, replacement));
+			if (ctx.edit) {
+				await ctx.edit(target, write);
+			} else {
+				await write();
+			}
 			return `patched ${path}`;
 		},
 	},

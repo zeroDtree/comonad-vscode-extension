@@ -2,18 +2,18 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { copyFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
-import type { Message } from '../lib/types';
-import { cardId, cardToJson, cardToPng, isCardFile, isPng, loadCard } from '../lib/tavern/card';
-import { personaJson, slugId, worldInfoJson } from '../lib/tavern/authoring';
-import { connectionKeys, personaBackup, personaFrom, readPersonaBackup, type PersonaBackup, type PersonaRestore } from '../lib/tavern/personas';
-import { activateLore, loreIndex, toWorldBook, worldInfoToBook, type LoreBook, type LoreHit, type LoreResult, type TimedEffects } from '../lib/tavern/lore';
-import { substituteMacros, type MacroContext } from '../lib/tavern/macro';
-import { applyRegex, regexScriptsFrom } from '../lib/tavern/regex';
-import { emptyStore, mergeStores, readStore, renameKey, storeJson, tagIdsOf, tagsOf, type Tag, type TagStore } from '../lib/tavern/tags';
-import { librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from '../lib/tavern/library';
-import { loadPreset, presetSamplers, presetToJson, type PresetSamplers } from '../lib/tavern/preset';
-import { applyCardOverrides, IDENTITY_PROMPT, promptCollection, withoutIdentityBlock, withoutRoleplayScaffolding, type ActivePrompt } from '../lib/tavern/prompts';
-import { assemble, type AssembleBlocks } from '../lib/tavern/assemble';
+import type { Message } from '@comonad/lib/types';
+import { cardId, cardToJson, cardToPng, isCardFile, isPng, loadCard } from '../lib/card';
+import { personaJson, slugId, worldInfoJson } from '../lib/authoring';
+import { connectionKeys, personaBackup, personaFrom, readPersonaBackup, type PersonaBackup, type PersonaRestore } from '../lib/personas';
+import { activateLore, loreIndex, toWorldBook, worldInfoToBook, type LoreBook, type LoreHit, type LoreResult, type TimedEffects } from '../lib/lore';
+import { substituteMacros, type MacroContext } from '../lib/macro';
+import { applyRegex, regexScriptsFrom } from '../lib/regex';
+import { emptyStore, mergeStores, readStore, renameKey, storeJson, tagIdsOf, tagsOf, type Tag, type TagStore } from '../lib/tags';
+import { librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from '../lib/library';
+import { loadPreset, presetSamplers, presetToJson, type PresetSamplers } from '../lib/preset';
+import { applyCardOverrides, IDENTITY_PROMPT, promptCollection, withoutIdentityBlock, withoutRoleplayScaffolding, type ActivePrompt } from '../lib/prompts';
+import { assemble, type AssembleBlocks } from '../lib/assemble';
 import {
 	PERSONA_POSITION,
 	REGEX_PLACEMENT,
@@ -30,7 +30,8 @@ import {
 	type WiRole,
 	type WorldBook,
 	type WorldInfoSettings,
-} from '../lib/tavern/types';
+} from '@comonad/lib/tavern/types';
+import type { Config } from '@comonad/services/settings';
 
 /**
  * The tavern service: it owns the content (characters, their books, personas, presets), keeps the
@@ -102,6 +103,22 @@ export type ContentKind = 'characters' | 'lorebooks' | 'presets' | 'personas';
 
 const MAX_FILES = 500;
 
+/** The settings a change to which means the library on disk has to be read again. */
+const SOURCE_KEYS = ['tavernEnabled', 'tavernCharacter', 'tavernPersona', 'tavernLorebooks', 'tavernPreset'] as const;
+
+function sourceKeys(config: Config): string {
+	return JSON.stringify(SOURCE_KEYS.map((key) => config[key]));
+}
+
+/**
+ * The seam between the agent and the tavern: the agent holds only this much of the service, so a
+ * build without the tavern plugin still type-checks — `ctx.get('tavern')` answers undefined then.
+ */
+export type TavernApi = Pick<
+	Tavern,
+	'compose' | 'continueNudge' | 'impersonationPrompt' | 'booksFor' | 'loreIndex' | 'promptsFor'
+>;
+
 /** The picture formats upstream accepts for a persona's avatar; ours is the file beside the JSON. */
 const AVATAR_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'] as const;
 
@@ -111,7 +128,7 @@ declare module 'cordis' {
 	}
 }
 
-export class Tavern extends Service {
+export class Tavern extends Service implements TavernApi {
 	static inject = ['host', 'log', 'settings', 'sessions'];
 
 	characters: Character[] = [];
@@ -142,7 +159,20 @@ export class Tavern extends Service {
 	constructor(ctx: Context) {
 		super(ctx, 'tavern');
 		this.ready = this.reload();
+		// The panel writes these keys through `settings`, and a hand-edited file arrives here too: the
+		// library is read again whenever one of them moved, and only then.
+		this.sources = sourceKeys(this.ctx.settings.get());
+		this.ctx.on('settings/changed', () => {
+			const sources = sourceKeys(this.ctx.settings.get());
+			if (sources !== this.sources) {
+				this.sources = sources;
+				void this.reload();
+			}
+		});
 	}
+
+	/** The source keys as they were last read, so a change to any other setting is not a reload. */
+	private sources: string;
 
 	/** Re-reads every source, after the read before it has finished. */
 	reload(): Promise<void> {

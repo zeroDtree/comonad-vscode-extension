@@ -8,7 +8,7 @@ import {
 	type PromptItem,
 	type PromptOrderEntry,
 	type TavernPreset,
-} from './types';
+} from '@comonad/lib/tavern/types';
 
 /**
  * OpenAI presets, read and written under their SillyTavern names: sampler settings, the prompt

@@ -13,6 +13,21 @@
             "node",
             "mocha"
         ],
+        /* The tavern plugin lives in `packages/` and imports the host's shared vocabulary, so one
+           project covers both: `@comonad/*` is what the plugin calls the host by. */
+        "paths": {
+            "@comonad/*": [
+                "./src/*"
+            ],
+            "comonad-plugin-tavern": [
+                "./packages/comonad-plugin-tavern/src/index.ts"
+            ],
+            /* The tests reach the plugin's own modules — a card file, a preset, the prompt collection —
+               the way the plugin's files reach each other. */
+            "comonad-plugin-tavern/*": [
+                "./packages/comonad-plugin-tavern/src/*"
+            ]
+        },
         "sourceMap": true,
         "strict": true,
         "esModuleInterop": true,
@@ -20,6 +35,7 @@
         "noEmit": true
     },
     "include": [
-        "src"
+        "src",
+        "packages"
     ]
 }

@@ -1,5 +1,5 @@
 import { readPersonaConnections } from './authoring';
-import { PERSONA_DEPTH_DEFAULT, PERSONA_POSITION, type Character, type Persona, type PersonaConnection, type PersonaDescription } from './types';
+import { PERSONA_DEPTH_DEFAULT, PERSONA_POSITION, type Character, type Persona, type PersonaConnection, type PersonaDescription } from '@comonad/lib/tavern/types';
 
 /**
  * Personas in SillyTavern's own shapes: one description block, the backup document that holds every

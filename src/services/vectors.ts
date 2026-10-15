@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { Service, type Context } from 'cordis';
 import { embedTexts } from '../lib/vectors';
 import { rank, queryText, type VectorCandidate, type VectorHit } from '../lib/vectors';
-import type { LoreBook, LoreMessage } from '../lib/tavern/lore';
+import type { LoreBook, LoreMessage } from 'comonad-plugin-tavern';
 import type { VectorSettings } from './settings';
 
 /**

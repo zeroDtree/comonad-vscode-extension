@@ -14,7 +14,6 @@
 	// extension asked for (`Comonad: Manage Content` opens straight into ST).
 	const askedTab = document.querySelector('script[data-tab]');
 	let activeTab = (vscode.getState() || {}).tab || (askedTab && askedTab.dataset.tab) || 'agent';
-	let activeSt = (vscode.getState() || {}).st || 'characters';
 	// The Inspect tab's own sub-tab: the tool policy flow, or the prompt list.
 	let activeInspect = (vscode.getState() || {}).inspect || 'flow';
 	let graphInfo = { nodes: [], routes: [], error: '' };
@@ -41,35 +40,47 @@
 		$('save').classList.remove('is-dirty');
 	};
 
-	// The content editor lives in the same document and shares this webview's message channel.
-	// `store` is the small per-document preference bag the two content guests share, kept apart from
-	// the tab the panel itself remembers.
+	// A pane is a tab a plugin added: its markup and its client files are part of this document, so this
+	// client owns the message channel for all of them. A pane's script registers here, is fed its own
+	// slice of every state push, and what it collects at save time is merged into the patch.
+	// `store` is the small per-document preference bag the guests share, kept apart from the tab.
 	const store = {
 		get: () => vscode.getState() || {},
 		set: (patch) => vscode.setState({ ...(vscode.getState() || {}), ...patch }),
 	};
-	const pane = window.comonadContentPane({ post, store });
+	const panes = new Map();
+	let paneSlices = {};
+	const lastNote = new Map();
+	/** What a pane's script is handed: the channel, the store, and where its own updates go. */
+	window.comonadPanes = {
+		store,
+		post: (id, message) => post({ type: 'pane', pane: id, message }),
+		dirty: markDirty,
+		register: (id, handlers) => {
+			panes.set(id, handlers || {});
+			// A pane's script loads after this one and may load after the first state: it is fed what is
+			// already here, so registration order is never what decides whether the tab draws.
+			if (paneSlices[id]) {
+				renderPane(id);
+			}
+			if (lastNote.has(id)) {
+				panes.get(id).note && panes.get(id).note(lastNote.get(id));
+			}
+			if (activeTab === id) {
+				panes.get(id).show && panes.get(id).show();
+			}
+		},
+	};
+
+	/** Feeds one pane its slice of the state the panel just pushed; a pane keeps its own edit state. */
+	function renderPane(id) {
+		const handlers = panes.get(id);
+		if (handlers && handlers.render) {
+			handlers.render(paneSlices[id]);
+		}
+	}
 
 	/* ------------------------------------------------------------------ tabs */
-
-	function showSt(name) {
-		// The content sub-tabs are the pane's kinds; ask it before switching away from unsaved edits.
-		if (name !== 'settings' && !pane.select(name)) {
-			return;
-		}
-		activeSt = name;
-		store.set({ tab: activeTab, st: name });
-		for (const button of document.querySelectorAll('.subtab[data-st]')) {
-			if (button.dataset.st === 'settings') {
-				button.classList.toggle('is-on', name === 'settings');
-			}
-		}
-		$('st-pane').dataset.view = name === 'settings' ? 'settings' : 'content';
-	}
-
-	for (const button of document.querySelectorAll('.subtab[data-st]')) {
-		button.addEventListener('click', () => showSt(button.dataset.st));
-	}
 
 	/* The Inspect tab's own sub-tabs: the tool policy flow and the prompt list. */
 	function showInspect(name) {
@@ -77,7 +88,7 @@
 			name = 'flow';
 		}
 		activeInspect = name;
-		store.set({ tab: activeTab, st: activeSt, inspect: name });
+		store.set({ tab: activeTab, inspect: name });
 		for (const button of document.querySelectorAll('.subtab[data-inspect]')) {
 			const on = button.dataset.inspect === name;
 			button.classList.toggle('is-on', on);
@@ -104,7 +115,7 @@
 			name = 'agent';
 		}
 		activeTab = name;
-		store.set({ tab: name, st: activeSt, inspect: activeInspect });
+		store.set({ tab: name, inspect: activeInspect });
 		for (const tab of document.querySelectorAll('.tab')) {
 			const on = tab.dataset.tab === name;
 			tab.classList.toggle('is-on', on);
@@ -115,6 +126,10 @@
 		}
 		if (name === 'inspect') {
 			showInspect(activeInspect);
+		}
+		// A pane may remember a sub-tab of its own: it is shown the tab that is now on screen.
+		if (panes.has(name) && panes.get(name).show) {
+			panes.get(name).show();
 		}
 		schedulePreview();
 		scheduleFlow();
@@ -155,52 +170,6 @@
 		}
 	}
 
-	/* ------------------------------------------------------------------ content tabs */
-
-	// The character/persona/book/preset pickers are selects over whatever the catalog found, plus an
-	// empty choice: "no default" is a real value for all four.
-	function fillCatalog(node, items, current, empty) {
-		node.innerHTML = '';
-		node.append(option(['', empty], current));
-		for (const item of items || []) {
-			node.append(option([item.id || item.name, item.name], current));
-		}
-		if (current && node.value !== current) {
-			node.append(option([current, current], current));
-		}
-	}
-
-	const STRATEGIES = [
-		['0', 'Character first'],
-		['1', 'Global first'],
-		['2', 'Evenly'],
-	];
-	function renderTavern() {
-		const tavern = state.tavern || {};
-		const catalog = state.catalog || {};
-		$('tavern-enabled').checked = Boolean(tavern.enabled);
-		$('tavern-user').value = tavern.userName || '';
-		$('tavern-note').value = tavern.authorNote || '';
-		$('tavern-note-depth').value = String(tavern.noteDepth || 0);
-		fillCatalog($('tavern-character'), catalog.characters, tavern.character, 'No default character');
-		fillCatalog($('tavern-persona'), catalog.personas, tavern.persona, 'No persona');
-		fillCatalog($('tavern-preset'), catalog.presets, tavern.preset, 'The shipped prompts');
-		$('books-known').textContent = 'Known books: ' + ((catalog.books || []).map((book) => book.name + ' (' + book.entries + ')').join(', ') || 'none found');
-		$('catalog-summary').textContent =
-			(catalog.characters || []).length +
-			' character(s) · ' +
-			(catalog.personas || []).length +
-			' persona(s) · ' +
-			(catalog.books || []).length +
-			' book(s) · ' +
-			(catalog.presets || []).length +
-			' preset(s). Reload after adding files — **Comonad: Reload Characters, Books and Presets**.';
-		const wi = tavern.wi || {};
-		$('wi-format').value = tavern.wiFormat || '';
-		$('fmt-scenario').value = tavern.scenarioFormat || '';
-		$('fmt-personality').value = tavern.personalityFormat || '';
-	}
-
 	function renderForm() {
 		const config = state.config;
 		fillSelect($('mode'), state.labels.modes, config.mode);
@@ -219,7 +188,6 @@
 		$('rules-ask').value = (rules.ask || []).join('\n');
 		$('rules-deny').value = (rules.deny || []).join('\n');
 		$('graph').value = config.graph;
-		renderTavern();
 		clearDirty();
 	}
 
@@ -227,7 +195,7 @@
 	const lines = (node) => node.value.split('\n').map((line) => line.trim()).filter(Boolean);
 
 	function collect() {
-		return {
+		const config = {
 			mode: $('mode').value,
 			approval: $('approval').value,
 			network: $('network').checked,
@@ -243,18 +211,14 @@
 			allow: lines($('rules-allow')),
 			ask: lines($('rules-ask')),
 			deny: lines($('rules-deny')),
-			// Content. The prompt table is saved on its own, as a preset.
-			tavernEnabled: $('tavern-enabled').checked,
-			tavernCharacter: $('tavern-character').value,
-			tavernPersona: $('tavern-persona').value,
-			tavernUserName: $('tavern-user').value.trim(),
-			tavernAuthorNote: $('tavern-note').value,
-			tavernNoteDepth: Number($('tavern-note-depth').value) || 0,
-			tavernWiFormat: $('wi-format').value,
-			tavernScenarioFormat: $('fmt-scenario').value,
-			tavernPersonalityFormat: $('fmt-personality').value,
-			tavernPreset: $('tavern-preset').value,
 		};
+		// A pane owns its own keys: it contributes the ones its tab holds, and nothing else.
+		for (const handlers of panes.values()) {
+			if (handlers.collect) {
+				Object.assign(config, handlers.collect());
+			}
+		}
+		return config;
 	}
 
 	for (const node of document.querySelectorAll('[data-key]')) {
@@ -475,6 +439,66 @@
 		});
 	}
 
+	/* ------------------------------------------------------ plugin dependency table */
+
+	/** What each row provides, what it needs and who needs it: the whole wiring, readable as a list. */
+	function renderPluginDeps() {
+		const rows = (state.plugins && state.plugins.dependencies) || [];
+		const node = $('pg-deps');
+		node.innerHTML = '';
+		const head = document.createElement('tr');
+		for (const header of ['row', 'layer', 'provides', 'needs', 'needed by', 'state']) {
+			const th = document.createElement('th');
+			th.textContent = header;
+			head.append(th);
+		}
+		node.append(head);
+		for (const row of rows) {
+			const tr = document.createElement('tr');
+			tr.className = 'pg-row';
+			tr.dataset.id = row.id;
+			tr.title = 'Click for the whole chain that stops with this row';
+			const name = document.createElement('td');
+			name.textContent = row.id;
+			name.className = 'mono';
+			tr.append(name);
+			const layer = document.createElement('td');
+			layer.textContent = row.group || '';
+			tr.append(layer);
+			const provides = document.createElement('td');
+			provides.textContent = row.provides.join(', ');
+			provides.className = 'mono';
+			tr.append(provides);
+			const needs = document.createElement('td');
+			needs.className = 'mono';
+			for (const require of row.requires) {
+				const line = document.createElement('div');
+				// A service Comonad mounts before the tree is not a hole in it; one nothing provides is.
+				line.textContent = require.provider ? `${require.name} ← ${require.provider}` : require.external ? `${require.name} (built in)` : `?${require.name}`;
+				if (!require.provider && !require.external) {
+					line.className = 'pg-missing';
+				}
+				needs.append(line);
+			}
+			tr.append(needs);
+			const usedBy = document.createElement('td');
+			usedBy.textContent = row.usedBy.join(', ');
+			usedBy.className = 'mono';
+			tr.append(usedBy);
+			const status = document.createElement('td');
+			status.textContent = row.loaded ? 'loaded' : row.enabled ? (row.error || '').startsWith('pending') ? 'waiting' : 'failed' : 'off';
+			if (row.error) {
+				status.title = row.error;
+				if (!row.loaded) {
+					status.className = 'plugin-error';
+				}
+			}
+			tr.append(status);
+			tr.addEventListener('click', () => post({ type: 'pluginTree', id: row.id }));
+			node.append(tr);
+		}
+	}
+
 	/* ------------------------------------------------------------------ graph */
 
 	function renderGraphInfo() {
@@ -521,6 +545,8 @@
 
 	$('mcp-save').addEventListener('click', () => post({ type: 'saveMcp', json: $('mcp').value }));
 	$('mcp-reload').addEventListener('click', () => post({ type: 'reloadMcp' }));
+	$('plugins-reload').addEventListener('click', () => post({ type: 'plugins', action: 'reload' }));
+	$('plugins-install').addEventListener('click', () => post({ type: 'plugins', action: 'install' }));
 
 	function table(node, headers, rows) {
 		node.innerHTML = '';
@@ -556,6 +582,64 @@
 			strong.textContent = name;
 			item.append(strong, detail ? ' — ' + detail : '');
 			node.append(item);
+		}
+	}
+
+	/**
+	 * The plugin list: what each row is, where it came from, and whether it is loaded. A row that is
+	 * enabled can be turned off here — the host writes that into the workspace's `cordis.yml` and applies
+	 * the list again, so the change is the same one you would make by hand, and it survives a reload.
+	 */
+	function renderPlugins() {
+		const plugins = state.plugins || { rows: [], project: '', user: '', writable: '', trusted: true };
+		$('plugins-project').textContent = plugins.project || '(no workspace folder)';
+		$('plugins-user').textContent = plugins.user || '(no home)';
+		$('plugins-writable').textContent = plugins.writable || 'nowhere (a toggle would have no file to go in)';
+		$('plugins-reload').disabled = !plugins.project && !plugins.user;
+		$('plugins-note').textContent = plugins.trusted
+			? ''
+			: 'This workspace is not trusted, so its own list is not read and a row can only be toggled in yours.';
+		const node = $('plugins');
+		node.innerHTML = '';
+		const head = document.createElement('tr');
+		for (const header of ['row', 'from', 'resolves to', 'state', '']) {
+			const th = document.createElement('th');
+			th.textContent = header;
+			head.append(th);
+		}
+		node.append(head);
+		for (const row of plugins.rows || []) {
+			const tr = document.createElement('tr');
+			const name = document.createElement('td');
+			name.textContent = row.id;
+			name.className = 'mono';
+			name.title = row.error || '';
+			tr.append(name);
+			const from = document.createElement('td');
+			from.textContent = row.source;
+			tr.append(from);
+			const target = document.createElement('td');
+			target.textContent = row.target;
+			target.className = 'mono';
+			tr.append(target);
+			const status = document.createElement('td');
+			status.textContent = row.loaded ? 'loaded' : row.enabled ? 'not loaded' : 'off';
+			if (row.error) {
+				status.title = row.error;
+				status.className = 'plugin-error';
+			}
+			tr.append(status);
+			const actions = document.createElement('td');
+			const button = document.createElement('button');
+			button.className = 'secondary';
+			button.type = 'button';
+			button.textContent = row.enabled ? 'Disable' : 'Enable';
+			button.disabled = !plugins.writable;
+			button.title = row.enabled ? 'Turn this row off' : 'Turn this row on';
+			button.addEventListener('click', () => post({ type: 'plugins', action: 'toggle', id: row.id, disabled: row.enabled }));
+			actions.append(button);
+			tr.append(actions);
+			node.append(tr);
 		}
 	}
 
@@ -688,24 +772,32 @@
 	window.addEventListener('message', (event) => {
 		const message = event.data;
 		switch (message.type) {
+			case 'pluginTree': {
+				const wrap = $('pg-detail-wrap');
+				$('pg-detail-title').textContent = 'Dependency tree — ' + message.id;
+				$('pg-detail').textContent = message.text;
+				wrap.hidden = false;
+				wrap.scrollIntoView({ block: 'nearest' });
+				break;
+			}
 			case 'state':
 				state = message;
+				paneSlices = message.panes || {};
 				graphInfo = message.graphInfo || graphInfo;
 				if (!dirty || !ready) {
 					renderForm();
 				}
+				renderPlugins();
+				renderPluginDeps();
 				renderReadOnly();
 				renderLegend();
 				renderGraphInfo();
-				// The pane keeps its own edit state, so it is fed on every push, not only on a tab switch.
-				if (message.content) {
-					pane.render(message.content);
-				} else {
-					pane.notice('The panel sent a state without its content slice — the ST tab cannot render.');
+				// Every pane is fed on every push, not only when its tab is shown: it keeps its own state.
+				for (const id of panes.keys()) {
+					renderPane(id);
 				}
 				if (!ready) {
 					ready = true;
-					showSt(activeSt);
 					showTab(activeTab);
 				} else {
 					scheduleFlow();
@@ -735,8 +827,11 @@
 			case 'error':
 				status(message.message, true);
 				break;
-			case 'contentNote':
-				pane.note(message);
+			case 'note':
+				lastNote.set(message.pane, message);
+				if (panes.has(message.pane) && panes.get(message.pane).note) {
+					panes.get(message.pane).note(message);
+				}
 				break;
 			case 'openTab':
 				showTab(message.tab);

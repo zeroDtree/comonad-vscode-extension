@@ -293,7 +293,7 @@
 		flyoutPage = page;
 		modelFlyout.innerHTML = '';
 		for (const item of pageItems(page)) {
-			modelFlyout.append(choiceRow(item, pageCurrent(page), (id) => pagePick(page, id)));
+			modelFlyout.append(choiceRow(item, pageCurrent(page), (id) => pagePick(page, id), modelPill));
 		}
 		if (page === 'model') {
 			// The way out when there is no profile yet: the wizard writes `comonad.profiles` and the key.
@@ -302,6 +302,7 @@
 					{ id: '__configure', label: '⚙ Configure a provider…', description: 'add an OpenAI-compatible endpoint' },
 					'',
 					() => modelPill.send({ type: 'configureModel' }),
+					modelPill,
 				),
 			);
 		}
@@ -344,7 +345,7 @@
 		}
 	});
 
-	function choiceRow(item, current, pick) {
+	function choiceRow(item, current, pick, entry) {
 		const row = document.createElement('button');
 		row.type = 'button';
 		row.className = 'pill-choice';
@@ -352,7 +353,9 @@
 		row.innerHTML = '<span class="pill-choice-label">' + esc((item.id === current ? '✓ ' : '') + (item.label || item.id)) + '</span>';
 		row.classList.toggle('is-on', item.id === current);
 		row.addEventListener('click', () => {
-			closeMenu(modelPill);
+			// The menu the row belongs to is the one that has to close: a pick is an action, not a
+			// setting that stays open for the next one.
+			closeMenu(entry);
 			pick(item.id);
 		});
 		return row;
@@ -399,72 +402,9 @@
 		renderModelMenu();
 	};
 
-	/* The character pill: who the chat speaks as, who you are, its books and its preset. */
+	/* What the content layer reported after the last turn: the entries the world-book scan injected. */
 
-	const tavernPill = setupPill('tavern', (action) => vscode.postMessage({ type: 'tavern', action }));
-	const tavernState = { enabled: true, character: '', persona: '', books: 0, bookNames: [], preset: '', activated: [], overflow: false, hasContent: false };
-
-	function tavernRow(action, label, value, tip) {
-		const row = document.createElement('button');
-		row.type = 'button';
-		row.className = 'pill-choice pill-choice-section';
-		row.dataset.tip = tip;
-		row.innerHTML =
-			'<span class="pill-choice-label">' +
-			esc(label) +
-			'</span><span class="pill-choice-value">' +
-			esc(value || '—') +
-			'</span><span class="pill-choice-arrow">›</span>';
-		row.addEventListener('click', () => {
-			closeMenu(tavernPill);
-			tavernPill.send(action);
-		});
-		return row;
-	}
-
-	function renderTavernMenu() {
-		const menu = tavernPill.menu;
-		menu.innerHTML = '';
-		const books = tavernState.books ? tavernState.bookNames.join(', ') : '';
-		menu.append(tavernRow('character', 'Character', tavernState.character, 'Write this chat as a character card, and open it with its greeting'));
-		menu.append(tavernRow('persona', 'Persona', tavernState.persona, 'Who the user is in this chat — the {{user}} name and description'));
-		menu.append(tavernRow('books', 'World books', books || (tavernState.books ? tavernState.books + ' book(s)' : ''), 'World books scanned for keywords each turn'));
-		menu.append(tavernRow('preset', 'Preset', tavernState.preset, 'Prompt collection, order and samplers'));
-		menu.append(
-			choiceRow({ id: 'reload', label: '↻ Reload content', description: 're-read .comonad/characters, lorebooks, presets and personas' }, '', () => tavernPill.send('reload')),
-		);
-		menu.append(choiceRow({ id: 'manage', label: '✎ Manage content…', description: 'create and edit cards, books, personas and presets' }, '', () => tavernPill.send('manage')));
-		if (!tavernState.hasContent) {
-			menu.append(
-				choiceRow(
-					{ id: 'help', label: 'Create content in Comonad: Manage Content', description: 'cards in .comonad/characters, books in .comonad/lorebooks' },
-					'',
-					() => undefined,
-				),
-			);
-		}
-	}
-
-	function renderTavern() {
-		const label = tavernState.character || (tavernState.enabled ? 'No character' : 'Tavern off');
-		const summary = [
-			tavernState.character || 'no character',
-			tavernState.persona ? 'as ' + tavernState.persona : '',
-			tavernState.books ? tavernState.books + ' book' + (tavernState.books === 1 ? '' : 's') : '',
-			tavernState.preset || '',
-		]
-			.filter(Boolean)
-			.join(' · ');
-		tavernPill.trigger.querySelector('.pill-label').textContent = label;
-		tavernPill.trigger.dataset.tip = 'Character — the content layered on this chat\nCurrent: ' + summary;
-		if (!tavernPill.menu.hidden) {
-			renderTavernMenu();
-		}
-	}
-
-	tavernPill.onOpen = () => {
-		renderTavernMenu();
-	};
+	const tavernState = { activated: [], overflow: false };
 
 	let state = null;
 	let running = false;
@@ -693,6 +633,8 @@
 
 	let turns = [];
 	let live = null;
+	/** An impersonation is being written into the composer rather than into a turn of the chat. */
+	let draft = false;
 
 	function currentView() {
 		return state && (state.display === 'token' || state.display === 'raw') ? state.display : 'rendered';
@@ -913,7 +855,7 @@
 				control.textContent = label;
 				control.disabled = disabled;
 				control.dataset.tip = tip;
-				control.addEventListener('click', () => vscode.postMessage({ type: 'setSwipe', index: shown + delta }));
+				control.addEventListener('click', () => vscode.postMessage({ type: 'setSwipe', turn: turn.index, index: shown + delta }));
 				return control;
 			};
 			const count = document.createElement('span');
@@ -963,7 +905,9 @@
 		if (turn.greeting) {
 			// A character's opening line has no prompt behind it: the bubble would be empty.
 			root.classList.add('greeting');
-		} else {
+		} else if (turn.prompt) {
+			// A continuation, an impersonation and a quiet turn have no prompt of their own either —
+			// the host sends them with no text, and an empty bubble is not a message.
 			root.appendChild(prompt);
 		}
 
@@ -1025,6 +969,26 @@
 	// that follows a tool call stays after it instead of being folded into one block.
 
 	function beginTurn(message) {
+		// An impersonation is not a turn: upstream clears the composer and streams your next message
+		// into it, so the chat is left alone until you send it yourself.
+		if (message.draft) {
+			draft = true;
+			live = null;
+			input.value = '';
+			return;
+		}
+		// A continue is not a turn of its own: its reply is written into the message it carries on, so
+		// that message grows here rather than a second bubble appearing beside it. The host hands over
+		// the transcript once the turn is over either way, so the two views always end the same.
+		const continuing = message.continues === undefined ? null : turns.find((turn) => turn.index === message.continues);
+		if (continuing) {
+			const grown = [...(continuing.steps || [])].reverse().find((step) => step.kind === 'text' && step._body);
+			live = { turn: continuing, thought: null, text: grown ?? null, think: '', pending: false };
+			renderFoot(continuing);
+			refreshActions();
+			scroll();
+			return;
+		}
 		const replacing = turns.find((turn) => turn.index === message.replaces);
 		if (replacing) {
 			turns = turns.filter((turn) => turn !== replacing);
@@ -1428,7 +1392,6 @@
 		fillPill(displayPill, DISPLAYS, currentView(), 'Display — how every turn is shown');
 		fillGenerations();
 		Object.assign(tavernState, state.tavern || {});
-		renderTavern();
 		renderLore();
 		// Switching the display form redraws what is on screen — never during a turn, where the
 		// transcript is being written to.
@@ -1552,7 +1515,21 @@
 				break;
 			}
 			case 'text':
-				appendText(message.text);
+				// A draft turn is being written into the composer, not into the transcript: the box grows
+				// with the text, and its end stays in view.
+				if (draft) {
+					input.value += message.text || '';
+					input.scrollTop = input.scrollHeight;
+				} else {
+					appendText(message.text);
+				}
+				break;
+			case 'draft':
+				// The finished impersonation as one piece of text, so nothing depends on how it streamed,
+				// with the caret where you edit it before sending.
+				input.value = message.text || '';
+				input.scrollTop = input.scrollHeight;
+				input.focus();
 				break;
 			case 'reasoning':
 				appendReasoning(message.text);
@@ -1568,6 +1545,7 @@
 				break;
 			case 'turn-end':
 				setRunning(false);
+				draft = false;
 				endTurn(message);
 				break;
 			case 'focus':
@@ -1598,11 +1576,10 @@
 			submit();
 			return;
 		}
+		// Quiet is the one type with a prompt of its own, and it is the one the host refuses when the
+		// box is empty — so the box is emptied here and the answer comes back as a notice.
 		const text = trigger === 'quiet' ? input.value.trim() : '';
 		if (trigger === 'quiet') {
-			if (!text) {
-				return;
-			}
 			input.value = '';
 		}
 		vscode.postMessage({ type: 'generate', trigger, text });
@@ -1617,7 +1594,7 @@
 		generationPill.menu.dataset.filled = 'yes';
 		for (const item of items) {
 			generationPill.menu.append(
-				choiceRow({ id: item.value, label: item.label, description: GENERATION_TIPS[item.value] }, '', () => runGeneration(item.value)),
+				choiceRow({ id: item.value, label: item.label, description: GENERATION_TIPS[item.value] }, '', () => runGeneration(item.value), generationPill),
 			);
 		}
 	}
@@ -1672,17 +1649,7 @@
 	});
 	networkChip.addEventListener('click', () => vscode.postMessage({ type: 'toggleNetwork' }));
 	changesChip.addEventListener('click', () => vscode.postMessage({ type: 'review' }));
-	loreChip.addEventListener('click', () => tavernPill.send('books'));
-	for (const chip of document.querySelectorAll('#chips button')) {
-		chip.addEventListener('click', () => {
-			input.value = chip.dataset.cmd;
-			if (chip.dataset.cmd.endsWith(' ')) {
-				input.focus();
-			} else {
-				submit();
-			}
-		});
-	}
+	loreChip.addEventListener('click', () => vscode.postMessage({ type: 'lorebooks' }));
 
 	/* ------------------------------------------------------------------ focus */
 

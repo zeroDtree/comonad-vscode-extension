@@ -39,7 +39,9 @@ export const TAG_FOLDER_DEFAULT = 'NONE';
  * What to do with the tags a card ships in its own `tags` field — upstream's numbers, so a value in
  * a copied settings file keeps its meaning.
  */
-export const TAG_IMPORT = { ASK: 1, NONE: 2, ALL: 3, ONLY_EXISTING: 4 } as const;
+import { TAG_IMPORT } from '@comonad/lib/tavern/types';
+
+export { TAG_IMPORT };
 
 /** Card tags that are never turned into library tags: they are generator metadata. */
 export const IMPORT_EXCLUDED_TAGS = ['ROOT', 'TAVERN'];

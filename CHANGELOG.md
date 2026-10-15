@@ -6,6 +6,153 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **The ST content layer is a plugin you install, not a feature built in.** It moved out of `src/` into
+  a package of its own, `packages/comonad-plugin-tavern`, built as its own bundle (`npm run build:plugins`)
+  and loaded by the host at run time: nothing in the shipped tree names it, so `dist/extension.js` carries
+  no content code at all — no library, no `lore_lookup`, no `/char` `/persona` `/lore` `/preset`, no **ST**
+  tab — until the row is there. **Settings → Plugins → Install…** offers it by name (and any other plugin
+  folder): the folder is copied into `~/.comonad/plugins/<id>`, a row is written into your `cordis.yml`,
+  and the list is applied again. Uninstalling is deleting either one.
+
+- **The settings panel draws panes, not tabs it knows about.** A pane is what a plugin contributes to the
+  panel — its tab, its markup, its stylesheets, its scripts, an optional editor and the config keys it
+  owns — and the panel asks each pane for its slice of every state push and for its keys at save time. The
+  **ST** tab is the tavern plugin's pane: with the row off the tab is not in the document at all, and with
+  it on the tab, its client files and its editor come from the plugin's own folder. The three services the
+  panel mounts before the tree (`host`, `log`, `settings`) are unchanged and still not rows.
+
+- **`cordis` and `vscode` are lent to an installed plugin.** A plugin loaded from `~/.comonad/plugins`
+  cannot resolve the platform modules from its own folder, so Comonad writes
+  `~/.comonad/plugins/node_modules/{cordis,schemastery,vscode}` beside it — generated bridges into the
+  running process, the way the harness shims are, so a plugin shares the host's classes rather than
+  carrying a second cordis. A plugin of your own can therefore be a single folder installed with
+  **Install…**, or mounted straight from a `cordis.yml` row. `COMONAD_HOME` names a different home for
+  all of it, and the test host sets it: the plugins you run never change what a test sees.
+
+
+- **Every feature is a plugin now, and the list is yours to edit.** The extension is one Cordis tree
+  written down as rows (`{ id, name, disabled, config }`) instead of assembled by hand, and a
+  `cordis.yml` in the project (`<workspace>/.comonad/cordis.yml`) or in your library (`~/.comonad`) turns
+  a row off, gives it a config of its own, or mounts a plugin of your own beside the shipped ones
+  (`name: ./mine.js`, or an installed package). Nothing here is privileged: a disabled row is never
+  loaded, a row that fails is reported with what became of it (`pending: waiting for …`, or the error it
+  threw) while the rest of the tree loads, and a row that changes behaviour does it through the same
+  extension points everyone else has to use. A plugin is a module — `export const name`, an optional
+  `inject` (declared, never inferred: cordis refuses a property that was not asked for), and `apply(ctx,
+  config)` — and everything it registers inside `apply` is an effect of it, so unloading the row takes
+  its tools, commands and watchers with it. A plugin that exports a `Config` schema has its row config
+  validated before `apply` runs. One rule is worth repeating: a row cannot *inject* the host's own list
+  — it reads `ctx.get('plugins')`, because the host is what is mounting it.
+
+- **The plugin list has a panel: Settings → Plugins.** Every row in load order with where it came from
+  (the extension, the workspace's `cordis.yml`, or your own), what it resolved to, and what became of it —
+  `loaded`, `off`, or `not loaded` with the reason on hover (`pending: waiting for tools`, or the error the
+  plugin threw). `Disable`/`Enable` writes the change into the workspace's list when the workspace is
+  trusted and into yours when it is not, and applies **that row** again — not the whole tree. That last
+  part matters: the panel is a row of the tree it is listing, and a full reload tore it down mid-click, so
+  turning `tavern` off looked like nothing happened. A row that others inject now takes them with it —
+  they go inactive and say what they are waiting for (`pending: waiting for tavern`) — and come back when
+  it does, the states in the table are read from the live fibers rather than from the moment each row was
+  applied, and a `cordis.yml` saved by hand is applied in full as soon as it changes (the host can tell
+  its own write from yours). A "Apply the list again" button applies everything on demand, and the tab is
+  how you get a feature back: the ST tab and its commands reappear the moment `tavern` is enabled.
+
+- **The tree's own wiring is a table: Settings → Inspect → Plugins.** Every row with what it provides
+  (a service another row can inject), what it needs — and which row provides each, or `(built in)` for the three
+  services Comonad mounts before the tree (`host`, `log`, `settings`: not rows, and not switchable) — who
+  needs it, its layer, and its state (`loaded`, `off`,
+  `waiting`, or `failed` with the reason on hover). A service nobody provides is written `?name`, so a row
+  waiting for something is visible rather than looking like a row that failed. Clicking a row prints its
+  **dependency tree**: what it stands on, and the whole chain that goes down with it, which is what a
+  toggle is really asking. Rows declare the layer they belong to (`kernel`, `tools`, `ui`, …), and all of
+  it is read from the live fibers — including a service a row provides through a plugin of its own.
+
+- **SillyTavern content and the shadow-git journal are plugins, not built-ins.** `{ id: tavern, disabled:
+  true }` turns the content layer off, and `{ id: checkpoints, disabled: true }` turns the journal off.
+  Neither takes the rest with it: without the tavern plugin a turn is exactly `[system, …history]` (the
+  agent reads the layer as `ctx.get('tavern')`, so the composition port is simply absent), the ST tab
+  disappears from the settings panel, and `/char`, `/persona`, `/lore`, `/preset` and the tavern's title
+  bar commands are not registered — while `/help`, `/status`, `/rewind` and the model, tools, MCP, rules
+  and inspect tabs are untouched. Without the journal, a write is just a write (nothing is recorded, the
+  tool is unaffected), and the review pane goes with it. Every reference the tavern layer had grown into
+  the agent, the slash commands, the settings panel and the environment watchers is behind one of those
+  seams now, and the agent reaches both features the same way: `ctx.get(...)`, never as an injection.
+
+- **DeepSeek Harness plugins run here.** A plugin written for the harness loads as it is: the `harness`
+  row redirects every `@deepseek-ai/*` import — `@deepseek-ai/cordis` is *this* cordis, so a plugin's own
+  `Service` subclass is a service the tree can see; `@deepseek-ai/schemastery` is the copy whose schemas
+  `Config` exports are validated with; `@deepseek-ai/dsh-brand`, `@deepseek-ai/dsh-tools`'s `defineTool`
+  and `@deepseek-ai/dsh-llm`'s `createUserMessage` are answered by small shims written where you can read
+  them (`~/.comonad/shims`). Its tool and policy half is implemented: `ctx.tools.register()` takes a
+  Comonad spec or a harness `ToolDefinition`, and the four waterfalls `tools/pre-execute`,
+  `tools/execute`, `tools/post-execute` and `tools/result` carry the harness's payloads and decisions
+  (`{kind:'deny',reason}`, `{kind:'accept',content}`, `{kind:'block',feedback}`, `ask` through the
+  approval surfaces) — so a permission gate, a timeout wrapper, a result shaper or a metrics observer
+  works unmodified. What is *not* implemented is the harness's agent and session internals
+  (`ctx.agents`, `session/event`, the PTC runtime): those names resolve to an empty module and are named
+  in the log, so a plugin that needs one fails where it used it instead of looking like Comonad's fault.
+
+- **Tool calls go through a policy pipeline, with or without the harness.** Every dispatch now passes
+  `tools/pre-execute` (refuse a call, or ask for it), `tools/execute` (wrap the dispatch — a replaced
+  `signal` is the signal the tool body honours), `tools/post-execute` (replace what the model sees, or
+  block with feedback) and `tools/result` (observe the settled outcome, refusals included). A refusal
+  reaches the model as the reason the plugin gave, because the model is the one who has to try something
+  else. The four names, payloads and decisions are the harness's, so the same listener works in both.
+
+- **The preset tool row no longer runs over the buttons beside it.** `#st-form .preset-tools` asked for a
+  flex row's `flex: 1 1 100%` inside the *grid* the actions bar is, so the row kept one cell's width and
+  its controls were laid out across the buttons next to it ("Restore template" under "Import…"). It spans
+  the grid's row now, and its buttons size to their words and wrap instead of shrinking into each other.
+
+- **A continue and an impersonation ask as the user.** Neither has a prompt of its own, so the request
+  ended on the model's own turn: OpenAI completes that turn, but Gemini refuses the whole request
+  (*"Requests ending with a model turn are not supported"*) and the turn is lost. The ask — the preset's
+  own nudge or impersonation prompt, or the agent's words when there is none — is now also sent as the
+  turn the model answers, which is where a preset's `send_if_empty` sits upstream. A quiet generation's
+  prompt is sent that way too; it used to be dropped entirely, since a quiet turn is never written down.
+
+- **The composer's actions sit at the right edge of the input box.** Send, the review chip and the
+  generation caret were held apart by a `grow` spacer whose rule only exists in the *settings*
+  webview's stylesheet, so the whole row read left-aligned. They are one group now (`#sendbar`), pinned
+  right and kept together when the row wraps on a narrow panel.
+- **Gemini 3's thought signatures are kept.** A Gemini 3 function call comes back with a
+  `thought_signature` in `extra_content`, and the next request is refused —
+  *"Function call is missing a thought_signature in functionCall parts"* — unless that exact field
+  rides back with the call. It is now kept on the call (and travels with the chat, so a reload or a
+  resume still sends it) and handed back verbatim; a call that has none, because it was written before
+  this or by another provider, carries Google's own `skip_thought_signature_validator` bypass instead,
+  so the turn is not lost. Only a model that demands one (Gemini 3 and later) is ever sent the bypass.
+
+- **The generation menu's six types now land where upstream puts them.** A turn of any other type than
+  *Normal* is written somewhere other than where it streamed, so the panel is handed the transcript
+  again when the turn ends — a **Continue** grows the reply it carries on (in place, no second bubble),
+  an **Impersonate** streams your next message into the composer to edit and send (the chat is left
+  alone, exactly as upstream's own button does), a **Quiet** turn leaves no bubble behind and reads as
+  a notice, and a **Swipe**/**Regenerate** keeps its versions: `‹ n/m ›` is drawn on the turn the
+  variants belong to, and switching one redraws the reply it moved instead of the last one in the chat.
+  **Continue** also stops cutting the transcript — it grows the last reply only when nothing comes
+  after it (a stopped, failed or tool-waiting turn used to lose the messages behind it), and a chat
+  that has said nothing is told there is nothing to continue. `/compact` is handed over the same way,
+  with the command's own answer printed after the redraw.
+- **A fork from a turn stops at that turn.** The panel was handed the copy as it stood *before* the cut
+  — a fork is announced twice, as a new chat and then as the copy with the turns after the click
+  removed, and the snapshot taken before the second one won — so a fork from a middle turn looked like
+  the whole conversation. The transcript a panel is given is now read after the wait, and one that got
+  shorter behind its back (the same fork, or a rewind) is handed over again.
+
+- **Checkpoints are per file, not per turn.** Every write the agent makes (`write_file`, `apply_patch`,
+  `apply_edits`, `write_plan`) is journaled with the file's content before and after it, through
+  `ToolContext.edit`. A turn that writes nothing takes no snapshot. Nothing is ever pruned, so a
+  session keeps its full history.
+  - **Review** lists only the journaled files, from one `git diff` against a temporary index that holds
+    just those paths (no `ls-files`, no process per file). A file the user changed outside the agent is
+    flagged; undo and rewind ask once — *Restore all* or *Choose per file* — and never overwrite it
+    silently. A file open with **unsaved** text refuses until it is saved, and nothing is written on a
+    refusal.
+  - **Shell commands are not tracked**, and the review says so in its title.
+  - **Rewind** goes back to a turn's rewind point, which is taken before that turn's first write.
+  - The old `Revert Files to Checkpoint` command is gone: rewind covers it, with the same checks.
+  - Shadow stores from the snapshot design are removed on startup; old rewind points are dropped.
 - **An Inspect tab: what the model is told, and how a tool call is gated.** The read-only views now live
   under one top-level tab, **Inspect**, with two sub-tabs of its own:
   - **Tool Policy Flow (TPF)** — the old **Flow** tab under a name that says what it draws; the chart is
@@ -244,9 +391,10 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   family): the identity block lists the books the chat can search, a miss says so, an unknown book
   name is an error rather than a crash, and a lookup never changes what the next turn injects.
 - **New commands.** `/char`, `/persona`, `/lore`, `/preset` and `/note` join the chat commands;
-  `Comonad: Pick Persona` and `Comonad: Pick Prompt Preset` join the palette. The composer's
-  character pill shows the chat's character, persona, book count and preset, and the **◈ lore** chip
-  reports the entries the last turn injected.
+  `Comonad: Pick Persona` and `Comonad: Pick Prompt Preset` join the palette. Nothing is layered on
+  the composer for it: the character, persona, books and preset of a chat are picked with those
+  commands (or the settings panel's defaults), and the **◈ lore** chip reports the entries the last
+  turn injected.
 - **Settings: Character, Lore and Prompts tabs.** Pick the default character, persona, preset and
   books, edit the user name, the SillyTavern folder, the author's note and its depth, the scan
   depth/budget/cap/recursion/matching knobs and the world-info format; the Prompts tab reorders and

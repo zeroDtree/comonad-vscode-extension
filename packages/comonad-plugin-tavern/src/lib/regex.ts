@@ -1,4 +1,4 @@
-import { REGEX_PLACEMENT, SUBSTITUTE_REGEX, type RegexScript } from './types';
+import { REGEX_PLACEMENT, SUBSTITUTE_REGEX, type RegexScript } from '@comonad/lib/tavern/types';
 
 /**
  * Regex scripts: the find-and-replace pass SillyTavern runs over prompts, replies and world info.

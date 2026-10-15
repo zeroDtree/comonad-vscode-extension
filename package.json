@@ -97,49 +97,57 @@
         "command": "comonad.openContent",
         "title": "Comonad: Manage Content",
         "category": "Comonad",
-        "icon": "$(library)"
+        "icon": "$(library)",
+        "enablement": "comonad.tavern"
       },
       {
         "command": "comonad.revealContentLibrary",
         "title": "Comonad: Open the Content Folder",
         "category": "Comonad",
-        "icon": "$(folder-opened)"
+        "icon": "$(folder-opened)",
+        "enablement": "comonad.tavern"
       },
       {
         "command": "comonad.exportCharacter",
         "title": "Comonad: Export Character as a PNG Card",
         "category": "Comonad",
-        "icon": "$(desktop-download)"
+        "icon": "$(desktop-download)",
+        "enablement": "comonad.tavern"
       },
       {
         "command": "comonad.pickCharacter",
         "title": "Comonad: Pick Character",
         "category": "Comonad",
-        "icon": "$(person)"
+        "icon": "$(person)",
+        "enablement": "comonad.tavern"
       },
       {
         "command": "comonad.pickLorebooks",
         "title": "Comonad: Pick World Books",
         "category": "Comonad",
-        "icon": "$(book)"
+        "icon": "$(book)",
+        "enablement": "comonad.tavern"
       },
       {
         "command": "comonad.reloadTavern",
         "title": "Comonad: Reload Characters, Books and Presets",
         "category": "Comonad",
-        "icon": "$(refresh)"
+        "icon": "$(refresh)",
+        "enablement": "comonad.tavern"
       },
       {
         "command": "comonad.pickPersona",
         "title": "Comonad: Pick Persona",
         "category": "Comonad",
-        "icon": "$(account)"
+        "icon": "$(account)",
+        "enablement": "comonad.tavern"
       },
       {
         "command": "comonad.pickTavernPreset",
         "title": "Comonad: Pick Prompt Preset",
         "category": "Comonad",
-        "icon": "$(symbol-structure)"
+        "icon": "$(symbol-structure)",
+        "enablement": "comonad.tavern"
       },
       {
         "command": "comonad.newSession",
@@ -200,11 +208,6 @@
       {
         "command": "comonad.undoAll",
         "title": "Comonad: Undo All Changes",
-        "category": "Comonad"
-      },
-      {
-        "command": "comonad.revertFiles",
-        "title": "Comonad: Revert Files to Checkpoint",
         "category": "Comonad"
       },
       {
@@ -361,7 +364,7 @@
         },
         {
           "command": "comonad.openContent",
-          "when": "view == comonad.chat",
+          "when": "view == comonad.chat && comonad.tavern",
           "group": "navigation@1"
         },
         {
@@ -708,7 +711,7 @@
         "comonad.checkpoints": {
           "type": "boolean",
           "default": true,
-          "description": "Snapshot the workspace with a shadow git repository before every user message."
+          "description": "Journal every file the agent writes (per file, not per turn) so the review can keep, undo and rewind them. Changes made by shell commands are not tracked."
         },
         "comonad.chatWindow": {
           "type": "boolean",
@@ -994,16 +997,17 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
-    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "compile": "npm run check-types && npm run lint && node esbuild.js && node esbuild.js --plugin",
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
+    "build:plugins": "node esbuild.js --plugin",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production && node esbuild.js --plugin --production",
     "compile-tests": "node esbuild.js --tests",
     "watch-tests": "node esbuild.js --tests --watch",
     "pretest": "npm run compile && npm run compile-tests",
     "check-types": "tsc --noEmit",
-    "lint": "eslint src",
+    "lint": "eslint src packages",
     "test": "vscode-test"
   },
   "devDependencies": {
@@ -1026,6 +1030,8 @@
     "@agnai/web-tokenizers": "^0.1.6-pre3",
     "cordis": "^4.0.0-rc.10",
     "fuse.js": "^7.5.0",
-    "gpt-tokenizer": "^4.0.0"
+    "gpt-tokenizer": "^4.0.0",
+    "schemastery": "^3.18.0",
+    "yaml": "^2.9.1"
   }
 }

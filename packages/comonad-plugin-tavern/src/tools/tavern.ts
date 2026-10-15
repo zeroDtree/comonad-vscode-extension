@@ -1,8 +1,8 @@
 import type { Context, Plugin } from 'cordis';
-import { clip } from '../lib/util';
-import { searchLore, type LoreBook } from '../lib/tavern/lore';
-import type { WorldInfoSettings } from '../lib/tavern/types';
-import type { ToolContext, ToolSpec } from '../lib/types';
+import { clip } from '@comonad/lib/util';
+import { searchLore, type LoreBook } from '../lib/lore';
+import type { WorldInfoSettings } from '@comonad/lib/tavern/types';
+import type { ToolContext, ToolSpec } from '@comonad/lib/types';
 
 /**
  * `lore_lookup`: the model's own way into the world books, the Comonad equivalent of SillyTavern's

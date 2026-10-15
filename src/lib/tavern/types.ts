@@ -574,3 +574,6 @@ export const WI_SETTINGS_DEFAULTS: WorldInfoSettings = {
 	characterStrategy: WI_STRATEGY.characterFirst,
 	useGroupScoring: false,
 };
+
+/** What a card import does with the card's tags: ask, keep none, keep all, or keep the known ones. */
+export const TAG_IMPORT = { ASK: 1, NONE: 2, ALL: 3, ONLY_EXISTING: 4 } as const;

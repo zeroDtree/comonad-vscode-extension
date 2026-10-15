@@ -55,8 +55,16 @@ export const planTools = toolset([
 		async execute(args, ctx) {
 			const { name, content } = args as { name: string; content: string };
 			const dir = planDir(ctx);
-			await mkdir(dir, { recursive: true });
-			await writeFile(planFile(ctx, name), content);
+			const target = planFile(ctx, name);
+			const write = async () => {
+				await mkdir(dir, { recursive: true });
+				await writeFile(target, content);
+			};
+			if (ctx.edit) {
+				await ctx.edit(target, write);
+			} else {
+				await write();
+			}
 			return `wrote plan ${name}`;
 		},
 	},

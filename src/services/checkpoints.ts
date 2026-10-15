@@ -1,38 +1,112 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { access, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { access, mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
 
 /**
- * Shadow-git checkpoints. One repository per session and workspace path, stored
- * outside the project (`GIT_DIR` points at the shadow repo). The user's own
- * repository is never touched.
+ * Per-file edit journal. Comonad never snapshots the workspace: every write the agent makes goes
+ * through `ToolContext.edit`, which stores the file's content before and after the change.
+ *
+ * Storage: one shadow git repository per session and workspace, outside the project (`GIT_DIR`). It
+ * only holds blobs (file contents) and a temporary index for diffs; it never commits, and the user's
+ * own `.git` is never touched. `journal.json` lists the writes in order. Nothing is pruned.
+ *
+ * Accepting a file (Keep) or undoing it sets `accepted` on its latest entry. Entries are never
+ * removed, except by a rewind, so the positions stored in rewind points stay valid.
  */
 
-export interface DiffLine {
-	type: 'add' | 'del' | 'ctx' | 'meta';
-	text: string;
+/** A file's content at one moment: a blob hash, or `null` when the file did not exist. */
+export type Blob = string | null;
+
+export interface JournalEntry {
+	/** Workspace-relative path with forward slashes. */
+	path: string;
+	/** The turn that made the write. */
+	turn: number;
+	/** Content before the first write of this path in the turn. */
+	before: Blob;
+	/** Content after the latest write of this path in the turn. */
+	after: Blob;
+	at: number;
+	/** The user accepted the file or undid it: entries before this one no longer count. */
+	accepted?: boolean;
 }
 
-export interface DiffHunk {
+export interface JournalHunk {
 	header: string;
-	lines: DiffLine[];
+	lines: { type: 'add' | 'del' | 'ctx'; text: string }[];
 }
 
-export interface DiffFile {
+export interface JournalFile {
 	path: string;
 	additions: number;
 	deletions: number;
-	untracked: boolean;
-	hunks: DiffHunk[];
-	patch: string;
+	/** The agent created the file. */
+	created: boolean;
+	/** The file is gone from disk, though it had content before the agent's writes. */
+	deleted: boolean;
+	/** The disk no longer matches what the agent last wrote: the user changed it since. */
+	changedOutside: boolean;
+	/** Unsaved in an editor. Undo and revert refuse until it is saved. */
+	dirty: boolean;
+	hunks: JournalHunk[];
 }
 
-export interface WorkspaceDiff {
+export interface Pending {
 	available: boolean;
-	files: DiffFile[];
-	error?: string;
+	files: JournalFile[];
+}
+
+export interface RevertReport {
+	restored: string[];
+	skipped: string[];
+}
+
+/** How to treat files changed outside the agent: `'all'`, or the named ones. Anything else refuses. */
+export type Overwrite = 'all' | string[];
+
+/** Unsaved editor text would be overwritten. Nothing was written. */
+export class DirtyEditorError extends Error {
+	constructor(readonly paths: string[]) {
+		super(`Save these files in the editor first: ${paths.join(', ')}`);
+	}
+}
+
+/** Files changed outside the agent would be overwritten. Nothing was written. */
+export class ChangedOutsideError extends Error {
+	constructor(readonly paths: string[]) {
+		super(`Changed outside the agent since it last wrote them: ${paths.join(', ')}`);
+	}
+}
+
+/**
+ * What the rest of the extension asks of the journal — the seam a feature plugin fills.
+ *
+ * The agent, the chat panel and the workspace watcher treat this as *optional*: they look it up with
+ * `ctx.get('checkpoints')` rather than injecting it, so turning the row off leaves a working extension
+ * that simply records nothing. The review webview is the journal's own surface and injects it, so it
+ * follows the feature in and out on its own.
+ */
+export interface JournalApi {
+	/** Records one write: `before` is kept for the first write of a path in a turn, `after` moves. */
+	record(workspace: string, sessionId: string, turn: number, path: string, before: Blob, after: Blob): Promise<void>;
+	/** The content hash of a file right now — what a write's `before`/`after` are taken from. */
+	store(workspace: string, sessionId: string, path: string): Promise<Blob>;
+	/** Every entry the journal holds for a session, oldest first. */
+	entries(workspace: string, sessionId: string): Promise<JournalEntry[]>;
+	/** What the agent wrote and the user has not accepted or undone. */
+	pending(workspace: string, sessionId: string, dirty?: (path: string) => boolean): Promise<Pending>;
+	/** Accepts the current content of these paths as the baseline. */
+	keep(workspace: string, sessionId: string, paths: string[]): Promise<void>;
+	/** Puts the file back to what it held before the agent first wrote it. */
+	undo(workspace: string, sessionId: string, paths: string[], options?: { overwrite?: Overwrite; isDirty?: (path: string) => boolean }): Promise<string[]>;
+	/** The content the agent found, for a diff view. */
+	baselineContent(workspace: string, sessionId: string, path: string): Promise<string | null>;
+	/** Whether anything was ever journaled for this session. */
+	hasSession(workspace: string, sessionId: string): Promise<boolean>;
+	/** Removes shadow repositories left by an older design of this feature. */
+	purgeLegacy(): Promise<number>;
 }
 
 interface Repo {
@@ -52,7 +126,7 @@ declare module 'cordis' {
 	}
 }
 
-export class Checkpoints extends Service {
+export class Checkpoints extends Service implements JournalApi {
 	static inject = ['host'];
 
 	constructor(ctx: Context) {
@@ -63,56 +137,217 @@ export class Checkpoints extends Service {
 		return this.ctx.host.storage.checkpoints;
 	}
 
-	/** Capture the workspace tree as an orphan commit keyed by `id`. Idempotent. */
-	async capture(workspace: string, sessionId: string, id: string): Promise<void> {
+	/**
+	 * Records one write. The first write of a path in a turn keeps its `before`; later writes of the
+	 * same path in that turn only move `after`. After the user accepted the file, a write starts over.
+	 */
+	async record(workspace: string, sessionId: string, turn: number, path: string, before: Blob, after: Blob): Promise<void> {
 		const repo = await this.open(workspace, sessionId);
-		const record = join(repo.dir, 'marks', `${checkpointId(id)}.json`);
-		if (await exists(record)) {
-			return;
+		const rel = relativePath(path);
+		const entries = await this.load(repo);
+		const last = lastFor(entries, rel);
+		if (last && last.turn === turn && !last.accepted) {
+			last.after = after;
+			last.at = Date.now();
+		} else {
+			entries.push({ path: rel, turn, before, after, at: Date.now() });
 		}
-		const index = join(repo.dir, `tmp-${checkpointId(id)}`);
-		try {
-			const empty = await git(repo, ['read-tree', '--empty'], index);
-			if (empty.code !== 0) {
-				throw new Error(empty.stderr || 'could not snapshot the workspace');
-			}
-			const added = await git(repo, ['add', '-A'], index);
-			if (added.code !== 0) {
-				throw new Error(added.stderr || 'could not snapshot the workspace');
-			}
-			const tree = await git(repo, ['write-tree'], index);
-			if (tree.code !== 0 || !tree.stdout.trim()) {
-				throw new Error(tree.stderr || 'could not snapshot the workspace');
-			}
-			const commit = await git(repo, ['commit-tree', tree.stdout.trim(), '-m', checkpointId(id)]);
-			if (commit.code !== 0 || !commit.stdout.trim()) {
-				throw new Error(commit.stderr || 'could not snapshot the workspace');
-			}
-			await mkdir(join(repo.dir, 'marks'), { recursive: true });
-			await writeFile(record, JSON.stringify({ commit: commit.stdout.trim() }));
-		} finally {
-			await unlink(index).catch(() => undefined);
-		}
+		await this.save(repo, entries);
 		this.ctx.emit('checkpoints/changed');
 	}
 
-	/** Restore the workspace and the accept index to a checkpoint. */
-	async revert(workspace: string, sessionId: string, id: string): Promise<void> {
+	/**
+	 * Removes shadow repositories left by the snapshot-per-turn design. They are not kept: a legacy
+	 * repository is identified by its `marks/` folder, which the journal never creates.
+	 */
+	async purgeLegacy(): Promise<number> {
+		let removed = 0;
+		let sessions: string[] = [];
+		try {
+			sessions = await readdir(this.root);
+		} catch {
+			return 0;
+		}
+		for (const session of sessions) {
+			const sessionDir = join(this.root, session);
+			let paths: string[] = [];
+			try {
+				paths = await readdir(sessionDir);
+			} catch {
+				continue;
+			}
+			for (const path of paths) {
+				const dir = join(sessionDir, path);
+				if (await exists(join(dir, 'marks'))) {
+					await rm(dir, { recursive: true, force: true });
+					removed += 1;
+				}
+			}
+		}
+		return removed;
+	}
+
+	/** Stores a file's current bytes and returns their hash, or `null` if the file does not exist. */
+	async store(workspace: string, sessionId: string, path: string): Promise<Blob> {
 		const repo = await this.open(workspace, sessionId);
-		const stored = JSON.parse(await readFile(join(repo.dir, 'marks', `${checkpointId(id)}.json`), 'utf8')) as { commit?: string };
-		const commit = stored.commit ?? '';
-		if (!/^[0-9a-f]{40}$/i.test(commit)) {
-			throw new Error('checkpoint record is invalid');
+		const [hash] = await this.hashFiles(repo, [join(repo.work, relativePath(path))]);
+		return hash ?? null;
+	}
+
+	/** The journal in write order. A rewind point stores a position in it. */
+	async entries(workspace: string, sessionId: string): Promise<JournalEntry[]> {
+		if (!(await this.hasSession(workspace, sessionId))) {
+			return [];
 		}
-		const reset = await git(repo, ['read-tree', '-u', '--reset', commit]);
-		if (reset.code !== 0) {
-			throw new Error(reset.stderr || 'could not restore the workspace');
+		return this.load(await this.open(workspace, sessionId));
+	}
+
+	/**
+	 * What the agent wrote and the user has not accepted yet. Only journaled paths are examined: their
+	 * current bytes are hashed in one process, and their diffs come from one `git diff` against a
+	 * temporary index that lists only them.
+	 */
+	async pending(workspace: string, sessionId: string, dirty: (path: string) => boolean = () => false): Promise<Pending> {
+		if (!(await this.hasSession(workspace, sessionId))) {
+			return { available: false, files: [] };
 		}
-		const cleaned = await git(repo, ['clean', '-fd']);
-		if (cleaned.code !== 0) {
-			throw new Error(cleaned.stderr || 'could not restore the workspace');
+		const repo = await this.open(workspace, sessionId);
+		const entries = await this.load(repo);
+		const paths = [...new Set(entries.map((entry) => entry.path))].filter((path) => working(entries, path).length > 0);
+		if (paths.length === 0) {
+			return { available: true, files: [] };
 		}
+		const nows = await this.currentBlobs(repo, paths);
+		const changed = paths
+			.map((path, index) => ({ path, now: nows[index] ?? null, first: working(entries, path)[0]! }))
+			// Back at the baseline: nothing left to review, whatever was written in between.
+			.filter((item) => item.now !== item.first.before);
+		if (changed.length === 0) {
+			return { available: true, files: [] };
+		}
+		const diffs = await this.diffs(
+			repo,
+			changed.map((item) => ({ path: item.path, baseline: item.first.before })),
+		);
+		return {
+			available: true,
+			files: changed.map((item) => {
+				const last = lastFor(entries, item.path)!;
+				const diff = diffs.get(item.path);
+				return {
+					path: item.path,
+					additions: diff?.additions ?? 0,
+					deletions: diff?.deletions ?? 0,
+					created: item.first.before === null,
+					deleted: item.now === null,
+					changedOutside: item.now !== last.after,
+					dirty: dirty(item.path),
+					hunks: diff?.hunks ?? [],
+				};
+			}),
+		};
+	}
+
+	/** Accepts files as they are now: they become the baseline and leave the pending list. */
+	async keep(workspace: string, sessionId: string, paths: string[]): Promise<void> {
+		const repo = await this.open(workspace, sessionId);
+		const entries = await this.load(repo);
+		for (const path of unique(paths.map(relativePath))) {
+			const last = lastOf(working(entries, path));
+			if (!last) {
+				throw new Error(`${path} is not pending review`);
+			}
+			last.accepted = true;
+		}
+		await this.save(repo, entries);
 		this.ctx.emit('checkpoints/changed');
+	}
+
+	/**
+	 * Restores files to their content before the agent first wrote them. Every check runs before the
+	 * first write: unsaved editor text refuses, and a file changed outside the agent refuses unless
+	 * `overwrite` allows it. Returns the paths restored.
+	 */
+	async undo(workspace: string, sessionId: string, paths: string[], options: { overwrite?: Overwrite; isDirty?: (path: string) => boolean } = {}): Promise<string[]> {
+		const repo = await this.open(workspace, sessionId);
+		const entries = await this.load(repo);
+		const targets = unique(paths.map(relativePath))
+			.map((path) => ({ path, work: working(entries, path) }))
+			.filter((target) => target.work.length > 0);
+		if (targets.length === 0) {
+			throw new Error('no pending changes to undo');
+		}
+		const unsaved = targets.filter((target) => options.isDirty?.(target.path)).map((target) => target.path);
+		if (unsaved.length > 0) {
+			throw new DirtyEditorError(unsaved);
+		}
+		const nows = await this.currentBlobs(
+			repo,
+			targets.map((target) => target.path),
+		);
+		const conflicts = targets
+			.filter((target, index) => !allowed(options.overwrite, target.path) && (nows[index] ?? null) !== lastOf(target.work)!.after)
+			.map((target) => target.path);
+		if (conflicts.length > 0) {
+			throw new ChangedOutsideError(conflicts);
+		}
+		for (const target of targets) {
+			await this.restore(repo, target.path, target.work[0]!.before);
+			lastOf(target.work)!.accepted = true;
+		}
+		await this.save(repo, entries);
+		this.ctx.emit('checkpoints/changed');
+		return targets.map((target) => target.path);
+	}
+
+	/**
+	 * Rewinds files to a rewind point: each path the journal changed after it goes back to its content
+	 * at that point. `skip` leaves named paths alone and keeps their later entries. Like `undo`, every
+	 * check runs before the first write.
+	 */
+	async revert(
+		workspace: string,
+		sessionId: string,
+		mark: { entryCount: number },
+		options: { overwrite?: Overwrite; skip?: string[]; isDirty?: (path: string) => boolean } = {},
+	): Promise<RevertReport> {
+		const repo = await this.open(workspace, sessionId);
+		const entries = await this.load(repo);
+		const later = entries.slice(mark.entryCount);
+		const skip = new Set(options.skip ?? []);
+		const touched = unique(later.map((entry) => entry.path));
+		const paths = touched.filter((path) => !skip.has(path));
+		const unsaved = paths.filter((path) => options.isDirty?.(path));
+		if (unsaved.length > 0) {
+			throw new DirtyEditorError(unsaved);
+		}
+		const nows = await this.currentBlobs(repo, paths);
+		const conflicts = paths.filter((path, index) => !allowed(options.overwrite, path) && (nows[index] ?? null) !== lastFor(entries, path)!.after);
+		if (conflicts.length > 0) {
+			throw new ChangedOutsideError(conflicts);
+		}
+		for (const path of paths) {
+			// The earliest later entry of a path holds its content at the rewind point.
+			await this.restore(repo, path, later.find((entry) => entry.path === path)!.before);
+		}
+		// Entries past the point go with the writes they describe; skipped files keep theirs.
+		await this.save(repo, [...entries.slice(0, mark.entryCount), ...later.filter((entry) => skip.has(entry.path))]);
+		this.ctx.emit('checkpoints/changed');
+		return { restored: paths, skipped: touched.filter((path) => skip.has(path)) };
+	}
+
+	/** The baseline text of a file, for a diff editor. `null` when the agent created it. */
+	async baselineContent(workspace: string, sessionId: string, path: string): Promise<string | null> {
+		if (!(await this.hasSession(workspace, sessionId))) {
+			return null;
+		}
+		const repo = await this.open(workspace, sessionId);
+		const first = working(await this.load(repo), relativePath(path))[0];
+		if (!first?.before) {
+			return null;
+		}
+		const bytes = await gitBytes(repo, ['cat-file', 'blob', first.before]);
+		return bytes?.toString('utf8') ?? null;
 	}
 
 	async hasSession(workspace: string, sessionId: string): Promise<boolean> {
@@ -122,126 +357,99 @@ export class Checkpoints extends Service {
 		return exists(repoDir(this.root, workspace, sessionId));
 	}
 
-	/** Pending changes: worktree versus the accept index. */
-	async diff(workspace: string, sessionId: string): Promise<WorkspaceDiff> {
-		if (!workspace.trim() || !sessionId.trim() || !(await this.hasSession(workspace, sessionId))) {
-			return { available: false, files: [] };
-		}
+	private async load(repo: Repo): Promise<JournalEntry[]> {
 		try {
-			const repo = await this.open(workspace, sessionId);
-			const [unstaged, untracked] = await Promise.all([
-				git(repo, ['diff', '--no-ext-diff']),
-				git(repo, ['ls-files', '--others', '--exclude-standard', '-z']),
-			]);
-			const created = await Promise.all(
-				untracked.stdout
-					.split('\0')
-					.filter(Boolean)
-					.map((file) => git(repo, ['diff', '--no-index', '--no-ext-diff', '--', '/dev/null', file])),
-			);
-			const files = [...parseUnified(unstaged.stdout), ...created.flatMap((item) => parseUnified(item.stdout))];
-			return { available: true, files };
-		} catch (error) {
-			return { available: false, files: [], error: error instanceof Error ? error.message : String(error) };
-		}
-	}
-
-	async keep(workspace: string, sessionId: string, file: string, hunk?: number): Promise<void> {
-		const repo = await this.open(workspace, sessionId);
-		const target = await this.pendingFile(workspace, sessionId, file);
-		if (hunk === undefined) {
-			const added = await git(repo, ['add', '--', target.path]);
-			if (added.code !== 0) {
-				throw new Error(added.stderr || 'git add failed');
-			}
-			this.ctx.emit('checkpoints/changed');
-			return;
-		}
-		const applied = await gitInput(repo, ['apply', '--cached'], hunkPatch(target, hunk));
-		if (applied.code !== 0) {
-			throw new Error(applied.stderr || 'could not accept this hunk');
-		}
-		this.ctx.emit('checkpoints/changed');
-	}
-
-	async undo(workspace: string, sessionId: string, file: string, hunk?: number): Promise<void> {
-		const repo = await this.open(workspace, sessionId);
-		const target = await this.pendingFile(workspace, sessionId, file);
-		if (hunk === undefined) {
-			if (target.untracked) {
-				await unlink(safeJoin(resolve(workspace), target.path));
-				this.ctx.emit('checkpoints/changed');
-				return;
-			}
-			const restored = await git(repo, ['checkout', '--', target.path]);
-			if (restored.code !== 0) {
-				throw new Error(restored.stderr || 'git checkout failed');
-			}
-			this.ctx.emit('checkpoints/changed');
-			return;
-		}
-		const applied = await gitInput(repo, ['apply', '--reverse'], hunkPatch(target, hunk));
-		if (applied.code !== 0) {
-			throw new Error(applied.stderr || 'could not undo this hunk');
-		}
-		this.ctx.emit('checkpoints/changed');
-	}
-
-	/** Content of the accepted (index) version of a file, for diff editors. */
-	async indexContent(workspace: string, sessionId: string, file: string): Promise<string | null> {
-		if (!(await this.hasSession(workspace, sessionId))) {
-			return null;
-		}
-		const repo = await this.open(workspace, sessionId);
-		const result = await git(repo, ['show', `:${file}`]);
-		return result.code === 0 ? result.stdout : null;
-	}
-
-	/** Housekeeping for the shadow repository; fire and forget. */
-	async gc(workspace: string, sessionId: string): Promise<void> {
-		if (!workspace || !(await this.hasSession(workspace, sessionId))) {
-			return;
-		}
-		try {
-			const repo = await this.open(workspace, sessionId);
-			await git(repo, ['gc', '--auto', '--quiet']);
+			const parsed = JSON.parse(await readFile(join(repo.dir, 'journal.json'), 'utf8')) as { entries?: JournalEntry[] };
+			return Array.isArray(parsed.entries) ? parsed.entries : [];
 		} catch {
-			// gc failures are harmless
+			return [];
 		}
 	}
 
-	private async pendingFile(workspace: string, sessionId: string, file: string): Promise<DiffFile> {
-		const path = relativePath(file);
-		const diff = await this.diff(workspace, sessionId);
-		const found = diff.files.find((item) => item.path === path);
-		if (!found) {
-			throw new Error('file is not pending review');
+	private async save(repo: Repo, entries: JournalEntry[]): Promise<void> {
+		await mkdir(repo.dir, { recursive: true });
+		await writeFile(join(repo.dir, 'journal.json'), JSON.stringify({ entries }), 'utf8');
+	}
+
+	private async currentBlobs(repo: Repo, paths: string[]): Promise<Blob[]> {
+		return this.hashFiles(
+			repo,
+			paths.map((path) => join(repo.work, relativePath(path))),
+		);
+	}
+
+	/** Stores the bytes of the existing files among `files` as blobs, in one `git hash-object` call. */
+	private async hashFiles(repo: Repo, files: string[]): Promise<Blob[]> {
+		const present = await Promise.all(files.map((file) => exists(file)));
+		const list = files.filter((_, index) => present[index]);
+		const result: Blob[] = files.map(() => null);
+		if (list.length === 0) {
+			return result;
 		}
-		return found;
+		const hashed = await gitInput(repo, ['hash-object', '-w', '--no-filters', '--stdin-paths'], `${list.join('\n')}\n`);
+		if (hashed.code !== 0) {
+			throw new Error(hashed.stderr || 'could not store the files');
+		}
+		const hashes = hashed.stdout.trim().split('\n');
+		let next = 0;
+		files.forEach((_, index) => {
+			if (present[index]) {
+				result[index] = hashes[next++]?.trim() || null;
+			}
+		});
+		return result;
+	}
+
+	/**
+	 * Diffs of the given files against their baselines: a temporary index holds only those baselines,
+	 * so `git diff` compares exactly them with the working tree. A created file's baseline is the
+	 * empty blob, so all of it counts as added.
+	 */
+	private async diffs(repo: Repo, items: { path: string; baseline: Blob }[]): Promise<Map<string, { additions: number; deletions: number; hunks: JournalHunk[] }>> {
+		const empty = (await gitInput(repo, ['hash-object', '-w', '--stdin'], '')).stdout.trim();
+		const index = join(repo.dir, 'review.index');
+		await unlink(index).catch(() => undefined);
+		const info = items.map((item) => `100644 ${item.baseline ?? empty}\t${item.path}\n`).join('');
+		try {
+			const built = await gitInput(repo, ['update-index', '--index-info'], info, index);
+			if (built.code !== 0) {
+				throw new Error(built.stderr || 'could not build the review index');
+			}
+			const diff = await gitInput(repo, ['-c', 'core.quotepath=off', 'diff', '--no-color', '--no-ext-diff', '--unified=2'], '', index);
+			if (diff.code !== 0) {
+				throw new Error(diff.stderr || 'could not diff the workspace');
+			}
+			return parseDiffs(diff.stdout);
+		} finally {
+			await unlink(index).catch(() => undefined);
+		}
+	}
+
+	private async restore(repo: Repo, path: string, blob: Blob): Promise<void> {
+		const target = join(repo.work, relativePath(path));
+		if (blob === null) {
+			await unlink(target).catch(() => undefined);
+			return;
+		}
+		const bytes = await gitBytes(repo, ['cat-file', 'blob', blob]);
+		if (!bytes) {
+			throw new Error(`could not read the stored version of ${path}`);
+		}
+		await mkdir(dirname(target), { recursive: true });
+		await writeFile(target, bytes);
 	}
 
 	private async open(workspace: string, sessionId: string): Promise<Repo> {
 		const work = resolve(workspace);
 		const dir = repoDir(this.root, work, sessionId);
-		await mkdir(dir, { recursive: true });
 		const repo = { dir, work };
-		const inside = await git(repo, ['rev-parse', '--is-inside-work-tree']);
-		if (inside.stdout.trim() === 'true') {
+		if (await exists(join(dir, 'HEAD'))) {
 			return repo;
 		}
-		const init = await git(repo, ['init']);
+		await mkdir(dir, { recursive: true });
+		const init = await git(repo, ['init', '--quiet']);
 		if (init.code !== 0) {
 			throw new Error(init.stderr || 'could not initialize the shadow repository');
-		}
-		await git(repo, ['config', 'user.email', 'comonad@localhost']);
-		await git(repo, ['config', 'user.name', 'comonad']);
-		const added = await git(repo, ['add', '-A']);
-		if (added.code !== 0) {
-			throw new Error(added.stderr || 'could not snapshot the workspace');
-		}
-		const committed = await git(repo, ['commit', '--allow-empty', '-m', 'baseline']);
-		if (committed.code !== 0) {
-			throw new Error(committed.stderr || 'could not commit the baseline');
 		}
 		return repo;
 	}
@@ -249,10 +457,100 @@ export class Checkpoints extends Service {
 
 export const checkpointsPlugin = Checkpoints;
 
+/** The entries of a path after its last accepted one: what is still pending, oldest first. */
+function working(entries: JournalEntry[], path: string): JournalEntry[] {
+	let start = 0;
+	entries.forEach((entry, index) => {
+		if (entry.path === path && entry.accepted) {
+			start = index + 1;
+		}
+	});
+	return entries.slice(start).filter((entry) => entry.path === path);
+}
+
+function lastOf(list: JournalEntry[]): JournalEntry | undefined {
+	return list[list.length - 1];
+}
+
+function lastFor(entries: JournalEntry[], path: string): JournalEntry | undefined {
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		if (entries[index]!.path === path) {
+			return entries[index];
+		}
+	}
+	return undefined;
+}
+
+function allowed(overwrite: Overwrite | undefined, path: string): boolean {
+	return overwrite === 'all' || (overwrite?.includes(path) ?? false);
+}
+
+function unique(paths: string[]): string[] {
+	return [...new Set(paths)];
+}
+
+/** Parses a `git diff` over several files into per-path counts and hunks. */
+export function parseDiffs(text: string): Map<string, { additions: number; deletions: number; hunks: JournalHunk[] }> {
+	const out = new Map<string, { additions: number; deletions: number; hunks: JournalHunk[] }>();
+	let current: { additions: number; deletions: number; hunks: JournalHunk[] } | null = null;
+	let hunk: JournalHunk | null = null;
+	for (const line of text.split('\n')) {
+		if (line.startsWith('diff --git ')) {
+			const at = line.lastIndexOf(' b/');
+			const path = unquote(at === -1 ? '' : line.slice(at + 1).slice(2));
+			current = { additions: 0, deletions: 0, hunks: [] };
+			hunk = null;
+			out.set(path, current);
+			continue;
+		}
+		if (!current) {
+			continue;
+		}
+		if (line.startsWith('@@')) {
+			hunk = { header: line, lines: [] };
+			current.hunks.push(hunk);
+			continue;
+		}
+		// `---` and `+++` header lines come before the first hunk, so they are never counted.
+		if (!hunk) {
+			continue;
+		}
+		if (line.startsWith('+')) {
+			current.additions += 1;
+			hunk.lines.push({ type: 'add', text: line.slice(1) });
+		} else if (line.startsWith('-')) {
+			current.deletions += 1;
+			hunk.lines.push({ type: 'del', text: line.slice(1) });
+		} else if (line.startsWith(' ')) {
+			hunk.lines.push({ type: 'ctx', text: line.slice(1) });
+		}
+	}
+	return out;
+}
+
+function unquote(path: string): string {
+	if (path.startsWith('"') && path.endsWith('"')) {
+		try {
+			return JSON.parse(path) as string;
+		} catch {
+			return path;
+		}
+	}
+	return path;
+}
+
 function repoDir(root: string, workspace: string, sessionId: string): string {
 	const session = createHash('sha1').update(sessionId).digest('hex').slice(0, 20);
 	const path = createHash('sha256').update(resolve(workspace)).digest('hex').slice(0, 16);
 	return join(root, session, path);
+}
+
+function relativePath(file: string): string {
+	const clean = file.replaceAll('\\', '/').replace(/^\.\//, '');
+	if (!clean || clean.includes('\0') || clean.startsWith('/') || clean.split('/').includes('..')) {
+		throw new Error('invalid path');
+	}
+	return clean;
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -264,16 +562,8 @@ async function exists(path: string): Promise<boolean> {
 	}
 }
 
-function checkpointId(id: string): string {
-	const clean = id.replaceAll('-', '');
-	if (!/^[0-9a-f]{8,64}$/i.test(clean)) {
-		return createHash('sha1').update(id).digest('hex');
-	}
-	return clean;
-}
-
-function git(repo: Repo, args: string[], index?: string): Promise<GitResult> {
-	return gitInput(repo, args, '', index);
+function git(repo: Repo, args: string[]): Promise<GitResult> {
+	return gitInput(repo, args, '');
 }
 
 function gitInput(repo: Repo, args: string[], input: string, index?: string): Promise<GitResult> {
@@ -311,137 +601,17 @@ function gitInput(repo: Repo, args: string[], input: string, index?: string): Pr
 	});
 }
 
-export function parseUnified(text: string): DiffFile[] {
-	const parts = text
-		.split(/^diff --git /m)
-		.map((part) => part.trim())
-		.filter(Boolean);
-	return parts.flatMap((part) => {
-		const patch = `diff --git ${part}\n`;
-		const lines = patch.split('\n');
-		const match = (lines[0] ?? '').match(/^diff --git a\/(.+) b\/(.+)$/);
-		const path = unquote(match?.[2] ?? '');
-		if (!path) {
-			return [];
-		}
-		const untracked = lines.some((line) => line === '--- /dev/null' || line.startsWith('new file mode'));
-		const raw: DiffHunk[] = [];
-		let current: DiffHunk | null = null;
-		for (const line of lines) {
-			if (line.startsWith('@@')) {
-				current = { header: line, lines: [] };
-				raw.push(current);
-				continue;
-			}
-			if (!current || line === '') {
-				continue;
-			}
-			if (line.startsWith('+')) {
-				current.lines.push({ type: 'add', text: line.slice(1) });
-			} else if (line.startsWith('-')) {
-				current.lines.push({ type: 'del', text: line.slice(1) });
-			} else if (line.startsWith(' ')) {
-				current.lines.push({ type: 'ctx', text: line.slice(1) });
-			} else if (line.startsWith('\\')) {
-				current.lines.push({ type: 'meta', text: line });
-			}
-		}
-		const hunks = raw.flatMap(splitHunk);
-		const additions = hunks.reduce((sum, hunk) => sum + hunk.lines.filter((line) => line.type === 'add').length, 0);
-		const deletions = hunks.reduce((sum, hunk) => sum + hunk.lines.filter((line) => line.type === 'del').length, 0);
-		return [{ path, additions, deletions, untracked, hunks, patch }];
+/** Raw bytes of a git command's output: a binary file must come back unchanged. */
+function gitBytes(repo: Repo, args: string[]): Promise<Buffer | null> {
+	return new Promise((resolvePromise) => {
+		const child = spawn('git', args, {
+			cwd: repo.work,
+			env: { ...process.env, GIT_DIR: repo.dir, GIT_WORK_TREE: repo.work },
+			stdio: ['ignore', 'pipe', 'ignore'],
+		});
+		const chunks: Buffer[] = [];
+		child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+		child.on('error', () => resolvePromise(null));
+		child.on('close', (code) => resolvePromise(code === 0 ? Buffer.concat(chunks) : null));
 	});
-}
-
-function splitHunk(hunk: DiffHunk): DiffHunk[] {
-	const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(hunk.header);
-	let oldLine = Number(match?.[1] ?? 1);
-	let newLine = Number(match?.[3] ?? 1);
-	const blocks: DiffHunk[] = [];
-	let pending: DiffLine | null = null;
-	let pendingOld = oldLine;
-	let pendingNew = newLine;
-	let block: DiffLine[] | null = null;
-	let blockOld = oldLine;
-	let blockNew = newLine;
-	const emit = (trailing: DiffLine | null) => {
-		if (!block) {
-			return;
-		}
-		const lines = trailing ? [...block, trailing] : [...block];
-		const oldCount = lines.filter((line) => line.type === 'ctx' || line.type === 'del').length;
-		const newCount = lines.filter((line) => line.type === 'ctx' || line.type === 'add').length;
-		blocks.push({ header: `@@ -${blockOld},${oldCount} +${blockNew},${newCount} @@`, lines });
-		block = null;
-	};
-	for (const line of hunk.lines) {
-		if (line.type === 'meta') {
-			if (block) {
-				block.push(line);
-			}
-			continue;
-		}
-		if (line.type === 'ctx') {
-			if (block) {
-				emit(line);
-			}
-			pending = line;
-			pendingOld = oldLine;
-			pendingNew = newLine;
-			oldLine += 1;
-			newLine += 1;
-			continue;
-		}
-		if (!block) {
-			block = pending ? [pending] : [];
-			blockOld = pending ? pendingOld : oldLine;
-			blockNew = pending ? pendingNew : newLine;
-		}
-		block.push(line);
-		if (line.type === 'del') {
-			oldLine += 1;
-		} else {
-			newLine += 1;
-		}
-	}
-	emit(null);
-	return blocks;
-}
-
-function hunkPatch(file: DiffFile, index: number): string {
-	const hunk = file.hunks[index];
-	if (!hunk) {
-		throw new Error('hunk is missing');
-	}
-	const lines = file.patch.split('\n');
-	const cut = lines.findIndex((line) => line.startsWith('@@'));
-	const head = (cut === -1 ? lines : lines.slice(0, cut)).filter((line) => line !== '');
-	const body = [
-		hunk.header,
-		...hunk.lines.map((line) => (line.type === 'meta' ? line.text : `${line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' '}${line.text}`)),
-	];
-	return `${head.join('\n')}\n${body.join('\n')}\n`;
-}
-
-function relativePath(file: string): string {
-	const clean = file.replaceAll('\\', '/').replace(/^\.\//, '');
-	if (!clean || clean.includes('\0') || clean.startsWith('/') || clean.split('/').includes('..')) {
-		throw new Error('invalid path');
-	}
-	return clean;
-}
-
-function safeJoin(cwd: string, file: string): string {
-	return join(cwd, relativePath(file));
-}
-
-function unquote(path: string): string {
-	if (path.startsWith('"') && path.endsWith('"')) {
-		try {
-			return JSON.parse(path) as string;
-		} catch {
-			return path;
-		}
-	}
-	return path;
 }

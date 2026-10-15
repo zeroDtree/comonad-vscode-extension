@@ -124,16 +124,24 @@ DeepSeek models think by default; the composer's **Reasoning** pill maps onto th
 switch — `None` sends DeepSeek's `thinking: {type: "disabled"}` (or `reasoning_effort: "none"` on
 Gemini), `Low`/`Medium`/`High` send `reasoning_effort`. Thinking is part of the wire protocol, not
 just display: when a request carries tools DeepSeek requires the `reasoning_content` of earlier turns
-back, so Comonad passes it along (endpoints that do not know the field ignore it).
+back, so Comonad passes it along (endpoints that do not know the field ignore it). Gemini 3 goes
+further — every function call comes back with a `thought_signature` and the *next* request is refused
+without it — so the signature is kept on the call (it travels with the chat) and handed back the same
+way; a call that has none carries Google's own `skip_thought_signature_validator` bypass rather than
+losing the turn.
 
 ## Content layer (characters, lore, personas, presets)
 
 The agent can wear a character. Content lives in **Comonad's own library** —
 `.comonad/{characters,lorebooks,presets,personas}` in the project plus `~/.comonad/…` for the user —
 written in **SillyTavern's file formats**, so a card, book, persona or preset can be moved between
-the two tools. It is all managed in one place: the settings panel's **ST** tab
-(`Comonad: Manage Content`, the book icon in the chat's title bar, or the character pill's *Manage
-content…*), whose sub-tabs are **Characters / World books / Personas / Presets / Settings**. Create,
+the two tools. The layer is **not built into Comonad**: it is a plugin package that ships beside the
+bundle, and it does nothing at all until you install it — **Settings → Plugins → Install… →
+SillyTavern content (ST)**, one click that copies it into `~/.comonad/plugins` and writes its row into
+your `cordis.yml` ([Installing a plugin](#installing-a-plugin)). With the row off, or the plugin never
+installed, a turn is a plain request and the ST tab and its commands are simply not there. It is all managed in one place: the settings panel's **ST** tab
+(`Comonad: Manage Content` or the book icon in the chat's title bar), whose sub-tabs are
+**Characters / World books / Personas / Presets / Settings**. Create,
 edit, duplicate and delete every kind, then use it in this chat or make it the default for new chats.
 
 - **Characters.** Cards are read as PNG (`chara` / `ccv3` chunks) or JSON, all three card versions,
@@ -183,8 +191,9 @@ edit, duplicate and delete every kind, then use it in this chat or make it the d
   only what already exists, or nothing.
 - **How a turn is generated.** The ▾ beside *Send* offers SillyTavern's six generation types, and
   each is a real generation: **Normal** answers the box, **Continue** carries the last message on
-  (one message, no new prompt), **Impersonate** writes your next message for you (recorded as
-  *your* message), **Swipe** adds another version of the last reply, **Regenerate** runs the last
+  (one message, no new prompt), **Impersonate** writes your next message for you — it streams into
+  the box, for you to edit and send yourself, exactly as upstream's own button does, **Swipe** adds
+  another version of the last reply, **Regenerate** runs the last
   prompt again, and **Quiet** generates without writing anything to the chat. An entry limited to a
   generation type only fires for those. Replies keep their versions: `‹ n/m ›` on the turn walks
   them, and a regenerate only overwrites the very first version — after that it adds one, as
@@ -339,8 +348,20 @@ Without an OS sandbox the command still requires approval. Presets combine all t
 
 ## Checkpoints and review
 
-Before every user message the workspace is snapshotted into a shadow git repository outside your
-project (`globalStorage/checkpoints/...`). Your own `.git` is never touched.
+Comonad journals each file the agent writes, one entry per write, in a shadow store outside your
+project (`globalStorage/checkpoints/...`). It is a plugin of its own: `{ id: checkpoints, disabled: true }`
+turns the journal — and the review pane that reads it — off without touching anything else
+([Plugins](#plugins)). Nothing is snapshotted on every turn: a turn that writes no
+file costs nothing, and the review only looks at the files the journal names. Your own `.git` is
+never touched.
+
+- **Changes made by shell commands (`run_shell`) are not tracked.** Review those with git. This is
+  the same limit Claude Code and Cursor have: a shell can change any file, and the journal only
+  knows what the agent's own write tools wrote.
+- A file you have edited since the agent last wrote it, or one open with unsaved text, is never
+  overwritten silently: the review asks, or refuses until you save.
+- Shadow stores from the earlier snapshot design are removed on startup. Their sessions keep their
+  transcripts, but cannot be rewound to file state.
 
 - **Comonad: Review Pending Changes** — open a diff, keep/undo a file or a single hunk, or keep/undo everything.
 - **Comonad: Rewind Conversation and Files** — restore the workspace *and* truncate the chat to that turn.
@@ -363,6 +384,146 @@ project (`globalStorage/checkpoints/...`). Your own `.git` is never touched.
 | hooks | `.comonad/hooks.json` (project), `globalStorage/hooks.json` (user) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`; handlers: `command`, `http`, `mcp_tool`, `prompt`; JSON decisions: `permissionDecision` deny/ask/allow, `additionalContext`, `updatedInput`; exit code 2 blocks |
 | MCP | `comonad.mcpServers` | stdio (`command`,`args`,`env`) or streamable HTTP (`url`,`headers`); per-server `capability`, `writeTools`, `exclude`, `overrides` |
 | memory | agent-owned `MEMORY.md` under global storage | loaded into the prompt, editable via the `memory` tool |
+| plugins | `cordis.yml` in `.comonad` (project) or `~/.comonad` (user) | every feature is a row: turn one off, configure it, or mount your own; [Plugins](#plugins) |
+
+### Plugins
+
+**A plugin is what a feature is.** The storage layer, the tools, the shadow-git journal and the panels
+are rows in `cordis.yml`, and so is anything you write — including features Comonad ships but does not
+build in, like the ST content layer:
+
+```yaml
+# .comonad/cordis.yml — the journal off, an installed plugin of mine off for now, one of my own on.
+- { id: checkpoints, disabled: true }
+- { id: comonad-plugin-tavern, disabled: true }
+- { id: mine, name: ./mine.js, config: { greeting: hello } }
+```
+
+```js
+// mine.js — a policy and a tool, both of them effects of the plugin
+export const name = 'mine';
+export const inject = ['tools']; // declared, never inferred: cordis refuses what it was not asked for
+
+export function apply(ctx, config) {
+	ctx.on('tools/pre-execute', (exec, next) =>
+		exec.name === 'run_shell' && /rm -rf/.test(String(exec.arguments?.command ?? ''))
+			? { kind: 'deny', reason: 'not that command' }
+			: next(),
+	);
+	ctx.tools.register({
+		name: 'hello',
+		description: 'Say hello.',
+		capability: 'ro',
+		needsNetwork: false,
+		needsWorkspace: false,
+		parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+		execute: async () => config.greeting,
+	});
+}
+```
+
+**Settings → Plugins** is that list, live: every row in load order, where it came from (the extension,
+this workspace's `cordis.yml`, or yours), what it resolved to, and what became of it — `loaded`, `off`, or
+`not loaded` with the reason in the tooltip (`pending: waiting for tools`, or the error the plugin threw).
+**Disable**/**Enable** writes the change into the workspace's list when the workspace is trusted and into
+yours when it is not, and applies **that row** again — not the whole tree, so the panel you are clicking
+in stays where it is. A row that others inject takes them with it: they go inactive and say what they are
+waiting for (`pending: waiting for tavern`), and come back when it does. The file that changed is named
+above the table, and a `cordis.yml` you edit by hand is applied in full as soon as it is saved — the
+host can tell its own write from yours.
+
+What is worth knowing before writing one:
+
+- **Everything a plugin registers goes away with it.** A row that is turned off is disposed, so its tools,
+  commands, watchers and panels disappear with it — and a plugin's registrations are only ever its own.
+- **Reading a service needs `inject`.** A row that injects something that is not loaded stays *pending*,
+  which is what "this feature is off" is spelled out as. The one exception is the host's own list: a row
+  reads `ctx.get('plugins')`, because the host is what is mounting it.
+- **A feature can be missing.** The journal is reached as `ctx.get('checkpoints')` and the ST layer as
+  `ctx.get('tavern')`: with those rows off a turn is a plain `[system, …history]` request, writes are not
+  journaled, and the surfaces only they own — the ST tab and `/char`, `/lore`, `/preset`, the review pane
+  — are simply not there. A feature can even be missing *as a package*: nothing in the shipped tree names
+  the tavern, so a window that never installed it has no content code at all, not even a tab to turn off.
+- **A pane is a plugin's tab.** The settings panel draws the tabs the `panes` service knows: the **ST**
+  tab, its markup, its stylesheets, its scripts and its editor are the tavern plugin's own files, loaded
+  from its folder. Its settings keys are the pane's too — the panel asks every pane for the keys it owns
+  when it saves, so the host's config schema knows nothing about characters or world books.
+
+### Installing a plugin
+
+**Settings → Plugins → Install…** offers the plugins that ship with Comonad by name, and a folder of
+your own otherwise (`dist/index.js`, or whatever the manifest's `main` says). An install is two steps
+you could take by hand — the folder is copied into `~/.comonad/plugins/<id>` and a row is written into
+your `cordis.yml` — so uninstalling is the same: delete the row, the folder, or both.
+
+```yaml
+# ~/.comonad/cordis.yml, written by an install
+- { id: comonad-plugin-tavern, name: ./plugins/comonad-plugin-tavern/dist/index.js }
+```
+
+The library lives in Comonad's home — `.comonad` under your home directory, or under whatever
+`COMONAD_HOME` names instead, which moves the whole of it: the plugin library, the harness shims, the
+catalog, the instruction layers.
+
+A plugin loaded from the library is handed the platform modules instead of carrying its own copies:
+`~/.comonad/plugins/node_modules/{cordis,schemastery,vscode}` are generated bridges into the running
+Comonad (the same trick the harness compatibility shims use), so a plugin's `Service` subclass belongs
+to the same cordis as the tree's, and `vscode` is the extension host's own module. Write your plugin as
+CommonJS or ESM; `require('cordis')` and `import { Service } from 'cordis'` both work.
+- **A broken row is reported, not fatal.** `Plugins.state()` names every row that is on and why one is
+  not (pending on which service, or the error it threw); the rest of the tree loads anyway.
+- **A config is the plugin's own schema.** Export `Config` (a schemastery schema) and the row's config is
+  validated before `apply` runs; a config that does not fit is that row's error.
+
+### Seeing the tree: Inspect → Plugins
+
+**Settings → Inspect → Plugins** lists what the tree is wired with, row by row: what each row **provides**
+(a service another row can inject), what it **needs** — with the row that provides each, or `(built in)`
+for the three services Comonad mounts *before* the tree (`host`, `log`, `settings`: not rows, and not
+switchable) — who needs it, its layer, and its state (`loaded`, `off`,
+`waiting` or `failed` with the reason on hover). A service nobody provides is written `?name`: that is what
+a row is waiting for. Clicking a row prints its **dependency tree** — what it stands on, and the whole
+chain that goes down with it when the row is turned off, which is what a toggle is really asking.
+
+### DeepSeek Harness plugins
+
+The `harness` row redirects `@deepseek-ai/*` imports, so a plugin written for
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) loads as it is, row and all:
+
+```yaml
+- { id: permission-gate, name: ./permission-gate.mjs }
+```
+
+```ts
+import type { Context } from '@deepseek-ai/cordis'
+
+export const name = 'permission-gate'
+export const inject = ['tools']
+
+export function apply(ctx: Context) {
+  ctx.on('tools/pre-execute', (exec, next) => {
+    if (String(exec.arguments?.command ?? '').includes('rm -rf')) {
+      return { kind: 'deny', reason: 'Denied by policy.' }
+    }
+    return next()
+  })
+}
+```
+
+What is implemented is the tool and policy half of the harness: `ctx.tools.register()` (Comonad's specs
+and the harness's `ToolDefinition`s, via `defineTool`), `@deepseek-ai/cordis` itself — the same `Service`
+and `Context` classes the tree is built from, so a plugin's own service is a service like any other —
+`@deepseek-ai/schemastery` schemas, `@deepseek-ai/dsh-brand` and `@deepseek-ai/dsh-llm`'s
+`createUserMessage`, and the four waterfalls `tools/pre-execute`, `tools/execute`, `tools/post-execute`
+and `tools/result` with the harness's payloads and decisions (`{kind:'deny',reason}`,
+`{kind:'accept',content}`, `{kind:'block',feedback}`, and `ask` through Comonad's approval surfaces).
+
+What is not implemented is the harness's agent and session internals — `ctx.agents`, `session/event`, the
+PTC runtime. A name Comonad neither implements nor finds installed resolves to an empty module and says
+so in the log, so such a plugin fails where it used the service, naming the package, rather than looking
+like Comonad's fault. The redirect is installed for the process (`module.registerHooks` on Node 22.15+,
+and a `require` resolver everywhere); turning the row off empties the table, so harness names then
+resolve the way they would with Comonad out of the picture.
 
 Hook example:
 
@@ -467,3 +628,13 @@ Four packages are bundled or shipped beside the bundle, and nothing else: `cordi
 kernel), `fuse.js` (the world-book search, with upstream's own options and field weights),
 `gpt-tokenizer` and `@agnai/web-tokenizers` (the tokenizer chain — the first is bundled, the second
 is kept as a real file because its wasm would bloat the bundle four megabytes).
+
+The tavern is a package of its own, `packages/comonad-plugin-tavern`: it is built as its own bundle
+(`npm run build:plugins`, part of `npm run compile`) and is *not* part of `dist/extension.js`, which is
+what makes it a plugin rather than a feature. It imports the host's shared vocabulary by name
+(`@comonad/*` — the content types, the prompt estimator, the command helper) and those imports are
+bundled into its own file, so an install is one folder.
+
+The test host runs against a home of Comonad's own — a temporary directory named by `COMONAD_HOME` — so
+the plugins installed in your real `~/.comonad`, and the rows you wrote for them, never change what a
+test sees.

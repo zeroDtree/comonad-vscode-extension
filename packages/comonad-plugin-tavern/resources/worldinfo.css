@@ -212,6 +212,18 @@
 	margin-left: auto;
 }
 
+/* The five file verbs share one width (the widest label's), and wrap as a unit when the sidebar is
+   too narrow for a single row, so none of them is ever pushed out of view. */
+#wi-toolbar .group {
+	flex: 0 1 auto;
+	justify-content: flex-end;
+}
+
+#wi-toolbar .group > button {
+	flex: 1 1 84px;
+	min-width: 0;
+}
+
 /* The search, the sort and the paging of the list are a group of their own, on its own line. */
 #wi-toolbar2 .group.push {
 	flex: 1 1 100%;
@@ -330,6 +342,18 @@
 #wi-headers > :nth-child(6) {
 	grid-column: 9;
 	text-align: center;
+}
+
+/* The grid below has a fixed minimum width, which a sidebar can be narrower than. Rather than let it
+   spill over the panel, the header and the list scroll sideways together, as one table. */
+#wi-table {
+	overflow-x: auto;
+	min-width: 0;
+}
+
+#wi-table > #wi-headers,
+#wi-table > #wi-list {
+	min-width: 560px;
 }
 
 #wi-list {

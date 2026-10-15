@@ -3,6 +3,9 @@ const esbuild = require("esbuild");
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
 const tests = process.argv.includes('--tests');
+// A plugin package is built as its own bundle: a plugin is loaded by the host at runtime, from a file
+// beside its own resources, so it cannot be folded into the extension's one file.
+const plugin = process.argv.includes('--plugin');
 
 /**
  * @type {import('esbuild').Plugin}
@@ -40,7 +43,20 @@ async function main() {
 		],
 	};
 	const ctx = await esbuild.context(
-		tests
+		plugin
+			? {
+					...common,
+					entryPoints: ['packages/comonad-plugin-tavern/src/index.ts'],
+					outfile: 'packages/comonad-plugin-tavern/dist/index.js',
+					// The platform modules are the host's, and it lends them to the plugin at run time
+					// (`src/services/plugin-modules.ts`): bundling a second cordis would give the plugin a
+					// context class no Comonad service belongs to.
+					external: ['vscode', 'cordis', 'schemastery'],
+					minify: production,
+					sourcemap: !production,
+					sourcesContent: false,
+				}
+			: tests
 			? {
 					...common,
 					entryPoints: ['src/test/extension.test.ts', 'src/test/activation.test.ts'],

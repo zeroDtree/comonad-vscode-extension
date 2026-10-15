@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { relative, resolve, sep } from 'node:path';
 import { Service, type Context } from 'cordis';
 import type { TurnRef } from '../lib/types';
 import {
@@ -19,14 +20,15 @@ import {
 import { formatInstructions, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { gateCalls, MODE_CAPS, MODE_LABELS, suggestAllowRule } from '../lib/policy';
-import type { AgentSpawnRequest, Message, SessionPolicy, TodoItem, ToolCall, ToolContext } from '../lib/types';
+import type { AgentSpawnRequest, Capability, Message, SessionPolicy, TodoItem, ToolCall, ToolContext } from '../lib/types';
 import type { GenerationTrigger } from '../lib/tavern/types';
-import type { PresetSamplers } from '../lib/tavern/preset';
+import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { agentIndex, allowedToolsFor, skillIndex } from './catalog';
+import type { JournalApi } from './checkpoints';
 import type { Config } from './settings';
 import { threadTitle, type Session, type SwipeCarry } from './sessions';
-import type { ComposeResult } from './tavern';
+import type { ComposeResult, TavernApi } from 'comonad-plugin-tavern';
 
 export interface TurnInput {
 	/** The prompt. Empty for a continue, a swipe or a regenerate, which re-run what is already there. */
@@ -73,6 +75,12 @@ interface RunState {
 
 const MAX_SUBAGENT_DEPTH = 2;
 
+/** The capabilities a subagent may use. Anything that writes — files, shell, plans — is never offered. */
+const SUBAGENT_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>(['ro', 'shell_ro']);
+
+/** What a continue says as the user when the preset has no `continue_nudge_prompt` of its own. */
+const CONTINUE_ASK = 'Continue the last message exactly where it stops. Do not repeat any of it, and do not start over.';
+
 /**
  * A continuation is appended to the text it continues. The model usually starts where the text stops
  * with a space of its own; this only supplies one when neither side brought it.
@@ -94,7 +102,7 @@ declare module 'cordis' {
  * `ctx.agent.runTurn()` and watch `agent/*` events.
  */
 export class Agent extends Service {
-	static inject = ['host', 'settings', 'sessions', 'checkpoints', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tavern', 'vectors', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
+	static inject = ['host', 'settings', 'sessions', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'vectors', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
 
 	private readonly stops = new Map<string, AbortController>();
 	/** The live Session object per running turn; usage is mutated here and saved by finish(). */
@@ -119,6 +127,14 @@ export class Agent extends Service {
 				controller.abort();
 			}
 		});
+	}
+
+	/**
+	 * The tavern feature, when its plugin is loaded. Read through `ctx.get` and not as an injected
+	 * property: injecting it would make the whole agent inactive without it, and a turn does not need it.
+	 */
+	private tavern(): TavernApi | undefined {
+		return this.ctx.get('tavern') as TavernApi | undefined;
 	}
 
 	/** Snapshot of the current settings as a session policy. */
@@ -155,6 +171,11 @@ export class Agent extends Service {
 		const session = input.sessionId ? (this.ctx.sessions.get(input.sessionId) ?? this.ctx.sessions.ensureActive(this.policyFor())) : this.ctx.sessions.ensureActive(this.policyFor());
 		if (!text && trigger !== 'continue' && trigger !== 'impersonate') {
 			return { sessionId: session.id, text: '' };
+		}
+		// A continuation is written into the reply it carries on, so there has to be one: in a chat
+		// that has said nothing yet the answer would hang on no message at all.
+		if (trigger === 'continue' && !session.transcript.length) {
+			return { sessionId: session.id, text: 'There is nothing to continue yet.' };
 		}
 		if (session.cursor) {
 			return {
@@ -201,53 +222,53 @@ export class Agent extends Service {
 		if (input.systemContext) {
 			contexts.push(input.systemContext);
 		}
-		// A continuation is not a new request: the model is asked to carry the last line on, and an
-		// impersonation writes your side of the conversation, with the preset's own prompt for it.
-		if (trigger === 'continue') {
-			// The preset's own nudge travels with the messages (see `compose`); when it has none, the
-			// agent says what it wants in its own words.
-			const binding = {
-				character: session.character ?? config.tavernCharacter,
-				persona: session.persona ?? config.tavernPersona,
-				preset: session.preset ?? config.tavernPreset,
-			};
-			const last = session.transcript[session.transcript.length - 1]?.content ?? '';
-			if (!this.ctx.tavern.continueNudge(binding, last)) {
-				contexts.push('Continue the last message exactly where it stops. Do not repeat any of it, and do not start over.');
-			}
-		}
-		if (trigger === 'impersonate') {
-			const impersonation = this.ctx.tavern.impersonationPrompt({
-				character: session.character ?? config.tavernCharacter,
-				persona: session.persona ?? config.tavernPersona,
-				preset: session.preset ?? config.tavernPreset,
-			});
-			contexts.push(
-				impersonation ||
-					`Write the next message of this conversation as ${this.ctx.settings.get().tavernUserName || 'the user'}, in their voice, and nothing else.`,
-			);
-		}
-		if (config.checkpoints && session.policy.workingDirectory) {
-			const checkpointId = randomUUID();
-			try {
-				await this.ctx.checkpoints.capture(session.policy.workingDirectory, session.id, checkpointId);
-				this.ctx.sessions.addMark(session.id, {
-					turn: session.turnIndex,
-					checkpointId,
-					length: session.transcript.length,
-					at: Date.now(),
-					text: text.slice(0, 80),
-				});
-			} catch (error) {
-				this.ctx.log.message(`checkpoint failed: ${describe(error)}`);
-			}
-		}
+		// No snapshot here: a turn is journaled file by file, as the agent actually writes each one.
 		// A continue and an impersonation add no prompt of their own: the conversation is already there,
 		// and quiet throws its prompt away again at the end.
-		const prompted = trigger !== 'continue' && trigger !== 'impersonate' && trigger !== 'quiet';
+		const prompted = trigger !== 'continue' && trigger !== 'impersonate';
 		const prior = [...session.transcript];
 		const seeded = prompted ? [...session.transcript, { role: 'user', content: text, at: Date.now() } as Message] : [...session.transcript];
-		const continueInto = trigger === 'continue' ? lastReplyIndex(seeded) : undefined;
+		// A continue grows the last reply, and only when nothing comes after it. A turn that was
+		// stopped, is waiting on a tool call, or failed leaves the transcript ending in something else
+		// — merging there would cut that away. With nothing to grow, the answer is a turn of its own.
+		const lastReply = trigger === 'continue' ? lastReplyIndex(seeded) : -1;
+		const continueInto = lastReply >= 0 && lastReply === seeded.length - 1 ? lastReply : undefined;
+		// What the model is asked to do when the turn carries no prompt of its own. It is also said *as a
+		// turn*: a request whose last turn is the model's own is completed by OpenAI but refused outright
+		// by Gemini ("Requests ending with a model turn are not supported"). Upstream answers the same
+		// problem with a preset's `send_if_empty`, said as the user when the history ends on a reply.
+		let ask = '';
+		if (trigger === 'continue') {
+			// The preset's own nudge travels with the messages (see `compose`); when it has none, the
+			// agent says what it wants in its own words — and only when there is a reply to carry on.
+			const nudge = this.tavern()?.continueNudge(
+				{
+					character: session.character ?? config.tavernCharacter,
+					persona: session.persona ?? config.tavernPersona,
+					preset: session.preset ?? config.tavernPreset,
+				},
+				session.transcript[session.transcript.length - 1]?.content ?? '',
+			);
+			if (!nudge && continueInto !== undefined) {
+				contexts.push(CONTINUE_ASK);
+			}
+			// The ask itself is always there to be sent: a turn that was cut short before it said anything
+			// still leaves the model's own turn last, and that is the request Gemini refuses.
+			ask = nudge || CONTINUE_ASK;
+		}
+		if (trigger === 'impersonate') {
+			const impersonation =
+				this.tavern()?.impersonationPrompt({
+					character: session.character ?? config.tavernCharacter,
+					persona: session.persona ?? config.tavernPersona,
+					preset: session.preset ?? config.tavernPreset,
+				}) ||
+				`Write the next message of this conversation as ${this.ctx.settings.get().tavernUserName || 'the user'}, in their voice, and nothing else.`;
+			// The words stand in the system prompt as well: an impersonation whose history already ends on
+			// your own turn has nowhere else to be said.
+			contexts.push(impersonation);
+			ask = impersonation;
+		}
 		const system = await this.systemPrompt(session, contexts);
 		const ref: TurnRef = { sessionId: session.id, surface: input.surface };
 		// The world-info budget, the context trim and every counter in the panels read the same counter,
@@ -265,14 +286,21 @@ export class Agent extends Service {
 				`World info budget reached after ${tavern.activated.length} entries — the rest were left out. Raise "Context %", give the book fewer entries, or tick "Ignore budget" on the ones that must always be sent.`,
 			);
 		}
+		// With no tavern content configured this is exactly `[system, …history]`, so the port is invisible
+		// until a character, book, persona or preset is actually selected.
+		const messages =
+			tavern && !tavern.inert ? [...tavern.messages] : [{ role: 'system', content: system } as Message, ...history];
+		// The ask goes last whenever the request would end in the model's own turn — which is what a
+		// continue and an impersonation look like until something is said as the user.
+		if (ask && messages[messages.length - 1]?.role !== 'user') {
+			messages.push({ role: 'user', content: ask, at: Date.now() } as Message);
+		}
 		const state: RunState = {
 			ref,
 			sessionId: session.id,
 			policy: session.policy,
 			transcript: seeded,
-			// With no tavern content configured this is exactly `[system, …history]`, so the port is
-			// invisible until a character, book, persona or preset is actually selected.
-			messages: tavern && !tavern.inert ? tavern.messages : [{ role: 'system', content: system }, ...history],
+			messages,
 			toolCalls: [],
 			gateReason: '',
 			confirmed: null,
@@ -457,11 +485,11 @@ export class Agent extends Service {
 	private finish(session: Session, state: RunState): void {
 		const answer = lastAssistant(state.transcript);
 		const reply = answer?.content.trim() ? answer.content : '';
-		if (state.trigger === 'quiet') {
-			// Upstream's quiet generation: the prompt and the reply are for the caller, not for the
-			// transcript, which goes back to exactly what it was before the turn.
+		if (state.trigger === 'quiet' || state.trigger === 'impersonate') {
+			// Upstream keeps neither in the chat: a quiet generation is the caller's alone, and an
+			// impersonation is streamed into the composer, for you to edit and send yourself.
 			session.transcript = state.prior;
-		} else if (state.trigger === 'continue' && reply && state.continueInto !== undefined) {
+		} else if (state.trigger === 'continue' && reply && state.continueInto !== undefined && state.continueInto >= 0) {
 			// A continuation extends the reply it continues: one message, one swipe, nothing truncated.
 			const merged = [...state.transcript];
 			const previous = merged[state.continueInto];
@@ -477,10 +505,6 @@ export class Agent extends Service {
 				};
 			}
 			session.transcript = merged.slice(0, state.continueInto + 1);
-		} else if (state.trigger === 'impersonate' && reply) {
-			// The model wrote your side of the conversation: it is recorded as your message, and
-			// nothing the assistant said on the way there stays behind.
-			session.transcript = [...session.transcript, { role: 'user', content: reply, at: answer?.at ?? Date.now() }];
 		} else if (state.swipes && reply) {
 			// A swipe or a regenerate: the variants the reader already saw are kept, and upstream's rule
 			// is that only the very first variant is ever overwritten.
@@ -548,7 +572,10 @@ export class Agent extends Service {
 		const routes = new Map<string, RouteFn<RunState>>();
 
 		nodes.set('llm.complete', async (state, runtime) => {
-			const visible = this.ctx.tools.visible(state.policy).filter((tool) => !state.filter?.allow || state.filter.allow.includes(tool.name));
+			// A subagent is shown only the read-only tools on its list; the model never learns of a write tool.
+			const visible = this.ctx.tools
+				.visible(state.policy)
+				.filter((tool) => !state.filter || (SUBAGENT_CAPABILITIES.has(tool.capability) && (!state.filter.allow || state.filter.allow.includes(tool.name))));
 			const live = this.live.get(state.sessionId);
 			const session = live ?? this.ctx.sessions.get(state.sessionId);
 			// The window of this model round trip is what the UI shows as "thinking for Ns".
@@ -613,7 +640,10 @@ export class Agent extends Service {
 		nodes.set('agent.tools', async (state, runtime) => {
 			const results = new Array<Message | null>(state.toolCalls.length).fill(null);
 			const runCall = async (call: ToolCall, index: number): Promise<void> => {
-				if (state.filter?.allow && !state.filter.allow.includes(call.name)) {
+				// The second line of defence: a subagent's call is refused if the tool is not on its list, or
+				// if the tool writes, whatever the model asked for.
+				const capability = this.ctx.tools.get(call.name)?.capability;
+				if (state.filter && (!state.filter.allow?.includes(call.name) || (capability !== undefined && !SUBAGENT_CAPABILITIES.has(capability)))) {
 					results[index] = { role: 'tool', toolCallId: call.id, content: `Error: tool ${call.name} is not available to this subagent`, at: Date.now() };
 					return;
 				}
@@ -707,7 +737,45 @@ export class Agent extends Service {
 			tasks: this.ctx.tasks,
 			spawnAgent: (request) => this.spawnAgent(state, request),
 			sensitiveEnv: this.ctx.settings.get().filterSensitiveEnv,
+			edit: (path, write) => this.journalEdit(state, path, write),
 		};
+	}
+
+	/**
+	 * Runs one file write and journals its content before and after. The first write of a path in a
+	 * turn records the earlier content; later writes in the same turn only move the after-hash.
+	 * Nothing is recorded when there is no workspace, when checkpoints are off, or when the write fails.
+	 */
+	private async journalEdit(state: RunState, path: string, write: () => Promise<void>): Promise<void> {
+		const workspace = state.policy.workingDirectory;
+		// The turn saves its own copy of the session when it ends. A mark written to any other copy is
+		// overwritten by that save, so the mark goes on the live object the turn is running with.
+		const session = this.live.get(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		// The journal is a feature of its own, not a part of the agent: without its plugin (or with
+		// checkpoints switched off) a write is simply a write, and nothing is recorded.
+		const journal = this.ctx.get('checkpoints') as JournalApi | undefined;
+		if (!workspace || !session || !journal || !this.ctx.settings.get().checkpoints || !isInside(workspace, path)) {
+			return write();
+		}
+		const rel = relative(resolve(workspace), resolve(path)).split(sep).join('/');
+		// The turn's rewind point is taken before its first write: rewinding to it undoes the whole turn.
+		// `length` is the transcript as it stood before this turn's prompt, which is what `truncate` keeps.
+		if (!session.marks.some((mark) => mark.turn === session.turnIndex)) {
+			const entries = await journal.entries(workspace, session.id);
+			const prompt = session.transcript.findLastIndex((message) => message.role === 'user');
+			session.marks.push({
+				turn: session.turnIndex,
+				entryCount: entries.length,
+				length: Math.max(0, prompt),
+				at: Date.now(),
+				text: (session.transcript[prompt]?.content ?? '').slice(0, 80),
+			});
+			this.ctx.sessions.save(session);
+		}
+		const before = await journal.store(workspace, state.sessionId, rel);
+		await write();
+		const after = await journal.store(workspace, state.sessionId, rel);
+		await journal.record(workspace, state.sessionId, session.turnIndex, rel, before, after);
 	}
 
 	private async spawnAgent(parent: RunState, request: AgentSpawnRequest): Promise<string> {
@@ -724,8 +792,10 @@ export class Agent extends Service {
 		}
 		const agent = definition ?? this.ctx.catalog.agents[0];
 		const policy: SessionPolicy = { ...parent.policy, model: agent?.model || parent.policy.model };
+		// A subagent never writes: only read-only capabilities are offered, whatever its definition lists.
 		const visible = this.ctx.tools
 			.visible(policy)
+			.filter((tool) => SUBAGENT_CAPABILITIES.has(tool.capability))
 			.map((tool) => tool.name)
 			.filter((name) => name !== 'agent' || depth + 1 < MAX_SUBAGENT_DEPTH);
 		const allow = agent ? allowedToolsFor(agent, visible) : visible;
@@ -803,7 +873,8 @@ export class Agent extends Service {
 		config: Config,
 		trigger: GenerationTrigger,
 	): Promise<ComposeResult | undefined> {
-		if (!config.tavernEnabled) {
+		const tavern = this.tavern();
+		if (!config.tavernEnabled || !tavern) {
 			return undefined;
 		}
 		try {
@@ -821,7 +892,7 @@ export class Agent extends Service {
 				effects: session.tavernEffects,
 			};
 			const external = await this.vectorHits(session, scan);
-			const composed = this.ctx.tavern.compose({
+			const composed = tavern.compose({
 				identity,
 				history,
 				binding,
@@ -861,7 +932,10 @@ export class Agent extends Service {
 		if (!settings.enabled) {
 			return undefined;
 		}
-		const books = this.ctx.tavern.booksFor(session.id);
+		const books = this.tavern()?.booksFor(session.id);
+		if (!books?.length) {
+			return undefined;
+		}
 		const found = await this.ctx.vectors.activate({ books, messages: scan }, settings);
 		if (!found.size) {
 			return undefined;
@@ -975,12 +1049,10 @@ export class Agent extends Service {
 		if (agents) {
 			blocks.push({ name: 'Sub-agents', text: agents });
 		}
-		if (config.tavernEnabled) {
-			// The books a chat can look up: without this the model cannot know `lore_lookup` has anything.
-			const books = this.ctx.tavern.loreIndex(session.id);
-			if (books) {
-				blocks.push({ name: 'Lore index', text: books });
-			}
+		// The books a chat can look up: without this the model cannot know `lore_lookup` has anything.
+		const lore = config.tavernEnabled ? this.tavern()?.loreIndex(session.id) : undefined;
+		if (lore) {
+			blocks.push({ name: 'Lore index', text: lore });
 		}
 		if (contexts.length) {
 			blocks.push({ name: 'Context', text: `Context:\n${contexts.join('\n\n')}` });
@@ -1005,6 +1077,14 @@ export function promptText(blocks: readonly PromptBlock[]): string {
 }
 
 export const agentPlugin = Agent;
+
+/** Whether a path lies inside the workspace; anything outside is not journaled. */
+function isInside(workspace: string, path: string): boolean {
+	const root = resolve(workspace);
+	const target = resolve(path);
+	const rel = relative(root, target);
+	return rel !== '' && !rel.startsWith('..') && !rel.startsWith(sep);
+}
 
 function parseArguments(text: string): unknown {
 	try {

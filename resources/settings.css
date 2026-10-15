@@ -555,6 +555,7 @@ button.icon.danger:hover {
 	height: auto;
 }
 
+
 /* ------------------------------------------------------------------ prompts */
 
 /* The Prompts tab: a list of every prompt beside the one that is picked. */
@@ -694,6 +695,40 @@ tbody tr:hover td {
 
 td.mono {
 	font-family: var(--st-mono);
+}
+
+/* ---------------------------------------------------- plugin dependency table */
+
+#pg-deps {
+	font-size: var(--st-small);
+}
+
+#pg-deps td {
+	vertical-align: top;
+}
+
+#pg-deps .pg-row {
+	cursor: pointer;
+}
+
+/* A service nobody provides: the missing end of the arrow a waiting row is looking at. */
+.pg-missing {
+	color: var(--vscode-editorWarning-foreground, #c8a13a);
+}
+
+#pg-detail {
+	max-height: 240px;
+}
+
+/* A row that is not loaded says why in a tooltip; the cell itself carries the warning colour. */
+td.plugin-error {
+	color: var(--vscode-editorWarning-foreground, #c8a13a);
+}
+
+#plugins td:last-child {
+	text-align: right;
+	width: 1%;
+	white-space: nowrap;
 }
 
 td.num,
