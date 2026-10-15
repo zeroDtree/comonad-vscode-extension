@@ -885,6 +885,101 @@ suite('Cordis kernel', () => {
 		}
 	});
 
+	test('an impersonation is offered no tools, runs none, and is not a turn of the chat', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let executed = 0;
+			kernel.ctx.tools.register({
+				name: 'read_file',
+				description: 'a write-capable probe',
+				capability: 'rw',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: { type: 'object', properties: {}, required: [], additionalProperties: true },
+				execute: async () => {
+					executed += 1;
+					return 'body';
+				},
+			} as never);
+			const offered: number[] = [];
+			const replies: { content: string; toolCalls?: { id: string; name: string; arguments: string }[] }[] = [
+				{ content: 'hi.' },
+				// The model asks for the tool anyway: the impersonation is not offered it, so the call is dropped.
+				{ content: '', toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{"path":"a.txt"}' }] },
+			];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request: AdapterRequest) {
+					offered.push(request.tools.length);
+					const reply = replies.shift() ?? { content: 'x' };
+					return { message: { role: 'assistant' as const, content: reply.content, toolCalls: reply.toolCalls }, toolCalls: reply.toolCalls ?? [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const policy = { approval: 'universal_accept' as const, workMode: 'sw' as const };
+			kernel.ctx.sessions.save(kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'impersonate'));
+			await kernel.ctx.agent.runTurn({ text: 'hello', sessionId: 'impersonate', policy });
+			const turns = kernel.ctx.sessions.require('impersonate').turnIndex;
+
+			const result = await kernel.ctx.agent.runTurn({ text: '', trigger: 'impersonate', sessionId: 'impersonate', policy });
+			assert.ok(offered[0]! > 0, 'a normal turn is still offered its tools');
+			assert.strictEqual(offered[1], 0, 'an impersonation is offered no tools');
+			assert.strictEqual(executed, 0, 'and a tool call it makes anyway is not run');
+			assert.strictEqual(result.text, '', 'the turn ends on what it wrote, which is nothing here');
+			assert.strictEqual(kernel.ctx.sessions.require('impersonate').turnIndex, turns, 'and it is not counted as a turn of the chat');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a quiet turn is offered no tools, runs none, and leaves the chat as it was', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let executed = 0;
+			kernel.ctx.tools.register({
+				name: 'read_file',
+				description: 'a write-capable probe',
+				capability: 'rw',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: { type: 'object', properties: {}, required: [], additionalProperties: true },
+				execute: async () => {
+					executed += 1;
+					return 'body';
+				},
+			} as never);
+			const offered: number[] = [];
+			const replies: { content: string; toolCalls?: { id: string; name: string; arguments: string }[] }[] = [
+				{ content: 'hi.' },
+				// The model asks for the tool anyway: a quiet turn is not offered it, so the call is dropped.
+				{ content: '', toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{"path":"a.txt"}' }] },
+			];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request: AdapterRequest) {
+					offered.push(request.tools.length);
+					const reply = replies.shift() ?? { content: 'x' };
+					return { message: { role: 'assistant' as const, content: reply.content, toolCalls: reply.toolCalls }, toolCalls: reply.toolCalls ?? [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const policy = { approval: 'universal_accept' as const, workMode: 'sw' as const };
+			kernel.ctx.sessions.save(kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'quiet'));
+			await kernel.ctx.agent.runTurn({ text: 'hello', sessionId: 'quiet', policy });
+			const before = kernel.ctx.sessions.require('quiet');
+			const transcript = before.transcript;
+			const turns = before.turnIndex;
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'answer this privately', trigger: 'quiet', sessionId: 'quiet', policy });
+			assert.ok(offered[0]! > 0, 'a normal turn is still offered its tools');
+			assert.strictEqual(offered[1], 0, 'a quiet turn is offered no tools');
+			assert.strictEqual(executed, 0, 'and a tool call it makes anyway is not run');
+			assert.strictEqual(result.text, '', 'the turn ends on what it wrote, which is nothing here');
+			assert.deepStrictEqual(kernel.ctx.sessions.require('quiet').transcript, transcript, 'the transcript is left exactly as it was');
+			assert.strictEqual(kernel.ctx.sessions.require('quiet').turnIndex, turns, 'and it is not counted as a turn of the chat');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('a chat can be forked from a turn and have its last turn replayed', async () => {
 		const kernel = await createTestKernel();
 		try {
@@ -1235,12 +1330,118 @@ suite('Cordis kernel', () => {
 			assert.ok(!existsSync(plugins.projectFile), 'nothing was written into the workspace');
 			assert.strictEqual(plugins.state().find((row) => row.id === 'probe')?.loaded, false, 'and the list was applied again');
 
-			// Once the workspace is trusted the change belongs to the project, where a user would look for it.
+			// Once the workspace is trusted, a row the project declares is toggled in the project.
 			kernel.host.trusted = () => true;
 			assert.strictEqual(plugins.patchFile, plugins.projectFile);
+			writeRow(plugins.projectFile, { id: 'probe' });
 			await plugins.set('probe', { disabled: false });
 			assert.deepStrictEqual(readRows(plugins.projectFile).map((row) => [row.id, row.disabled]), [['probe', false]]);
 			assert.strictEqual(plugins.state().find((row) => row.id === 'probe')?.loaded, true);
+
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a toggle of an installed row is written back to your list, not copied into the project', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.host.trusted = () => true;
+			const userList = join(kernel.root, 'home', '.comonad');
+			const projectList = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(userList, { recursive: true });
+			writeFileSync(join(userList, 'delta.js'), `module.exports = { apply: () => void 0 };`);
+			writeRow(join(userList, 'cordis.yml'), { id: 'delta', name: './delta.js' });
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			const plugins = kernel.ctx.plugins;
+			await plugins.set('delta', { disabled: true });
+			assert.deepStrictEqual(readRows(join(userList, 'cordis.yml')).map((row) => [row.id, row.disabled]), [['delta', true]]);
+			assert.ok(!existsSync(join(projectList, 'cordis.yml')), 'nothing was written into the project');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a row named by a file of your own is read from your folder, even when a project toggles it', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.host.trusted = () => true;
+			const userList = join(kernel.root, 'home', '.comonad');
+			const projectList = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(userList, { recursive: true });
+			writeFileSync(join(userList, 'delta.js'), `module.exports = { apply: () => void 0 };`);
+			writeRow(join(userList, 'cordis.yml'), { id: 'delta', name: './delta.js' });
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			const plugins = kernel.ctx.plugins;
+			assert.strictEqual(plugins.state().find((row) => row.id === 'delta')?.loaded, true);
+
+			// The project only says on or off: the name stays with the list that declared it, so the path is
+			// read from the user's folder rather than the project's.
+			await plugins.set('delta', { disabled: true });
+			await plugins.set('delta', { disabled: false });
+			assert.ok(!existsSync(join(projectList, 'cordis.yml')), 'the project is not written for a row it does not declare');
+			assert.deepStrictEqual(
+				readRows(join(userList, 'cordis.yml')).map((row) => [row.id, row.name, row.disabled]),
+				[['delta', './delta.js', false]],
+			);
+			assert.strictEqual(plugins.state().find((row) => row.id === 'delta')?.loaded, true, 'and the row still loads');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a row may name its plugin by an absolute path or by ~/, and both are read as files', async () => {
+		const kernel = await createTestKernel();
+		const home = process.env.HOME;
+		try {
+			kernel.host.trusted = () => true;
+			const userList = join(kernel.root, 'home', '.comonad');
+			const elsewhere = join(kernel.root, 'elsewhere');
+			mkdirSync(userList, { recursive: true });
+			mkdirSync(elsewhere, { recursive: true });
+			writeFileSync(join(elsewhere, 'abs.js'), `module.exports = { apply: () => void 0 };`);
+			writeFileSync(join(kernel.root, 'home', 'tilde.js'), `module.exports = { apply: () => void 0 };`);
+			// `~` is the user's home folder, which the test points at its own root for the duration.
+			process.env.HOME = join(kernel.root, 'home');
+			writeRow(join(userList, 'cordis.yml'), { id: 'abs', name: join(elsewhere, 'abs.js') });
+			writeRow(join(userList, 'cordis.yml'), { id: 'tilde', name: '~/tilde.js' });
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			const plugins = kernel.ctx.plugins;
+			assert.deepStrictEqual(
+				plugins.state().filter((row) => ['abs', 'tilde'].includes(row.id)).map((row) => [row.id, row.loaded, row.error]),
+				[['abs', true, undefined], ['tilde', true, undefined]],
+			);
+			// The list shows where a file is by the same rule: `~/` inside the home folder, absolute outside it.
+			assert.deepStrictEqual(
+				plugins.state().filter((row) => ['abs', 'tilde'].includes(row.id)).map((row) => row.target),
+				[join(elsewhere, 'abs.js'), '~/tilde.js'],
+			);
+		} finally {
+			if (home === undefined) {
+				delete process.env.HOME;
+			} else {
+				process.env.HOME = home;
+			}
+			await kernel.dispose();
+		}
+	});
+
+	test('a relative name in a project list is read from the project folder, and a missing file is reported', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.host.trusted = () => true;
+			const userList = join(kernel.root, 'home', '.comonad');
+			const projectList = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(userList, { recursive: true });
+			mkdirSync(projectList, { recursive: true });
+			writeFileSync(join(userList, 'delta.js'), `module.exports = { apply: () => void 0 };`);
+			writeRow(join(userList, 'cordis.yml'), { id: 'delta', name: './delta.js' });
+			// The same relative path, written in the project: there is no `delta.js` beside it.
+			writeRow(join(projectList, 'cordis.yml'), { id: 'delta', name: './delta.js' });
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			const delta = kernel.ctx.plugins.state().find((row) => row.id === 'delta');
+			assert.strictEqual(delta?.loaded, false);
+			assert.ok(delta?.error?.includes(join(projectList, 'delta.js')), 'the error names the file the project asked for');
 		} finally {
 			await kernel.dispose();
 		}

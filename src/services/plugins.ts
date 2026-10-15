@@ -1,5 +1,6 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Service, type Context, type Fiber, type Plugin } from 'cordis';
 import type * as vscode from 'vscode';
@@ -159,10 +160,24 @@ function waiting(fiber: Fiber): string {
 /** The state names, for a row that is not loaded: `pending` is a missing service, `failed` an error. */
 const STATE_NAMES: Record<number, string> = { 0: 'pending', 1: 'loading', 2: 'active', 3: 'failed', 4: 'disposed', 5: 'unloading' };
 
+/** Whether a row's `name` is a file rather than a package: `./x`, `../x`, `/x`, `C:\\x` or `~/x`. */
+export function isPathName(name: string): boolean {
+	return name.startsWith('.') || name === '~' || name.startsWith('~/') || name.startsWith('~\\') || isAbsolute(name);
+}
+
+/** `~` and `~/…` are the user's home folder; anything else is returned as it is. */
+export function expandHome(name: string): string {
+	if (name === '~' || name.startsWith('~/') || name.startsWith('~\\')) {
+		return join(homedir(), name.slice(1));
+	}
+	return name;
+}
+
 /** A row as it is loaded: the file it came from decides where a relative `name` resolves. */
 interface ResolvedRow extends PluginRow {
 	source: PluginState['source'];
-	dir: string;
+	/** The folder a relative `name` is read from: that of the file which declared the name, not of the row. */
+	nameDir: string;
 }
 
 declare module 'cordis' {
@@ -570,7 +585,7 @@ export class Plugins extends Service {
 	 * injections on both edges), so the rest of the tree is untouched either way.
 	 */
 	async set(id: string, patch: { disabled?: boolean; config?: unknown }): Promise<PluginState[]> {
-		const file = this.patchFile;
+		const file = this.fileOf(id);
 		if (!file) {
 			return this.state();
 		}
@@ -583,6 +598,21 @@ export class Plugins extends Service {
 		});
 		this.written.set(file, readFileSync(file, 'utf8'));
 		return this.apply(id);
+	}
+
+	/**
+	 * Where a toggle of one row is written: the file that already declares the row, so an installed plugin
+	 * (declared in your library) stays there and is not copied into the project. A row nobody declared
+	 * falls back to `patchFile`.
+	 */
+	private fileOf(id: string): string {
+		if (this.projectFile && this.ctx.host.trusted() && readRows(this.projectFile).some((row) => row.id === id)) {
+			return this.projectFile;
+		}
+		if (readRows(this.userFile).some((row) => row.id === id)) {
+			return this.userFile;
+		}
+		return this.patchFile;
 	}
 
 	/**
@@ -660,7 +690,7 @@ export class Plugins extends Service {
 	private resolveRows(): { rows: ResolvedRow[]; errors: PluginState[] } {
 		const rows = new Map<string, ResolvedRow>();
 		for (const row of this.config.rows) {
-			rows.set(row.id, { ...row, source: 'builtin', dir: '' });
+			rows.set(row.id, { ...row, source: 'builtin', nameDir: '' });
 		}
 		const errors: PluginState[] = [];
 		// The user's list first, the project's second: a row of the same id is the project's to decide.
@@ -686,7 +716,8 @@ export class Plugins extends Service {
 						// A row nobody shipped needs a name; a patch of a built-in row keeps the one it had.
 						name: row.name ?? previous?.name,
 						source,
-						dir: dirname(file),
+						// A row that does not name its plugin keeps the folder of the file that did.
+						nameDir: row.name === undefined ? (previous?.nameDir ?? '') : dirname(file),
 					});
 				}
 			} catch (error) {
@@ -698,8 +729,24 @@ export class Plugins extends Service {
 		return { rows: [...rows.values()], errors };
 	}
 
+	/**
+	 * What a row loads, as the list shows it: `built-in`, a package name, or a file — shown as `~/…` when
+	 * it is in your home folder, and as its absolute path otherwise.
+	 */
 	private target(row: ResolvedRow): string {
-		return this.config.plugins[row.name ?? row.id] ? 'built-in' : (row.name ?? row.id);
+		const name = row.name ?? row.id;
+		if (this.config.plugins[name]) {
+			return 'built-in';
+		}
+		if (!isPathName(name)) {
+			return name;
+		}
+		const file = resolve(row.nameDir || this.ctx.host.home(), expandHome(name));
+		const home = homedir();
+		if (file === home) {
+			return '~';
+		}
+		return file.startsWith(home + sep) ? `~${sep}${file.slice(home.length + 1)}` : file;
 	}
 
 	private async load(row: ResolvedRow): Promise<Plugin> {
@@ -712,11 +759,11 @@ export class Plugins extends Service {
 			throw new Error('a row with no name, and no built-in plugin of that id, has nothing to load');
 		}
 		// A package is resolved by Node, from the extension's own modules; a path is read where the row's
-		// own yml sits, so a plugin travels with the list that names it.
-		if (!name.startsWith('.') && !isAbsolute(name)) {
+		// own yml sits, so a plugin travels with the list that names it — unless it is absolute or `~/`.
+		if (!isPathName(name)) {
 			return pickDefault((await import(name)) as { default?: Plugin });
 		}
-		const file = resolve(row.dir || this.ctx.host.home(), name);
+		const file = resolve(row.nameDir || this.ctx.host.home(), expandHome(name));
 		if (!existsSync(file)) {
 			throw new Error(`no plugin at ${file}`);
 		}

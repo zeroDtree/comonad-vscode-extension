@@ -79,6 +79,12 @@ const MAX_SUBAGENT_DEPTH = 2;
 const SUBAGENT_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>(['ro', 'shell_ro']);
 
 /** What a continue says as the user when the preset has no `continue_nudge_prompt` of its own. */
+/**
+ * The generation types that write nothing into the chat and run no tools: an impersonation streams into the
+ * composer, and a quiet turn is the caller's alone. Neither is a turn the chat has taken.
+ */
+const SILENT_TRIGGERS: ReadonlySet<GenerationTrigger> = new Set<GenerationTrigger>(['impersonate', 'quiet']);
+
 const CONTINUE_ASK = 'Continue the last message exactly where it stops. Do not repeat any of it, and do not start over.';
 
 /**
@@ -533,11 +539,16 @@ export class Agent extends Service {
 		} else {
 			session.transcript = state.transcript;
 		}
-		session.turnIndex += 1;
+		// An impersonation writes nothing into the chat, so it is not a turn the chat has taken.
+		if (!SILENT_TRIGGERS.has(state.trigger)) {
+			session.turnIndex += 1;
+		}
 		session.cursor = null;
 		session.policy = state.policy;
 		this.ctx.sessions.save(session);
-		this.ctx.audit.write(session.id, { kind: 'turn-end', turn: session.turnIndex });
+		if (!SILENT_TRIGGERS.has(state.trigger)) {
+			this.ctx.audit.write(session.id, { kind: 'turn-end', turn: session.turnIndex });
+		}
 		this.ctx.sessions.changed(session.id);
 	}
 
@@ -573,9 +584,12 @@ export class Agent extends Service {
 
 		nodes.set('llm.complete', async (state, runtime) => {
 			// A subagent is shown only the read-only tools on its list; the model never learns of a write tool.
-			const visible = this.ctx.tools
+			// A silent generation (an impersonation or a quiet turn) writes nothing down and is offered no
+			// tools at all: a tool it called would run for real, and its reply is thrown away afterwards.
+			const offered = this.ctx.tools
 				.visible(state.policy)
 				.filter((tool) => !state.filter || (SUBAGENT_CAPABILITIES.has(tool.capability) && (!state.filter.allow || state.filter.allow.includes(tool.name))));
+			const visible = SILENT_TRIGGERS.has(state.trigger) ? [] : offered;
 			const live = this.live.get(state.sessionId);
 			const session = live ?? this.ctx.sessions.get(state.sessionId);
 			// The window of this model round trip is what the UI shows as "thinking for Ns".
@@ -697,6 +711,11 @@ export class Agent extends Service {
 
 		routes.set('agent.after-llm', (state) => {
 			if (state.toolCalls.length === 0) {
+				return 'end';
+			}
+			// A silent generation is offered no tools, so a call it makes anyway is dropped with its turn: the
+			// reply is what it wrote, and nothing is run on its behalf.
+			if (SILENT_TRIGGERS.has(state.trigger)) {
 				return 'end';
 			}
 			const gate = gateCalls(state.toolCalls, (name) => this.ctx.tools.get(name), state.policy, this.ctx.settings.rules());

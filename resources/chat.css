@@ -910,13 +910,9 @@ footer {
 	max-width: 60%;
 }
 
-/* The generate caret sits beside Send and carries no label: the chevron is the whole control. */
+/* The generate menu sits beside Send: its label says what the control does, and the chevron opens it. */
 #controls .pill-caret {
 	max-width: none;
-}
-
-.pill-caret .pill-trigger {
-	padding: 2px 6px;
 }
 
 /* Work mode, approval, context and network: their own row under the input box. */

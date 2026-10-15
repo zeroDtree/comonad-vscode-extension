@@ -6,6 +6,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **An impersonation and a quiet turn run no tools.** Both used to be offered every tool the chat has, so a tool
+  they called ran for real (a write was approved in the chat, and the reply was discarded afterwards), and both
+  counted as a turn of the chat. Neither is offered tools now, a call either makes anyway is dropped, and neither
+  leaves the turn count alone.
+
 - **The ST content layer is a plugin you install, not a feature built in.** It moved out of `src/` into
   a package of its own, `packages/comonad-plugin-tavern`, built as its own bundle (`npm run build:plugins`)
   and loaded by the host at run time: nothing in the shipped tree names it, so `dist/extension.js` carries
@@ -306,8 +311,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
     `/continue`, `/impersonate`, `/swipe`, `/regenerate` and `/quiet`. An entry that names types
     fires only for those. Replies keep their versions — `‹ n/m ›` on the turn walks them — a
     regenerate replaces the first version and adds every later one, a continue extends the message
-    it carries on, an impersonation is recorded as *your* message, and a quiet generation leaves no
-    trace in the chat.
+    it carries on, an impersonation streams into the composer and is written nowhere, and a quiet generation
+    leaves no trace in the chat.
   - *Vectorized*: with `comonad.wiVectorEnabled` an entry in that state is found by meaning instead
     of by its keys — the newest messages are embedded through an OpenAI-compatible `/embeddings`
     endpoint, ranked by cosine similarity against each entry's own vector, and the best few above

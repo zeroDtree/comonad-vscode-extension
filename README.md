@@ -399,6 +399,8 @@ build in, like the ST content layer:
 - { id: mine, name: ./mine.js, config: { greeting: hello } }
 ```
 
+A `name` that is a path is read as a file: `./x` and `../x` relative to the `cordis.yml` that names it, `~/x` from your home folder, and `/abs/x` as it is. Any other name is a package.
+
 ```js
 // mine.js — a policy and a tool, both of them effects of the plugin
 export const name = 'mine';

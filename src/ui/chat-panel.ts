@@ -821,7 +821,7 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 				<button id="changes" class="chip" hidden></button>
 				<button id="stop" class="ghost" data-tip="Stop the running turn (Esc)" hidden>Stop</button>
 				<div class="pill pill-caret" data-control="generate">
-					<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false" data-tip="Generation type — Normal, Continue, Impersonate, Swipe, Regenerate, Quiet"><span class="chev">▾</span></button>
+					<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false" data-tip="Generation type — Normal, Continue, Impersonate, Swipe, Regenerate, Quiet"><span class="pill-label">Generate</span><span class="chev">▾</span></button>
 					<div class="pill-menu" hidden></div>
 				</div>
 				<button id="send" class="primary" data-tip="Send — Enter">Send</button>
