@@ -42,7 +42,12 @@ export async function pickPreset(ctx: Context): Promise<void> {
 		return;
 	}
 	const policy = presetPolicy(picked.name);
-	await ctx.settings.applyPolicy({ mode: policy.workMode, approval: policy.approval, network: policy.network });
+	await ctx.settings.applyPolicy({
+		mode: policy.workMode,
+		approval: policy.approval,
+		network: policy.network,
+		confinement: policy.confinement,
+	});
 }
 
 export async function pickMode(ctx: Context): Promise<void> {

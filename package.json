@@ -521,6 +521,16 @@
           ],
           "description": "Workspace-relative paths or basenames that file and shell tools must not read or write."
         },
+        "comonad.confineRead": {
+          "type": "boolean",
+          "default": false,
+          "description": "Restrict reads to the workspace. With this on, the file tools refuse paths outside the working directory and the shell sandbox cannot read outside it, which can break commands that read ~/.gitconfig, ~/.npmrc and similar."
+        },
+        "comonad.confineWrite": {
+          "type": "boolean",
+          "default": true,
+          "description": "Restrict writes to the workspace. With this on, the file tools refuse paths outside the working directory and the shell sandbox cannot write outside it."
+        },
         "comonad.maxSteps": {
           "type": "number",
           "default": 48,
@@ -750,15 +760,10 @@
           "default": "auto",
           "markdownDescription": "Thinking effort for models that support `reasoning_effort`. New chats start here; the model menu changes it per chat."
         },
-        "comonad.contextLimit": {
+        "comonad.contextWindow": {
           "type": "number",
           "default": 0,
-          "markdownDescription": "Estimated token budget for the history a chat sends; older turns are dropped whole and `0` keeps everything. New chats start here; the model menu changes it per chat."
-        },
-        "comonad.autoCompactChars": {
-          "type": "number",
-          "default": 400000,
-          "description": "Automatically compact the conversation when it grows past this many characters (0 disables)."
+          "markdownDescription": "Overrides the model's input window in tokens. `0` uses the window on the model profile, falling back to 128K for a model that has none. The chat summarizes itself when the request no longer fits. New chats start here; the model menu changes it per chat."
         },
         "comonad.budgetUsd": {
           "type": "number",

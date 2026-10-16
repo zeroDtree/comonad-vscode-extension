@@ -1,22 +1,27 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { formatResult, runCommand, shellArgv, sandboxKind } from '../lib/sandbox';
-import { objectSchema, type ToolContext } from '../lib/types';
+import { objectSchema, type Confinement, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
 
 /** Shell tools with OS sandboxing (sandbox-exec on macOS, bwrap on Linux). */
 
-async function run(ctx: ToolContext, command: string, writable: boolean, mode: 'sandbox' | 'direct' = 'sandbox'): Promise<string> {
+async function run(ctx: ToolContext, command: string, writable: boolean): Promise<string> {
+	const result = await runCommand(shellArgv(command), ctx.policy.workingDirectory, shellOptions(ctx, writable));
+	return formatResult(result);
+}
+
+/** The boundary a shell tool runs under, from the session policy. */
+function shellOptions(ctx: ToolContext, writable: boolean) {
 	const workspace = ctx.policy.workingDirectory;
-	const result = await runCommand(shellArgv(command), workspace, {
+	return {
 		writable,
+		confinement: ctx.policy.confinement,
 		network: ctx.policy.network,
 		denyReadPaths: deniedFiles(workspace, ctx.policy.denyReadPaths),
 		timeoutMs: ctx.policy.commandTimeout * 1000,
-		mode,
 		filterEnv: ctx.sensitiveEnv !== false,
-	});
-	return formatResult(result);
+	};
 }
 
 /** Resolves deny patterns to absolute paths so the OS sandbox can enforce them. */
@@ -68,9 +73,15 @@ function collect(dir: string, found: Set<string>, depth: number): void {
 	}
 }
 
-export function sandboxStatus(): string {
+/** Reports the OS sandbox in use and what the workspace boundary currently covers. */
+export function sandboxStatus(confinement: Confinement): string {
 	const kind = sandboxKind();
-	return kind === 'none' ? 'no OS sandbox available; commands run with your account' : `sandbox: ${kind}`;
+	const engine = kind === 'none' ? 'no OS sandbox available' : `sandbox: ${kind}`;
+	const boundary = [
+		confinement.read ? 'reads' : null,
+		confinement.write ? 'writes' : null,
+	].filter(Boolean).join(' and ') || 'nothing';
+	return `${engine} · confined to the workspace: ${boundary}`;
 }
 
 export const shellTools = toolset([
@@ -99,29 +110,16 @@ export const shellTools = toolset([
 		},
 	},
 	{
-		name: 'run_shell_unsandboxed',
-		description:
-			'Run a shell command without the OS sandbox. The user approves every call unless an explicit allow rule exists. Use only when the sandbox blocks a legitimate command.',
-		capability: 'shell_rw',
-		needsNetwork: false,
-		needsWorkspace: true,
-		parameters: objectSchema({ command: { type: 'string' } }, ['command']),
-		execute(args, ctx) {
-			const { command } = args as { command: string };
-			return run(ctx, command, true, 'direct');
-		},
-	},
-	{
 		name: 'start_shell',
 		description:
-			'Start a long-running shell command in the background. It runs with your user account, outside the sandbox, so prefer foreground commands when possible. Read output with shell_output.',
+			'Start a long-running shell command in the background. Read output with shell_output.',
 		capability: 'shell_rw',
 		needsNetwork: false,
 		needsWorkspace: true,
 		parameters: objectSchema({ command: { type: 'string' } }, ['command']),
 		async execute(args, ctx) {
 			const { command } = args as { command: string };
-			const task = ctx.tasks.start(command, ctx.policy.workingDirectory);
+			const task = ctx.tasks.start(command, ctx.policy.workingDirectory, shellOptions(ctx, true));
 			return `started task ${task.id}: ${command}`;
 		},
 	},

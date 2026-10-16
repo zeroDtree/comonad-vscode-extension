@@ -207,12 +207,17 @@
 		{ id: 'medium', label: 'Medium', description: 'balanced thinking' },
 		{ id: 'high', label: 'High', description: 'the deepest thinking the model offers' },
 	];
+	// The window the model is treated as having. Auto takes the model's own, which is the only setting
+	// that stays right when the model changes; the rest override it for a model whose window is not what
+	// its provider documents. None of these cap the history — past the window, older turns are summarized.
 	const LIMITS = [
-		{ id: 0, label: 'Auto', description: 'send as much history as the model accepts' },
-		{ id: 32768, label: '32K', description: 'keep about 32k tokens of history' },
-		{ id: 65536, label: '64K', description: 'keep about 64k tokens of history' },
-		{ id: 131072, label: '128K', description: 'keep about 128k tokens of history' },
-		{ id: 262144, label: '256K', description: 'keep about 256k tokens of history' },
+		{ id: 0, label: 'Auto', description: "use the model's own window" },
+		{ id: 32768, label: '32K', description: 'treat the window as 32k tokens' },
+		{ id: 65536, label: '64K', description: 'treat the window as 64k tokens' },
+		{ id: 131072, label: '128K', description: 'treat the window as 128k tokens' },
+		{ id: 262144, label: '256K', description: 'treat the window as 256k tokens' },
+		{ id: 524288, label: '512K', description: 'treat the window as 512k tokens' },
+		{ id: 1048576, label: '1M', description: 'treat the window as 1m tokens' },
 	];
 
 	const modelPill = setupPill('model', (value) => {
@@ -223,7 +228,7 @@
 		}
 	});
 
-	const modelState = { models: [], model: '', modelLabel: 'auto', reasoningEffort: 'auto', contextLimit: 0 };
+	const modelState = { models: [], model: '', modelLabel: 'auto', reasoningEffort: 'auto', contextWindow: 0, windowTokens: 0 };
 
 	// Hovering Reasoning / Context / Model expands the choices in a flyout on the right.
 	const modelFlyout = document.createElement('div');
@@ -234,10 +239,23 @@
 	let flyoutShowTimer = 0;
 	let flyoutHideTimer = 0;
 
+	/** A token count the way a window is spoken about: 128K, 1M. */
+	function formatTokens(tokens) {
+		if (tokens >= 1048576) {
+			return Math.round((tokens / 1048576) * 10) / 10 + 'M';
+		}
+		return Math.round(tokens / 1024) + 'K';
+	}
+
+	/** The Context row's value: the chat's override, or the window the model's profile supplied. */
 	function formatLimit(value) {
 		const tokens = Number(value) || 0;
-		return tokens > 0 ? Math.round(tokens / 1024) + 'K' : 'Auto';
+		if (tokens > 0) {
+			return formatTokens(tokens);
+		}
+		return modelState.windowTokens > 0 ? `Auto (${formatTokens(modelState.windowTokens)})` : 'Auto';
 	}
+
 
 	function pageItems(page) {
 		if (page === 'reasoning') {
@@ -254,7 +272,7 @@
 			return modelState.reasoningEffort;
 		}
 		if (page === 'context') {
-			return modelState.contextLimit;
+			return modelState.contextWindow;
 		}
 		return modelState.model;
 	}
@@ -263,7 +281,7 @@
 		if (page === 'reasoning') {
 			modelPill.send({ type: 'setReasoningEffort', effort: id });
 		} else if (page === 'context') {
-			modelPill.send({ type: 'setContextLimit', limit: id });
+			modelPill.send({ type: 'setContextWindow', window: id });
 		} else {
 			modelPill.send(id);
 		}
@@ -386,7 +404,7 @@
 		const menu = modelPill.menu;
 		menu.innerHTML = '';
 		menu.append(flyoutRow('reasoning', 'Reasoning', choiceLabel(REASONING, modelState.reasoningEffort)));
-		menu.append(flyoutRow('context', 'Context', formatLimit(modelState.contextLimit)));
+		menu.append(flyoutRow('context', 'Context window', formatLimit(modelState.contextWindow)));
 		menu.append(flyoutRow('model', 'Model', modelState.modelLabel));
 	}
 
@@ -1403,7 +1421,8 @@
 		modelState.model = state.model;
 		modelState.modelLabel = state.modelLabel || state.model || 'auto';
 		modelState.reasoningEffort = state.reasoningEffort || 'auto';
-		modelState.contextLimit = Number(state.contextLimit) || 0;
+		modelState.contextWindow = Number(state.contextWindow) || 0;
+		modelState.windowTokens = Number(state.windowTokens) || 0;
 		updateModelPill();
 		networkChip.classList.toggle('is-on', Boolean(state.network));
 		networkChip.dataset.tip =

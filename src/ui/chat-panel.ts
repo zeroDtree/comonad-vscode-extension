@@ -12,6 +12,27 @@ import type { JournalApi } from '../services/checkpoints';
 import type { Session } from '../services/sessions';
 import { registerCommand } from './register';
 
+/**
+ * How full the window was on the last request, as a share of the window. It reads the prompt size the
+ * provider reported rather than counting the transcript, so it is the same number the budget uses and
+ * the same one the endpoint charged for.
+ */
+/** A token count the way a window is spoken about: 128K, 1M. */
+function formatTokens(tokens: number): string {
+	if (tokens >= 1_048_576) {
+		return `${Math.round((tokens / 1_048_576) * 10) / 10}M`;
+	}
+	return `${Math.round(tokens / 1024)}K`;
+}
+
+function contextUsage(session: Session | undefined, window: number): string {
+	if (!session?.lastInputTokens || !window) {
+		return '';
+	}
+	const share = Math.min(100, Math.round((session.lastInputTokens / window) * 100));
+	return `context ${share}% · ${formatTokens(session.lastInputTokens)}/${formatTokens(window)}`;
+}
+
 /** The chat: a webview view in the Secondary Side Bar, plus an optional editor window. */
 
 const SURFACE = 'panel';
@@ -101,6 +122,7 @@ export function chatPanel(ctx: Context): void {
 			detail: [
 				usage && usage.requests ? `${tokens} tokens · $${usage.cost.toFixed(3)}` : '',
 				session ? `turn ${session.turnIndex}` : '',
+				contextUsage(session, session ? ctx.agent.windowFor(session) : 0),
 			]
 				.filter(Boolean)
 				.join('  ·  '),
@@ -114,7 +136,11 @@ export function chatPanel(ctx: Context): void {
 			context: session?.contextForm ?? config.contextForm,
 			display: config.displayForm,
 			reasoningEffort: session?.reasoningEffort ?? config.reasoningEffort,
-			contextLimit: session?.contextLimit ?? config.contextLimit,
+			contextWindow: session?.contextWindow ?? config.contextWindow,
+			// The window the request is actually measured against, and how full it was last time: the
+			// provider's own count of the prompt rather than an estimate of the transcript.
+			windowTokens: session ? ctx.agent.windowFor(session) : 0,
+			contextUsed: session?.lastInputTokens ?? 0,
 			modes: splitChoices(MODE_LABELS),
 			approvals: splitChoices(APPROVAL_LABELS),
 			generations: GENERATION_TRIGGERS.map((value) => ({ value, label: GENERATION_LABELS[value] })),
@@ -606,10 +632,10 @@ export function chatPanel(ctx: Context): void {
 					}
 					break;
 				}
-				case 'setContextLimit': {
+				case 'setContextWindow': {
 					const session = ctx.sessions.active();
 					if (session) {
-						session.contextLimit = Math.max(0, Number(message.limit) || 0);
+						session.contextWindow = Math.max(0, Number(message.window) || 0);
 						ctx.sessions.save(session);
 						ctx.sessions.changed(session.id);
 					}

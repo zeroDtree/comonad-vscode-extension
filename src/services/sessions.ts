@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Service, type Context } from 'cordis';
+import { WORKSPACE_BOUNDARY } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { turnsOf } from '../lib/turns';
 import type { Message, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
@@ -32,6 +33,32 @@ export interface Mark {
 	text: string;
 }
 
+/**
+ * The record of a compaction. `covers` is how many transcript messages the text stands in for, which
+ * is what lets the next compaction extend this summary rather than summarize the whole chat again.
+ */
+export interface SessionSummary {
+	text: string;
+	covers: number;
+	at: number;
+}
+
+/** The message a compaction leaves at the head of the transcript. */
+export function summaryMessage(text: string): Message {
+	return { role: 'system', content: `Conversation summary (compacted):\n\n${text}` };
+}
+
+/**
+ * Moves the rewind points when `removed` messages were folded into one summary at the head. A mark
+ * inside the folded stretch cannot be honoured any more — those messages are gone — so it is dropped;
+ * the rest shift by what was removed, plus the summary that now sits in front of them.
+ */
+export function rebaseMarks(marks: readonly Mark[], removed: number): Mark[] {
+	return marks
+		.filter((mark) => mark.length >= removed)
+		.map((mark) => ({ ...mark, length: mark.length - removed + 1 }));
+}
+
 export interface Cursor {
 	node: string;
 	payload: unknown;
@@ -49,13 +76,24 @@ export interface Session {
 	contextForm?: ContextForm;
 	/** Thinking effort for this chat (new chats start from the Reasoning effort setting). */
 	reasoningEffort?: ReasoningEffort;
-	/** Estimated token budget for the history this chat sends; 0 keeps everything. */
-	contextLimit?: number;
+	/**
+	 * Window override in tokens for this chat; `0` (the default) resolves from the model profile, so
+	 * switching models re-resolves it. It overrides the model's window, it does not cap history.
+	 */
+	contextWindow?: number;
+	/** The last compaction: what it covers, so the next one extends it instead of starting over. */
+	summary?: SessionSummary;
 	transcript: Message[];
 	turnIndex: number;
 	cursor: Cursor | null;
 	marks: Mark[];
 	usage: SessionUsage;
+	/**
+	 * The prompt size the provider reported for the last request, in tokens. It is the only exact
+	 * measure of how full the window is — everything else about the context is an estimate — so the
+	 * panels read it rather than counting the transcript themselves.
+	 */
+	lastInputTokens?: number;
 	/** Instruction files loaded into the last system prompt. */
 	instructions?: string[];
 	/** Tavern selection: a character and persona by id, world books by name, a preset by id. */
@@ -168,7 +206,7 @@ export class SessionStore {
 	build(
 		policy: SessionPolicy,
 		id: string = newSessionId(),
-		defaults: { contextForm?: ContextForm; reasoningEffort?: ReasoningEffort; contextLimit?: number } = {},
+		defaults: { contextForm?: ContextForm; reasoningEffort?: ReasoningEffort; contextWindow?: number } = {},
 	): Session {
 		const now = Date.now();
 		return {
@@ -179,7 +217,7 @@ export class SessionStore {
 			policy: { ...policy },
 			contextForm: defaults.contextForm ?? 'rendered',
 			reasoningEffort: defaults.reasoningEffort ?? 'auto',
-			contextLimit: defaults.contextLimit ?? 0,
+			contextWindow: defaults.contextWindow ?? 0,
 			transcript: [],
 			turnIndex: 0,
 			cursor: null,
@@ -400,7 +438,7 @@ export class Sessions extends Service {
 		const session = this.store.build(policy, id, {
 			contextForm: config.contextForm,
 			reasoningEffort: config.reasoningEffort,
-			contextLimit: config.contextLimit,
+			contextWindow: config.contextWindow,
 		});
 		this._draft = session;
 		this._activeId = session.id;
@@ -418,6 +456,7 @@ export class Sessions extends Service {
 				workingDirectory: '',
 				commandTimeout: 60,
 				denyReadPaths: [],
+				confinement: { ...WORKSPACE_BOUNDARY },
 				model: 'auto',
 			});
 		}
@@ -583,6 +622,24 @@ export class Sessions extends Service {
 		const session = this.require(id);
 		session.marks.push(mark);
 		this.save(session);
+	}
+
+	/**
+	 * Writes a compaction down: the summary replaces the turns it covers in the chat record, and the
+	 * rewind points that sat inside those turns move with it. The caller has already decided what the
+	 * summary says; this only keeps the record and the marks consistent.
+	 *
+	 * It takes the caller's own session object rather than an id, because a turn holds one live copy
+	 * while it runs — reading the chat back from disk here would return a second copy, and whichever of
+	 * the two was saved last would silently win.
+	 */
+	compacted(session: Session, summary: SessionSummary, transcript: Message[]): void {
+		session.summary = summary;
+		session.marks = rebaseMarks(session.marks, summary.covers);
+		session.transcript = transcript;
+		session.cursor = null;
+		this.save(session);
+		this.changed(session.id);
 	}
 }
 

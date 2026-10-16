@@ -1,5 +1,7 @@
 /** Domain types shared by the agent kernel. This module must not import `vscode` or `cordis`. */
 
+import type { SandboxOptions } from './sandbox';
+
 /** Work modes, least capable first: chat only, then reads, writes and a full shell, then plan files. */
 export type WorkMode = 'chat' | 'ro' | 'sw' | 'aw' | 'pl';
 
@@ -56,6 +58,14 @@ export interface SwipeInfo {
 	extra?: { gen_id?: number; api?: string; model?: string };
 }
 
+/** What the workspace boundary applies to. `false` leaves that direction unrestricted. */
+export interface Confinement {
+	/** Reads outside the workspace are refused, by the file tools and inside the shell sandbox. */
+	read: boolean;
+	/** Writes outside the workspace are refused, by the file tools and inside the shell sandbox. */
+	write: boolean;
+}
+
 export interface SessionPolicy {
 	workMode: WorkMode;
 	approval: Approval;
@@ -63,6 +73,8 @@ export interface SessionPolicy {
 	workingDirectory: string;
 	commandTimeout: number;
 	denyReadPaths: string[];
+	/** How far outside the working directory reads and writes may reach. */
+	confinement: Confinement;
 	/** Workspace-relative folder for plan files; empty uses `.comonad/plans`. */
 	planDirectory?: string;
 	/** Model profile id, or `auto` for the first configured profile. */
@@ -86,7 +98,7 @@ export interface BackgroundTask {
 }
 
 export interface TaskApi {
-	start(command: string, cwd: string): BackgroundTask;
+	start(command: string, cwd: string, options: SandboxOptions): BackgroundTask;
 	read(id: string, tail?: number): string;
 	stop(id: string): boolean;
 	list(): BackgroundTask[];

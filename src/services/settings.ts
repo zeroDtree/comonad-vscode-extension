@@ -3,7 +3,7 @@ import { DEFAULT_GRAPH_SOURCE } from '../lib/mermaid';
 import { parseRules, type RuleSet } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { TAG_IMPORT, WI_SETTINGS_DEFAULTS, type RegexScript } from '../lib/tavern/types';
-import type { Approval, Capability, ReasoningEffort, WorkMode } from '../lib/types';
+import type { Approval, Capability, Confinement, ReasoningEffort, WorkMode } from '../lib/types';
 import type { Host } from './host';
 
 /** Typed view over the `comonad.*` settings section. */
@@ -30,6 +30,12 @@ export interface Profile {
 	temperature?: number;
 	topP?: number;
 	maxTokens?: number;
+	/**
+	 * The model's input window in tokens. This is what `Auto` resolves the chat's budget from, so a
+	 * model missing here counts against `DEFAULT_CONTEXT_WINDOW` and the panel says so rather than
+	 * guessing silently. Values come from the provider's own documentation.
+	 */
+	contextWindow?: number;
 	includeUsage?: boolean;
 	/** USD per million input tokens (cache miss), for /cost estimates. */
 	pricingIn?: number;
@@ -56,6 +62,10 @@ export function profileKeyEnvs(profile: Profile): string[] {
  * million tokens from https://api-docs.deepseek.com/quick_start/pricing — **peak** hours, cache-miss
  * input, so `/cost` is an upper bound (off-peak is half) while `pricingCachedIn` keeps long agent
  * loops honest, since a cached prompt costs 2 % of a fresh one.
+ *
+ * `contextWindow` is the provider's **input** window, not its maximum output: DeepSeek documents a
+ * 1M context for V4 Flash and V4 Pro on that same pricing page, and Google documents 1,048,576 input
+ * tokens for Gemini 3.8 Flash. A model added later needs the same figure from its own provider.
  */
 export const DEFAULT_PROFILES: Profile[] = [
 	{
@@ -66,6 +76,7 @@ export const DEFAULT_PROFILES: Profile[] = [
 		keyEnv: 'DEEPSEEK_API_KEY',
 		thinkingOff: 'thinking',
 		includeUsage: true,
+		contextWindow: 1_048_576,
 		pricingIn: 0.3,
 		pricingCachedIn: 0.006,
 		pricingOut: 1.2,
@@ -78,6 +89,7 @@ export const DEFAULT_PROFILES: Profile[] = [
 		keyEnv: 'DEEPSEEK_API_KEY',
 		thinkingOff: 'thinking',
 		includeUsage: true,
+		contextWindow: 1_048_576,
 		pricingIn: 1.32,
 		pricingCachedIn: 0.044,
 		pricingOut: 3.96,
@@ -94,8 +106,16 @@ export const DEFAULT_PROFILES: Profile[] = [
 		keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
 		thinkingOff: 'effort',
 		includeUsage: true,
+		contextWindow: 1_048_576,
 	},
 ];
+
+/**
+ * What a model with no configured window is assumed to hold. 128K is the floor every current
+ * frontier model clears, so a wrong guess costs an occasional unnecessary summary instead of a
+ * rejected request — and the panel says the number is a guess, so it can be corrected.
+ */
+export const DEFAULT_CONTEXT_WINDOW = 131_072;
 
 export interface PermissionsConfig {
 	allow: string[];
@@ -124,6 +144,10 @@ export interface Config {
 	workingDirectory: string;
 	commandTimeout: number;
 	denyReadPaths: string[];
+	/** Refuse reads outside the working directory, in the file tools and in the shell sandbox. */
+	confineRead: boolean;
+	/** Refuse writes outside the working directory, in the file tools and in the shell sandbox. */
+	confineWrite: boolean;
 	/** Workspace-relative folder for plan files; empty uses `.comonad/plans`. */
 	planDirectory: string;
 	maxSteps: number;
@@ -140,8 +164,8 @@ export interface Config {
 	contextForm: ContextForm;
 	displayForm: ContextForm;
 	reasoningEffort: ReasoningEffort;
-	contextLimit: number;
-	autoCompactChars: number;
+	/** Window override in tokens for new chats; `0` resolves from the model profile. */
+	contextWindow: number;
 	budgetUsd: number;
 	filterSensitiveEnv: boolean;
 	allowFullAccess: boolean;
@@ -229,6 +253,8 @@ export const CONFIG_KEYS = [
 	'workingDirectory',
 	'commandTimeout',
 	'denyReadPaths',
+	'confineRead',
+	'confineWrite',
 	'planDirectory',
 	'maxSteps',
 	'graph',
@@ -244,8 +270,7 @@ export const CONFIG_KEYS = [
 	'contextForm',
 	'displayForm',
 	'reasoningEffort',
-	'contextLimit',
-	'autoCompactChars',
+	'contextWindow',
 	'budgetUsd',
 	'filterSensitiveEnv',
 	'allowFullAccess',
@@ -332,6 +357,8 @@ export class Settings extends Service {
 			workingDirectory: value('workingDirectory', '') || folder,
 			commandTimeout: value('commandTimeout', 60),
 			denyReadPaths: value('denyReadPaths', ['.env', '**/.env']),
+			confineRead: value('confineRead', false),
+			confineWrite: value('confineWrite', true),
 			planDirectory: value('planDirectory', ''),
 			maxSteps: value('maxSteps', 48),
 			graph: value('graph', DEFAULT_GRAPH_SOURCE),
@@ -349,8 +376,7 @@ export class Settings extends Service {
 			contextForm: value('contextForm', 'rendered' as ContextForm),
 			displayForm: value('displayForm', 'rendered' as ContextForm),
 			reasoningEffort: value('reasoningEffort', 'auto' as ReasoningEffort),
-			contextLimit: value('contextLimit', 0),
-			autoCompactChars: value('autoCompactChars', 400_000),
+			contextWindow: value('contextWindow', 0),
 			budgetUsd: value('budgetUsd', 0),
 			filterSensitiveEnv: value('filterSensitiveEnv', true),
 			allowFullAccess: value('allowFullAccess', true),
@@ -429,7 +455,12 @@ export class Settings extends Service {
 	}
 
 	/** Applies a preset or partial policy to the workspace settings. */
-	async applyPolicy(patch: { mode?: WorkMode; approval?: Approval; network?: boolean }): Promise<void> {
+	async applyPolicy(patch: {
+		mode?: WorkMode;
+		approval?: Approval;
+		network?: boolean;
+		confinement?: Confinement;
+	}): Promise<void> {
 		if (patch.mode) {
 			await this.host.update('mode', patch.mode);
 		}
@@ -438,6 +469,10 @@ export class Settings extends Service {
 		}
 		if (patch.network !== undefined) {
 			await this.host.update('network', patch.network);
+		}
+		if (patch.confinement) {
+			await this.host.update('confineRead', patch.confinement.read);
+			await this.host.update('confineWrite', patch.confinement.write);
 		}
 		this.ctx.emit('settings/changed');
 	}

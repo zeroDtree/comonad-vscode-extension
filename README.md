@@ -48,9 +48,11 @@ File. Forking a chat and the rest live in the **Comonad** view in the Activity
 Bar and in the command palette. The composer
 keeps the model pill and send button; under the input box sit the **Work mode**, **Approval**, **↑
 Context**, **👁 Display** and **Network** pills — no status-bar buttons. The model pill opens the
-Cursor-style menu: **Reasoning** effort (thinking strength), a **Context** budget in tokens for the
-history sent to the model, and the **Model** list — all remembered per chat, with new chats starting
-from `comonad.reasoningEffort` and `comonad.contextLimit`. The two pills that list Rendered / Token /
+Cursor-style menu: **Reasoning** effort (thinking strength), a **Context window** in tokens, and the
+**Model** list — all remembered per chat, with new chats starting from `comonad.reasoningEffort` and
+`comonad.contextWindow`. **Auto** takes the window from the model's profile, which is the only setting
+that stays right when the model changes; the fixed sizes override it for a model whose window is not
+what its provider documents. The two pills that list Rendered / Token /
 Raw are told apart by their icons: **↑ Context** decides the shape of what this chat sends back
 (new chats start from the Context setting), **👁 Display** is the one control for how the whole
 transcript is drawn and redraws it at once (`comonad.displayForm`): **Rendered** draws every step in
@@ -283,10 +285,10 @@ copied.
 | --- | --- |
 | `/plan [task]` | research read-only, then write a plan file |
 | `/review [focus]` | review pending changes without editing |
-| `/compact [notes]` | summarize the conversation into one message |
+| `/summarize [notes]` | summarize the conversation to free up context (`/compress` and `/compact` are aliases) |
 | `/clear`, `/new` | start a fresh session |
 | `/fork` | fork this session and keep exploring in a fresh one |
-| `/context` | token budget breakdown (messages, tools, instructions) |
+| `/context` | window, budget breakdown and how full the window was on the last request |
 | `/status` | mode, model, workspace, sandbox and usage |
 | `/cost` | token usage for today and the session |
 | `/permissions` | mode capabilities and permission rules |
@@ -336,15 +338,48 @@ Three layers, evaluated in order, deny wins:
    everything the mode allows and `universal_reject` runs nothing. Approvals pause the turn;
    "Always allow" adds an allow rule.
 
-Shell commands run under `sandbox-exec` (macOS) or `bwrap` (Linux) with the workspace as the only
-writable path, network off by default, and `.env` files denied to both reading and writing.
-Commands shaped like `rm -rf`, `sudo`, `curl | sh`, `git push --force` and friends always prompt,
-even under accept policies; the `run_shell_unsandboxed` escalation tool prompts on every call.
-Secrets (API keys, tokens, passwords) are stripped from the environment of commands and tasks
-unless `comonad.filterSensitiveEnv` is disabled, and `.git` is never writable by file tools.
-Without an OS sandbox the command still requires approval. Presets combine all three layers:
-**Ask**, **Plan**, **Auto**, **Read only**, **Full access** (**Comonad: Select Preset**;
-`comonad.allowFullAccess: false` hides the unrestricted preset).
+Shell commands run under `sandbox-exec` (macOS) or `bwrap` (Linux). The workspace boundary is set by
+pair of settings: **`comonad.confineWrite`** (on by default) keeps writes inside the working
+directory, and **`comonad.confineRead`** (off by default) does the same for reads. Both apply to the
+file tools and to the shell sandbox, so a path the model names and a path a command touches meet the
+same rule; turning read confinement on also hides files like `~/.gitconfig` and `~/.npmrc` from `git`
+and `npm`. The file tools resolve symlinks before checking containment, so a link inside the workspace
+cannot reach outside it. Network is off by default, and `.env` files are denied to both reading and
+writing. Commands shaped like `rm -rf`, `sudo`, `curl | sh`, `git push --force` and friends always
+prompt, even under accept policies. Secrets (API keys, tokens, passwords) are stripped from the
+environment of commands and tasks unless `comonad.filterSensitiveEnv` is disabled, and `.git` is
+never writable by file tools. Without an OS sandbox the command still requires approval. Presets
+combine all three layers: **Ask**, **Plan**, **Auto**, **Read only**, **Full access**
+(**Comonad: Select Preset**; `comonad.allowFullAccess: false` hides the unrestricted preset, and
+**Full access** is the one preset that drops the workspace boundary).
+
+## The context window
+
+A request carries more than the conversation: a system prompt, the definitions of every tool the turn
+may run, and whatever the tavern layer composes. Those are paid for out of the same window, which is
+why a `128K` model does not hold 128K of chat. Comonad subtracts both before deciding whether the
+conversation fits.
+
+The window itself is data on the model profile (`contextWindow`), so **Auto** in the model menu
+resolves to whatever the current model actually is; the fixed entries override it for an endpoint
+whose window is not what its provider documents. A model with no window configured falls back to
+128K and says so in `/context` rather than pretending to know.
+
+**Past the window, older turns are folded into a summary — not cut.** The newest request is kept word
+for word, the summary is written into the chat itself where you can see it, and a second summarization
+extends the first instead of starting over. Three things follow from that being the only mechanism:
+
+- A turn that outgrows the window mid-flight is handled in two steps, cheapest first: old tool output
+  is elided, and only a request that still does not fit has the turns before it folded away. The
+  current turn is never folded — it is what you just asked for.
+- A summary that fails changes nothing. The conversation stays exactly as it was and the turn is
+  answered from it, because losing the record would be worse than a refused request.
+- **Rewind follows the summary.** Compacting replaces turns, so the rewind points that sat inside them
+  cannot be honoured and are dropped; the rest keep naming the same message they always did. After a
+  compaction the earliest point to rewind to is the summary itself.
+
+A request the endpoint refuses as too long — the case the estimate cannot predict — is retried once
+after being shrunk hard, so a mis-sized window costs a retry rather than the turn.
 
 ## Checkpoints and review
 
@@ -549,13 +584,14 @@ Hook example:
 ## Tools
 
 `list_dir`, `read_file`, `grep_files`, `write_file`, `apply_patch`, `run_shell_readonly`, `run_shell`,
-`run_shell_unsandboxed`, `start_shell` / `shell_output` / `stop_shell` (background), `list_plans` / `read_plan` / `write_plan`,
+`start_shell` / `shell_output` / `stop_shell` (background), `list_plans` / `read_plan` / `write_plan`,
 `todo_write`, `calculate` / `describe_numbers` / `percentile` / `convert_units`, `fetch_url`,
 `web_search`, `find_files`, `find_symbols`, `get_diagnostics`, `apply_edits`, `git_diff`, `run_task`,
 `ask_user`, `agent` (subagents), `skill`, `memory`, plus `server__tool` for every MCP tool.
 
 Every tool declares a capability, whether it needs network, and whether it needs a workspace; the
-registry filters by all three before the model ever sees it.
+registry filters by all three before the model ever sees it. Read and write paths go through the same
+workspace guard, and every shell — foreground or background — runs under the OS sandbox.
 
 ## Architecture
 
@@ -594,11 +630,12 @@ src/
 The default agent loop is a Mermaid graph (`comonad.graph`); edit it in **Comonad: Open Settings**.
 The panel is tabbed — **Graph** (Mermaid source beside a live preview, Max steps, parsed Nodes /
 Routes), **Agent** (model, work mode, approval, display, context, network, working directory,
-command timeout, plan directory, deny read paths), **Rules** (the `comonad.permissions` allow / ask /
+command timeout, plan directory, deny read paths, and the **Restrict to workspace** pair that narrows
+reads and writes to the working directory), **Rules** (the `comonad.permissions` allow / ask /
 deny lists, one rule per line, validated on save), **Inspect** (a read-only tab with two sub-tabs:
 **Tool Policy Flow (TPF)** — the tool-call gate as a Mermaid diagram: the work-mode, network and
 workspace checks, then two frames — **your rules** and the **approval policy**, whose five settings each
-get their own node — with the built-in unsandboxed / dangerous-command escalation between them; every
+get their own node — with the unsandboxed / dangerous-command escalation between them; every
 gate ends in its own **Rejected** / **Asks you** / **Runs** node right beside it, so the chart never
 draws an edge across itself; generated from the policy tables, so it cannot drift from the code — and
 **Prompts** — every prompt the model can be given: Comonad's own named blocks, each tool's definition

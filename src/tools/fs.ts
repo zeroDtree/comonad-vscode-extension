@@ -1,29 +1,28 @@
 import { readdir, readFile, stat, writeFile, mkdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
-import { assertReadable, isDeniedRead, isProtectedPath, PathEscapeError, resolveInside } from '../lib/sandbox';
+import { guardPath, isDeniedRead } from '../lib/sandbox';
 import { objectSchema, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
 
-/** Workspace file tools. Every path is confined to the working directory. */
+/** Workspace file tools. Every path the model names goes through `guardPath`. */
 
 const SKIP = new Set(['node_modules', '.git', 'dist', 'out', '.next', 'build', 'vendor']);
 
-function readable(ctx: ToolContext, path: string): string {
-	const target = resolveInside(ctx.policy.workingDirectory, path);
-	assertReadable(ctx.policy.workingDirectory, target, ctx.policy.denyReadPaths);
-	return target;
+function readable(ctx: ToolContext, path: string): Promise<string> {
+	return guardPath(ctx.policy.workingDirectory, path, {
+		access: 'read',
+		confinement: ctx.policy.confinement,
+		denyReadPaths: ctx.policy.denyReadPaths,
+	});
 }
 
-function writable(ctx: ToolContext, path: string): string {
-	const target = resolveInside(ctx.policy.workingDirectory, path);
-	if (isDeniedRead(ctx.policy.workingDirectory, target, ctx.policy.denyReadPaths)) {
-		throw new PathEscapeError(`writing ${target} is denied by policy`);
-	}
-	if (isProtectedPath(ctx.policy.workingDirectory, target)) {
-		throw new PathEscapeError('the .git directory is protected; use git commands through the shell for repository changes');
-	}
-	return target;
+function writable(ctx: ToolContext, path: string): Promise<string> {
+	return guardPath(ctx.policy.workingDirectory, path, {
+		access: 'write',
+		confinement: ctx.policy.confinement,
+		denyReadPaths: ctx.policy.denyReadPaths,
+	});
 }
 
 async function walk(dir: string, visit: (file: string) => Promise<void>): Promise<void> {
@@ -56,7 +55,7 @@ export const fsTools = toolset([
 		parameters: objectSchema({ path: { type: 'string', description: 'Directory relative to the workspace root.' } }, ['path']),
 		async execute(args, ctx) {
 			const { path } = args as { path: string };
-			const target = readable(ctx, path);
+			const target = await readable(ctx, path);
 			const entries = await readdir(target, { withFileTypes: true });
 			const lines = entries
 				.filter((entry) => entry.name !== '.DS_Store')
@@ -81,7 +80,7 @@ export const fsTools = toolset([
 		),
 		async execute(args, ctx) {
 			const { path, startLine, lines } = args as { path: string; startLine?: number; lines?: number };
-			const text = await readFile(readable(ctx, path), 'utf8');
+			const text = await readFile(await readable(ctx, path), 'utf8');
 			if (startLine === undefined && lines === undefined) {
 				return text.length > 30_000 ? `${text.slice(0, 30_000)}\n[...truncated, ${text.length} chars]` : text;
 			}
@@ -109,12 +108,14 @@ export const fsTools = toolset([
 		async execute(args, ctx) {
 			const { pattern, path = '.' } = args as { pattern: string; path?: string };
 			const regex = new RegExp(pattern, 'i');
-			const root = readable(ctx, path);
+			const root = await readable(ctx, path);
 			const info = await stat(root);
 			const files: string[] = [];
 			if (info.isDirectory()) {
 				await walk(root, async (file) => {
-					files.push(file);
+					if (!isDeniedRead(root, file, ctx.policy.denyReadPaths)) {
+						files.push(file);
+					}
 				});
 			} else {
 				files.push(root);
@@ -148,7 +149,7 @@ export const fsTools = toolset([
 		parameters: objectSchema({ path: { type: 'string' }, content: { type: 'string' } }, ['path', 'content']),
 		async execute(args, ctx) {
 			const { path, content } = args as { path: string; content: string };
-			const target = writable(ctx, path);
+			const target = await writable(ctx, path);
 			const write = async () => {
 				await mkdir(dirname(target), { recursive: true });
 				await writeFile(target, content);
@@ -170,7 +171,7 @@ export const fsTools = toolset([
 		parameters: objectSchema({ path: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' } }, ['path', 'old', 'new']),
 		async execute(args, ctx) {
 			const { path, old, new: replacement } = args as { path: string; old: string; new: string };
-			const target = writable(ctx, path);
+			const target = await writable(ctx, path);
 			const text = await readFile(target, 'utf8');
 			if (!text.includes(old)) {
 				return `Error: the old text was not found in ${path}`;

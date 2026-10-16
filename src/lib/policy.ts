@@ -1,4 +1,4 @@
-import type { Approval, Capability, SessionPolicy, ToolCall, ToolSpec, WorkMode } from './types';
+import type { Approval, Capability, Confinement, SessionPolicy, ToolCall, ToolSpec, WorkMode } from './types';
 
 /** Modes, capability gating, permission rules and the approval gate. Pure module. */
 
@@ -34,20 +34,28 @@ export const PRESET_LABELS: Record<string, string> = {
 	full: 'Unrestricted — no sandbox, network on (careful)',
 };
 
-export function presetPolicy(preset: string): { workMode: WorkMode; approval: Approval; network: boolean } {
+export function presetPolicy(preset: string): { workMode: WorkMode; approval: Approval; network: boolean; confinement: Confinement } {
 	switch (preset) {
 		case 'plan':
-			return { workMode: 'pl', approval: 'whitelist_accept', network: false };
+			return { workMode: 'pl', approval: 'whitelist_accept', network: false, confinement: WORKSPACE_BOUNDARY };
 		case 'auto':
-			return { workMode: 'aw', approval: 'universal_accept', network: false };
+			return { workMode: 'aw', approval: 'universal_accept', network: false, confinement: WORKSPACE_BOUNDARY };
 		case 'readonly':
-			return { workMode: 'ro', approval: 'whitelist_accept', network: false };
+			return { workMode: 'ro', approval: 'whitelist_accept', network: false, confinement: WORKSPACE_BOUNDARY };
 		case 'full':
-			return { workMode: 'aw', approval: 'universal_accept', network: true };
+			// The preset's whole point is to drop the boundary, so it is the one that moves it.
+			return { workMode: 'aw', approval: 'universal_accept', network: true, confinement: { read: false, write: false } };
 		default:
-			return { workMode: 'sw', approval: 'manual', network: false };
+			return { workMode: 'sw', approval: 'manual', network: false, confinement: WORKSPACE_BOUNDARY };
 	}
 }
+
+/**
+ * The boundary the shipped settings use, and the one every preset but `full` restores: writes stay
+ * inside the working directory, reads do not. Confining reads is opt-in, because it costs commands
+ * like `git` and `npm` access to their per-user configuration.
+ */
+export const WORKSPACE_BOUNDARY: Confinement = { read: false, write: true };
 
 export function capabilityAllowed(capability: Capability, mode: WorkMode): boolean {
 	return MODE_CAPS[mode].has(capability);

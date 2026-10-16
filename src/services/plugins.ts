@@ -469,7 +469,12 @@ export class Plugins extends Service {
 		return this.provided.get(`${id}\u0000injects`) ?? [];
 	}
 
-	/** Unloads every row and applies the list again: what a new `cordis.yml` or a toggle means. */
+	/**
+	 * Unloads every row and applies the list from scratch, which is the only way to take up a plugin's
+	 * changed *code*: `reconcile()` leaves an unedited row alone, so a rebuilt bundle would keep running
+	 * otherwise. `cordis.yml` and a toggle do **not** need this — `reconcile()` covers them without
+	 * disturbing anything else — so nothing in the UI calls it and a caller reaches for it on purpose.
+	 */
 	async reload(): Promise<PluginState[]> {
 		// A watcher can fire while the tree is still being mounted, and a mount started from a context
 		// that is not active yet would fail. Waiting is the difference between "apply this again" and
@@ -632,8 +637,13 @@ export class Plugins extends Service {
 	 * Applies the list again, row by row: a row whose line did not change is left running, and only the
 	 * rows that appeared, went away or were edited are applied. Editing a `cordis.yml` therefore does not
 	 * restart the whole tree — an open panel, a running turn and a watched folder are not collateral —
-	 * while a row's own change still lands at once. `reload()` is the blunt version, for the button: a
-	 * plugin's *code* may have changed, and nothing here can tell that from the outside.
+	 * while a row's own change still lands at once.
+	 *
+	 * This is what the panel's **Apply the list again** does, and what a row toggle does after it writes
+	 * the file: the two are the same operation, which is why the button's copy says the change it makes is
+	 * the one you could make by hand. What it cannot see is a plugin's *code* — a row nobody edited keeps
+	 * the mount it had, so rebuilding a plugin and pressing the button leaves the old bundle running.
+	 * `reload()` is the call that takes the whole list down, and it is deliberately not wired to a button.
 	 */
 	async reconcile(): Promise<PluginState[]> {
 		const { rows, errors } = this.resolveRows();

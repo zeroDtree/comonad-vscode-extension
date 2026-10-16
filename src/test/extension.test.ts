@@ -1,13 +1,21 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
-import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule } from '../lib/policy';
-import { applyContextForm, applyContextLimit } from '../lib/prompt';
-import { isProtectedPath, PathEscapeError, resolveInside, sanitizedEnv } from '../lib/sandbox';
+import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule, WORKSPACE_BOUNDARY } from '../lib/policy';
+import {
+	applyContextForm,
+	DEFAULT_OUTPUT_RESERVE,
+	elideToolResults,
+	estimateMessages,
+	planCompaction,
+	resolveBudget,
+} from '../lib/prompt';
+import { isContextOverflow, ModelRequestError } from '../lib/openai';
+import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, PathEscapeError, resolveInside, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
 import { listEndpointModels, openAiChat } from '../lib/openai';
 import type { ApprovalRequest, Message, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
@@ -18,9 +26,9 @@ import { fsTools } from '../tools/fs';
 import { agentTools } from '../tools/misc';
 import { hostStorage, type Host } from '../services/host';
 import { Context, Service, type Plugin } from 'cordis';
-import { SessionStore, unusedChat } from '../services/sessions';
+import { rebaseMarks, SessionStore, unusedChat, type Mark } from '../services/sessions';
 import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
-import { CONFIG_KEYS, DEPRECATED_CONFIG_KEYS, profileKeyEnvs } from '../services/settings';
+import { CONFIG_KEYS, DEFAULT_CONTEXT_WINDOW, DEPRECATED_CONFIG_KEYS, profileKeyEnvs } from '../services/settings';
 import { toolset } from '../services/tools';
 import { promptText } from '../services/agent';
 import { PLUGINS, ROWS } from '../app';
@@ -101,6 +109,7 @@ const policy = (patch: Partial<SessionPolicy> = {}): SessionPolicy => ({
 	workingDirectory: '/tmp/workspace',
 	commandTimeout: 60,
 	denyReadPaths: [],
+	confinement: { read: false, write: false },
 	model: 'auto',
 	...patch,
 });
@@ -164,9 +173,20 @@ suite('Token counting', () => {
 
 suite('Comonad domain', () => {
 	test('policy presets', () => {
-		assert.deepStrictEqual(presetPolicy('plan'), { workMode: 'pl', approval: 'whitelist_accept', network: false });
-		assert.deepStrictEqual(presetPolicy('auto'), { workMode: 'aw', approval: 'universal_accept', network: false });
+		assert.deepStrictEqual(presetPolicy('plan'), {
+			workMode: 'pl',
+			approval: 'whitelist_accept',
+			network: false,
+			confinement: WORKSPACE_BOUNDARY,
+		});
+		assert.deepStrictEqual(presetPolicy('auto'), {
+			workMode: 'aw',
+			approval: 'universal_accept',
+			network: false,
+			confinement: WORKSPACE_BOUNDARY,
+		});
 		assert.strictEqual(presetPolicy('full').network, true);
+		assert.deepStrictEqual(presetPolicy('full').confinement, { read: false, write: false }, 'full is the preset that drops the boundary');
 	});
 
 	test('manual approval confirms and universal reject rejects', () => {
@@ -304,6 +324,142 @@ suite('Comonad domain', () => {
 	test('path guard rejects escapes', () => {
 		assert.strictEqual(resolveInside('/tmp/ws', 'src/a.ts'), '/tmp/ws/src/a.ts');
 		assert.throws(() => resolveInside('/tmp/ws', '../secrets'), PathEscapeError);
+	});
+
+	suite('workspace boundary', () => {
+		/** A workspace holding files, a `.env` behind a link, and a symlink that points outside it. */
+		function tree() {
+			const root = mkdtempSync(join(tmpdir(), 'comonad-boundary-'));
+			const outside = mkdtempSync(join(tmpdir(), 'comonad-outside-'));
+			const workspace = join(root, 'ws');
+			mkdirSync(workspace);
+			mkdirSync(join(workspace, '.git'));
+			mkdirSync(join(workspace, 'nested'));
+			writeFileSync(join(outside, 'secret.txt'), 'secret');
+			writeFileSync(join(workspace, 'inside.txt'), 'inside');
+			writeFileSync(join(workspace, '.env'), 'TOKEN=1');
+			writeFileSync(join(workspace, 'nested', '.env'), 'TOKEN=2');
+			symlinkSync(outside, join(workspace, 'link'));
+			symlinkSync('nested', join(workspace, 'alias'));
+			return { root, outside, workspace };
+		}
+
+		function cleanup(dir: string): void {
+			rmSync(dir, { recursive: true, force: true });
+		}
+
+		test('a symlink inside the workspace cannot reach outside it', async () => {
+			const { root, outside, workspace } = tree();
+			try {
+				const escape = { access: 'read' as const, denyReadPaths: [] as string[] };
+				await assert.rejects(
+					guardPath(workspace, 'link/secret.txt', { ...escape, confinement: { read: true, write: true } }),
+					PathEscapeError,
+				);
+				assert.strictEqual(
+					await guardPath(workspace, 'link/secret.txt', { ...escape, confinement: { read: false, write: true } }),
+					join(workspace, 'link', 'secret.txt'),
+				);
+				assert.strictEqual(
+					await guardPath(workspace, 'inside.txt', { ...escape, confinement: { read: true, write: true } }),
+					join(workspace, 'inside.txt'),
+				);
+				// A link that stays inside is fine either way, and still resolves to its target.
+				assert.strictEqual(
+					await guardPath(workspace, 'alias/inside.txt', { ...escape, confinement: { read: true, write: true } }),
+					join(workspace, 'alias', 'inside.txt'),
+				);
+			} finally {
+				cleanup(root);
+				cleanup(outside);
+			}
+		});
+
+		test('a write target that does not exist yet is checked through its parent', async () => {
+			const { root, outside, workspace } = tree();
+			try {
+				const confined = { access: 'write' as const, denyReadPaths: [] as string[], confinement: { read: false, write: true } };
+				assert.strictEqual(
+					await guardPath(workspace, 'src/deep/new.ts', confined),
+					join(workspace, 'src', 'deep', 'new.ts'),
+				);
+				await assert.rejects(guardPath(workspace, 'link/new.ts', confined), PathEscapeError);
+				assert.strictEqual(
+					await guardPath(workspace, 'link/new.ts', { ...confined, confinement: { read: false, write: false } }),
+					join(workspace, 'link', 'new.ts'),
+				);
+			} finally {
+				cleanup(root);
+				cleanup(outside);
+			}
+		});
+
+		test('deny patterns and the .git guard hold on the real path', async () => {
+			const { root, outside, workspace } = tree();
+			try {
+				const open = { confinement: { read: false, write: false } };
+				await assert.rejects(
+					guardPath(workspace, '.env', { access: 'read', denyReadPaths: ['.env'], ...open }),
+					PathEscapeError,
+				);
+				// The basename rule reads the file the link lands on, not the name the model wrote.
+				await assert.rejects(
+					guardPath(workspace, 'alias/.env', { access: 'read', denyReadPaths: ['**/.env'], ...open }),
+					PathEscapeError,
+				);
+				await assert.rejects(
+					guardPath(workspace, '.git/config', { access: 'write', denyReadPaths: [], ...open }),
+					PathEscapeError,
+				);
+				assert.strictEqual(
+					await guardPath(workspace, 'nested/.env', { access: 'read', denyReadPaths: [], ...open }),
+					join(workspace, 'nested', '.env'),
+					'with no pattern for it, the same file is readable',
+				);
+			} finally {
+				cleanup(root);
+				cleanup(outside);
+			}
+		});
+
+		test('the macOS profile applies each boundary flag', () => {
+			const base: SandboxOptions = { writable: true, confinement: { read: false, write: false }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+			const open = buildSbpl('/ws', base);
+			assert.ok(!open.includes('(deny file-write*)'));
+			assert.ok(!open.includes('(allow file-write* (subpath "/ws"))'));
+			assert.ok(!open.includes('(deny file-read*)'));
+
+			const writes = buildSbpl('/ws', { ...base, confinement: { read: false, write: true } });
+			assert.ok(writes.includes('(allow file-write* (subpath "/ws"))'));
+			assert.ok(!writes.includes('(deny file-read*)'));
+
+			const both = buildSbpl('/ws', { ...base, confinement: { read: true, write: true } });
+			assert.ok(both.includes('(deny file-read*)'));
+			assert.ok(both.includes('(allow file-read* (subpath "/ws"))'));
+
+			const readonly = buildSbpl('/ws', { ...base, writable: false, confinement: { read: true, write: true } });
+			assert.ok(readonly.includes('(deny file-write*)'));
+			assert.ok(!readonly.includes('(allow file-write* (subpath "/ws"))'));
+		});
+
+		test('the bwrap mounts follow the boundary flags', () => {
+			const base: SandboxOptions = { writable: true, confinement: { read: true, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+			const confined = bwrapArguments('bwrap', ['ls'], '/ws', base).join(' ');
+			assert.ok(!confined.includes('--ro-bind / /'));
+			assert.ok(confined.includes('--ro-bind /usr /usr'));
+			assert.ok(confined.includes('--bind /ws /ws'));
+
+			const reads = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, confinement: { read: false, write: true } }).join(' ');
+			assert.ok(reads.includes('--ro-bind / /'));
+			assert.ok(reads.includes('--bind /ws /ws'));
+
+			const open = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, confinement: { read: false, write: false } }).join(' ');
+			assert.ok(open.includes('--bind / /'));
+
+			const readonly = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, writable: false }).join(' ');
+			assert.ok(readonly.includes('--ro-bind /ws /ws'));
+			assert.ok(!readonly.includes('--bind /ws /ws'));
+		});
 	});
 
 	test('unified diff parsing yields hunks', () => {
@@ -610,16 +766,77 @@ suite('Comonad domain', () => {
 		assert.notStrictEqual(raw, transcript);
 	});
 
-	test('context limits trim whole turns', () => {
+
+
+	test('a budget is the window less what the request always carries', () => {
+		const budget = resolveBudget(1_000, 200, 300);
+		assert.deepStrictEqual(budget, { window: 1_000, reserve: 200, overhead: 300, input: 500 });
+		// A window the fixed parts already fill leaves nothing, rather than a negative or an inflated budget:
+		// spending more than the window allows is the one thing the budget must never do.
+		assert.strictEqual(resolveBudget(100, 200, 300).input, 0);
+		assert.strictEqual(resolveBudget(1_000, 0, 0).input, 1_000);
+		assert.ok(DEFAULT_OUTPUT_RESERVE > 0);
+	});
+
+	test('a compaction keeps the newest turn and folds the rest', () => {
 		const messages: Message[] = [
 			{ role: 'user', content: 'a'.repeat(400) },
 			{ role: 'assistant', content: 'b'.repeat(400) },
 			{ role: 'user', content: 'c'.repeat(400) },
 			{ role: 'assistant', content: 'd'.repeat(400) },
+			{ role: 'user', content: 'e'.repeat(400) },
 		];
-		assert.strictEqual(applyContextLimit(messages, 0).length, 4);
-		assert.deepStrictEqual(applyContextLimit(messages, 250).map((message) => message.content[0]), ['c', 'd']);
-		assert.deepStrictEqual(applyContextLimit(messages, 150).map((message) => message.content[0]), ['c', 'd']);
+		// Nothing fits, so only the last turn is kept — and it is kept whole.
+		const squeezed = planCompaction(messages, 0);
+		assert.deepStrictEqual(squeezed.recent.map((message) => message.content[0]), ['e']);
+		assert.deepStrictEqual(squeezed.older.map((message) => message.content[0]), ['a', 'b', 'c', 'd']);
+		// Room for three messages keeps the newest turn and the one before it, cutting at a turn boundary
+		// rather than inside a turn.
+		const roomy = planCompaction(messages, 400);
+		assert.deepStrictEqual(roomy.recent.map((message) => message.content[0]), ['c', 'd', 'e']);
+		assert.deepStrictEqual(roomy.older.map((message) => message.content[0]), ['a', 'b']);
+		// A single turn has nothing to fold, which is what makes the callers leave the chat alone.
+		assert.deepStrictEqual(planCompaction([{ role: 'user', content: 'only' }], 0).older, []);
+	});
+
+	test('eliding tool output shrinks the request without breaking a call from its result', () => {
+		const messages: Message[] = [
+			{ role: 'user', content: 'go' },
+			{ role: 'assistant', content: '', toolCalls: [{ id: 't1', name: 'read_file', arguments: '{}' }] },
+			{ role: 'tool', toolCallId: 't1', content: 'x'.repeat(20_000) },
+			{ role: 'assistant', content: 'done' },
+		];
+		const before = estimateMessages(messages);
+		const { messages: elided, changed } = elideToolResults(messages, 200);
+		assert.ok(changed, 'the old tool result is what gets elided');
+		assert.strictEqual(elided.length, messages.length, 'no message is dropped');
+		assert.strictEqual(elided[2]!.toolCallId, 't1', 'the result still names its call');
+		assert.ok(elided[2]!.content.length < messages[2]!.content.length);
+		assert.ok(elided[2]!.content.includes('elided'));
+		assert.ok(estimateMessages(elided) < before);
+		assert.deepStrictEqual(elided[0], messages[0], 'nothing else is touched');
+		// A request that already fits is left exactly as it was.
+		const untouched = elideToolResults(messages, 1_000_000);
+		assert.strictEqual(untouched.changed, false);
+	});
+
+	test('a compaction moves the rewind points that survive it, and drops the rest', () => {
+		const marks: Mark[] = [0, 3, 8, 12].map((length) => ({ turn: length, entryCount: length, length, at: length, text: `t${length}` }));
+		const rebased = rebaseMarks(marks, 5);
+		// A mark inside the folded stretch points at messages that no longer exist, so it goes.
+		assert.deepStrictEqual(rebased.map((mark) => mark.length), [4, 8]);
+		assert.deepStrictEqual(rebased.map((mark) => mark.turn), [8, 12], 'everything else about a mark is untouched');
+		// A mark exactly at the fold keeps only the summary: that is the earliest point left to rewind to.
+		assert.deepStrictEqual(rebaseMarks([{ turn: 0, entryCount: 0, length: 5, at: 0, text: 't' }], 5).map((mark) => mark.length), [1]);
+		assert.deepStrictEqual(rebaseMarks(marks, 100), [], 'a stretch longer than every mark leaves none of them');
+	});
+
+	test('a context rejection is told apart from a request that is simply wrong', () => {
+		assert.ok(isContextOverflow(new ModelRequestError(400, 'This model\'s maximum context length is 128000 tokens')));
+		assert.ok(isContextOverflow(new ModelRequestError(413, 'prompt is too long')));
+		assert.ok(!isContextOverflow(new ModelRequestError(400, 'invalid model name')), 'a 400 about the model is not a size problem');
+		assert.ok(!isContextOverflow(new ModelRequestError(401, 'maximum context length exceeded')), 'the status has to match too');
+		assert.ok(!isContextOverflow(new Error('model request failed (400): maximum context length')), 'a plain error is not one of ours');
 	});
 
 	test('a `hidden` attribute hides, in both webview documents', () => {
@@ -1304,7 +1521,8 @@ suite('Cordis kernel', () => {
 				'only the edited row was applied, and the rows the edit did not mention were left running',
 			);
 
-			// The button is the blunt one: a plugin's own file may have changed, which no diff can see.
+			// A reload is the blunt one: a plugin's own file may have changed, which no diff can see, so
+			// unlike `reconcile()` it may not leave an unedited row running.
 			await kernel.ctx.plugins.reload();
 			assert.ok(log.includes('unload provider'), 'a reload takes the whole list down and applies it again');
 		} finally {
@@ -2113,20 +2331,20 @@ suite('Cordis kernel', () => {
 		try {
 			await kernel.ctx.settings.update('contextForm', 'raw');
 			await kernel.ctx.settings.update('reasoningEffort', 'low');
-			await kernel.ctx.settings.update('contextLimit', 65_536);
+			await kernel.ctx.settings.update('contextWindow', 65_536);
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'ctx');
 			assert.strictEqual(session.contextForm, 'raw');
 			assert.strictEqual(session.reasoningEffort, 'low');
-			assert.strictEqual(session.contextLimit, 65_536);
+			assert.strictEqual(session.contextWindow, 65_536);
 			session.contextForm = 'token';
 			session.reasoningEffort = 'high';
-			session.contextLimit = 0;
+			session.contextWindow = 0;
 			session.transcript.push({ role: 'user', content: 'hi' });
 			kernel.ctx.sessions.save(session);
 			const saved = kernel.ctx.sessions.get('ctx');
 			assert.strictEqual(saved?.contextForm, 'token');
 			assert.strictEqual(saved?.reasoningEffort, 'high');
-			assert.strictEqual(saved?.contextLimit, 0);
+			assert.strictEqual(saved?.contextWindow, 0);
 		} finally {
 			await kernel.dispose();
 		}
@@ -2174,7 +2392,7 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('the agent forwards the chat reasoning effort and drops over-budget turns', async () => {
+	test('the agent forwards the chat reasoning effort and summarizes a conversation that no longer fits', async () => {
 		const kernel = await createTestKernel();
 		try {
 			let seen: Message[] = [];
@@ -2182,6 +2400,10 @@ suite('Cordis kernel', () => {
 			kernel.ctx.llm.use({
 				name: 'test',
 				async chat(request) {
+					// The summarization call is the one with two messages and a summarizing system prompt.
+					if (request.messages.length === 2 && request.messages[0]!.content.startsWith('You summarize')) {
+						return { message: { role: 'assistant', content: 'SUMMARY OF THE EARLIER TURNS' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
 					seen = request.messages;
 					effort = request.reasoningEffort;
 					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -2189,12 +2411,304 @@ suite('Cordis kernel', () => {
 			});
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'gen');
 			session.reasoningEffort = 'high';
-			session.contextLimit = 50;
-			session.transcript.push({ role: 'user', content: 'a'.repeat(400) }, { role: 'assistant', content: 'b'.repeat(400) });
+			// A conversation far past the window, so the fold happens whatever the tool definitions cost.
+			session.contextWindow = 8_000;
+			session.policy.maxTokens = 500;
+			for (let turn = 0; turn < 5; turn += 1) {
+				session.transcript.push(
+					{ role: 'user', content: `ask ${turn} ${'a'.repeat(4_000)}` },
+					{ role: 'assistant', content: `answer ${turn} ${'b'.repeat(4_000)}` },
+				);
+			}
 			kernel.ctx.sessions.save(session);
-			await kernel.ctx.agent.runTurn({ text: 'hi', sessionId: 'gen' });
+			await kernel.ctx.agent.runTurn({ text: 'the newest ask', sessionId: 'gen' });
+
 			assert.strictEqual(effort, 'high');
-			assert.ok(!seen.some((message) => message.content.startsWith('a')), 'the over-budget turn is dropped');
+			// The turns before this one are gone from the request, and the model is told what they said.
+			assert.ok(!seen.some((message) => message.content.startsWith('ask 0 ')), 'the folded turns are no longer sent verbatim');
+			assert.ok(seen.some((message) => message.content.includes('SUMMARY OF THE EARLIER TURNS')), 'and the summary stands in for them');
+			// The newest request is kept word for word, which is the whole point of folding rather than cutting.
+			assert.ok(seen.some((message) => message.role === 'user' && message.content === 'the newest ask'));
+			// The chat itself carries the summary, so what was folded is visible rather than quietly lost.
+			const folded = kernel.ctx.sessions.require('gen');
+			assert.strictEqual(folded.transcript[0]?.content.includes('SUMMARY OF THE EARLIER TURNS'), true);
+			assert.ok(folded.summary && folded.summary.covers > 0, 'the summary records what it stands in for');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a compaction keeps every rewind point it can still honour', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages[0]!.content.startsWith('You summarize')) {
+						return { message: { role: 'assistant', content: 'SUMMARY' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'marks');
+			session.contextWindow = 8_000;
+			session.policy.maxTokens = 500;
+			// Five turns, each with a rewind point recorded the way the agent records one: the transcript
+			// length at the end of the turn.
+			const original: Message[] = [];
+			for (let turn = 0; turn < 5; turn += 1) {
+				original.push({ role: 'user', content: `ask-${turn}-${'a'.repeat(4_000)}` });
+				original.push({ role: 'assistant', content: `answer-${turn}-${'b'.repeat(4_000)}` });
+				session.marks.push({ turn, entryCount: turn, length: original.length, at: turn, text: `t${turn}` });
+			}
+			session.transcript.push(...original);
+			kernel.ctx.sessions.save(session);
+
+			await kernel.ctx.agent.runTurn({ text: 'the newest ask', sessionId: 'marks' });
+
+			const folded = kernel.ctx.sessions.require('marks');
+			const covers = folded.summary?.covers ?? 0;
+			assert.ok(covers > 0, 'the turn folded the older turns away');
+
+			// A mark only survives if it pointed at or past the folded stretch, and it must still name the
+			// same message it named before — through the summary that now sits in front of it.
+			for (const length of [2, 4, 6, 8, 10]) {
+				const kept = folded.marks.find((mark) => mark.turn === length / 2 - 1);
+				if (length < covers) {
+					assert.strictEqual(kept, undefined, `the mark inside the folded stretch is gone (length ${length})`);
+					continue;
+				}
+				assert.ok(kept, `the mark past the folded stretch survives (length ${length})`);
+				assert.strictEqual(kept.length, length - covers + 1);
+				const landed = folded.transcript[kept.length - 1];
+				if (length === covers) {
+					// The mark named the whole folded stretch, and the summary is all that stands for it now.
+					assert.ok(landed?.content.includes('SUMMARY'), `the boundary mark lands on the summary (length ${length})`);
+					continue;
+				}
+				assert.strictEqual(
+					landed?.content,
+					original[length - 1]?.content,
+					`rewinding to the mark lands on the message it always meant (length ${length})`,
+				);
+			}
+			assert.ok(folded.marks.every((mark) => mark.length <= folded.transcript.length), 'no mark points past the transcript');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a long turn is shrunk mid-flight without ever orphaning a tool result', async () => {
+		const kernel = await createTestKernel();
+		try {
+			// A tool whose output alone overruns the window, which is how a turn grows past it.
+			kernel.ctx.tools.register({
+				name: 'big_read',
+				description: 'Reads something enormous.',
+				capability: 'ro',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: objectSchema({}),
+				execute: async () => `START ${'x'.repeat(60_000)} END`,
+			});
+			const calls: Message[][] = [];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					calls.push(request.messages);
+					if (request.tools.some((tool) => tool.name === 'big_read') && !request.messages.some((message) => message.role === 'tool')) {
+						const toolCall: ToolCall = { id: 'big-1', name: 'big_read', arguments: '{}' };
+						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'read it all' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'longturn');
+			// The window plus the turn's own tool output is well past what one request may carry.
+			session.contextWindow = 12_000;
+			session.policy.maxTokens = 500;
+			kernel.ctx.sessions.save(session);
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'read everything', sessionId: 'longturn' });
+			assert.strictEqual(result.text, 'read it all');
+			assert.ok(calls.length >= 2, 'the turn took more than one step');
+
+			const last = calls[calls.length - 1]!;
+			// The call and its result still travel together: an endpoint refuses a result with no call
+			// behind it, so the shrink must never separate them.
+			const answered = new Set<string>();
+			for (const message of last) {
+				if (message.role === 'assistant') {
+					for (const call of message.toolCalls ?? []) {
+						answered.add(call.id);
+					}
+				}
+				if (message.role === 'tool') {
+					assert.ok(answered.has(message.toolCallId ?? ''), `tool result ${message.toolCallId} still names its call`);
+				}
+			}
+			// And the enormous result is no longer carried whole: that is what made room for the answer.
+			const toolText = last.filter((message) => message.role === 'tool').map((message) => message.content).join('');
+			assert.ok(toolText.includes('elided'), 'the oversized tool output was elided');
+			assert.ok(toolText.length < 60_000, `and it shrank rather than being resent whole (${toolText.length} chars)`);
+			// The prompt the turn is answering is still there, word for word.
+			assert.ok(last.some((message) => message.role === 'user' && message.content === 'read everything'));
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a model with no window of its own uses the fallback, and says so', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			// A profile is configured, but it declares no window — which is every endpoint added by hand.
+			await kernel.ctx.settings.update('profiles', [
+				{ id: 'custom', label: 'A custom endpoint', base: 'https://example.invalid', model: 'whatever', keyEnv: 'K' },
+			]);
+			await kernel.ctx.settings.update('model', 'custom');
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'nowin');
+			assert.strictEqual(kernel.ctx.agent.windowFor(session), DEFAULT_CONTEXT_WINDOW, 'the fallback stands in');
+			kernel.ctx.sessions.save(session);
+
+			await kernel.ctx.agent.runTurn({ text: 'hi', sessionId: 'nowin' });
+			const report = kernel.ctx.agent.contextReport();
+			assert.ok(report.includes(String(DEFAULT_CONTEXT_WINDOW)), 'the report names the window in use');
+			assert.ok(report.includes('a fallback'), 'and does not pass a guess off as the model’s own number');
+			assert.ok(report.includes('Set `contextWindow` on its profile'), 'and says how to correct it');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an endpoint that refuses the prompt as too long is retried once, shrunk', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let attempts = 0;
+			let second: Message[] = [];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages[0]!.content.startsWith('You summarize')) {
+						return { message: { role: 'assistant', content: 'SUMMARY' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					attempts += 1;
+					if (attempts === 1) {
+						// Worded the way an endpoint words it, with the status that means "too big".
+						throw new ModelRequestError(400, "This model's maximum context length is 128000 tokens, but you requested 200000");
+					}
+					second = request.messages;
+					return { message: { role: 'assistant', content: 'ok after retry' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'retry');
+			// Big enough to fit, so the estimate alone would never have shrunk it: only the endpoint's
+			// refusal starts the retry, which is the case the estimate cannot predict.
+			session.contextWindow = 400_000;
+			for (let turn = 0; turn < 4; turn += 1) {
+				session.transcript.push(
+					{ role: 'user', content: `ask ${turn} ${'a'.repeat(400)}` },
+					{ role: 'assistant', content: `answer ${turn} ${'b'.repeat(400)}` },
+				);
+			}
+			session.marks.push({ turn: 0, entryCount: 0, length: 2, at: 0, text: 't0' });
+			kernel.ctx.sessions.save(session);
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'the newest ask', sessionId: 'retry' });
+			assert.strictEqual(result.text, 'ok after retry');
+			assert.strictEqual(attempts, 2, 'the request was sent again exactly once');
+			assert.ok(!second.some((message) => message.content.startsWith('ask 0')), 'and the retry carried a shrunk conversation');
+			assert.ok(second.some((message) => message.role === 'user' && message.content === 'the newest ask'), 'with the newest request still whole');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a summary that fails leaves the conversation exactly as it was', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages[0]!.content.startsWith('You summarize')) {
+						throw new Error('the summarizer is down');
+					}
+					return { message: { role: 'assistant', content: 'answered anyway' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'nosum');
+			session.contextWindow = 8_000;
+			session.policy.maxTokens = 500;
+			for (let turn = 0; turn < 5; turn += 1) {
+				session.transcript.push(
+					{ role: 'user', content: `ask ${turn} ${'a'.repeat(4_000)}` },
+					{ role: 'assistant', content: `answer ${turn} ${'b'.repeat(4_000)}` },
+				);
+			}
+			const before = session.transcript.map((message) => message.content);
+			kernel.ctx.sessions.save(session);
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'the newest ask', sessionId: 'nosum' });
+
+			// The turn is answered, and nothing of the record was traded away for a summary that never came.
+			assert.strictEqual(result.text, 'answered anyway');
+			const after = kernel.ctx.sessions.require('nosum');
+			assert.strictEqual(after.summary, undefined, 'no summary was recorded');
+			assert.deepStrictEqual(after.transcript.slice(0, before.length).map((message) => message.content), before);
+			assert.ok(after.transcript.some((message) => message.content.startsWith('ask 0')), 'the older turns are still there');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a second compaction extends the first summary instead of starting over', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let summaryPrompt = '';
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages[0]!.content.startsWith('You summarize')) {
+						summaryPrompt = request.messages[1]!.content;
+						return { message: { role: 'assistant', content: 'SUMMARY ONE' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'twice');
+			session.contextWindow = 8_000;
+			session.policy.maxTokens = 500;
+			const grow = (from: number) => {
+				for (let turn = from; turn < from + 5; turn += 1) {
+					session.transcript.push(
+						{ role: 'user', content: `ask ${turn} ${'a'.repeat(4_000)}` },
+						{ role: 'assistant', content: `answer ${turn} ${'b'.repeat(4_000)}` },
+					);
+				}
+			};
+			grow(0);
+			kernel.ctx.sessions.save(session);
+			await kernel.ctx.agent.runTurn({ text: 'first', sessionId: 'twice' });
+			const first = kernel.ctx.sessions.require('twice');
+			assert.strictEqual(first.summary?.text, 'SUMMARY ONE');
+
+			// The chat grows again, and the second summary is handed the first one to build on.
+			first.transcript.push(
+				{ role: 'user', content: `ask 5 ${'c'.repeat(4_000)}` },
+				{ role: 'assistant', content: `answer 5 ${'d'.repeat(4_000)}` },
+				{ role: 'user', content: `ask 6 ${'e'.repeat(4_000)}` },
+				{ role: 'assistant', content: `answer 6 ${'f'.repeat(4_000)}` },
+				{ role: 'user', content: `ask 7 ${'g'.repeat(4_000)}` },
+				{ role: 'assistant', content: `answer 7 ${'h'.repeat(4_000)}` },
+			);
+			kernel.ctx.sessions.save(first);
+			await kernel.ctx.agent.runTurn({ text: 'second', sessionId: 'twice' });
+			assert.ok(summaryPrompt.includes('SUMMARY ONE'), 'the earlier summary travelled into the second one');
 		} finally {
 			await kernel.dispose();
 		}
@@ -3248,14 +3762,16 @@ suite('Tavern content', () => {
 		assert.deepStrictEqual(turns[0].steps.map((step) => step.text), ['Kestrel looks up.']);
 		assert.strictEqual(turns[1].prompt, 'hello');
 
-		// The opening line is pinned, so a growing chat does not silently lose the character's premise.
+		// A compaction folds the opening line into the summary rather than dropping it, and the cut still
+		// lands on a turn boundary: the premise is what the summary is told to keep.
 		const long = [
 			{ role: 'assistant', content: 'Kestrel looks up.', greeting: true } as Message,
 			...Array.from({ length: 6 }, (_, index) => ({ role: 'user', content: `turn ${index} ${'x'.repeat(400)}` }) as Message),
 		];
-		const trimmed = applyContextLimit(long, 200);
-		assert.strictEqual(trimmed[0].greeting, true, 'the greeting survives the trim');
-		assert.ok(trimmed.length < long.length, 'and the trim still happened');
+		const folded = planCompaction(long, 200);
+		assert.strictEqual(folded.older[0]?.greeting, true, 'the greeting is the first thing the summary covers');
+		assert.strictEqual(folded.recent[0]?.role, 'user', 'and the cut is a turn boundary');
+		assert.strictEqual(folded.older.length + folded.recent.length, long.length, 'nothing is dropped outright');
 
 		const kernel = await createTestKernel();
 		try {
@@ -4100,6 +4616,65 @@ suite('Tavern content', () => {
 		assert.strictEqual(shippedPrompt('my-own-block'), undefined);
 	});
 
+	test('the prompt preview fills a marker from the same values the assembler uses', async () => {
+		const card = {
+			spec: 'chara_card_v2',
+			spec_version: '2.0',
+			data: {
+				name: 'Kestrel',
+				description: 'A cartographer of dead cities.',
+				personality: 'Terse, watchful.',
+				scenario: 'The salt flats, at dusk.',
+				first_mes: 'Kestrel looks up.',
+				mes_example: '<START>\nYou: hi\nKestrel: hm.',
+			},
+		};
+		const kernel = await createTestKernel({ config: { tavernCharacter: 'kestrel' } });
+		try {
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'characters'), { recursive: true });
+			writeFileSync(join(library, 'characters', 'kestrel.json'), JSON.stringify(card));
+			await kernel.ctx.tavern.reload();
+
+			let seen: Message[] = [];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					seen = request.messages;
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'preview');
+			const identity = promptText(await kernel.ctx.agent.promptBlocks(session));
+			const shown = kernel.ctx.tavern.displayPrompts(session.id, identity);
+
+			// The block the panel used to report as "0 tokens" is the agent's whole system prompt.
+			assert.strictEqual(shown[IDENTITY_PROMPT], identity);
+			assert.ok(identity.length > 0, 'and it is not empty');
+			// The card's own fields are resolved, formats and all.
+			assert.strictEqual(shown.charDescription, 'A cartographer of dead cities.');
+			assert.strictEqual(shown.charPersonality, 'Terse, watchful.');
+			assert.strictEqual(shown.scenario, 'The salt flats, at dusk.');
+			assert.match(shown.dialogueExamples ?? '', /Kestrel: hm\./);
+			// Filled from the turn, not from the chat: neither has a value until a turn is built, and
+			// inventing one is exactly what the panel must not do.
+			assert.strictEqual(shown.worldInfoBefore, undefined);
+			assert.strictEqual(shown.worldInfoAfter, undefined);
+			assert.strictEqual(shown.chatHistory, undefined);
+
+			// What the preview promises is what the request carries — the two share one resolver.
+			await kernel.ctx.agent.runTurn({ text: 'hello', sessionId: 'preview' });
+			const sent = seen.map((message) => message.content).join('\n');
+			assert.ok(sent.includes(identity), 'the identity the preview showed is in the request');
+			assert.ok(sent.includes('A cartographer of dead cities.'));
+			assert.ok(sent.includes('Terse, watchful.'));
+			assert.ok(sent.includes('The salt flats, at dusk.'));
+			assert.ok(sent.includes('Kestrel: hm.'), 'and the examples arrive, parsed, as the preview showed');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('a character, its book and a preset shape the request without displacing the agent', async () => {		const card = {
 			spec: 'chara_card_v2',
 			spec_version: '2.0',
@@ -4221,7 +4796,7 @@ suite('Tavern content', () => {
 
 	test('the budget says which entries it dropped, and the alert is said once per chat', async () => {
 		const kernel = await createTestKernel({
-			config: { tavernLorebooks: ['Big'], contextLimit: 400, wiBudget: 2, wiOverflowAlert: true },
+			config: { tavernLorebooks: ['Big'], contextWindow: 400, wiBudget: 2, wiOverflowAlert: true },
 		});
 		try {
 			const library = join(kernel.root, 'ws', '.comonad');

@@ -1,21 +1,30 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
-import { PathEscapeError, resolveInside } from '../lib/sandbox';
+import { basename, dirname, join } from 'node:path';
+import { guardPath, PathEscapeError } from '../lib/sandbox';
 import { objectSchema, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
 
 /** Plan files live under `<workdir>/<planDirectory>/<session>/` inside the workspace. */
 
 function planDir(ctx: ToolContext): string {
-	return join(ctx.policy.workingDirectory, ctx.policy.planDirectory || '.comonad/plans', ctx.sessionId);
+	return join(ctx.policy.planDirectory || '.comonad/plans', ctx.sessionId);
 }
 
-function planFile(ctx: ToolContext, name: string): string {
-	const clean = basename(name.trim());
-	if (!clean || clean === '.' || clean === '..') {
-		throw new PathEscapeError(`invalid plan name: ${name}`);
+/** Resolves a plan path through the workspace guard, so a symlinked plan folder cannot escape. */
+function planPath(ctx: ToolContext, name: string | null, access: 'read' | 'write'): Promise<string> {
+	const parts = [planDir(ctx)];
+	if (name !== null) {
+		const clean = basename(name.trim());
+		if (!clean || clean === '.' || clean === '..') {
+			throw new PathEscapeError(`invalid plan name: ${name}`);
+		}
+		parts.push(clean);
 	}
-	return resolveInside(planDir(ctx), clean);
+	return guardPath(ctx.policy.workingDirectory, join(...parts), {
+		access,
+		confinement: ctx.policy.confinement,
+		denyReadPaths: ctx.policy.denyReadPaths,
+	});
 }
 
 export const planTools = toolset([
@@ -27,7 +36,7 @@ export const planTools = toolset([
 		needsWorkspace: true,
 		parameters: objectSchema({}),
 		async execute(_args, ctx) {
-			const dir = planDir(ctx);
+			const dir = await planPath(ctx, null, 'write');
 			await mkdir(dir, { recursive: true });
 			const names = await readdir(dir);
 			return names.join('\n') || '(no plans)';
@@ -42,7 +51,7 @@ export const planTools = toolset([
 		parameters: objectSchema({ name: { type: 'string' } }, ['name']),
 		async execute(args, ctx) {
 			const { name } = args as { name: string };
-			return readFile(planFile(ctx, name), 'utf8');
+			return readFile(await planPath(ctx, name, 'read'), 'utf8');
 		},
 	},
 	{
@@ -54,10 +63,9 @@ export const planTools = toolset([
 		parameters: objectSchema({ name: { type: 'string' }, content: { type: 'string' } }, ['name', 'content']),
 		async execute(args, ctx) {
 			const { name, content } = args as { name: string; content: string };
-			const dir = planDir(ctx);
-			const target = planFile(ctx, name);
+			const target = await planPath(ctx, name, 'write');
 			const write = async () => {
-				await mkdir(dir, { recursive: true });
+				await mkdir(dirname(target), { recursive: true });
 				await writeFile(target, content);
 			};
 			if (ctx.edit) {

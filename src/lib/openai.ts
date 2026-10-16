@@ -2,6 +2,34 @@ import type { CompletionUsage, Message, ToolCall, ToolSpec } from './types';
 
 /** OpenAI-compatible chat completions over SSE, with tool-call delta assembly. Pure module. */
 
+/**
+ * A request the endpoint refused. The status is kept as a field, not just in the message, so a caller
+ * can tell an over-full prompt (which it can shrink and retry) from a request that is simply wrong.
+ */
+export class ModelRequestError extends Error {
+	constructor(
+		readonly status: number,
+		readonly detail: string,
+	) {
+		super(`model request failed (${status}): ${detail}`);
+		this.name = 'ModelRequestError';
+	}
+}
+
+/** How an endpoint words "this prompt no longer fits", across the providers worth naming. */
+const OVERFLOW_TEXT = /context length|context_length|maximum context|context window|too long|too many tokens|token limit|reduce the length|exceeds the maximum/i;
+
+/** Whether a refusal was about the prompt's size, which is the one refusal a retry can fix. */
+export function isContextOverflow(error: unknown): boolean {
+	if (!(error instanceof ModelRequestError)) {
+		return false;
+	}
+	if (error.status !== 400 && error.status !== 413 && error.status !== 422) {
+		return false;
+	}
+	return OVERFLOW_TEXT.test(error.detail);
+}
+
 export interface OpenAiRequest {
 	base: string;
 	key: string;
@@ -119,7 +147,7 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 	}
 	if (!response.ok) {
 		const detail = await response.text().catch(() => '');
-		throw new Error(`model request failed (${response.status}): ${trim(detail, 400)}`);
+		throw new ModelRequestError(response.status, trim(detail, 400));
 	}
 	const reader = response.body?.getReader();
 	if (!reader) {

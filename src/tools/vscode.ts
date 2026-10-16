@@ -1,6 +1,6 @@
-import { relative, sep } from 'node:path';
+import { relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
-import { formatResult, isDeniedRead, isProtectedPath, resolveInside, runCommand } from '../lib/sandbox';
+import { formatResult, guardPath, resolveInside, runCommand } from '../lib/sandbox';
 import { objectSchema } from '../lib/types';
 import { toolset } from '../services/tools';
 
@@ -12,6 +12,11 @@ function within(root: string, path: string): boolean {
 	}
 	const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
 	return path === root || path.startsWith(prefix);
+}
+
+/** A path as the model should see it: workspace-relative inside, absolute when reads are open. */
+function shown(root: string, path: string): string {
+	return within(root, path) ? relative(root, path).split(sep).join('/') : path;
 }
 
 export const vscodeTools = toolset([
@@ -28,8 +33,8 @@ export const vscodeTools = toolset([
 			const root = ctx.policy.workingDirectory;
 			const files = uris
 				.map((uri) => uri.fsPath)
-				.filter((path) => within(root, path))
-				.map((path) => relative(root, path).split(sep).join('/'));
+				.filter((path) => !ctx.policy.confinement.read || within(root, path))
+				.map((path) => shown(root, path));
 			return files.join('\n') || '(no files)';
 		},
 	},
@@ -46,10 +51,10 @@ export const vscodeTools = toolset([
 				(await vscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>('vscode.executeWorkspaceSymbolProvider', query)) ?? [];
 			const root = ctx.policy.workingDirectory;
 			const lines = symbols
-				.filter((symbol) => within(root, symbol.location.uri.fsPath))
+				.filter((symbol) => !ctx.policy.confinement.read || within(root, symbol.location.uri.fsPath))
 				.slice(0, Math.min(max ?? 50, 100))
 				.map((symbol) => {
-					const path = relative(root, symbol.location.uri.fsPath).split(sep).join('/');
+					const path = shown(root, symbol.location.uri.fsPath);
 					return `${vscode.SymbolKind[symbol.kind]} ${symbol.name} — ${path}:${symbol.location.range.start.line + 1}`;
 				});
 			return lines.join('\n') || '(no symbols)';
@@ -65,13 +70,14 @@ export const vscodeTools = toolset([
 		async execute(args, ctx) {
 			const { path } = args as { path?: string };
 			const root = ctx.policy.workingDirectory;
-			const filter = path ? resolveInside(root, path) : root;
+			const confine = ctx.policy.confinement.read;
+			const filter = path ? (confine ? resolveInside(root, path) : resolve(root, path)) : root;
 			const lines: string[] = [];
 			for (const [uri, diagnostics] of vscode.languages.getDiagnostics()) {
-				if (!within(filter, uri.fsPath) && !within(root, uri.fsPath)) {
+				if (!within(filter, uri.fsPath)) {
 					continue;
 				}
-				if (path && !within(filter, uri.fsPath)) {
+				if (confine && !within(root, uri.fsPath)) {
 					continue;
 				}
 				for (const diagnostic of diagnostics) {
@@ -79,7 +85,7 @@ export const vscodeTools = toolset([
 						break;
 					}
 					const severity = vscode.DiagnosticSeverity[diagnostic.severity] ?? 'info';
-					const file = relative(root, uri.fsPath).split(sep).join('/');
+					const file = shown(root, uri.fsPath);
 					lines.push(`${file}:${diagnostic.range.start.line + 1} ${severity.toLowerCase()}: ${diagnostic.message}`);
 				}
 			}
@@ -119,9 +125,15 @@ export const vscodeTools = toolset([
 				path: string;
 				edits: { startLine: number; startColumn: number; endLine: number; endColumn: number; text: string; old?: string }[];
 			};
-			const target = resolveInside(ctx.policy.workingDirectory, path);
-			if (isProtectedPath(ctx.policy.workingDirectory, target) || isDeniedRead(ctx.policy.workingDirectory, target, ctx.policy.denyReadPaths)) {
-				return `Error: ${path} is protected from edits by policy`;
+			let target: string;
+			try {
+				target = await guardPath(ctx.policy.workingDirectory, path, {
+					access: 'write',
+					confinement: ctx.policy.confinement,
+					denyReadPaths: ctx.policy.denyReadPaths,
+				});
+			} catch (error) {
+				return `Error: ${error instanceof Error ? error.message : String(error)}`;
 			}
 			const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
 			// Unsaved text is the user's, not the agent's: refuse rather than save it to disk.
@@ -167,7 +179,13 @@ export const vscodeTools = toolset([
 		parameters: objectSchema({ staged: { type: 'boolean' } }),
 		async execute(args, ctx) {
 			const { staged } = args as { staged?: boolean };
-			const options = { writable: false, network: false, denyReadPaths: [] as string[], timeoutMs: 20_000 };
+			const options = {
+				writable: false,
+				confinement: ctx.policy.confinement,
+				network: false,
+				denyReadPaths: [] as string[],
+				timeoutMs: 20_000,
+			};
 			const status = await runCommand(['git', 'status', '--porcelain=v1', '--branch'], ctx.policy.workingDirectory, options);
 			const diff = await runCommand(['git', 'diff', ...(staged ? ['--cached'] : [])], ctx.policy.workingDirectory, options);
 			const parts = [formatResult(status, 6_000)];

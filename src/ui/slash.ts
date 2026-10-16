@@ -14,7 +14,7 @@ const HELP = [
 	'| --- | --- |',
 	'| `/plan [task]` | research read-only, then write a plan |',
 	'| `/review [focus]` | review pending changes without editing |',
-	'| `/compact [notes]` | summarize the conversation |',
+	'| `/summarize [notes]` | summarize the conversation to free up context (`/compress` and `/compact` are aliases) |',
 	'| `/clear` `/new` | start a fresh session |',
 	'| `/fork` | fork this session and keep exploring |',
 	'| `/context` | token budget breakdown for this session |',
@@ -72,20 +72,25 @@ export function slashCommands(ctx: Context): void {
 		};
 	});
 
-	register('compact', 'Summarize the conversation', async (args, surface) => {
+	const summarize: CommandSpec['run'] = async (args, surface) => {
 		const session = ctx.sessions.active();
 		if (!session) {
 			surface.markdown('No active session yet.');
 			return { done: true };
 		}
-		surface.progress('Compacting…');
+		surface.progress('Summarizing…');
 		try {
 			surface.markdown(await ctx.agent.compact(session.id, args.trim() || undefined));
 		} catch (error) {
-			surface.markdown(`Compaction failed: ${error instanceof Error ? error.message : String(error)}`);
+			surface.markdown(`Summarizing failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		return { done: true };
-	});
+	};
+
+	// `/summarize` is the name; the other two are what people reach for, and what other tools call it.
+	register('summarize', 'Summarize the conversation to free up context', summarize);
+	register('compress', 'Summarize the conversation to free up context', summarize);
+	register('compact', 'Summarize the conversation to free up context', summarize);
 
 	register('clear', 'Start a fresh session', (_args, surface) => {
 		ctx.sessions.create(ctx.agent.policyFor());
@@ -209,7 +214,7 @@ async function statusText(ctx: Context): Promise<string> {
 		`- Mode: ${config.mode} · approval: ${config.approval} · network: ${config.network ? 'on' : 'off'}`,
 		`- Workspace: ${config.workingDirectory || '(none)'}`,
 		`- Tools available now: ${visible.length}`,
-		`- ${sandboxStatus()}`,
+		`- ${sandboxStatus({ read: config.confineRead, write: config.confineWrite })}`,
 		`- Today: ${formatUsage(ctx.usage.today())}`,
 	];
 	if (session) {

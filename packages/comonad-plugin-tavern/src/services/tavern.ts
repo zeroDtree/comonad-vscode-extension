@@ -13,7 +13,7 @@ import { emptyStore, mergeStores, readStore, renameKey, storeJson, tagIdsOf, tag
 import { librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from '../lib/library';
 import { loadPreset, presetSamplers, presetToJson, type PresetSamplers } from '../lib/preset';
 import { applyCardOverrides, IDENTITY_PROMPT, promptCollection, withoutIdentityBlock, withoutRoleplayScaffolding, type ActivePrompt } from '../lib/prompts';
-import { assemble, type AssembleBlocks } from '../lib/assemble';
+import { assemble, hasMarkerText, markerContent, previewPrompt, type AssembleBlocks } from '../lib/assemble';
 import {
 	PERSONA_POSITION,
 	REGEX_PLACEMENT,
@@ -116,7 +116,7 @@ function sourceKeys(config: Config): string {
  */
 export type TavernApi = Pick<
 	Tavern,
-	'compose' | 'continueNudge' | 'impersonationPrompt' | 'booksFor' | 'loreIndex' | 'promptsFor'
+	'compose' | 'continueNudge' | 'impersonationPrompt' | 'booksFor' | 'loreIndex' | 'promptsFor' | 'displayPrompts'
 >;
 
 /** The picture formats upstream accepts for a persona's avatar; ours is the file beside the JSON. */
@@ -401,6 +401,45 @@ export class Tavern extends Service implements TavernApi {
 		const preset = this.preset(session?.preset ?? config.tavernPreset);
 		const character = this.character(session?.character ?? config.tavernCharacter);
 		return turnPrompts(preset, character);
+	}
+
+	/**
+	 * The text the settings panel shows for every prompt in this chat's collection. A marker is filled
+	 * from the same `markerContent` the assembler uses, so the preview and the request cannot disagree;
+	 * every other block shows its own content with the decorators stripped, because a decorator tells
+	 * the assembler where to put a block and never reaches the model.
+	 *
+	 * The markers that only exist while a turn is built are deliberately absent — world info needs that
+	 * turn's activation scan, and the chat history *is* the conversation — so the panel can report them
+	 * as filled from the turn instead of as an empty prompt with no tokens. `identity` is the agent's
+	 * system prompt, which the caller owns: the tavern layer only ever sees it as a `compose` argument.
+	 */
+	displayPrompts(sessionId: string | undefined, identity = ''): Record<string, string> {
+		const session = sessionId ? this.ctx.sessions.get(sessionId) : this.ctx.sessions.active();
+		const config = this.ctx.settings.get();
+		const character = this.character(session?.character ?? config.tavernCharacter);
+		const persona = this.personaFor(session?.persona ?? config.tavernPersona, character);
+		// No composing turn here, so `{{model}}` and `{{input}}` stand empty rather than guessed at.
+		const macro = this.macroContext(undefined, character, persona);
+		const blocks: AssembleBlocks = {
+			...cardBlocks(character, persona, config, (text) => substituteMacros(text, macro)),
+			identity,
+		};
+		const options = { wiFormat: config.tavernWiFormat ?? '{0}' };
+		const out: Record<string, string> = {};
+		for (const prompt of this.promptsFor(sessionId)) {
+			if (hasMarkerText(prompt.identifier)) {
+				const text = markerContent(prompt.identifier, blocks, options);
+				if (text?.trim()) {
+					out[prompt.identifier] = text;
+				}
+				continue;
+			}
+			if (!prompt.marker) {
+				out[prompt.identifier] = previewPrompt(prompt);
+			}
+		}
+		return out;
 	}
 
 	/**
@@ -926,14 +965,10 @@ export class Tavern extends Service implements TavernApi {
 			});
 		}
 		const blocks: AssembleBlocks = {
+			...cardBlocks(character, persona, config, substitute),
 			identity: input.identity,
-			charDescription: character?.description,
-			charPersonality: character?.personality && config.tavernPersonalityFormat ? macroize(config.tavernPersonalityFormat, substitute) : character?.personality,
-			scenario: character?.scenario && config.tavernScenarioFormat ? macroize(config.tavernScenarioFormat, substitute) : character?.scenario,
-			personaDescription: persona && persona.position === PERSONA_POSITION.inPrompt ? persona.description : undefined,
 			worldInfoBefore: lore.before.join('\n'),
 			worldInfoAfter: lore.after.join('\n'),
-			examples: character?.examples,
 			examplesBefore: lore.examplesBefore,
 			examplesAfter: lore.examplesAfter,
 			atDepth,
@@ -1135,6 +1170,29 @@ export const tavernPlugin = Tavern;
 	 * when neither a character nor a preset is in play. `trigger` picks the blocks: one limited to some
 	 * generation types is left out of the others.
 	 */
+/**
+ * The blocks a card and a persona supply. One function builds them for the assembler and for the
+ * settings panel's preview, so what the panel says a marker holds cannot drift from what is sent.
+ */
+function cardBlocks(
+	character: Character | undefined,
+	persona: Persona | undefined,
+	config: Config,
+	substitute: (text: string) => string,
+): Omit<AssembleBlocks, 'identity'> {
+	return {
+		charDescription: character?.description,
+		// A configured format wraps the value; without one the card's own text is sent as it stands.
+		charPersonality:
+			character?.personality && config.tavernPersonalityFormat
+				? macroize(config.tavernPersonalityFormat, substitute)
+				: character?.personality,
+		scenario: character?.scenario && config.tavernScenarioFormat ? macroize(config.tavernScenarioFormat, substitute) : character?.scenario,
+		personaDescription: persona && persona.position === PERSONA_POSITION.inPrompt ? persona.description : undefined,
+		examples: character?.examples,
+	};
+}
+
 export function turnPrompts(
 	preset: TavernPreset | undefined,
 	character: Character | undefined,

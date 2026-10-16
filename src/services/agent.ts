@@ -3,9 +3,14 @@ import { relative, resolve, sep } from 'node:path';
 import { Service, type Context } from 'cordis';
 import type { TurnRef } from '../lib/types';
 import {
+	DEFAULT_OUTPUT_RESERVE,
 	applyContextForm,
-	applyContextLimit,
+	elideToolResults,
+	estimateMessages,
 	estimateTokens,
+	planCompaction,
+	resolveBudget,
+	type Budget,
 } from '../lib/prompt';
 import {
 	compileGraphs,
@@ -19,16 +24,23 @@ import {
 } from '../lib/graph';
 import { formatInstructions, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
+import { isContextOverflow, type Completion } from '../lib/openai';
 import { gateCalls, MODE_CAPS, MODE_LABELS, suggestAllowRule } from '../lib/policy';
-import type { AgentSpawnRequest, Capability, Message, SessionPolicy, TodoItem, ToolCall, ToolContext } from '../lib/types';
+import type { AgentSpawnRequest, Capability, Message, SessionPolicy, TodoItem, ToolCall, ToolContext, ToolSpec } from '../lib/types';
 import type { GenerationTrigger } from '../lib/tavern/types';
 import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { agentIndex, allowedToolsFor, skillIndex } from './catalog';
 import type { JournalApi } from './checkpoints';
-import type { Config } from './settings';
-import { threadTitle, type Session, type SwipeCarry } from './sessions';
+import { DEFAULT_CONTEXT_WINDOW, type Config } from './settings';
+import { summaryMessage, threadTitle, type Session, type SessionSummary, type SwipeCarry } from './sessions';
 import type { ComposeResult, TavernApi } from 'comonad-plugin-tavern';
+
+/** Room held back for the summary a compaction adds, so the fit it plans survives its own output. */
+const SUMMARY_RESERVE = 1_024;
+
+/** How many characters of the older turns one summary is allowed to read. */
+const SUMMARY_SOURCE_LIMIT = 120_000;
 
 export interface TurnInput {
 	/** The prompt. Empty for a continue, a swipe or a regenerate, which re-run what is already there. */
@@ -71,6 +83,13 @@ interface RunState {
 	continueInto?: number;
 	/** The variants a swipe or a regenerate replaces or grows. */
 	swipes?: SwipeCarry;
+	/**
+	 * Whether this request may be rebuilt from the chat's transcript when it outgrows the window. It is
+	 * true when the request is the transcript plus this turn, and false when something else composed
+	 * it — a subagent owns it, or tavern content rewrote it — because then its parts no longer line up
+	 * with a chat record and only elision may rewrite it.
+	 */
+	foldable: boolean;
 }
 
 const MAX_SUBAGENT_DEPTH = 2;
@@ -120,6 +139,8 @@ export class Agent extends Service {
 	private readonly budgetWarned = new Set<string>();
 	/** Sessions already warned that the world-info budget was spent. */
 	private readonly overflowWarned = new Set<string>();
+	/** The system prompt last given to each chat, so `/context` can break the budget down exactly. */
+	private readonly systems = new Map<string, string>();
 	/** Sessions already told that their stored model profile is gone. */
 	private readonly warned = new Set<string>();
 	private activeSubagents = 0;
@@ -153,6 +174,7 @@ export class Agent extends Service {
 			workingDirectory: config.workingDirectory,
 			commandTimeout: config.commandTimeout,
 			denyReadPaths: [...config.denyReadPaths],
+			confinement: { read: config.confineRead, write: config.confineWrite },
 			planDirectory: config.planDirectory,
 			model: config.model,
 		};
@@ -202,17 +224,6 @@ export class Agent extends Service {
 			session.title = threadTitle(text);
 		}
 		const config = this.ctx.settings.get();
-		if (config.autoCompactChars > 0 && session.transcript.length > 12) {
-			const chars = session.transcript.reduce((total, message) => total + message.content.length, 0);
-			if (chars > config.autoCompactChars) {
-				this.notice({ sessionId: session.id, surface: input.surface }, 'Auto-compacting the conversation…');
-				try {
-					await this.compact(session.id);
-				} catch (error) {
-					this.ctx.log.message(`auto-compact failed: ${describe(error)}`);
-				}
-			}
-		}
 		const contexts: string[] = [];
 		if (!this.greeted.has(session.id)) {
 			this.greeted.add(session.id);
@@ -233,7 +244,12 @@ export class Agent extends Service {
 		// and quiet throws its prompt away again at the end.
 		const prompted = trigger !== 'continue' && trigger !== 'impersonate';
 		const prior = [...session.transcript];
-		const seeded = prompted ? [...session.transcript, { role: 'user', content: text, at: Date.now() } as Message] : [...session.transcript];
+		// The prompt keeps the time it was asked at however often the transcript is re-derived below, so
+		// a compaction in the middle of this turn cannot make it look like a later message.
+		const promptAt = Date.now();
+		const seed = (): Message[] =>
+			prompted ? [...session.transcript, { role: 'user', content: text, at: promptAt } as Message] : [...session.transcript];
+		let seeded = seed();
 		// A continue grows the last reply, and only when nothing comes after it. A turn that was
 		// stopped, is waiting on a tool call, or failed leaves the transcript ending in something else
 		// — merging there would cut that away. With nothing to grow, the answer is a turn of its own.
@@ -276,15 +292,33 @@ export class Agent extends Service {
 			ask = impersonation;
 		}
 		const system = await this.systemPrompt(session, contexts);
+		this.systems.set(session.id, system);
 		const ref: TurnRef = { sessionId: session.id, surface: input.surface };
-		// The world-info budget, the context trim and every counter in the panels read the same counter,
-		// so the model's own tokenizer is made exact before anything is measured with it.
+		// The world-info budget, the context budget and every counter in the panels read the same
+		// counter, so the model's own tokenizer is made exact before anything is measured with it.
 		await this.ctx.tokenizers.warm(this.ctx.llm.modelName(session.policy.model));
-		const history = applyContextLimit(
-			applyContextForm(seeded, session.contextForm ?? config.contextForm),
-			session.contextLimit ?? config.contextLimit,
-		);
-		const tavern = await this.tavernTurn(session, seeded, history, system, config, trigger);
+		const budget = this.budgetFor(session.policy, session.contextWindow, system, this.ctx.tools.visible(session.policy));
+		let history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
+		// A conversation that no longer fits is summarized before it is sent, not after the endpoint
+		// refuses it. The whole older stretch becomes one summary, so the newest turn is still answered
+		// in full — and because the summary replaces those turns in the chat itself, nothing is lost
+		// quietly.
+		if (estimateMessages(history) > budget.input) {
+			// The conversation no longer fits, so it is summarized before it is sent rather than after the
+			// endpoint refuses it. The summary replaces those turns in the chat itself, so nothing is lost
+			// quietly — and the prompt this turn is answering survives word for word.
+			this.notice(ref, 'Summarizing the conversation — it no longer fits the model’s window.');
+			try {
+				if (await this.fold(session, session.transcript, budget.input)) {
+					seeded = seed();
+					history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
+				}
+			} catch (error) {
+				this.ctx.log.message(`summarize failed: ${describe(error)}`);
+				this.notice(ref, `Could not summarize the conversation (${describe(error)}); its older turns stay as they are.`);
+			}
+		}
+		const tavern = await this.tavernTurn(session, seeded, history, system, config, trigger, budget.window);
 		if (tavern?.buckets.overflowed && config.wiOverflowAlert && !this.overflowWarned.has(session.id)) {
 			this.overflowWarned.add(session.id);
 			this.notice(
@@ -294,8 +328,8 @@ export class Agent extends Service {
 		}
 		// With no tavern content configured this is exactly `[system, …history]`, so the port is invisible
 		// until a character, book, persona or preset is actually selected.
-		const messages =
-			tavern && !tavern.inert ? [...tavern.messages] : [{ role: 'system', content: system } as Message, ...history];
+		const composed = tavern && !tavern.inert;
+		const messages = composed ? [...tavern!.messages] : [{ role: 'system', content: system } as Message, ...history];
 		// The ask goes last whenever the request would end in the model's own turn — which is what a
 		// continue and an impersonation look like until something is said as the user.
 		if (ask && messages[messages.length - 1]?.role !== 'user') {
@@ -315,6 +349,8 @@ export class Agent extends Service {
 			prior,
 			continueInto,
 			swipes,
+			// A composed request is not a slice of the chat, so there is nothing to fold it back into.
+			foldable: !composed,
 		};
 		session.transcript = seeded;
 		this.ctx.sessions.save(session);
@@ -344,33 +380,291 @@ export class Agent extends Service {
 		});
 	}
 
+	/**
+	 * Summarizes the conversation on demand. The cut is planned against a budget of zero, which keeps
+	 * only the turns after the last prompt: what a reader asking for this wants is the conversation
+	 * folded now, not the longest tail that happens to fit.
+	 */
 	async compact(sessionId: string, instructions?: string): Promise<string> {
 		const session = this.ctx.sessions.require(sessionId);
-		if (session.transcript.length <= 4) {
-			return 'Nothing to compact yet.';
-		}
 		const before = session.transcript.length;
-		const body = session.transcript
-			.map((message) => `${message.role}: ${clip(message.content, 4_000)}`)
-			.join('\n\n')
-			.slice(0, 120_000);
-		const summary = await this.ctx.llm.complete(
-			session.policy.model,
+		const folded = await this.fold(session, session.transcript, 0, instructions);
+		return folded ? `Compacted ${before} messages into a summary.` : 'Nothing to compact yet.';
+	}
+
+		/** The input budget of one request: the window, less the reply's share, less the fixed part. */
+	private budgetFor(policy: SessionPolicy, window: number | undefined, system: string, tools: ToolSpec[]): Budget {
+		const profile = this.ctx.llm.profileFor(policy.model);
+		return resolveBudget(
+			this.windowOf(policy, window),
+			policy.maxTokens ?? profile?.maxTokens ?? DEFAULT_OUTPUT_RESERVE,
+			estimateTokens(system) + this.toolTokens(tools),
+		);
+	}
+
+	/** The window a chat is measured against, for the surfaces that show it. */
+	windowFor(session: Session): number {
+		return this.windowOf(session.policy, session.contextWindow);
+	}
+
+	/**
+	 * The window before the reply's share and the fixed part come off: the chat's own override, else
+	 * the model profile's, else the documented fallback. A subagent passes its own policy and no
+	 * override, so it is measured against the window of the model it runs on rather than its parent's.
+	 */
+	private windowOf(policy: SessionPolicy, override: number | undefined): number {
+		return override || this.ctx.llm.profileFor(policy.model)?.contextWindow || DEFAULT_CONTEXT_WINDOW;
+	}
+
+	/**
+	 * What the tool definitions cost. They travel with every request of the turn, so they are part of
+	 * the budget rather than part of the conversation — which is why a window's headline number is
+	 * never the amount of chat that fits.
+	 */
+	private toolTokens(tools: ToolSpec[]): number {
+		return estimateTokens(
+			JSON.stringify(tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }))),
+		);
+	}
+
+	/**
+	 * Folds the turns before the newest one into a single summary, in the chat itself. Returns whether
+	 * anything was folded. The plan keeps the newest turn word for word and a previous summary is
+	 * extended rather than replaced; a failure propagates so the caller can leave the transcript alone,
+	 * because a chat that cannot be summarized is still a chat and losing the record would be worse
+	 * than sending a request that may be refused.
+	 */
+	private async fold(session: Session, transcript: Message[], budget: number, instructions?: string): Promise<boolean> {
+		const plan = planCompaction(transcript, budget, SUMMARY_RESERVE);
+		if (!plan.older.length) {
+			return false;
+		}
+		const text = await this.summaryText(session.policy.model, plan.older, session.summary, instructions);
+		if (!text) {
+			return false;
+		}
+		this.record(session, text, plan.older.length, plan.recent);
+		return true;
+	}
+
+	/**
+	 * Writes a compaction down: the summary replaces the turns it covers, here and in the chat record,
+	 * and the rewind points inside those turns go with them.
+	 */
+	private record(session: Session, text: string, covers: number, recent: Message[]): void {
+		const folded = [summaryMessage(text), ...recent];
+		this.ctx.sessions.compacted(
+			session,
+			{ text, covers, at: Date.now() },
+			// The chat record holds the same turns as the request did, so the same stretch comes off it.
+			[folded[0]!, ...session.transcript.slice(covers)],
+		);
+	}
+
+	/**
+	 * The request about to be sent, made to fit. Old tool output is elided first, because that is what
+	 * grew the request and it costs no model call; only a request that still does not fit has the turns
+	 * before this one folded away. The current turn is never folded: it is what the user just asked for.
+	 *
+	 * A composed request — tavern content rewrote it, or a subagent owns it — no longer lines up with a
+	 * chat record, so only elision may touch it.
+	 */
+	private async fitRequest(
+		state: RunState,
+		session: Session | undefined,
+		tools: ToolSpec[],
+	): Promise<{ messages: Message[]; transcript?: Message[] }> {
+		const budget = this.budgetFor(state.policy, session?.contextWindow, this.systemText(state.messages), tools);
+		if (estimateMessages(state.messages) <= budget.input) {
+			return { messages: state.messages };
+		}
+		const elided = elideToolResults(state.messages, budget.input);
+		if (elided.changed) {
+			this.notice(state.ref, 'Trimmed older tool output to fit the model’s window.');
+		}
+		if (estimateMessages(elided.messages) <= budget.input || !state.foldable || !session) {
+			return { messages: elided.messages };
+		}
+		const plan = planCompaction(state.transcript, budget.input, SUMMARY_RESERVE);
+		if (!plan.older.length) {
+			return { messages: elided.messages };
+		}
+		this.notice(state.ref, 'Summarizing the conversation — this turn outgrew the model’s window.');
+		let text: string;
+		try {
+			text = await this.summaryText(state.policy.model, plan.older, session.summary);
+		} catch (error) {
+			// The turn still has to be answered, so a summary that failed is reported and not fatal.
+			this.ctx.log.message(`summarize failed mid-turn: ${describe(error)}`);
+			return { messages: elided.messages };
+		}
+		if (!text) {
+			return { messages: elided.messages };
+		}
+		this.record(session, text, plan.older.length, plan.recent);
+		// The folded transcript already ends with this turn — a fold cuts at a turn boundary and keeps
+		// everything after it — so the request is rebuilt from it whole. That is what keeps the request
+		// and the chat record from drifting apart, and it needs no arithmetic about which messages were
+		// the turn's own.
+		const folded = [summaryMessage(text), ...plan.recent];
+		return {
+			messages: [...elided.messages.filter((message) => message.role === 'system'), ...folded],
+			transcript: folded,
+		};
+	}
+
+	/**
+	 * One model round trip, with the usage it reported recorded against the session. Its `input` is the
+	 * real size of the prompt — the one measurement of the context that is not an estimate — so it is
+	 * kept for the panels and for judging whether the next request needs to shrink.
+	 *
+	 * A refusal about the prompt's size is the one kind a retry can fix: the request is shrunk as far as
+	 * it goes and sent once more, and only a second refusal is the turn's answer.
+	 */
+	private async request(
+		state: RunState,
+		tools: ToolSpec[],
+		signal: AbortSignal,
+		session: Session | undefined,
+		live: boolean,
+	): Promise<{ completion: Completion; messages: Message[] }> {
+		const call = (messages: Message[]): Promise<Completion> =>
+			this.ctx.llm.chat(
+				state.policy.model,
+				messages,
+				tools,
+				{
+					onToken: (text) => this.ctx.emit('agent/token', state.ref, text),
+					onReasoning: (text) => this.ctx.emit('agent/reasoning', state.ref, text),
+					onToolDelta: (call) => this.ctx.emit('agent/tool-delta', state.ref, call),
+				},
+				signal,
+				{ reasoningEffort: session?.reasoningEffort, ...state.samplers },
+			);
+		let messages = state.messages;
+		let completion: Completion;
+		try {
+			completion = await call(messages);
+		} catch (error) {
+			if (!isContextOverflow(error)) {
+				throw error;
+			}
+			// The estimate said it fit and the endpoint disagreed. Trust the endpoint: shrink hard, retry once.
+			this.notice(state.ref, 'The model refused the request as too long; shrinking it and trying again.');
+			const shrunk = await this.emergencyFit(state, session);
+			if (!shrunk) {
+				throw error;
+			}
+			messages = shrunk;
+			completion = await call(messages);
+		}
+		if (completion.usage && session) {
+			session.usage.inputTokens += completion.usage.input;
+			session.usage.outputTokens += completion.usage.output;
+			session.usage.requests += 1;
+			session.lastInputTokens = completion.usage.input;
+			this.ctx.usage.add(completion.usage);
+			const cost = this.ctx.llm.costFor(state.policy.model, completion.usage);
+			if (cost > 0) {
+				session.usage.cost += cost;
+				this.checkBudget(session, state.ref);
+			}
+			if (!live) {
+				this.ctx.sessions.save(session);
+			}
+		}
+		return { completion, messages };
+	}
+
+	/**
+	 * The hardest shrink available, for a refusal the estimate did not predict: every tool result down
+	 * to its marker, and every turn but the last folded away. Returns `null` when there is nothing left
+	 * to give, which is the endpoint's answer to keep.
+	 */
+	private async emergencyFit(state: RunState, session: Session | undefined): Promise<Message[] | null> {
+		const system = state.messages.filter((message) => message.role === 'system');
+		const body = elideToolResults(state.messages, 0).messages.filter((message) => message.role !== 'system');
+		if (!session || !state.foldable) {
+			return estimateMessages(body) < estimateMessages(state.messages) ? [...system, ...body] : null;
+		}
+		const plan = planCompaction(state.transcript, 0);
+		if (!plan.older.length) {
+			return null;
+		}
+		try {
+			const text = await this.summaryText(state.policy.model, plan.older, session.summary);
+			if (!text) {
+				return null;
+			}
+			this.record(session, text, plan.older.length, plan.recent);
+			return [...system, summaryMessage(text), ...plan.recent];
+		} catch (error) {
+			this.ctx.log.message(`emergency summarize failed: ${describe(error)}`);
+			return null;
+		}
+	}
+
+	/** The system prompt of a message list, as the budget's fixed part measures it. */
+	private systemText(messages: Message[]): string {
+		return messages
+			.filter((message) => message.role === 'system')
+			.map((message) => message.content)
+			.join('\n');
+	}
+
+	/**
+	 * The prompt one summary is written from: the turns being folded as a head and a tail within a
+	 * character budget. The tail is the part that matters — the turns nearest the present are the ones
+	 * the next request leans on — so a conversation too long to read in full loses its middle and says
+	 * so in the text the model sees. A previous summary is handed over as the base to extend.
+	 */
+	private async summaryText(
+		model: string,
+		older: Message[],
+		previous?: SessionSummary,
+		instructions?: string,
+	): Promise<string> {
+		const lines = older.map((message) => `${message.role}: ${clip(message.content, 2_000)}`);
+		let head = 0;
+		let used = previous ? previous.text.length : 0;
+		while (head < lines.length && used + lines[head]!.length < SUMMARY_SOURCE_LIMIT / 4) {
+			used += lines[head]!.length;
+			head += 1;
+		}
+		const tail: string[] = [];
+		for (let index = lines.length - 1; index >= head && used < SUMMARY_SOURCE_LIMIT; index -= 1) {
+			const line = lines[index]!;
+			if (used + line.length > SUMMARY_SOURCE_LIMIT) {
+				break;
+			}
+			used += line.length;
+			tail.unshift(line);
+		}
+		const omitted = lines.length - head - tail.length;
+		return this.ctx.llm.complete(
+			model,
+			this.summaryInstruct(instructions),
 			[
-				'You compact agent conversations. Preserve decisions, file paths, open tasks, user preferences and unresolved issues.',
-				instructions ? `Extra instructions: ${instructions}` : '',
+				previous ? `It was summarized once before; extend that summary rather than starting over:\n\n${previous.text}` : '',
+				`The earliest turns:\n\n${lines.slice(0, head).join('\n\n')}`,
+				omitted > 0 ? `[...${omitted} messages between these were left out of this request]` : '',
+				`The most recent turns:\n\n${tail.join('\n\n')}`,
 			]
 				.filter(Boolean)
-				.join('\n'),
-			`Summarize this conversation:\n\n${body}`,
+				.join('\n\n'),
 		);
-		session.transcript = [
-			{ role: 'system', content: `Conversation summary (compacted):\n\n${summary}` },
-			...session.transcript.slice(-2),
-		];
-		this.ctx.sessions.save(session);
-		this.ctx.sessions.changed(sessionId);
-		return `Compacted ${before} messages into a summary.`;
+	}
+
+	private summaryInstruct(instructions?: string): string {
+		return [
+			'You summarize agent conversations for a coding assistant. Write the summary the next request will be answered from.',
+			'Preserve decisions, file paths, open tasks, user preferences and unresolved issues.',
+			'Do not drop facts from early in the conversation: a detail mentioned only once is exactly the kind this summary has to keep.',
+			'The last request in the conversation is being answered separately, so do not answer it here.',
+			instructions ? `Extra instructions: ${instructions}` : '',
+		]
+			.filter(Boolean)
+			.join('\n');
 	}
 
 	stop(sessionId?: string): boolean {
@@ -409,12 +703,27 @@ export class Agent extends Service {
 			JSON.stringify(visible.map((item) => ({ name: item.name, description: item.description, parameters: item.parameters }))),
 		);
 		const files = session.instructions ?? [];
+		const profile = this.ctx.llm.profileFor(session.policy.model);
+		const system = this.systems.get(session.id) ?? '';
+		const budget = this.budgetFor(session.policy, session.contextWindow, system, visible);
+		const used = session.lastInputTokens;
+		const windowLine = profile?.contextWindow
+			? `- window: ${budget.window} tokens${session.contextWindow ? ' (set for this chat)' : ` — from the ${profile.label || profile.id} profile`}`
+			: `- window: ${budget.window} tokens — **a fallback, not this model's own**. Set \`contextWindow\` on its profile.`;
 		return [
-			'**Context estimate** (approx. 4 chars per token)',
-			`- messages: ${user + assistant + tool} tokens (user ${user} · assistant ${assistant} · tool ${tool})`,
-			`- tool definitions: ${visible.length} tools ≈ ${toolTokens} tokens`,
+			'**Context**',
+			windowLine,
+			`- room for messages: ${budget.input} tokens = ${budget.window} window − ${budget.reserve} held for the reply − ${budget.overhead} of system prompt and tool definitions`,
+			`  - of that overhead: ${estimateTokens(system)} system prompt, ${this.toolTokens(visible)} the ${visible.length} tool definitions`,
+			used === undefined
+				? '- last request: none yet, so the numbers below are estimates'
+				: `- last request: ${used} tokens, as the provider counted them`,
+			`- transcript: ${user + assistant + tool} tokens (user ${user} · assistant ${assistant} · tool ${tool})`,
 			`- instruction files: ${files.length}${files.length ? ` — ${files.slice(0, 5).map((file) => file.split('/').pop()).join(', ')}` : ''}`,
-			`- context form: ${config.contextForm} · auto-compact at ${config.autoCompactChars > 0 ? `${config.autoCompactChars} chars` : 'off'}`,
+			`- context form: ${config.contextForm}`,
+			session.summary
+				? `- summarized: ${session.summary.covers} earlier messages stand behind one summary`
+				: '- not summarized yet: past the window, the older turns are folded into one',
 		].join('\n');
 	}
 
@@ -592,34 +901,20 @@ export class Agent extends Service {
 			const visible = SILENT_TRIGGERS.has(state.trigger) ? [] : offered;
 			const live = this.live.get(state.sessionId);
 			const session = live ?? this.ctx.sessions.get(state.sessionId);
+			// A long turn grows by its own tool results, so the request is checked here as well as at the
+			// turn's start: eliding old output costs nothing, and folding the turns before this one is
+			// what keeps a request that has outgrown the window from being refused outright.
+			const fitted = await this.fitRequest(state, session, visible);
+			if (fitted.messages !== state.messages || fitted.transcript !== undefined) {
+				state = { ...state, messages: fitted.messages, transcript: fitted.transcript ?? state.transcript };
+			}
 			// The window of this model round trip is what the UI shows as "thinking for Ns".
 			const startedAt = Date.now();
-			const completion = await this.ctx.llm.chat(
-				state.policy.model,
-				state.messages,
-				visible,
-				{
-					onToken: (text) => this.ctx.emit('agent/token', state.ref, text),
-					onReasoning: (text) => this.ctx.emit('agent/reasoning', state.ref, text),
-					onToolDelta: (call) => this.ctx.emit('agent/tool-delta', state.ref, call),
-				},
-				runtime.signal,
-				{ reasoningEffort: session?.reasoningEffort, ...state.samplers },
-			);
-			if (completion.usage && session) {
-				session.usage.inputTokens += completion.usage.input;
-				session.usage.outputTokens += completion.usage.output;
-				session.usage.requests += 1;
-				this.ctx.usage.add(completion.usage);
-				const cost = this.ctx.llm.costFor(state.policy.model, completion.usage);
-				if (cost > 0) {
-					session.usage.cost += cost;
-					this.checkBudget(session, state.ref);
-				}
-				if (!live) {
-					this.ctx.sessions.save(session);
-				}
+			const sent = await this.request(state, visible, runtime.signal, session, Boolean(live));
+			if (sent.messages !== state.messages) {
+				state = { ...state, messages: sent.messages };
 			}
+			const completion = sent.completion;
 			const message = completion.message;
 			if (message.content || message.toolCalls?.length) {				this.ctx.audit.write(state.sessionId, {
 					kind: 'assistant',
@@ -845,6 +1140,9 @@ export class Agent extends Service {
 					// A subagent is an ordinary generation of its own; nothing about it is swiped or quieted.
 					trigger: 'normal',
 					prior: [...base],
+					// A subagent's request is its own, with no chat record behind it to fold, so only
+					// elision may shrink it; the isolation is what keeps its oversize off the parent.
+					foldable: false,
 				};
 				const abort = new AbortController();
 				const link = () => abort.abort();
@@ -891,6 +1189,7 @@ export class Agent extends Service {
 		identity: string,
 		config: Config,
 		trigger: GenerationTrigger,
+		window: number,
 	): Promise<ComposeResult | undefined> {
 		const tavern = this.tavern();
 		if (!config.tavernEnabled || !tavern) {
@@ -920,7 +1219,7 @@ export class Agent extends Service {
 				trigger,
 				external,
 				model: session.policy.model,
-				contextSize: session.contextLimit || config.contextLimit || 0,
+				contextSize: window,
 			});
 			// Timed world-info effects outlive the turn; the activated list is for the chat's readout.
 			if (composed.effects !== session.tavernEffects) {

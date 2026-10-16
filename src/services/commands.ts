@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
 import { Service, type Context } from 'cordis';
-import { resolveInside, runProcess, shellArgv } from '../lib/sandbox';
+import { guardPath, runCommand, shellArgv, type SandboxOptions } from '../lib/sandbox';
 import type { SessionPolicy } from '../lib/types';
 import type { GenerationTrigger } from '../lib/tavern/types';
 import type { CustomCommand } from './catalog';
@@ -104,8 +104,24 @@ export class Commands extends Service {
 			surface.markdown(`Unknown command \`/${name}\`. Try \`/help\`.`);
 			return { done: true };
 		}
-		const expanded = await expandCommand(custom, args, this.ctx.settings.workspace());
+		const expanded = await expandCommand(custom, args, this.ctx.settings.workspace(), this.sandboxOptions());
 		return { done: false, text: expanded };
+	}
+
+	/**
+	 * The boundary a custom command's `!`shell`` snippets and `@file` includes run under: the same
+	 * one the shell tools get, so a command file cannot be a way around it.
+	 */
+	private sandboxOptions(): SandboxOptions {
+		const config = this.ctx.settings.get();
+		return {
+			writable: true,
+			confinement: { read: config.confineRead, write: config.confineWrite },
+			network: config.network,
+			denyReadPaths: [...config.denyReadPaths],
+			timeoutMs: 20_000,
+			filterEnv: config.filterSensitiveEnv,
+		};
 	}
 }
 
@@ -121,7 +137,7 @@ function stripSlash(prompt: string): string {
 }
 
 /** Expands `$ARGUMENTS`, `` !`shell` `` snippets and `@path` file includes. */
-async function expandCommand(command: CustomCommand, args: string, workspace: string): Promise<string> {
+async function expandCommand(command: CustomCommand, args: string, workspace: string, options: SandboxOptions): Promise<string> {
 	let output = command.template.replaceAll('$ARGUMENTS', args);
 	const shellPattern = /!`([^`]+)`/g;
 	for (const match of [...output.matchAll(shellPattern)]) {
@@ -129,7 +145,7 @@ async function expandCommand(command: CustomCommand, args: string, workspace: st
 		let replacement = `(command failed: ${snippet})`;
 		if (workspace) {
 			try {
-				const result = await runProcess(shellArgv(snippet), workspace, 20_000);
+				const result = await runCommand(shellArgv(snippet), workspace, options);
 				replacement = [result.stdout, result.stderr].filter(Boolean).join('\n').trim() || `(no output: ${snippet})`;
 				if (result.code !== 0) {
 					replacement = `(exit ${result.code})\n${replacement}`;
@@ -146,7 +162,11 @@ async function expandCommand(command: CustomCommand, args: string, workspace: st
 			continue;
 		}
 		try {
-			const file = resolveInside(workspace, match[1]!);
+			const file = await guardPath(workspace, match[1]!, {
+				access: 'read',
+				confinement: options.confinement,
+				denyReadPaths: options.denyReadPaths,
+			});
 			const info = await stat(file);
 			if (!info.isFile() || info.size > 64 * 1024) {
 				continue;

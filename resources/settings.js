@@ -182,6 +182,8 @@
 		$('timeout').value = String(config.commandTimeout);
 		$('plans').value = config.planDirectory;
 		$('deny').value = (config.denyReadPaths || []).join('\n');
+		$('confine-read').checked = Boolean(config.confineRead);
+		$('confine-write').checked = Boolean(config.confineWrite);
 		$('steps').value = String(config.maxSteps);
 		const rules = config.permissions || {};
 		$('rules-allow').value = (rules.allow || []).join('\n');
@@ -203,6 +205,8 @@
 			commandTimeout: Number($('timeout').value) || 0,
 			planDirectory: $('plans').value.trim(),
 			denyReadPaths: lines($('deny')),
+			confineRead: $('confine-read').checked,
+			confineWrite: $('confine-write').checked,
 			maxSteps: Number($('steps').value) || 0,
 			displayForm: $('display').value,
 			contextForm: $('context').value,
@@ -708,14 +712,16 @@
 			if (prompt.inChat) {
 				bits.push('@ ' + Number(prompt.depth ?? 4));
 			}
-			bits.push(prompt.tokens + ' tokens');
+			// A marker the chat cannot fill is filled while the turn is built, and saying so beats
+			// reporting the empty slot it still is as "0 tokens".
+			bits.push(prompt.tokens === null ? 'filled from ' + prompt.source : prompt.tokens + ' tokens');
 			rows.push({
 				group: 'SillyTavern',
 				id: 'st:' + prompt.identifier,
 				name: prompt.name,
 				note: bits.join(' · '),
 				meta: 'SillyTavern — ' + prompt.identifier + ' · ' + prompt.role,
-				text: prompt.content,
+				text: prompt.content || (prompt.source ? 'Nothing here yet: this block is filled while the turn is built, from ' + prompt.source + '.' : ''),
 			});
 		}
 		return rows;

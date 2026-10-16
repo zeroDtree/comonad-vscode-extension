@@ -1,7 +1,7 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Service, type Context } from 'cordis';
-import { sanitizedEnv, shellArgv } from '../lib/sandbox';
+import { shellArgv, spawnSandboxed, type SandboxOptions } from '../lib/sandbox';
 import type { BackgroundTask, TaskApi } from '../lib/types';
 
 const MAX_OUTPUT = 400_000;
@@ -13,12 +13,12 @@ declare module 'cordis' {
 }
 
 /**
- * Background shell tasks. They run outside the OS sandbox with the user's account,
- * so the policy gate still approves each `start_shell` call. Children are killed
- * when the service unloads.
+ * Background shell tasks. They run under the same OS sandbox and the same workspace boundary as a
+ * foreground command, which is why the child comes from `spawnSandboxed` rather than `spawn`.
+ * Children are killed when the service unloads.
  */
 export class Tasks extends Service implements TaskApi {
-	static inject = ['host', 'settings'];
+	static inject = ['host'];
 
 	private readonly running = new Map<string, { task: BackgroundTask; child: ChildProcess }>();
 
@@ -27,12 +27,10 @@ export class Tasks extends Service implements TaskApi {
 		ctx.effect(() => () => this.killAll());
 	}
 
-	start(command: string, cwd: string): BackgroundTask {
+	start(command: string, cwd: string, options: SandboxOptions): BackgroundTask {
 		const id = randomUUID().slice(0, 8);
 		const task: BackgroundTask = { id, command, cwd, startedAt: Date.now(), output: '', exitCode: null };
-		const argv = shellArgv(command);
-		const env = this.ctx.settings.get().filterSensitiveEnv ? sanitizedEnv() : undefined;
-		const child = spawn(argv[0]!, argv.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+		const child = spawnSandboxed(shellArgv(command), cwd, options);
 		const append = (chunk: string) => {
 			task.output = `${task.output}${chunk}`.slice(-MAX_OUTPUT);
 		};

@@ -63,8 +63,32 @@ export function formatWorldInfo(value: string | undefined, format: string | unde
 	return shape.includes('{0}') ? shape.replace(/\{0\}/g, text) : shape ? `${shape}${text}` : text;
 }
 
-/** The content of a marker block, or `undefined` when the chat has nothing to put there. */
-function markerContent(identifier: string, blocks: AssembleBlocks, options: AssembleOptions): string | undefined {
+/**
+ * The markers `markerContent` knows how to resolve. The ones it does not are filled from a turn rather
+ * than from a chat — the conversation itself, or an entry a depth or an outlet places.
+ */
+const MARKER_IDENTIFIERS: ReadonlySet<string> = new Set([
+	IDENTITY_PROMPT,
+	'worldInfoBefore',
+	'worldInfoAfter',
+	'charDescription',
+	'charPersonality',
+	'scenario',
+	'personaDescription',
+	'dialogueExamples',
+]);
+
+/** Whether a block's text comes from a value the assembler holds rather than from the block itself. */
+export function hasMarkerText(identifier: string): boolean {
+	return MARKER_IDENTIFIERS.has(identifier);
+}
+
+/**
+ * The content of a marker block, or `undefined` when the chat has nothing to put there. Exported so
+ * the settings panel's preview asks the same question the assembler does: a marker's text has one
+ * definition, and a preview that re-derived it could disagree with what was actually sent.
+ */
+export function markerContent(identifier: string, blocks: AssembleBlocks, options: AssembleOptions): string | undefined {
 	switch (identifier) {
 		case IDENTITY_PROMPT:
 			return blocks.identity;

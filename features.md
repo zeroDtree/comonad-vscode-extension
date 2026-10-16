@@ -185,8 +185,8 @@ flowchart LR
 - [ ] 路径作用域规则：`.comonad/rules/*.md` + `paths:` frontmatter，按需加载（Claude Code rules）
 - [ ] 自动记忆：模型维护 `MEMORY.md` 索引 + 主题文件；启动加载上限（200 行 / 25KB）；可审计可编辑（Claude Code auto memory）
 - [ ] 上下文装配：`@` 提及、当前文件/选区、诊断、Git 快照、diff、终端输出 → 结构化注入并显示来源
-- [ ] 上下文视图：token 分解（系统提示/指令/历史/工具/附件），可手动修剪
-- [ ] 压缩：`/compact`（可带指令）+ 阈值自动压缩；压缩前后 hooks；摘要持久化
+- [x] 上下文视图：`/context` 分解窗口、输出预留、系统提示与工具定义开销、转录 token、指令文件与摘要覆盖范围；composer 状态行显示 `context 43% · 55K/128K`（取自 provider 报告的真实 prompt 大小）
+- [x] 窗口与压缩：窗口取自模型 profile（`contextWindow`），Auto 自动解析、手动档覆盖；超出窗口时**摘要并继续**（不丢弃整轮）——最新请求逐字保留、增量复用旧摘要、摘要失败不动历史；轮内先省略旧工具输出再摘要；端点以「too long」拒绝时压缩后重试一次；压缩后 rewind 点同步重定位（落在折叠区内的丢弃）；`/summarize`（`/compress`、`/compact` 别名）；`/context` 报告窗口、预算拆分与上一次请求的真实占用
 - [ ] 渐进式加载：Skills/规则按需进入上下文，控制常驻 token
 
 **P2**
@@ -354,8 +354,8 @@ flowchart LR
 | --- | --- | --- |
 | A 入口与会话 | **独立 Chat 面板**（流式消息、工具卡片、reasoning 折叠、内联审批按钮、会话切换/Fork、待办与运行状态；可一键弹出为独立窗口）、共享命令层、`@comonad` Chat participant、编辑器/`#`引用注入、会话持久化与树视图（重命名/删除/fork 右键菜单）、会话导出、选区 Code Action 与编辑器菜单（解释/修复） | `ui/chat-panel.ts`, `resources/chat.js`, `resources/chat.css`, `ui/palette.ts`, `ui/slash.ts`, `ui/participant.ts`, `ui/sessions-view.ts`, `ui/inline.ts`, `services/sessions.ts` |
 | B 运行时 | Mermaid 图运行时（节点/路由/suspend/resume/soft route）、默认图、每节点模型路由、子代理（前后台、深度/并发限制、`fork` 继承对话）、只读工具并行批次执行、/compact 压缩与超长自动压缩 | `lib/graph.ts`, `lib/mermaid.ts`, `services/agent.ts`, `ui/chat-panel.ts` |
-| C 工具 | fs（写保护 `.git`）、shell（沙箱 + 后台任务 + 未沙箱升级工具 + 敏感环境变量过滤）、plan、todo、math、web（fetch/search）、VS Code（诊断/符号/编辑/任务/git）、ask、agent、skill、memory、MCP 客户端（stdio + HTTP，逐服务器挂载/卸载） | `tools/*.ts`, `services/tools.ts`, `services/mcp.ts` |
-| D 策略与安全 | 四模式 × 五审批、能力过滤、allow/ask/deny 规则引擎、“总是允许”规则生成、危险命令（rm -rf/sudo/curl\|sh/force push…）强制确认、`*_unsandboxed` 升级必确认、sbpl/bwrap 沙箱（Windows 走 PowerShell 直执需审批）、`.env` 与 `.git` 保护、Workspace Trust、审计 JSONL（user/assistant/tool/turn-end 全轨迹） | `lib/policy.ts`, `lib/sandbox.ts`, `services/agent.ts`, `services/audit.ts` |
+| C 工具 | fs（写保护 `.git`、所有路径经工作区守卫，符号链接逃逸被拒）、shell（沙箱 + 后台任务 + 敏感环境变量过滤）、plan、todo、math、web（fetch/search）、VS Code（诊断/符号/编辑/任务/git）、ask、agent、skill、memory、MCP 客户端（stdio + HTTP，逐服务器挂载/卸载） | `tools/*.ts`, `services/tools.ts`, `services/mcp.ts` |
+| D 策略与安全 | 四模式 × 五审批、能力过滤、allow/ask/deny 规则引擎、“总是允许”规则生成、危险命令（rm -rf/sudo/curl\|sh/force push…）强制确认、`*_unsandboxed` 升级必确认、sbpl/bwrap 沙箱（Windows 走 PowerShell 直执需审批）、工作区边界双开关（`confineRead` / `confineWrite`，同时作用于文件工具与 shell 沙箱）、`.env` 与 `.git` 保护、Workspace Trust、审计 JSONL（user/assistant/tool/turn-end 全轨迹） | `lib/policy.ts`, `lib/sandbox.ts`, `services/agent.ts`, `services/audit.ts` |
 | E 检查点 | 影子 git 基线 + 每轮 orphan 快照、Keep/Undo（文件或 hunk）、Revert、代码+对话 Rewind、diff 编辑器打开、激活时自动 `git gc` | `services/checkpoints.ts`, `ui/review.ts` |
 | F 上下文与记忆 | COMONAD.md/AGENTS.md/rules 层级加载（记录来源文件）、自动记忆（读写工具 + 注入）、context/display 三形态（rendered/token/raw）、token 估算与 `/context` 预算报告、`/cost` 与预算告警 | `lib/instructions.ts`, `lib/prompt.ts`, `services/catalog.ts`, `services/agent.ts` |
 | G 扩展 | Skills、自定义命令（`$ARGUMENTS`/`` !`cmd` ``/`@file`）、Hooks（command/http/mcp_tool/prompt + matcher + if + 决策 JSON + async）、定义式 Subagents、MCP 配置、内置 slash 命令（`ui/slash.ts`） | `services/hooks.ts`, `services/catalog.ts`, `services/commands.ts`, `ui/slash.ts` |

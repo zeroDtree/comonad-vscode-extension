@@ -346,6 +346,15 @@ export class Llm extends Service {
 		}
 	}
 
+	/** The profile a chat's model id resolves to, for the settings the request itself needs. */
+	profileFor(policyModel: string): Profile | undefined {
+		try {
+			return this.resolve(policyModel).profile;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/** The adapter a profile names, or the only loaded one. */
 	private adapter(name: string | undefined): LlmAdapter {
 		const adapter = this.findAdapter(name);

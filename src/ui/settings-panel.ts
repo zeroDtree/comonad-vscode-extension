@@ -11,11 +11,22 @@ import { estimateTokens, type ContextForm } from '../lib/prompt';
 import { INJECTION_POSITION } from '../lib/tavern/types';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
+import { promptText } from '../services/agent';
 import { profileKeyEnvs, type Config, type Profile } from '../services/settings';
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
 /** Webview settings panel: tabs for the agent policy, the graph editor, MCP servers and tools. */
+
+/**
+ * Where a marker's text comes from when no chat value can stand for it: the two that are only known
+ * while a turn is being built.
+ */
+const MARKER_SOURCE: Record<string, string> = {
+	worldInfoBefore: 'the world-book entries this turn activates',
+	worldInfoAfter: 'the world-book entries this turn activates',
+	chatHistory: 'the conversation itself',
+};
 
 const DISPLAY_LABELS: Record<ContextForm, string> = {
 	rendered: 'Rendered — folded thoughts and tool calls',
@@ -219,6 +230,8 @@ export function settingsPanel(ctx: Context): void {
 			commandTimeout: Math.max(1, Number(patch.commandTimeout) || current.commandTimeout),
 			planDirectory: String(patch.planDirectory ?? '').trim(),
 			denyReadPaths: asList(patch.denyReadPaths),
+			confineRead: Boolean(patch.confineRead),
+			confineWrite: Boolean(patch.confineWrite),
 			maxSteps: Math.max(1, Number(patch.maxSteps) || current.maxSteps),
 			displayForm: patch.displayForm ?? current.displayForm,
 			contextForm: patch.contextForm ?? current.contextForm,
@@ -258,6 +271,8 @@ export function settingsPanel(ctx: Context): void {
 				commandTimeout: config.commandTimeout,
 				planDirectory: config.planDirectory,
 				denyReadPaths: config.denyReadPaths,
+				confineRead: config.confineRead,
+				confineWrite: config.confineWrite,
 				maxSteps: config.maxSteps,
 				displayForm: config.displayForm,
 				contextForm: config.contextForm,
@@ -304,31 +319,43 @@ export function settingsPanel(ctx: Context): void {
 	const promptsSlice = async (): Promise<Record<string, unknown>> => {
 		const session = ctx.sessions.active();
 		const visible = new Set(session ? ctx.tools.visible(session.policy).map((tool) => tool.name) : []);
+		const blocks = session ? await ctx.agent.promptBlocks(session) : [];
+		// A marker carries no text of its own: the assembler fills it while the turn is built, so the
+		// panel asks the tavern for the same values the assembler would use. What is left over is filled
+		// from the turn itself and is reported as such rather than as an empty prompt with no tokens.
+		const shown = session ? (tavern()?.displayPrompts(session.id, promptText(blocks)) ?? {}) : {};
 		return {
 			chat: session ? { title: session.title, mode: session.policy.workMode, approval: session.policy.approval } : null,
-			comonad: session
-				? (await ctx.agent.promptBlocks(session)).map((block) => ({ name: block.name, text: block.text, tokens: estimateTokens(block.text) }))
-				: [],
+			comonad: blocks.map((block) => ({ name: block.name, text: block.text, tokens: estimateTokens(block.text) })),
 			tools: ctx.tools.all().map((tool) => ({
 				name: tool.name,
 				capability: tool.capability,
 				description: tool.description,
 				parameters: tool.parameters,
 				visible: visible.has(tool.name),
-				tokens: estimateTokens(tool.description),
+				// What travels with every request is the whole definition, parameter schema included — the
+				// panel counts the same thing the context budget does, not just the prose.
+				tokens: estimateTokens(JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters })),
 			})),
 			// Nothing sends these when the tavern row is off, so the tab shows no collection at all.
-			st: (tavern()?.promptsFor(session?.id) ?? []).map((prompt) => ({
-				identifier: prompt.identifier,
-				name: prompt.name || prompt.identifier,
-				role: prompt.role,
-				content: prompt.content ?? '',
-				enabled: prompt.enabled,
-				marker: prompt.marker === true,
-				inChat: Number(prompt.injection_position ?? 0) === INJECTION_POSITION.absolute,
-				depth: prompt.injection_depth,
-				tokens: estimateTokens(String(prompt.content ?? '')),
-			})),
+			st: (tavern()?.promptsFor(session?.id) ?? []).map((prompt) => {
+				const text = shown[prompt.identifier];
+				const marker = prompt.marker === true;
+				return {
+					identifier: prompt.identifier,
+					name: prompt.name || prompt.identifier,
+					role: prompt.role,
+					content: text ?? '',
+					enabled: prompt.enabled,
+					marker,
+					inChat: Number(prompt.injection_position ?? 0) === INJECTION_POSITION.absolute,
+					depth: prompt.injection_depth,
+					// A marker with no text here is one only a turn can fill, and saying which is honest
+					// where reporting the empty slot as "0 tokens" was not.
+					source: marker && text === undefined ? (MARKER_SOURCE[prompt.identifier] ?? 'the turn being built') : undefined,
+					tokens: marker && text === undefined ? null : estimateTokens(text ?? ''),
+				};
+			}),
 		};
 	};
 
@@ -647,6 +674,12 @@ ${paneTabs}
         <label for="deny">Deny read paths</label>
         <textarea id="deny" class="control" data-key="denyReadPaths" spellcheck="false" rows="3"></textarea>
         <p class="hint">One workspace-relative path or basename per line — file and shell tools refuse to read or write them.</p>
+      </div>
+      <div class="field wide">
+        <label>Restrict to workspace</label>
+        <label class="check"><input type="checkbox" id="confine-read" data-key="confineRead" /> Reads outside the working directory are refused</label>
+        <label class="check"><input type="checkbox" id="confine-write" data-key="confineWrite" /> Writes outside the working directory are refused</label>
+        <p class="hint">Applies to the file tools and to commands run in the shell sandbox. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm.</p>
       </div>
     </div>
   </section>
