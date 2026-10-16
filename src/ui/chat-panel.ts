@@ -17,20 +17,20 @@ import { registerCommand } from './register';
  * provider reported rather than counting the transcript, so it is the same number the budget uses and
  * the same one the endpoint charged for.
  */
-/** A token count the way a window is spoken about: 128K, 1M. */
-function formatTokens(tokens: number): string {
-	if (tokens >= 1_048_576) {
-		return `${Math.round((tokens / 1_048_576) * 10) / 10}M`;
-	}
-	return `${Math.round(tokens / 1024)}K`;
-}
-
 function contextUsage(session: Session | undefined, window: number): string {
 	if (!session?.lastInputTokens || !window) {
 		return '';
 	}
 	const share = Math.min(100, Math.round((session.lastInputTokens / window) * 100));
 	return `context ${share}% · ${formatTokens(session.lastInputTokens)}/${formatTokens(window)}`;
+}
+
+/** A token count the way a window is spoken about: 128K, 1M. */
+function formatTokens(tokens: number): string {
+	if (tokens >= 1_048_576) {
+		return `${Math.round((tokens / 1_048_576) * 10) / 10}M`;
+	}
+	return `${Math.round(tokens / 1024)}K`;
 }
 
 /** The chat: a webview view in the Secondary Side Bar, plus an optional editor window. */
@@ -137,10 +137,9 @@ export function chatPanel(ctx: Context): void {
 			display: config.displayForm,
 			reasoningEffort: session?.reasoningEffort ?? config.reasoningEffort,
 			contextWindow: session?.contextWindow ?? config.contextWindow,
-			// The window the request is actually measured against, and how full it was last time: the
-			// provider's own count of the prompt rather than an estimate of the transcript.
+			// The window this chat's requests are measured against, which is what the model menu's
+			// `Auto (…)` reads out.
 			windowTokens: session ? ctx.agent.windowFor(session) : 0,
-			contextUsed: session?.lastInputTokens ?? 0,
 			modes: splitChoices(MODE_LABELS),
 			approvals: splitChoices(APPROVAL_LABELS),
 			generations: GENERATION_TRIGGERS.map((value) => ({ value, label: GENERATION_LABELS[value] })),
@@ -497,7 +496,8 @@ export function chatPanel(ctx: Context): void {
 		await generate('regenerate');
 	};
 
-	const resume = async (): Promise<void> => {		const session = ctx.sessions.active();
+	const resume = async (): Promise<void> => {
+		const session = ctx.sessions.active();
 		if (!session?.cursor || running) {
 			return;
 		}
@@ -568,7 +568,8 @@ export function chatPanel(ctx: Context): void {
 					break;
 				case 'resume':
 					await resume();
-					break;				case 'openUrl':
+					break;
+				case 'openUrl':
 					await openLink(String(message.url ?? ''));
 					break;
 				case 'copy':

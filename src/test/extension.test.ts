@@ -26,7 +26,7 @@ import { fsTools } from '../tools/fs';
 import { agentTools } from '../tools/misc';
 import { hostStorage, type Host } from '../services/host';
 import { Context, Service, type Plugin } from 'cordis';
-import { rebaseMarks, SessionStore, unusedChat, type Mark } from '../services/sessions';
+import { rebaseMarks, isSummaryMessage, SessionStore, unusedChat, type Mark } from '../services/sessions';
 import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
 import { CONFIG_KEYS, DEFAULT_CONTEXT_WINDOW, DEPRECATED_CONFIG_KEYS, profileKeyEnvs } from '../services/settings';
 import { toolset } from '../services/tools';
@@ -71,7 +71,7 @@ import {
 	tagIdsOf,
 	tagsOf,
 } from 'comonad-plugin-tavern/lib/tags';
-import { REGEX_PLACEMENT, PROMPT_LIBRARY_KEY, WI_LOGIC, WI_POSITION, WI_ROLE, WI_SETTINGS_DEFAULTS, WI_STRATEGY, worldEntry, type GenerationTrigger, type WorldEntry } from '../lib/tavern/types';
+import { REGEX_PLACEMENT, INJECTION_POSITION, PROMPT_LIBRARY_KEY, WI_LOGIC, WI_POSITION, WI_ROLE, WI_SETTINGS_DEFAULTS, WI_STRATEGY, worldEntry, type GenerationTrigger, type WorldEntry } from '../lib/tavern/types';
 /** The tavern plugin is a package beside the host: its files are read from there, not from `src/`. */
 const PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-tavern');
 const PACKAGE_SRC = join(PACKAGE, 'src');
@@ -81,7 +81,10 @@ import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
 import { settingsDocument } from '../ui/settings-panel';
 import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
+import { settingsTarget } from '../host';
+import { McpConnection } from '../services/mcp';
 import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, countMessages, countRaw, countTokens, encodingForModel, guesstimate, setEncoder } from '../lib/tokens';
+import { embedTexts } from '../lib/vectors';
 import { planFor } from '../services/tokenizers';
 
 const readTool: ToolSpec = {
@@ -820,6 +823,94 @@ suite('Comonad domain', () => {
 		assert.strictEqual(untouched.changed, false);
 	});
 
+	test('eliding never grows a result, and steps every one of them down when it has to', () => {
+		const call = (id: string): Message => ({ role: 'assistant', content: '', toolCalls: [{ id, name: 'read_file', arguments: '{}' }] });
+		// A result shorter than the marker that would replace it: eliding it would make the request bigger.
+		const short: Message[] = [
+			{ role: 'user', content: 'go' },
+			call('t1'),
+			{ role: 'tool', toolCallId: 't1', content: 'ok' },
+		];
+		const kept = elideToolResults(short, 0);
+		assert.strictEqual(kept.changed, false, 'nothing is elided when nothing gets shorter');
+		assert.deepStrictEqual(kept.messages, short);
+		// Two enormous results and nowhere to put them: both are taken down to their marker, which is what
+		// the emergency shrink promises. A running estimate that forgot the steps already taken would stop
+		// after the first one and leave the request as long as it was.
+		const long: Message[] = [
+			{ role: 'user', content: 'go' },
+			call('t1'),
+			{ role: 'tool', toolCallId: 't1', content: 'x'.repeat(9_000) },
+			call('t2'),
+			{ role: 'tool', toolCallId: 't2', content: 'y'.repeat(9_000) },
+		];
+		const squeezed = elideToolResults(long, 0);
+		assert.ok(squeezed.changed, 'the results are elided');
+		const results = squeezed.messages.filter((message) => message.role === 'tool');
+		assert.strictEqual(results.length, 2, 'no message is dropped');
+		for (const [index, result] of results.entries()) {
+			assert.ok(result.content.length < 100, `result ${index} is down to its marker (${result.content.length} chars)`);
+			assert.ok(result.content.includes('elided'), 'and says so');
+		}
+		assert.ok(estimateMessages(squeezed.messages) < estimateMessages(long));
+	});
+
+	test('an embedding response that is missing a vector is refused', async () => {
+		const original = globalThis.fetch;
+		const respond = (data: unknown): void => {
+			globalThis.fetch = (async () =>
+				new Response(JSON.stringify({ data }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+		};
+		try {
+			// Two texts, one vector: the answer is useless and the caller has to hear about it rather than
+			// pair a vector with the wrong text.
+			respond([{ index: 0, embedding: [1, 0] }]);
+			await assert.rejects(
+				() => embedTexts({ base: 'https://example.invalid/v1', key: 'k', model: 'm', input: ['a', 'b'] }),
+				/came back without a vector/,
+			);
+			// A row whose index names nothing is one too: it takes the place of the row it cannot be, and the
+			// text it left behind is reported as missing rather than quietly paired with another vector.
+			respond([{ index: 5, embedding: [1, 0] }]);
+			await assert.rejects(
+				() => embedTexts({ base: 'https://example.invalid/v1', key: 'k', model: 'm', input: ['a', 'b'] }),
+				/came back without a vector/,
+			);
+			// Out of order is fine: the index puts every vector back where it belongs.
+			respond([{ index: 1, embedding: [0, 1] }, { index: 0, embedding: [1, 0] }]);
+			assert.deepStrictEqual(await embedTexts({ base: 'https://example.invalid/v1', key: 'k', model: 'm', input: ['a', 'b'] }), [
+				[1, 0],
+				[0, 1],
+			]);
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
+	test('an MCP server that answers with a string id is understood', async () => {
+		const original = globalThis.fetch;
+		globalThis.fetch = (async (_url: string, init: { body: string }) => {
+			const sent = JSON.parse(init.body) as { id: number; method: string };
+			// JSON-RPC allows either type for an id, and a server that echoes its own as a string is still
+			// answering this request: read only numbers and every call waits for its timeout instead.
+			const result = sent.method === 'initialize' ? { protocolVersion: '2025-06-18' } : { tools: [{ name: 'echo', description: 'Echoes.' }] };
+			return new Response(JSON.stringify({ jsonrpc: '2.0', id: `${sent.id}`, result }), {
+				status: 200,
+				headers: { 'content-type': 'application/json', 'mcp-session-id': 'session-1' },
+			});
+		}) as unknown as typeof fetch;
+		try {
+			const connection = await McpConnection.connect({ url: 'https://example.invalid/mcp' }, process.cwd());
+			try {
+				assert.deepStrictEqual((await connection.listTools()).map((tool) => tool.name), ['echo']);
+			} finally {
+				connection.close();
+			}
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
 	test('a compaction moves the rewind points that survive it, and drops the rest', () => {
 		const marks: Mark[] = [0, 3, 8, 12].map((length) => ({ turn: length, entryCount: length, length, at: length, text: `t${length}` }));
 		const rebased = rebaseMarks(marks, 5);
@@ -967,6 +1058,14 @@ suite('Comonad domain', () => {
 		assert.match(css, /#inspect-tabs\s*\{/, 'the sub-tab strip has its own rule');
 		assert.match(css, /#pr-wrap\s*\{/, 'the pane has its own layout');
 		assert.match(css, /\.pr-row\s*\{/, 'with a row per prompt');
+	});
+
+	test('a setting picked with no folder open is written to the user’s own settings', () => {
+		// A window with no folder has no workspace settings to write, and VS Code refuses that write rather
+		// than redirecting it: without this, the mode or the approval picked from the chat — or a model from
+		// the same menu — simply fails with an error in a window that has no folder open.
+		assert.strictEqual(settingsTarget(false), vscode.ConfigurationTarget.Global);
+		assert.strictEqual(settingsTarget(true), vscode.ConfigurationTarget.Workspace);
 	});
 
 	test('every setting the manifest declares is one the code actually reads', () => {
@@ -2558,6 +2657,141 @@ suite('Cordis kernel', () => {
 		}
 	});
 
+	test('a fold during a continue moves the reply it extends, and never orphans a tool call', async () => {
+		const kernel = await createTestKernel();
+		try {
+			// A tool whose output alone overruns the window, so the turn's own step is what forces the
+			// fold after the request was built.
+			kernel.ctx.tools.register({
+				name: 'big_read',
+				description: 'Reads something enormous.',
+				capability: 'ro',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: objectSchema({}),
+				execute: async () => `START ${'x'.repeat(30_000)} END`,
+			});
+			let step = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages[0]!.content.startsWith('You summarize')) {
+						return { message: { role: 'assistant', content: 'SUMMARY OF THE EARLIER TURNS' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					step += 1;
+					if (step === 1) {
+						const call: ToolCall = { id: 'big-1', name: 'big_read', arguments: '{}' };
+						return { message: { role: 'assistant', content: '', toolCalls: [call] }, toolCalls: [call], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'AND THEN' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'cont');
+			// A conversation far past the window, so the fold happens before the turn's own messages and
+			// the reply a continue extends has to be found again in the transcript the fold leaves.
+			session.contextWindow = 12_000;
+			session.policy.maxTokens = 500;
+			for (let turn = 0; turn < 6; turn += 1) {
+				session.transcript.push({ role: 'user', content: `ask ${turn} ${'a'.repeat(3_000)}` });
+				session.transcript.push({ role: 'assistant', content: `answer ${turn} ${'b'.repeat(3_000)}` });
+			}
+			kernel.ctx.sessions.save(session);
+
+			await kernel.ctx.agent.runTurn({ text: '', trigger: 'continue', sessionId: 'cont' });
+
+			const after = kernel.ctx.sessions.require('cont');
+			assert.ok(after.summary && after.summary.covers > 0, 'the conversation was folded');
+			assert.ok(isSummaryMessage(after.transcript[0]), 'and the record keeps the summary it was folded into');
+			// The continuation extends the reply it was asked to continue — the fold moved that reply, so
+			// an index taken before it would name the turn's own tool call instead.
+			const last = after.transcript[after.transcript.length - 1]!;
+			assert.ok(last.continued, 'the continuation is merged into the reply it extends');
+			assert.ok(last.content.startsWith('answer 5'), `and lands on that reply (${last.content.slice(0, 20)})`);
+			assert.strictEqual(last.content.split('AND THEN').length, 2, 'the continuation is written once');
+			assert.ok(!last.toolCalls, 'and never on a call of its own');
+			// An assistant call whose result is gone is refused by every endpoint, so the record must not
+			// hold one: the fold took that whole turn, result included.
+			assert.deepStrictEqual(
+				after.transcript.filter((message) => message.role === 'assistant' && message.toolCalls?.length),
+				[],
+				'no call is left without its result',
+			);
+			assert.ok(after.marks.every((mark) => mark.length <= after.transcript.length), 'no rewind point is past the transcript');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a fold during a quiet turn leaves the record the summary it folded into', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages[0]!.content.startsWith('You summarize')) {
+						return { message: { role: 'assistant', content: 'SUMMARY' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'privately' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'quiet-fold');
+			session.contextWindow = 12_000;
+			session.policy.maxTokens = 500;
+			for (let turn = 0; turn < 9; turn += 1) {
+				session.transcript.push({ role: 'user', content: `ask ${turn} ${'a'.repeat(3_000)}` });
+				session.transcript.push({ role: 'assistant', content: `answer ${turn} ${'b'.repeat(3_000)}` });
+			}
+			kernel.ctx.sessions.save(session);
+
+			// A quiet turn writes nothing down, so the record it restores has to be the folded one: the
+			// summary, the marks and the transcript are one account, and rolling the transcript back alone
+			// would leave the other two describing turns that are still there.
+			await kernel.ctx.agent.runTurn({ text: 'answer this privately', trigger: 'quiet', sessionId: 'quiet-fold' });
+
+			const after = kernel.ctx.sessions.require('quiet-fold');
+			assert.ok(after.summary && after.summary.covers > 0, 'the fold happened');
+			assert.ok(isSummaryMessage(after.transcript[0]), 'the record keeps the summary');
+			assert.ok(after.transcript.some((message) => message.content.startsWith('answer 8')), 'and the turns the fold kept');
+			assert.ok(!after.transcript.some((message) => message.content === 'answer this privately'), 'while the quiet prompt is still not a turn of the chat');
+			assert.ok(after.marks.every((mark) => mark.length <= after.transcript.length), 'no rewind point is past the transcript');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('extending a summary keeps what it already stood in for', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages[0]!.content.startsWith('You summarize')) {
+						return { message: { role: 'assistant', content: 'SUMMARY' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'twice');
+			for (let turn = 0; turn < 6; turn += 1) {
+				session.transcript.push({ role: 'user', content: `ask ${turn} ${'a'.repeat(400)}` });
+				session.transcript.push({ role: 'assistant', content: `answer ${turn} ${'b'.repeat(400)}` });
+			}
+			kernel.ctx.sessions.save(session);
+
+			// `/summarize` folds everything before the last prompt, so the summary heads the transcript.
+			await kernel.ctx.agent.compact('twice');
+			const covered = kernel.ctx.sessions.require('twice').summary!.covers;
+			assert.ok(covered > 1, `the first summary stands in for the whole older stretch (${covered})`);
+			// A second one folds that summary itself, and what it stood for is not lost with it.
+			await kernel.ctx.agent.compact('twice');
+			const after = kernel.ctx.sessions.require('twice');
+			assert.strictEqual(after.summary!.covers, covered, 'the extended summary still stands in for the same turns');
+			assert.ok(isSummaryMessage(after.transcript[0]) && after.transcript.length > 1, 'and the record holds what came after it');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('a model with no window of its own uses the fallback, and says so', async () => {
 		const kernel = await createTestKernel();
 		try {
@@ -3639,6 +3873,21 @@ suite('Tavern content', () => {
 		const withHistory = assemble(noHistory, { identity: 'i' }, [{ role: 'user', content: 'kept' }]);
 		assert.ok(withHistory.some((message) => message.content === 'kept'));
 
+		// And it gets the in-chat injections too: a block in chat only ever travels inside the history, so
+		// splicing the history without them would drop the author's note on the floor.
+		const note = {
+			...promptCollection().find((prompt) => prompt.identifier === 'jailbreak')!,
+			content: 'Keep it short.',
+			injection_position: INJECTION_POSITION.absolute,
+			injection_depth: 0,
+		};
+		const withNote = assemble([...noHistory, note], { identity: 'i' }, [{ role: 'user', content: 'kept' }]);
+		assert.deepStrictEqual(
+			withNote.filter((message) => message.content === 'kept' || message.content === 'Keep it short.').map((message) => message.content),
+			['kept', 'Keep it short.'],
+			'an in-chat block is spliced at its depth inside the history',
+		);
+
 		assert.deepStrictEqual(
 			injectAtDepth(
 				[
@@ -3684,7 +3933,8 @@ suite('Tavern content', () => {
 		assert.deepStrictEqual(exampleMessages('<START>\none').map((message) => message.content), ['<START>\none\n']);
 	});
 
-	test('regex scripts honour placement, depth, markdown/prompt gates and trim strings', () => {		const script = makeScript({ scriptName: 's', findRegex: '/\\bfoo\\b/g', replaceString: 'bar', placement: [REGEX_PLACEMENT.aiOutput] });
+	test('regex scripts honour placement, depth, markdown/prompt gates and trim strings', () => {
+		const script = makeScript({ scriptName: 's', findRegex: '/\\bfoo\\b/g', replaceString: 'bar', placement: [REGEX_PLACEMENT.aiOutput] });
 		assert.strictEqual(applyRegex([script], 'foo foo', { placement: REGEX_PLACEMENT.aiOutput }), 'bar bar');
 		assert.strictEqual(applyRegex([script], 'foo', { placement: REGEX_PLACEMENT.userInput }), 'foo');
 		assert.strictEqual(applyRegex([{ ...script, disabled: true }], 'foo', { placement: REGEX_PLACEMENT.aiOutput }), 'foo');
@@ -4675,7 +4925,8 @@ suite('Tavern content', () => {
 		}
 	});
 
-	test('a character, its book and a preset shape the request without displacing the agent', async () => {		const card = {
+	test('a character, its book and a preset shape the request without displacing the agent', async () => {
+		const card = {
 			spec: 'chara_card_v2',
 			spec_version: '2.0',
 			data: {

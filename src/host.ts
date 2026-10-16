@@ -10,6 +10,15 @@ export interface HostConfig {
 	extension: vscode.ExtensionContext;
 }
 
+/**
+ * Where a settings write lands. A window with no folder open has no workspace settings to write, and
+ * VS Code refuses that write rather than redirecting it, so the value goes to the user's own settings
+ * instead: a mode or an approval picked from the chat still sticks in a window with no folder.
+ */
+export function settingsTarget(hasFolder: boolean): vscode.ConfigurationTarget {
+	return hasFolder ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+}
+
 export function host(ctx: Context, config: HostConfig): void {
 	const { extension } = config;
 	const output = vscode.window.createOutputChannel('Comonad');
@@ -36,7 +45,8 @@ export function host(ctx: Context, config: HostConfig): void {
 			return record;
 		},
 		update: async (key, value) => {
-			await vscode.workspace.getConfiguration('comonad').update(key, value, vscode.ConfigurationTarget.Workspace);
+			const target = settingsTarget(Boolean(vscode.workspace.workspaceFolders?.length));
+			await vscode.workspace.getConfiguration('comonad').update(key, value, target);
 		},
 		secret: (id) => Promise.resolve(extension.secrets.get(id)),
 		setSecret: (id, value) => Promise.resolve(extension.secrets.store(id, value)),

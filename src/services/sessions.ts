@@ -34,8 +34,10 @@ export interface Mark {
 }
 
 /**
- * The record of a compaction. `covers` is how many transcript messages the text stands in for, which
- * is what lets the next compaction extend this summary rather than summarize the whole chat again.
+ * The record of a compaction. `covers` is how many messages of the conversation the text stands in
+ * for — counted in the conversation, not in the transcript the summary now heads, so a summary that is
+ * extended reports everything it covers — which is what lets the next compaction carry on from it and
+ * what `/context` tells the reader.
  */
 export interface SessionSummary {
 	text: string;
@@ -45,7 +47,12 @@ export interface SessionSummary {
 
 /** The message a compaction leaves at the head of the transcript. */
 export function summaryMessage(text: string): Message {
-	return { role: 'system', content: `Conversation summary (compacted):\n\n${text}` };
+	return { role: 'system', content: `Conversation summary (compacted):\n\n${text}`, summarized: true };
+}
+
+/** Whether a message is a compaction's summary, which is how a transcript says what its head stands for. */
+export function isSummaryMessage(message: Message | undefined): boolean {
+	return message?.summarized === true;
 }
 
 /**
@@ -480,7 +487,8 @@ export class Sessions extends Service {
 	}
 
 	remove(id: string): void {
-		if (this._draft?.id === id) {			this._draft = null;
+		if (this._draft?.id === id) {
+			this._draft = null;
 		} else {
 			this.store.remove(id);
 		}
@@ -626,16 +634,17 @@ export class Sessions extends Service {
 
 	/**
 	 * Writes a compaction down: the summary replaces the turns it covers in the chat record, and the
-	 * rewind points that sat inside those turns move with it. The caller has already decided what the
-	 * summary says; this only keeps the record and the marks consistent.
+	 * rewind points that sat inside those turns move with it. `removed` is how many messages the record
+	 * itself loses, which is not `summary.covers` once a summary is extended. The caller has already
+	 * decided what the summary says; this only keeps the record and the marks consistent.
 	 *
 	 * It takes the caller's own session object rather than an id, because a turn holds one live copy
 	 * while it runs — reading the chat back from disk here would return a second copy, and whichever of
 	 * the two was saved last would silently win.
 	 */
-	compacted(session: Session, summary: SessionSummary, transcript: Message[]): void {
+	compacted(session: Session, summary: SessionSummary, transcript: Message[], removed: number): void {
 		session.summary = summary;
-		session.marks = rebaseMarks(session.marks, summary.covers);
+		session.marks = rebaseMarks(session.marks, removed);
 		session.transcript = transcript;
 		session.cursor = null;
 		this.save(session);

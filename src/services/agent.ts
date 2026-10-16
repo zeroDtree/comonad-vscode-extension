@@ -33,7 +33,7 @@ import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/uti
 import { agentIndex, allowedToolsFor, skillIndex } from './catalog';
 import type { JournalApi } from './checkpoints';
 import { DEFAULT_CONTEXT_WINDOW, type Config } from './settings';
-import { summaryMessage, threadTitle, type Session, type SessionSummary, type SwipeCarry } from './sessions';
+import { isSummaryMessage, summaryMessage, threadTitle, type Session, type SessionSummary, type SwipeCarry } from './sessions';
 import type { ComposeResult, TavernApi } from 'comonad-plugin-tavern';
 
 /** Room held back for the summary a compaction adds, so the fit it plans survives its own output. */
@@ -41,6 +41,32 @@ const SUMMARY_RESERVE = 1_024;
 
 /** How many characters of the older turns one summary is allowed to read. */
 const SUMMARY_SOURCE_LIMIT = 120_000;
+
+/** The reply a continue extends: the last thing the model said, when nothing came after it. */
+function continuationIndex(transcript: readonly Message[]): number | undefined {
+	const at = lastReplyIndex(transcript);
+	return at >= 0 && at === transcript.length - 1 ? at : undefined;
+}
+
+/** The record a fold leaves: the summary, then whatever stood after the stretch it folded. */
+function foldedRecord(summary: Message, source: readonly Message[], covers: number): Message[] {
+	return [summary, ...source.slice(covers)];
+}
+
+/** Where an index into a transcript lands once `covers` messages at its head became one summary. */
+function rebaseIndex(index: number | undefined, covers: number): number | undefined {
+	return index === undefined || index < covers ? undefined : index - covers + 1;
+}
+
+/** What one fold did, so a caller can move its own indices and copies with the transcript. */
+interface FoldResult {
+	/** The message that now stands for the folded stretch. */
+	summary: Message;
+	/** How many messages of the transcript it folded. */
+	covers: number;
+	/** The transcript as the fold leaves it. */
+	folded: Message[];
+}
 
 export interface TurnInput {
 	/** The prompt. Empty for a continue, a swipe or a regenerate, which re-run what is already there. */
@@ -243,7 +269,7 @@ export class Agent extends Service {
 		// A continue and an impersonation add no prompt of their own: the conversation is already there,
 		// and quiet throws its prompt away again at the end.
 		const prompted = trigger !== 'continue' && trigger !== 'impersonate';
-		const prior = [...session.transcript];
+		let prior = [...session.transcript];
 		// The prompt keeps the time it was asked at however often the transcript is re-derived below, so
 		// a compaction in the middle of this turn cannot make it look like a later message.
 		const promptAt = Date.now();
@@ -253,8 +279,8 @@ export class Agent extends Service {
 		// A continue grows the last reply, and only when nothing comes after it. A turn that was
 		// stopped, is waiting on a tool call, or failed leaves the transcript ending in something else
 		// — merging there would cut that away. With nothing to grow, the answer is a turn of its own.
-		const lastReply = trigger === 'continue' ? lastReplyIndex(seeded) : -1;
-		const continueInto = lastReply >= 0 && lastReply === seeded.length - 1 ? lastReply : undefined;
+		// It is derived again whenever a fold rewrites the transcript the turn is running on.
+		let continueInto = trigger === 'continue' ? continuationIndex(seeded) : undefined;
 		// What the model is asked to do when the turn carries no prompt of its own. It is also said *as a
 		// turn*: a request whose last turn is the model's own is completed by OpenAI but refused outright
 		// by Gemini ("Requests ending with a model turn are not supported"). Upstream answers the same
@@ -309,9 +335,16 @@ export class Agent extends Service {
 			// quietly — and the prompt this turn is answering survives word for word.
 			this.notice(ref, 'Summarizing the conversation — it no longer fits the model’s window.');
 			try {
-				if (await this.fold(session, session.transcript, budget.input)) {
+				const fold = await this.fold(session, session.transcript, budget.input);
+				if (fold) {
 					seeded = seed();
 					history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
+					// The fold rewrote the record the turn is running on, so the turn's own view of it moves
+					// too: the record a quiet trigger restores at the end of the turn, and the reply a
+					// continue extends — which has a new index in the folded transcript, or none at all when
+					// the fold took it with the rest.
+					prior = foldedRecord(fold.summary, prior, fold.covers);
+					continueInto = trigger === 'continue' ? continuationIndex(seeded) : undefined;
 				}
 			} catch (error) {
 				this.ctx.log.message(`summarize failed: ${describe(error)}`);
@@ -428,37 +461,56 @@ export class Agent extends Service {
 	}
 
 	/**
-	 * Folds the turns before the newest one into a single summary, in the chat itself. Returns whether
-	 * anything was folded. The plan keeps the newest turn word for word and a previous summary is
-	 * extended rather than replaced; a failure propagates so the caller can leave the transcript alone,
-	 * because a chat that cannot be summarized is still a chat and losing the record would be worse
-	 * than sending a request that may be refused.
+	 * Folds the turns before the newest one into a single summary, in the chat itself, and answers with
+	 * what it folded. The plan keeps the newest turn word for word and a previous summary is extended
+	 * rather than replaced; a failure propagates so the caller can leave the transcript alone, because a
+	 * chat that cannot be summarized is still a chat and losing the record would be worse than sending a
+	 * request that may be refused.
 	 */
-	private async fold(session: Session, transcript: Message[], budget: number, instructions?: string): Promise<boolean> {
+	private async fold(session: Session, transcript: Message[], budget: number, instructions?: string): Promise<FoldResult | null> {
 		const plan = planCompaction(transcript, budget, SUMMARY_RESERVE);
 		if (!plan.older.length) {
-			return false;
+			return null;
 		}
 		const text = await this.summaryText(session.policy.model, plan.older, session.summary, instructions);
 		if (!text) {
-			return false;
+			return null;
 		}
-		this.record(session, text, plan.older.length, plan.recent);
-		return true;
+		return this.record(session, text, plan.older.length, transcript);
 	}
 
 	/**
 	 * Writes a compaction down: the summary replaces the turns it covers, here and in the chat record,
-	 * and the rewind points inside those turns go with them.
+	 * and the rewind points inside those turns go with them. Answers with the transcript the fold
+	 * leaves, which is what a caller hands on as the request's history.
+	 *
+	 * `covers` counts messages of `source` — the transcript the plan was made from — while the record
+	 * only holds the head of it when a turn is still running, so the same cut comes off both: the
+	 * record's own messages are a prefix of the request's. A summary that is extended stands in for
+	 * everything it covered before, plus the turns this fold adds to it — the previous summary was one
+	 * message of the folded stretch — which is why `covers` is carried over rather than restarted.
 	 */
-	private record(session: Session, text: string, covers: number, recent: Message[]): void {
-		const folded = [summaryMessage(text), ...recent];
+	private record(session: Session, text: string, covers: number, source: readonly Message[]): FoldResult {
+		const summary = summaryMessage(text);
+		const previous = isSummaryMessage(source[0]) ? session.summary : undefined;
 		this.ctx.sessions.compacted(
 			session,
-			{ text, covers, at: Date.now() },
-			// The chat record holds the same turns as the request did, so the same stretch comes off it.
-			[folded[0]!, ...session.transcript.slice(covers)],
+			{ text, covers: (previous?.covers ?? 0) + covers - (previous ? 1 : 0), at: Date.now() },
+			foldedRecord(summary, session.transcript, covers),
+			covers,
 		);
+		return { summary, covers, folded: foldedRecord(summary, source, covers) };
+	}
+
+	/**
+	 * The run state after a fold the turn made mid-flight: the transcript becomes the folded one, and
+	 * the indices and copies the state keeps — the reply a continue extends, and the record a quiet
+	 * trigger restores at the end of the turn — move with it.
+	 */
+	private rebaseState(state: RunState, fold: FoldResult): void {
+		state.transcript = fold.folded;
+		state.continueInto = rebaseIndex(state.continueInto, fold.covers);
+		state.prior = foldedRecord(fold.summary, state.prior, fold.covers);
 	}
 
 	/**
@@ -501,15 +553,16 @@ export class Agent extends Service {
 		if (!text) {
 			return { messages: elided.messages };
 		}
-		this.record(session, text, plan.older.length, plan.recent);
-		// The folded transcript already ends with this turn — a fold cuts at a turn boundary and keeps
-		// everything after it — so the request is rebuilt from it whole. That is what keeps the request
-		// and the chat record from drifting apart, and it needs no arithmetic about which messages were
-		// the turn's own.
-		const folded = [summaryMessage(text), ...plan.recent];
+		const fold = this.record(session, text, plan.older.length, state.transcript);
+		// The fold moves the transcript under the turn, so the state's own view of it moves too: the
+		// reply a continue extends has a new index, and the record a quiet trigger restores was folded
+		// with it. The request is then rebuilt from the folded transcript whole — that is what keeps the
+		// request and the chat record from drifting apart, and it needs no arithmetic about which
+		// messages were this turn's own.
+		this.rebaseState(state, fold);
 		return {
-			messages: [...elided.messages.filter((message) => message.role === 'system'), ...folded],
-			transcript: folded,
+			messages: [...elided.messages.filter((message) => message.role === 'system'), ...fold.folded],
+			transcript: fold.folded,
 		};
 	}
 
@@ -596,8 +649,11 @@ export class Agent extends Service {
 			if (!text) {
 				return null;
 			}
-			this.record(session, text, plan.older.length, plan.recent);
-			return [...system, summaryMessage(text), ...plan.recent];
+			const fold = this.record(session, text, plan.older.length, state.transcript);
+			// The retry carries the folded request, and the rest of the turn goes on from the folded
+			// transcript: the reply a continue extends and the record a quiet trigger restores move with it.
+			this.rebaseState(state, fold);
+			return [...system, ...fold.folded];
 		} catch (error) {
 			this.ctx.log.message(`emergency summarize failed: ${describe(error)}`);
 			return null;
@@ -699,9 +755,6 @@ export class Agent extends Service {
 		const assistant = sum('assistant');
 		const tool = sum('tool');
 		const visible = this.ctx.tools.visible(session.policy);
-		const toolTokens = estimateTokens(
-			JSON.stringify(visible.map((item) => ({ name: item.name, description: item.description, parameters: item.parameters }))),
-		);
 		const files = session.instructions ?? [];
 		const profile = this.ctx.llm.profileFor(session.policy.model);
 		const system = this.systems.get(session.id) ?? '';
@@ -916,7 +969,8 @@ export class Agent extends Service {
 			}
 			const completion = sent.completion;
 			const message = completion.message;
-			if (message.content || message.toolCalls?.length) {				this.ctx.audit.write(state.sessionId, {
+			if (message.content || message.toolCalls?.length) {
+				this.ctx.audit.write(state.sessionId, {
 					kind: 'assistant',
 					text: clip(message.content, 2_000),
 					tools: message.toolCalls?.map((call) => call.name),

@@ -212,12 +212,16 @@ export class McpConnection {
 	}
 
 	private route(message: RpcMessage): void {
-		if (typeof message.id === 'number' && (message.result !== undefined || message.error !== undefined)) {
-			const waiter = this.pending.get(message.id);
+		if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
+			// The id comes back as the number this sent it as, or — since JSON-RPC allows either — as the
+			// string of it. `Number` reads both, and an id that names no request waits for its timeout
+			// rather than being answered as something else.
+			const id = Number(message.id);
+			const waiter = this.pending.get(id);
 			if (!waiter) {
 				return;
 			}
-			this.pending.delete(message.id);
+			this.pending.delete(id);
 			if (message.error) {
 				waiter.reject(new Error(message.error.message));
 			} else {

@@ -47,13 +47,19 @@ export async function embedTexts(request: EmbedRequest): Promise<number[][]> {
 		}
 		const body = (await response.json()) as { data?: Array<{ embedding?: unknown; index?: unknown }>; embeddings?: unknown };
 		const rows = Array.isArray(body.data) ? body.data : [];
-		const vectors: Array<number[] | undefined> = new Array(request.input.length);
+		// Filled rather than left sparse: a missing vector has to be *visible* to the check below, and
+		// `filter` steps over the holes of a sparse array without calling the predicate.
+		const vectors: Array<number[] | undefined> = new Array<number[] | undefined>(request.input.length).fill(undefined);
 		rows.forEach((row, at) => {
 			const vector = asVector(row?.embedding);
 			if (!vector.length) {
 				return;
 			}
 			const index = typeof row?.index === 'number' && Number.isInteger(row.index) && row.index >= 0 && row.index < vectors.length ? row.index : at;
+			if (index >= vectors.length) {
+				// A row nobody asked for: counting it would put a vector where no text was sent.
+				return;
+			}
 			vectors[index] = vector;
 		});
 		const missing = vectors.filter((vector) => !vector);

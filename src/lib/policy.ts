@@ -218,7 +218,9 @@ export function gateCalls(
 		if (rules.allow.some((rule) => ruleMatches(rule, call, tool))) {
 			continue;
 		}
-		// Escalation and dangerous commands never run silently, even under accept policies.
+		// Escalation and dangerous commands never run silently, even under accept policies. The name is a
+		// convention, not a list: the shipped tree registers no unsandboxed tool, but a plugin of yours may
+		// register one, and that is exactly the call this has to catch.
 		if (tool.name.endsWith('_unsandboxed')) {
 			confirm ||= `${call.name} runs outside the OS sandbox`;
 			continue;

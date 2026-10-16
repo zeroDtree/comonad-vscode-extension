@@ -569,12 +569,6 @@ export async function configureModel(ctx: Context): Promise<void> {
 	void vscode.window.showInformationMessage(`Comonad: profile ${id} saved (${profile.model}).`);
 }
 
-/** A prompt's text for the preview: one line, clipped, so the panel never ships a whole block. */
-function clipSource(text: string | undefined): string {
-	const flat = (text ?? '').replace(/\s+/g, ' ').trim();
-	return flat.length > 160 ? `${flat.slice(0, 160)}…` : flat;
-}
-
 /** A pane names its own tab and titles it, and that text lands in the host's markup: it is escaped. */
 function escapeHtml(text: string): string {
 	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

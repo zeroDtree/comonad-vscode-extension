@@ -80,6 +80,9 @@ export function resolveBudget(window: number, reserve: number, overhead: number)
 const TOOL_ELISION_STEPS = [1_200, 400, 0];
 
 function elided(text: string, size: number): string {
+	if (text.length <= size) {
+		return text;
+	}
 	return size <= 0 ? `[...${text.length} chars elided]` : `${text.slice(0, size)}\n[...${text.length - size} chars elided]`;
 }
 
@@ -87,6 +90,10 @@ function elided(text: string, size: number): string {
  * Shrinks the oldest tool results until the estimate fits, without dropping a message or touching the
  * pairing between a call and its result. This is the cheap first answer to an over-full request: it
  * costs no model call, so it can run on every step of a turn.
+ *
+ * A message is stepped down through the sizes until one of them does not shrink it any further — a
+ * marker is longer than a short result, so replacing it would grow the request — and every step's
+ * saving is measured against the content that step replaces, not against the original.
  */
 export function elideToolResults(messages: Message[], limit: number): { messages: Message[]; changed: boolean } {
 	const out = messages.map((message) => ({ ...message }));
@@ -98,15 +105,20 @@ export function elideToolResults(messages: Message[], limit: number): { messages
 			continue;
 		}
 		const original = message.content;
+		let current = original;
 		for (const size of TOOL_ELISION_STEPS) {
-			if (original.length <= size || total <= limit) {
-				continue;
+			if (total <= limit) {
+				break;
 			}
 			const next = elided(original, size);
+			if (next.length >= current.length) {
+				continue;
+			}
 			// Replacing one message's content moves the estimate by exactly the two strings' counts:
 			// `countMessages` adds a fixed per-message cost and one padding for the list.
-			total += countRaw(next) - countRaw(original);
+			total += countRaw(next) - countRaw(current);
 			out[index] = { ...message, content: next };
+			current = next;
 			changed = true;
 		}
 	}

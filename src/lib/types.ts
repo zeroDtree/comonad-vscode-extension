@@ -38,6 +38,8 @@ export interface Message {
 	startedAt?: number;
 	/** A character's opening line: the one assistant message that has no prompt behind it. */
 	greeting?: true;
+	/** A compaction's summary, which heads the transcript it stands in for. */
+	summarized?: true;
 	/** A reply that continues the one before it (`/continue`) rather than answering a new prompt. */
 	continued?: true;
 	/**

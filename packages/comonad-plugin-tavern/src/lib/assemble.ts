@@ -244,9 +244,10 @@ export function assemble(
 		push(roleOf(prompt, options), substitute(prompt.content ?? ''));
 	}
 
-	// A collection that never mentions the history would silently drop the conversation.
+	// A collection that never mentions the history would silently drop the conversation — and with it the
+	// in-chat injections, which only ever travel inside the history, so the same list goes in here.
 	if (!prompts.some((prompt) => prompt.identifier === 'chatHistory' && prompt.enabled)) {
-		messages.push(...injectAtDepth(history, blocks.atDepth ?? []));
+		messages.push(...injectAtDepth(history, injections));
 	}
 	return messages;
 }

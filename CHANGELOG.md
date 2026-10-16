@@ -6,6 +6,26 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **A setting picked from the chat sticks in a window with no folder open.** A mode, an approval, a model or
+  the display form all write through the host, which asked for *workspace* settings — a write VS Code refuses
+  where there is no workspace, so the pick failed with an error instead of landing. It falls back to your own
+  settings, which is the only place left. An MCP server that answers with a string `id` — the spec allows
+  either type — is answered as the request it came from rather than waiting for a timeout, and the background
+  task tool stops listening for a task it has given up on. The world info a turn carries in chat is spliced in
+  even when the collection has no **Chat History** block, which used to drop an author's note silently.
+
+- **A compaction can no longer write a `/continue` onto the wrong message.** A fold rewrites the transcript,
+  and the reply a continue extends has a new index in the transcript it leaves: the turn finds it again there
+  instead of keeping the index it took before the fold. A continuation therefore still extends the reply it was
+  asked to continue — the stale index could name the turn's own tool call, which left the record with an
+  assistant call no result answered (every later request refused) or wrote the text twice onto itself. A fold
+  during a quiet turn or an impersonation keeps the summary it wrote, so the record, the rewind points and the
+  summary describe the same conversation again, and a summary that is extended keeps the count of turns it
+  already stood in for rather than restarting at the one message it replaced. Elision steps every oversized
+  tool result down when the request still does not fit (the running estimate no longer forgets the steps it
+  already took), and an embedding answer that comes back with a vector missing is refused instead of pairing
+  a vector with the wrong text.
+
 - **An impersonation and a quiet turn run no tools.** Both used to be offered every tool the chat has, so a tool
   they called ran for real (a write was approved in the chat, and the reply was discarded afterwards), and both
   counted as a turn of the chat. Neither is offered tools now, a call either makes anyway is dropped, and neither

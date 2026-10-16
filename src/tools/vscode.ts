@@ -214,7 +214,12 @@ export const vscodeTools = toolset([
 			}
 			const execution = await vscode.tasks.executeTask(task);
 			const exitCode = await new Promise<number | undefined>((resolvePromise) => {
-				const timer = setTimeout(() => resolvePromise(undefined), 10 * 60_000);
+				const timer = setTimeout(() => {
+					// The task outlived the wait: stop listening, or every run that times out leaves a
+					// listener behind that fires on the next one.
+					stop.dispose();
+					resolvePromise(undefined);
+				}, 10 * 60_000);
 				const stop = vscode.tasks.onDidEndTaskProcess((event) => {
 					if (event.execution === execution) {
 						clearTimeout(timer);
