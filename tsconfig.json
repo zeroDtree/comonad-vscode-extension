@@ -26,6 +26,14 @@
                the way the plugin's files reach each other. */
             "comonad-plugin-tavern/*": [
                 "./packages/comonad-plugin-tavern/src/*"
+            ],
+            /* The journal is a plugin row too: the host names the little it looks up by hand
+               (`JournalApi`), and the tests reach its modules the way the plugin's files reach each other. */
+            "comonad-plugin-checkpoints": [
+                "./packages/comonad-plugin-checkpoints/src/index.ts"
+            ],
+            "comonad-plugin-checkpoints/*": [
+                "./packages/comonad-plugin-checkpoints/src/*"
             ]
         },
         "sourceMap": true,

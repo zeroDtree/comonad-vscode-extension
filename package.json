@@ -198,22 +198,26 @@
       {
         "command": "comonad.review",
         "title": "Comonad: Review Pending Changes",
-        "category": "Comonad"
+        "category": "Comonad",
+        "enablement": "comonad.checkpoints"
       },
       {
         "command": "comonad.keepAll",
         "title": "Comonad: Keep All Changes",
-        "category": "Comonad"
+        "category": "Comonad",
+        "enablement": "comonad.checkpoints"
       },
       {
         "command": "comonad.undoAll",
         "title": "Comonad: Undo All Changes",
-        "category": "Comonad"
+        "category": "Comonad",
+        "enablement": "comonad.checkpoints"
       },
       {
         "command": "comonad.rewind",
         "title": "Comonad: Rewind Conversation and Files",
-        "category": "Comonad"
+        "category": "Comonad",
+        "enablement": "comonad.checkpoints"
       },
       {
         "command": "comonad.exportSession",
@@ -465,7 +469,8 @@
       {
         "command": "comonad.review",
         "key": "ctrl+alt+d",
-        "mac": "cmd+alt+d"
+        "mac": "cmd+alt+d",
+        "when": "comonad.checkpoints"
       }
     ],
     "configuration": {
@@ -721,7 +726,7 @@
         "comonad.checkpoints": {
           "type": "boolean",
           "default": true,
-          "description": "Journal every file the agent writes (per file, not per turn) so the review can keep, undo and rewind them. Changes made by shell commands are not tracked."
+          "description": "Journal every file the agent writes (per file, not per turn) so the review can keep, undo and rewind them. Needs the Change journal plugin row — install it from Settings → Plugins → Install…; the setting only pauses a journal that is there. Changes made by shell commands are not tracked."
         },
         "comonad.chatWindow": {
           "type": "boolean",

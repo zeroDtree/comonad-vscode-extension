@@ -8,7 +8,7 @@ import { turnsOf, type Step } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
 import type { Approval, ApprovalDecision, ReasoningEffort, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/tavern/types';
-import type { JournalApi } from '../services/checkpoints';
+import type { JournalApi } from 'comonad-plugin-checkpoints';
 import type { Session } from '../services/sessions';
 import { registerCommand } from './register';
 

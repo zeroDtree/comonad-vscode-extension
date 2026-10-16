@@ -7,7 +7,6 @@ import { agentPlugin } from './services/agent';
 import { approvalPlugin } from './services/approval';
 import { auditPlugin } from './services/audit';
 import { catalogPlugin } from './services/catalog';
-import { checkpointsPlugin } from './services/checkpoints';
 import { commandsPlugin } from './services/commands';
 import { hooksPlugin } from './services/hooks';
 import { llmPlugin } from './services/llm';
@@ -34,7 +33,6 @@ import { chatPanel } from './ui/chat-panel';
 import { inline } from './ui/inline';
 import { palette } from './ui/palette';
 import { participant } from './ui/participant';
-import { review } from './ui/review';
 import { sessionsView } from './ui/sessions-view';
 import { settingsPanel } from './ui/settings-panel';
 import { slashCommands } from './ui/slash';
@@ -67,7 +65,6 @@ export const PLUGINS: Record<string, Plugin> = {
 	harness: harnessCompat,
 	audit: auditPlugin,
 	sessions: sessionsPlugin,
-	checkpoints: checkpointsPlugin,
 	usage: usagePlugin,
 	tasks: tasksPlugin,
 	tools: toolsPlugin,
@@ -98,7 +95,6 @@ export const PLUGINS: Record<string, Plugin> = {
 	'ui-controls': controls,
 	'ui-sessions': sessionsView,
 	'ui-tasks': tasksView,
-	'ui-review': review,
 	'ui-settings': settingsPanel,
 	'ui-inline': inline,
 	'ui-chat': chatPanel,
@@ -117,7 +113,6 @@ export const ROWS: PluginRow[] = [
 	// Kernel services.
 	{ id: 'audit', group: 'kernel' },
 	{ id: 'sessions', group: 'kernel' },
-	{ id: 'checkpoints', group: 'kernel' },
 	{ id: 'usage', group: 'kernel' },
 	{ id: 'tasks', group: 'kernel' },
 	{ id: 'tools', group: 'kernel' },
@@ -155,7 +150,6 @@ export const ROWS: PluginRow[] = [
 	{ id: 'ui-controls', group: 'ui' },
 	{ id: 'ui-sessions', group: 'ui' },
 	{ id: 'ui-tasks', group: 'ui' },
-	{ id: 'ui-review', group: 'ui' },
 	{ id: 'ui-settings', group: 'ui' },
 	{ id: 'ui-inline', group: 'ui' },
 	{ id: 'ui-chat', group: 'ui' },

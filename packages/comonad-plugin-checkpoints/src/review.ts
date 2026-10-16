@@ -2,14 +2,17 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
-import { describe } from '../lib/util';
-import type { JournalFile, Overwrite } from '../services/checkpoints';
-import { ChangedOutsideError, DirtyEditorError } from '../services/checkpoints';
-import { registerCommand } from './register';
+import { describe } from '@comonad/lib/util';
+import { registerCommand } from '@comonad/ui/register';
+import type { JournalFile, Overwrite } from './services/journal';
+import { ChangedOutsideError, DirtyEditorError } from './services/journal';
 
 /**
  * Review of what the agent wrote: keep or undo files and hunks, rewind to a turn. Only the files the
  * journal names are looked at. Shell commands are not journaled, and the review says so.
+ *
+ * This is the journal's own surface and it travels with the journal: with the row out of the tree the
+ * commands are not registered at all, and the manifest's `enablement` keeps them out of the palette.
  */
 
 const SHELL_NOTE = 'Changes made by shell commands are not tracked here — review them with git.';
@@ -224,36 +227,10 @@ async function revertTo(ctx: Context, workspace: string, sessionId: string, entr
 	}
 }
 
-async function exportSession(ctx: Context): Promise<void> {
-	const session = ctx.sessions.active();
-	if (!session) {
-		void vscode.window.showInformationMessage('Comonad: no session to export.');
-		return;
-	}
-	const lines = [`# ${session.title}`, '', `- session: ${session.id}`, `- created: ${new Date(session.createdAt).toISOString()}`, ''];
-	for (const message of session.transcript) {
-		if (message.role === 'tool') {
-			lines.push('<details><summary>tool result</summary>', '', '```', message.content.slice(0, 4_000), '```', '', '</details>', '');
-			continue;
-		}
-		lines.push(`## ${message.role}`, '', message.content, '');
-	}
-	const target = await vscode.window.showSaveDialog({
-		defaultUri: vscode.Uri.file(join(ctx.settings.workspace() || ctx.host.storage.root, `${session.id.slice(0, 8)}-session.md`)),
-		filters: { Markdown: ['md'] },
-	});
-	if (!target) {
-		return;
-	}
-	await vscode.workspace.fs.writeFile(target, Buffer.from(lines.join('\n'), 'utf8'));
-	void vscode.window.showInformationMessage(`Comonad: exported to ${target.fsPath}`);
-}
-
 export function review(ctx: Context): void {
 	registerCommand(ctx, 'comonad.review', () => reviewChanges(ctx));
 	registerCommand(ctx, 'comonad.keepAll', () => keepOrUndoAll(ctx, true));
 	registerCommand(ctx, 'comonad.undoAll', () => keepOrUndoAll(ctx, false));
 	registerCommand(ctx, 'comonad.rewind', () => rewind(ctx));
-	registerCommand(ctx, 'comonad.exportSession', () => exportSession(ctx));
 }
-review.inject = ['sessions', 'checkpoints', 'settings', 'host', 'log'];
+review.inject = ['sessions', 'checkpoints', 'host', 'log'];

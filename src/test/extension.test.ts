@@ -21,7 +21,8 @@ import { listEndpointModels, openAiChat } from '../lib/openai';
 import type { ApprovalRequest, Message, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
-import { ChangedOutsideError, Checkpoints, DirtyEditorError, parseDiffs } from '../services/checkpoints';
+import { ChangedOutsideError, Checkpoints, DirtyEditorError } from 'comonad-plugin-checkpoints/services/journal';
+import { parseDiffs } from 'comonad-plugin-checkpoints/lib/diff';
 import { fsTools } from '../tools/fs';
 import { agentTools } from '../tools/misc';
 import { hostStorage, type Host } from '../services/host';
@@ -77,6 +78,7 @@ const PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-tavern')
 const PACKAGE_SRC = join(PACKAGE, 'src');
 const PACKAGE_RESOURCES = join(PACKAGE, 'resources');
 import tavernEntry from 'comonad-plugin-tavern';
+import checkpointsEntry from 'comonad-plugin-checkpoints';
 import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
 import { settingsDocument } from '../ui/settings-panel';
 import { panesPlugin } from '../services/panes';
@@ -2087,6 +2089,108 @@ suite('Cordis kernel', () => {
 			const slice = controller?.state?.() ?? {};
 			assert.deepStrictEqual(Object.keys(slice).sort(), ['catalog', 'content', 'tavern'], 'the slices it pushes');
 			assert.ok('wi' in (slice.tavern as Record<string, unknown>), 'the catalog and the settings travel together');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the journal is an installable plugin: the shipped tree has no row for it, and mounting one brings it back', async () => {
+		const kernel = await createTestKernel({ skip: ['checkpoints'], config: { checkpoints: true } });
+		try {
+			// Not built in: nothing in the shipped tree names it, so a fresh window journals nothing and has
+			// no review command — a write is simply a write.
+			assert.ok(!ROWS.some((row) => row.id === 'checkpoints'), 'the shipped rows mount no journal');
+			assert.strictEqual(PLUGINS.checkpoints, undefined, 'and no built-in plugin to name');
+			assert.strictEqual(kernel.ctx.get('checkpoints'), undefined, 'so a tree without the row has no journal');
+			assert.deepStrictEqual(
+				kernel.ctx.sessions.require(kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plain').id).marks,
+				[],
+				'nothing to rewind to without the row',
+			);
+
+			// A row of one's own, mounted the way a `cordis.yml` mounts it: the plugin package's entry.
+			await kernel.ctx.plugin(checkpointsEntry);
+			assert.ok(kernel.ctx.get('checkpoints'), 'the row provides the journal');
+
+			// And it journals for real: the agent's own write tools go through the row it found.
+			const workspace = kernel.host.workspace();
+			writeFileSync(join(workspace, 'journaled.txt'), 'before\n');
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'journaled');
+			kernel.ctx.sessions.save(session);
+			kernel.ctx.llm.use({
+				name: 'writer',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						const toolCall: ToolCall = { id: `w${request.messages.length}`, name: 'write_file', arguments: JSON.stringify({ path: 'journaled.txt', content: 'written\n' }) };
+						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.agent.runTurn({
+				text: 'write it',
+				sessionId: 'journaled',
+				policy: { workMode: 'aw', approval: 'universal_accept' },
+				surface: 'test',
+			});
+			const pending = await kernel.ctx.checkpoints.pending(workspace, 'journaled');
+			assert.deepStrictEqual(pending.files.map((file) => file.path), ['journaled.txt'], 'the row journals the write');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the journal that ships with Comonad installs from its own folder and loads', async () => {
+		// The real thing, end to end: the package as it is packaged (its `dist` bundle, built by
+		// `npm run compile`), copied into the library the way the panel's Install… does it, and loaded by
+		// the host from there — so the bundle's own `require('cordis')` and `require('vscode')` are the
+		// modules Comonad lends it.
+		const extension = vscode.extensions.getExtension('comonad.comonad');
+		assert.ok(extension, 'the extension is installed in the test host');
+		const source = join(extension!.extensionUri.fsPath, 'packages', 'comonad-plugin-checkpoints');
+		assert.ok(existsSync(join(source, 'dist', 'index.js')), 'the plugin bundle is built beside the extension');
+
+		const kernel = await createTestKernel({ skip: ['checkpoints'], config: { checkpoints: true } });
+		try {
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			// What the panel's Install… reads: the `comonad` block in the package's own manifest, found
+			// under the extension's `packages` folder — so the journal is offered by name, not by a list.
+			(kernel.host as { extensionUri: unknown }).extensionUri = extension!.extensionUri;
+			const offered = kernel.ctx.plugins.bundled().find((entry) => entry.id === 'comonad-plugin-checkpoints');
+			assert.strictEqual(offered?.label, 'Change journal (shadow git)', 'the panel offers the journal by name');
+			assert.strictEqual(offered?.dir, source, 'from the folder that ships beside the extension');
+
+			const state = await kernel.ctx.plugins.install(source);
+			const row = state.find((entry) => entry.id === 'comonad-plugin-checkpoints');
+			assert.strictEqual(row?.loaded, true, `the shipped plugin loads from the library (${row?.error ?? ''})`);
+			assert.ok(kernel.ctx.get('checkpoints'), 'and it brought the journal with it');
+			// A write the agent makes now reaches the journal the *installed bundle* provides.
+			const workspace = kernel.host.workspace();
+			writeFileSync(join(workspace, 'installed.txt'), 'before\n');
+			await kernel.ctx.plugin(fsTools);
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'installed');
+			kernel.ctx.sessions.save(session);
+			kernel.ctx.llm.use({
+				name: 'writer',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						const toolCall: ToolCall = { id: `w${request.messages.length}`, name: 'write_file', arguments: JSON.stringify({ path: 'installed.txt', content: 'written\n' }) };
+						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.agent.runTurn({
+				text: 'write it',
+				sessionId: 'installed',
+				policy: { workMode: 'aw', approval: 'universal_accept' },
+				surface: 'test',
+			});
+			const pending = await kernel.ctx.checkpoints.pending(workspace, 'installed');
+			assert.deepStrictEqual(pending.files.map((file) => file.path), ['installed.txt'], 'the installed journal records the write');
 		} finally {
 			await kernel.dispose();
 		}

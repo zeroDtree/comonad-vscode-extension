@@ -1,10 +1,41 @@
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { join } from 'node:path';
 import { MODE_LABELS } from '../lib/policy';
 import type { Session } from '../services/sessions';
 import { registerCommand } from './register';
 
-/** Sessions tree view with open / fork / rename / delete commands. */
+/** Sessions tree view with open / fork / rename / delete / export commands. */
+
+/**
+ * Writes the active chat out as markdown. It lives with the other session commands and not with the
+ * journal: exporting a conversation is the sessions view's business, and it works whether or not the
+ * change-journal plugin is installed.
+ */
+async function exportSession(ctx: Context): Promise<void> {
+	const session = ctx.sessions.active();
+	if (!session) {
+		void vscode.window.showInformationMessage('Comonad: no session to export.');
+		return;
+	}
+	const lines = [`# ${session.title}`, '', `- session: ${session.id}`, `- created: ${new Date(session.createdAt).toISOString()}`, ''];
+	for (const message of session.transcript) {
+		if (message.role === 'tool') {
+			lines.push('<details><summary>tool result</summary>', '', '```', message.content.slice(0, 4_000), '```', '', '</details>', '');
+			continue;
+		}
+		lines.push(`## ${message.role}`, '', message.content, '');
+	}
+	const target = await vscode.window.showSaveDialog({
+		defaultUri: vscode.Uri.file(join(ctx.settings.workspace() || ctx.host.storage.root, `${session.id.slice(0, 8)}-session.md`)),
+		filters: { Markdown: ['md'] },
+	});
+	if (!target) {
+		return;
+	}
+	await vscode.workspace.fs.writeFile(target, Buffer.from(lines.join('\n'), 'utf8'));
+	void vscode.window.showInformationMessage(`Comonad: exported to ${target.fsPath}`);
+}
 
 function ago(at: number): string {
 	const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
@@ -93,7 +124,8 @@ export function sessionsView(ctx: Context): void {
 		}
 		ctx.sessions.remove(id);
 	});
+	registerCommand(ctx, 'comonad.exportSession', () => exportSession(ctx));
 }
-sessionsView.inject = ['sessions', 'agent'];
+sessionsView.inject = ['sessions', 'agent', 'settings'];
 
 export type { Session };

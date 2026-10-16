@@ -8,7 +8,7 @@ import { logPlugin } from '../services/log';
 import { settingsPlugin } from '../services/settings';
 import { auditPlugin } from '../services/audit';
 import { sessionsPlugin } from '../services/sessions';
-import { checkpointsPlugin } from '../services/checkpoints';
+import { journalPlugin } from 'comonad-plugin-checkpoints/services/journal';
 import { usagePlugin } from '../services/usage';
 import { tasksPlugin } from '../services/tasks';
 import { toolsPlugin } from '../services/tools';
@@ -140,7 +140,7 @@ export async function createTestKernel(
 		child.plugin(auditPlugin);
 		child.plugin(sessionsPlugin);
 		if (!skipped.has('checkpoints')) {
-			child.plugin(checkpointsPlugin);
+			child.plugin(journalPlugin);
 		}
 		child.plugin(usagePlugin);
 		child.plugin(tasksPlugin);

@@ -3,10 +3,12 @@ import { spawn } from 'node:child_process';
 import { access, mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
+import { parseDiffs, type JournalHunk } from '../lib/diff';
 
 /**
- * Per-file edit journal. Comonad never snapshots the workspace: every write the agent makes goes
- * through `ToolContext.edit`, which stores the file's content before and after the change.
+ * Per-file edit journal, as a Comonad plugin row. Comonad never snapshots the workspace: every write
+ * the agent makes goes through `ToolContext.edit`, which stores the file's content before and after
+ * the change.
  *
  * Storage: one shadow git repository per session and workspace, outside the project (`GIT_DIR`). It
  * only holds blobs (file contents) and a temporary index for diffs; it never commits, and the user's
@@ -31,11 +33,6 @@ export interface JournalEntry {
 	at: number;
 	/** The user accepted the file or undid it: entries before this one no longer count. */
 	accepted?: boolean;
-}
-
-export interface JournalHunk {
-	header: string;
-	lines: { type: 'add' | 'del' | 'ctx'; text: string }[];
 }
 
 export interface JournalFile {
@@ -131,6 +128,10 @@ export class Checkpoints extends Service implements JournalApi {
 
 	constructor(ctx: Context) {
 		super(ctx, 'checkpoints');
+		// Shadow repositories from the earlier snapshot-per-turn design are this feature's own leftovers,
+		// and this is the one place that knows what they look like: cleaned up when the journal is mounted.
+		// Fire and forget: a leftover that cannot be removed must not keep the journal from starting.
+		void this.purgeLegacy();
 	}
 
 	private get root(): string {
@@ -455,7 +456,8 @@ export class Checkpoints extends Service implements JournalApi {
 	}
 }
 
-export const checkpointsPlugin = Checkpoints;
+/** The service as a plugin, so a host or a test can mount the journal on a context of its own. */
+export const journalPlugin = Checkpoints;
 
 /** The entries of a path after its last accepted one: what is still pending, oldest first. */
 function working(entries: JournalEntry[], path: string): JournalEntry[] {
@@ -487,56 +489,6 @@ function allowed(overwrite: Overwrite | undefined, path: string): boolean {
 
 function unique(paths: string[]): string[] {
 	return [...new Set(paths)];
-}
-
-/** Parses a `git diff` over several files into per-path counts and hunks. */
-export function parseDiffs(text: string): Map<string, { additions: number; deletions: number; hunks: JournalHunk[] }> {
-	const out = new Map<string, { additions: number; deletions: number; hunks: JournalHunk[] }>();
-	let current: { additions: number; deletions: number; hunks: JournalHunk[] } | null = null;
-	let hunk: JournalHunk | null = null;
-	for (const line of text.split('\n')) {
-		if (line.startsWith('diff --git ')) {
-			const at = line.lastIndexOf(' b/');
-			const path = unquote(at === -1 ? '' : line.slice(at + 1).slice(2));
-			current = { additions: 0, deletions: 0, hunks: [] };
-			hunk = null;
-			out.set(path, current);
-			continue;
-		}
-		if (!current) {
-			continue;
-		}
-		if (line.startsWith('@@')) {
-			hunk = { header: line, lines: [] };
-			current.hunks.push(hunk);
-			continue;
-		}
-		// `---` and `+++` header lines come before the first hunk, so they are never counted.
-		if (!hunk) {
-			continue;
-		}
-		if (line.startsWith('+')) {
-			current.additions += 1;
-			hunk.lines.push({ type: 'add', text: line.slice(1) });
-		} else if (line.startsWith('-')) {
-			current.deletions += 1;
-			hunk.lines.push({ type: 'del', text: line.slice(1) });
-		} else if (line.startsWith(' ')) {
-			hunk.lines.push({ type: 'ctx', text: line.slice(1) });
-		}
-	}
-	return out;
-}
-
-function unquote(path: string): string {
-	if (path.startsWith('"') && path.endsWith('"')) {
-		try {
-			return JSON.parse(path) as string;
-		} catch {
-			return path;
-		}
-	}
-	return path;
 }
 
 function repoDir(root: string, workspace: string, sessionId: string): string {

@@ -1,0 +1,15 @@
+{
+	"name": "comonad-plugin-checkpoints",
+	"displayName": "Change journal (shadow git)",
+	"description": "The per-file journal of everything the agent writes, with keep, undo, rewind and diff review, as a Comonad plugin row.",
+	"version": "0.2.0",
+	"private": true,
+	"main": "./dist/index.js",
+	"comonad": {
+		"plugin": true,
+		"label": "Change journal (shadow git)"
+	},
+	"files": [
+		"dist"
+	]
+}

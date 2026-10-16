@@ -31,7 +31,7 @@ import type { GenerationTrigger } from '../lib/tavern/types';
 import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { agentIndex, allowedToolsFor, skillIndex } from './catalog';
-import type { JournalApi } from './checkpoints';
+import type { JournalApi } from 'comonad-plugin-checkpoints';
 import { DEFAULT_CONTEXT_WINDOW, type Config } from './settings';
 import { isSummaryMessage, summaryMessage, threadTitle, type Session, type SessionSummary, type SwipeCarry } from './sessions';
 import type { ComposeResult, TavernApi } from 'comonad-plugin-tavern';

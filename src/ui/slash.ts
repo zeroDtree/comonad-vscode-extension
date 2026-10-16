@@ -173,7 +173,13 @@ export function slashCommands(ctx: Context): void {
 		return { done: true };
 	});
 
-	register('rewind', 'Rewind files and conversation', async () => {
+	register('rewind', 'Rewind files and conversation', async (_args, surface) => {
+		// The journal is a plugin row now, so the command exists only while it is installed: say what to
+		// do about it rather than letting a missing command surface as an error.
+		if (!ctx.get('checkpoints')) {
+			surface.markdown('The change journal is a plugin: install **Change journal (shadow git)** from Settings → Plugins → Install… to rewind files with the conversation.');
+			return { done: true };
+		}
 		await vscode.commands.executeCommand('comonad.rewind');
 		return { done: true };
 	});

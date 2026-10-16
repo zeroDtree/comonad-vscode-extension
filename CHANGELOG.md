@@ -6,6 +6,21 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **The change journal (shadow git) is a plugin you install, not a feature built in.** It moved out of
+  `src/` into a package of its own, `packages/comonad-plugin-checkpoints`, built as its own bundle
+  (`npm run build:plugins`, part of `npm run compile`): nothing in the shipped tree names it, so
+  `dist/extension.js` carries no journal code at all — no shadow repository, no review commands, no
+  `Cmd+Alt+D` — until the row is there. **Settings → Plugins → Install…** offers it by name (and any
+  other plugin folder): the folder is copied into `~/.comonad/plugins/<id>`, a row is written into your
+  `cordis.yml`, and the list is applied again. Uninstalling is deleting either one. **A window that had
+  the journal before has it off until you install it** — the review commands are hidden rather than
+  offered and broken, `/rewind` says where to install it, and `comonad.checkpoints: false` still pauses a
+  journal that is there. What stays in the host is the vocabulary: the `JournalApi` the agent and the chat
+  panel look up as a type, the storage folder, and the `checkpoints/changed` event. Exporting a chat is
+  not the journal's business, so `comonad.exportSession` stayed with the sessions view. The build now
+  bundles *every* folder under `packages/` that declares `comonad.plugin`, so a third plugin needs no
+  build change.
+
 - **A setting picked from the chat sticks in a window with no folder open.** A mode, an approval, a model or
   the display form all write through the host, which asked for *workspace* settings — a write VS Code refuses
   where there is no workspace, so the pick failed with an error instead of landing. It falls back to your own

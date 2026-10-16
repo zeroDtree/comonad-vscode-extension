@@ -383,25 +383,35 @@ after being shrunk hard, so a mis-sized window costs a retry rather than the tur
 
 ## Checkpoints and review
 
-Comonad journals each file the agent writes, one entry per write, in a shadow store outside your
-project (`globalStorage/checkpoints/...`). It is a plugin of its own: `{ id: checkpoints, disabled: true }`
-turns the journal — and the review pane that reads it — off without touching anything else
-([Plugins](#plugins)). Nothing is snapshotted on every turn: a turn that writes no
-file costs nothing, and the review only looks at the files the journal names. Your own `.git` is
-never touched.
+Comonad can journal each file the agent writes, one entry per write, in a shadow store outside your
+project (`globalStorage/checkpoints/...`). **It is an installed plugin, not a built-in feature**:
+install **Change journal (shadow git)** from **Settings → Plugins → Install…**, or by hand —
+
+```sh
+# one folder into your library, one row into your list
+cp -r <extension>/packages/comonad-plugin-checkpoints ~/.comonad/plugins/
+# ~/.comonad/cordis.yml
+- { id: comonad-plugin-checkpoints, name: ./plugins/comonad-plugin-checkpoints/dist/index.js }
+```
+
+Nothing is journaled until that row is there, and `comonad.checkpoints: false` pauses a journal that
+is ([Plugins](#plugins)). Nothing is snapshotted on every turn: a turn that writes no file costs
+nothing, and the review only looks at the files the journal names. Your own `.git` is never touched.
 
 - **Changes made by shell commands (`run_shell`) are not tracked.** Review those with git. This is
   the same limit Claude Code and Cursor have: a shell can change any file, and the journal only
   knows what the agent's own write tools wrote.
 - A file you have edited since the agent last wrote it, or one open with unsaved text, is never
   overwritten silently: the review asks, or refuses until you save.
-- Shadow stores from the earlier snapshot design are removed on startup. Their sessions keep their
-  transcripts, but cannot be rewound to file state.
+- Shadow stores from the earlier snapshot design are removed when the journal is mounted. Their
+  sessions keep their transcripts, but cannot be rewound to file state.
 
 - **Comonad: Review Pending Changes** — open a diff, keep/undo a file or a single hunk, or keep/undo everything.
 - **Comonad: Rewind Conversation and Files** — restore the workspace *and* truncate the chat to that turn.
-- `Cmd+Alt+D` opens review, `Cmd+Alt+.` stops a turn, `Cmd+N` starts a new session while a Comonad
-  surface has focus.
+- Those four commands (with `Cmd+Alt+D`) are declared in Comonad's manifest behind
+  `enablement: comonad.checkpoints`: the palette and the keybinding offer them while the row is
+  loaded, and a window without the row has nothing to click rather than something that fails.
+- `Cmd+Alt+.` stops a turn, `Cmd+N` starts a new session while a Comonad surface has focus.
 - Right-click a session in the Comonad view to rename, delete or fork it; sessions fork with a
   a numbered fork title (`Title (fork 1)`, `Title (fork 2)`, …) and a fresh checkpoint identity. The **Tasks** view lists background commands
   with output preview and a stop action. Select code and use the lightbulb or editor context menu
@@ -423,13 +433,13 @@ never touched.
 
 ### Plugins
 
-**A plugin is what a feature is.** The storage layer, the tools, the shadow-git journal and the panels
-are rows in `cordis.yml`, and so is anything you write — including features Comonad ships but does not
-build in, like the ST content layer:
+**A plugin is what a feature is.** The storage layer, the tools and the panels are rows in
+`cordis.yml`, and so is anything you write — including features Comonad ships but does not build in,
+like the change journal and the ST content layer:
 
 ```yaml
-# .comonad/cordis.yml — the journal off, an installed plugin of mine off for now, one of my own on.
-- { id: checkpoints, disabled: true }
+# .comonad/cordis.yml — two installed plugins of Comonad's own, one of mine off for now, one on.
+- { id: comonad-plugin-checkpoints, name: ./plugins/comonad-plugin-checkpoints/dist/index.js }
 - { id: comonad-plugin-tavern, disabled: true }
 - { id: mine, name: ./mine.js, config: { greeting: hello } }
 ```
@@ -478,9 +488,12 @@ What is worth knowing before writing one:
   reads `ctx.get('plugins')`, because the host is what is mounting it.
 - **A feature can be missing.** The journal is reached as `ctx.get('checkpoints')` and the ST layer as
   `ctx.get('tavern')`: with those rows off a turn is a plain `[system, …history]` request, writes are not
-  journaled, and the surfaces only they own — the ST tab and `/char`, `/lore`, `/preset`, the review pane
-  — are simply not there. A feature can even be missing *as a package*: nothing in the shipped tree names
-  the tavern, so a window that never installed it has no content code at all, not even a tab to turn off.
+  journaled, and the surfaces only they own — the ST tab, `/char`, `/lore`, `/preset`, and the review
+  commands the journal registers — are simply not there. A feature can even be missing *as a package*:
+  nothing in the shipped tree names either one, so a window that never installed them has no content
+  code, no journal code and no review commands at all — not even a row to turn off. What the host still
+  names of an absent feature is only its vocabulary: the `checkpoints` service's shape as a *type*, the
+  storage folder it may use, and the event it announces.
 - **A pane is a plugin's tab.** The settings panel draws the tabs the `panes` service knows: the **ST**
   tab, its markup, its stylesheets, its scripts and its editor are the tavern plugin's own files, loaded
   from its folder. Its settings keys are the pane's too — the panel asks every pane for the keys it owns
@@ -607,7 +620,9 @@ The whole extension is one Cordis plugin tree, assembled in `src/app.ts` and mou
   calling plugin's lifetime. The MCP manager mounts one child plugin per server and re-mounts the
   tree on reload, so connections close and tools disappear together.
 - **One turn pipeline.** UI never assembles prompts — `ctx.agent` owns the graph loop, policy
-  gate, hooks, checkpoints, usage and subagents, and mirrors everything to the audit log.
+  gate, hooks, usage and subagents, and mirrors everything to the audit log. A file write goes
+  through `ctx.edit` when the change-journal row is loaded, which is how the journal sees every write
+  without the agent knowing what a journal is.
 
 ```
 src/
@@ -617,13 +632,13 @@ src/
   events.ts       typed event declarations (declaration merging on Cordis' Events)
   lib/            pure domain: types, policy gate, graph runtime, mermaid parser, sandbox,
                   prompt shaping, frontmatter, OpenAI protocol, instructions/memory
-  services/       Cordis services: log, settings, audit, sessions, checkpoints, usage, tasks,
-                  tools, catalog (skills/agents/commands), llm, hooks, mcp, approval, commands,
+  services/       Cordis services: log, settings, audit, sessions, usage, tasks, tools,
+                  catalog (skills/agents/commands), llm, hooks, mcp, approval, commands,
                   agent (turn pipeline)
   llm/            model adapter: OpenAI-compatible SSE (DeepSeek and friends)
   tools/          tool plugins: fs, shell, plan, todo, web, vscode, math, misc
   ui/             surfaces: chat panel, participant, status bar, sessions/tasks views,
-                  review, settings panel, inline actions, slash commands, command palette
+                  settings panel, inline actions, slash commands, command palette
   plugins/        reactions: watchers that reload catalogs and MCP on config/trust changes
 ```
 
@@ -668,11 +683,18 @@ kernel), `fuse.js` (the world-book search, with upstream's own options and field
 `gpt-tokenizer` and `@agnai/web-tokenizers` (the tokenizer chain — the first is bundled, the second
 is kept as a real file because its wasm would bloat the bundle four megabytes).
 
-The tavern is a package of its own, `packages/comonad-plugin-tavern`: it is built as its own bundle
-(`npm run build:plugins`, part of `npm run compile`) and is *not* part of `dist/extension.js`, which is
-what makes it a plugin rather than a feature. It imports the host's shared vocabulary by name
-(`@comonad/*` — the content types, the prompt estimator, the command helper) and those imports are
+Two packages ship beside the bundle as plugins, and both are built the same way:
+`packages/comonad-plugin-tavern` (the SillyTavern content layer) and
+`packages/comonad-plugin-checkpoints` (the change journal and its review). Each is built as its own
+bundle (`npm run build:plugins`, part of `npm run compile`, one bundle per folder that declares
+`comonad.plugin` in its `package.json`) and neither is part of `dist/extension.js`, which is what makes
+them plugins rather than features. Each imports the host's shared vocabulary by name (`@comonad/*` — the
+content types, the prompt estimator, the command helper, the journal contract) and those imports are
 bundled into its own file, so an install is one folder.
+
+The journal is the seam that shows what that buys: the agent, the chat panel and the review all reach it
+through `ctx.get('checkpoints')`, so with the row out of the tree nothing is journaled, no review
+command is registered, and a write is simply a write.
 
 The test host runs against a home of Comonad's own — a temporary directory named by `COMONAD_HOME` — so
 the plugins installed in your real `~/.comonad`, and the rows you wrote for them, never change what a
