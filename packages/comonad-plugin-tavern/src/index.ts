@@ -8,15 +8,16 @@ import { tavernPane } from './panel/pane';
 /**
  * The tavern plugin: everything SillyTavern-shaped Comonad knows, as one installable row.
  *
- * It provides the `tavern` service — the content library and the composition of a turn out of it —
+ * It provides the `tavern` service — the content library and the composition of a turn out of it,
+ * the vector side of world info, and SillyTavern's tokenizer files for the kernel's counter —
  * registers the `/char`, `/persona`, `/lore`, `/preset` and `/note` commands, offers the `lore_lookup`
  * tool, and draws the **ST** tab in the settings panel. Without the row none of that exists: the agent
  * falls back to its own prompt shape, and the panel has no tab to show.
  *
- * What it does *not* own is the vocabulary: the content types, the settings keys and the session fields
- * it reads and writes live in the host, under `@comonad/*`, so an install is one folder and no host
- * change. The host reaches it through `ctx.get('tavern')`, which is how a feature this size stays
- * optional.
+ * What it does *not* own is the shared vocabulary: the content types and the session fields it reads
+ * and writes live in the host, under `@comonad/*`, and its settings are its own keys over the same
+ * store every setting uses. An install is one folder and no host change — the host reaches it through
+ * `ctx.get('tavern')`, which is how a feature this size stays optional.
  */
 
 export type { ComposeInput, ComposeResult, TavernApi, TavernBinding, ContentKind } from './services/tavern';

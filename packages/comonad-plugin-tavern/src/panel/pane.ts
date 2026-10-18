@@ -2,8 +2,8 @@ import { join } from 'node:path';
 import type { Context } from 'cordis';
 import type { PaneController, PaneHost, PaneSpec } from '@comonad/services/panes';
 import { markup } from './markup';
-import { contentController, type ContentController } from './controller';
-import type { Config } from '@comonad/services/settings';
+import { contentCatalog, contentController, type ContentController } from './controller';
+import { tavernSettings, type TavernSettings } from '../lib/settings';
 
 /**
  * The **ST** tab, as the settings panel takes it: the markup, the client files beside this package's
@@ -11,22 +11,9 @@ import type { Config } from '@comonad/services/settings';
  * panel has no content code of its own — it draws whatever panes are registered.
  */
 
-function catalogOf(ctx: Context): Record<string, unknown> | null {
-	const tavern = ctx.get('tavern');
-	if (!tavern) {
-		return null;
-	}
-	return {
-		characters: tavern.characters.map((character) => ({ id: character.id, name: character.name, source: character.source })),
-		personas: tavern.personas.map((persona) => ({ id: persona.id, name: persona.title || persona.name, source: persona.source })),
-		books: tavern.books.map((book) => ({ name: book.name, entries: Object.keys(book.book.entries).length, source: book.source })),
-		presets: tavern.presets.map((preset) => ({ id: preset.id, name: preset.name })),
-	};
-}
-
 /** The settings half of the tab: the content keys, and the world-info scoring beside them. */
 function settingsOf(ctx: Context): Record<string, unknown> {
-	const config = ctx.settings.get();
+	const config = tavernSettings(ctx);
 	return {
 		enabled: config.tavernEnabled,
 		character: config.tavernCharacter,
@@ -64,12 +51,20 @@ function controller(ctx: Context, host: PaneHost): PaneController {
 		// The injection lands a moment after the open, so the first state the panel pushed was thin.
 		void Promise.resolve().then(() => host.refresh());
 	});
+	// The preset editor previews Comonad's generated text, which the agent keeps from its last prompt
+	// build. Opening the panel may be the first thing after a reload, so build once and refresh.
+	const session = ctx.sessions.active();
+	if (session) {
+		void Promise.resolve()
+			.then(() => ctx.get('agent')?.promptBlocks?.(session))
+			.then(() => host.refresh(), () => undefined);
+	}
 	// A reload or a save moves the content list, so the pane is told what the catalog now holds.
 	ctx.on('tavern/changed', () => host.refresh());
 	return {
-		state: () => ({ content: editor?.state(), catalog: catalogOf(ctx), tavern: settingsOf(ctx) }),
+		state: () => ({ content: editor?.state(), catalog: contentCatalog(ctx), tavern: settingsOf(ctx) }),
 		action: async (message) => (await editor?.action(message)) as Record<string, unknown> | null,
-		patch: (patch, current) => ownedSettings(patch, current),
+		patch: (patch) => ownedSettings(patch, tavernSettings(ctx)),
 	};
 }
 
@@ -93,7 +88,7 @@ function bookList(value: unknown, fallback: string[]): string[] {
  * from a webview — so every value is taken through a shape this plugin accepts, and the keys the rest
  * of the panel owns are left alone.
  */
-export function ownedSettings(patch: Record<string, unknown>, current: Config): Record<string, unknown> {
+export function ownedSettings(patch: Record<string, unknown>, current: TavernSettings): Record<string, unknown> {
 	const text = (key: string, fallback: string): string => String(patch[key] ?? fallback).trim();
 	const number = (key: string, fallback: number): number => {
 		const value = Number(patch[key]);
@@ -126,6 +121,10 @@ export function ownedSettings(patch: Record<string, unknown>, current: Config): 
 	};
 }
 
+/** A book, for the content layer's tab; it uses the panel's currentColor stroke. */
+const BOOK_ICON =
+	'<svg viewBox="0 0 16 16"><path d="M3 3.2h4.1c.7 0 1.2.5 1.2 1.2v8.2c0-.7-.5-1.2-1.2-1.2H3z"/><path d="M13 3.2H8.9c-.7 0-1.2.5-1.2 1.2v8.2c0-.7.5-1.2 1.2-1.2H13z"/></svg>';
+
 export function tavernPane(ctx: Context): PaneSpec {
 	// The client files travel with the package, beside its build, so an install is a copy of the folder.
 	const resources = join(__dirname, '..', 'resources');
@@ -133,6 +132,7 @@ export function tavernPane(ctx: Context): PaneSpec {
 		id: 'st',
 		label: 'ST',
 		title: 'ST — characters, world books, personas, presets and their settings',
+		icon: BOOK_ICON,
 		command: 'comonad.openContent',
 		markup,
 		// The world-book and persona pages are guest modules: they load before the pane that hands them

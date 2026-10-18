@@ -4,8 +4,8 @@ import { dirname, join } from 'node:path';
 import { Service, type Context } from 'cordis';
 import { embedTexts } from '../lib/vectors';
 import { rank, queryText, type VectorCandidate, type VectorHit } from '../lib/vectors';
-import type { LoreBook, LoreMessage } from 'comonad-plugin-tavern';
-import type { VectorSettings } from './settings';
+import type { LoreBook, LoreMessage } from '../lib/lore';
+import type { VectorSettings } from '../lib/settings';
 
 /**
  * The vector side of a world book: the entries that ask to be found by meaning instead of by keys,

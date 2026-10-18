@@ -6,12 +6,11 @@ import {
 	DEFAULT_OUTPUT_RESERVE,
 	applyContextForm,
 	elideToolResults,
-	estimateMessages,
-	estimateTokens,
 	planCompaction,
 	resolveBudget,
 	type Budget,
 } from '../lib/prompt';
+import { estimateMessages, estimateTokens } from '../lib/tokens';
 import {
 	compileGraphs,
 	runGraph,
@@ -22,18 +21,28 @@ import {
 	type RouteFn,
 	type SoftRequest,
 } from '../lib/graph';
-import { formatInstructions, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
+import { instructionBody, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { isContextOverflow, type Completion } from '../lib/openai';
-import { gateCalls, MODE_CAPS, MODE_LABELS, suggestAllowRule } from '../lib/policy';
+import { gateCalls, MODE_LABELS, suggestAllowRule } from '../lib/policy';
+import {
+	COMONAD_BLOCK,
+	COMONAD_BLOCKS,
+	DEFAULT_BLOCK_PREFIX,
+	NO_TOOLS_PREFIX,
+	composeBlockText,
+	type ComonadBlockId,
+	type PromptBlock,
+} from '../lib/blocks';
+import { applyPromptLayout } from '../lib/prompt-layout';
 import type { AgentSpawnRequest, Capability, Message, SessionPolicy, TodoItem, ToolCall, ToolContext, ToolSpec } from '../lib/types';
-import type { GenerationTrigger } from '../lib/tavern/types';
+import type { GenerationTrigger } from '../lib/generations';
 import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
-import { agentIndex, allowedToolsFor, skillIndex } from './catalog';
-import type { JournalApi } from 'comonad-plugin-checkpoints';
+import { agentIndex, agentLines, allowedToolsFor, skillLines } from './catalog';
+import type { JournalApi } from '../lib/journal';
 import { DEFAULT_CONTEXT_WINDOW, type Config } from './settings';
-import { isSummaryMessage, summaryMessage, threadTitle, type Session, type SessionSummary, type SwipeCarry } from './sessions';
+import { canRewrite, isSummaryMessage, summaryMessage, threadTitle, type Session, type SessionSummary, type SwipeCarry } from './sessions';
 import type { ComposeResult, TavernApi } from 'comonad-plugin-tavern';
 
 /** Room held back for the summary a compaction adds, so the fit it plans survives its own output. */
@@ -82,6 +91,20 @@ export interface TurnInput {
 	 * entries may activate and how the reply is written down; `normal` is a plain prompt.
 	 */
 	trigger?: GenerationTrigger;
+	/** Re-run the existing prompt at this transcript index, discarding it and every later turn. */
+	rewriteAt?: number;
+	/**
+	 * Called after UserPromptSubmit allowed the turn and before the transcript is cut. The surface
+	 * restores files here and announces the turn. Return false to cancel with nothing changed.
+	 */
+	prepareRewrite?: (session: Session) => Promise<boolean>;
+	/**
+	 * Builds the Context block for this turn. Called after hooks and after a rewrite has cut the
+	 * transcript, with the prompt actually being run (replayed, rewritten, or typed). It must not
+	 * throw; a surface that resolves @ references reads files here, so a blocked hook or a refused
+	 * rewrite never pays for the read.
+	 */
+	resolveSystemContext?: (session: Session, text: string) => Promise<string | undefined>;
 }
 
 export interface TurnResult {
@@ -99,6 +122,11 @@ interface RunState {
 	gateReason: string;
 	confirmed: boolean | null;
 	filter?: { allow?: string[] };
+	/**
+	 * Whether this turn may offer tools at all: the preset's Tools row under ST, the core layout's
+	 * Tools block otherwise. `undefined` (a subagent) leaves the policy's own list in charge.
+	 */
+	toolsEnabled?: boolean;
 	/** Samplers a selected preset contributed to this turn. */
 	samplers?: PresetSamplers;
 	/** What started this turn, which decides what may activate and what gets written down. */
@@ -132,6 +160,13 @@ const SILENT_TRIGGERS: ReadonlySet<GenerationTrigger> = new Set<GenerationTrigge
 
 const CONTINUE_ASK = 'Continue the last message exactly where it stops. Do not repeat any of it, and do not start over.';
 
+/** The display name of a Comonad block, shared with the tavern's preset list. */
+const BLOCK_NAMES = new Map<ComonadBlockId, string>(COMONAD_BLOCKS.map((block) => [block.id, block.name]));
+
+function blockName(id: ComonadBlockId): string {
+	return BLOCK_NAMES.get(id) ?? id;
+}
+
 /**
  * A continuation is appended to the text it continues. The model usually starts where the text stops
  * with a space of its own; this only supplies one when neither side brought it.
@@ -153,7 +188,7 @@ declare module 'cordis' {
  * `ctx.agent.runTurn()` and watch `agent/*` events.
  */
 export class Agent extends Service {
-	static inject = ['host', 'settings', 'sessions', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'vectors', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
+	static inject = ['host', 'settings', 'sessions', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
 
 	private readonly stops = new Map<string, AbortController>();
 	/** The live Session object per running turn; usage is mutated here and saved by finish(). */
@@ -167,6 +202,10 @@ export class Agent extends Service {
 	private readonly overflowWarned = new Set<string>();
 	/** The system prompt last given to each chat, so `/context` can break the budget down exactly. */
 	private readonly systems = new Map<string, string>();
+	/** The blocks the last prompt build produced, so a pane can preview generated text synchronously. */
+	private readonly lastBlocks = new Map<string, readonly PromptBlock[]>();
+	/** Whether the last turn's request offered tools, which decides `/context`'s tool overhead. */
+	private readonly toolModes = new Map<string, boolean>();
 	/** Sessions already told that their stored model profile is gone. */
 	private readonly warned = new Set<string>();
 	private activeSubagents = 0;
@@ -209,6 +248,9 @@ export class Agent extends Service {
 	async runTurn(input: TurnInput): Promise<TurnResult> {
 		let text = input.text.trim();
 		const trigger: GenerationTrigger = input.trigger ?? 'normal';
+		if (input.rewriteAt !== undefined && trigger !== 'normal') {
+			return { sessionId: input.sessionId ?? '', text: 'Error: only a new prompt can be edited.' };
+		}
 		// A swipe or a regenerate re-runs the prompt that is already there: the reply it produced is
 		// dropped here, and the variants it had are handed to `finish` so none of them is lost. The
 		// session is read *after* the replay, which rewrites the stored transcript.
@@ -237,6 +279,11 @@ export class Agent extends Service {
 				text: 'This session has a suspended tool call. Run "Comonad: Resume Suspended Turn" to continue it.',
 			};
 		}
+		// A stale index must not fire the session hooks or drain pending contexts for a prompt that
+		// cannot be replaced; `rewriteAt` validates again after the hooks, before it cuts.
+		if (input.rewriteAt !== undefined && !canRewrite(session, input.rewriteAt)) {
+			return { sessionId: session.id, text: 'Error: that message is not a prompt that can be edited.' };
+		}
 		session.policy = { ...session.policy, ...this.policyFor(), ...(input.policy ?? {}) };
 		if (!this.ctx.llm.known(session.policy.model) && !this.warned.has(session.id)) {
 			// The chat remembers a model that no longer exists; say which one runs instead, once.
@@ -262,8 +309,33 @@ export class Agent extends Service {
 		}
 		contexts.push(...submitted.contexts, ...this.ctx.hooks.drainContexts(), ...(this.pending.get(session.id) ?? []));
 		this.pending.delete(session.id);
+		// An edit cuts the transcript only after the prompt hook accepted the turn, so a blocked edit
+		// leaves the old prompt in place. The surface restores files and announces the turn here; a
+		// refusal from it cancels the whole operation.
+		if (input.rewriteAt !== undefined) {
+			if (input.prepareRewrite && !(await input.prepareRewrite(session))) {
+				return { sessionId: session.id, text: '' };
+			}
+			const problem = this.ctx.sessions.rewriteAt(session, input.rewriteAt);
+			if (problem) {
+				return { sessionId: session.id, text: `Error: ${problem}` };
+			}
+		}
+		// References are read after the cut and the policy merge: an edit that restored files reads
+		// the restored content, and a fixed systemContext (the participant's native references) and a
+		// resolved one can coexist. The block stays last, so the static prefix keeps caching.
 		if (input.systemContext) {
 			contexts.push(input.systemContext);
+		}
+		if (input.resolveSystemContext && text.trim()) {
+			try {
+				const resolved = await input.resolveSystemContext(session, text);
+				if (resolved) {
+					contexts.push(resolved);
+				}
+			} catch (error) {
+				this.ctx.log.message(`references: ${describe(error)}`);
+			}
 		}
 		// No snapshot here: a turn is journaled file by file, as the agent actually writes each one.
 		// A continue and an impersonation add no prompt of their own: the conversation is already there,
@@ -272,9 +344,9 @@ export class Agent extends Service {
 		let prior = [...session.transcript];
 		// The prompt keeps the time it was asked at however often the transcript is re-derived below, so
 		// a compaction in the middle of this turn cannot make it look like a later message.
-		const promptAt = Date.now();
+		const askedAt = Date.now();
 		const seed = (): Message[] =>
-			prompted ? [...session.transcript, { role: 'user', content: text, at: promptAt } as Message] : [...session.transcript];
+			prompted ? [...session.transcript, { role: 'user', content: text, at: askedAt } as Message] : [...session.transcript];
 		let seeded = seed();
 		// A continue grows the last reply, and only when nothing comes after it. A turn that was
 		// stopped, is waiting on a tool call, or failed leaves the transcript ending in something else
@@ -290,11 +362,7 @@ export class Agent extends Service {
 			// The preset's own nudge travels with the messages (see `compose`); when it has none, the
 			// agent says what it wants in its own words — and only when there is a reply to carry on.
 			const nudge = this.tavern()?.continueNudge(
-				{
-					character: session.character ?? config.tavernCharacter,
-					persona: session.persona ?? config.tavernPersona,
-					preset: session.preset ?? config.tavernPreset,
-				},
+				{ character: session.character, persona: session.persona, preset: session.preset },
 				session.transcript[session.transcript.length - 1]?.content ?? '',
 			);
 			if (!nudge && continueInto !== undefined) {
@@ -305,25 +373,27 @@ export class Agent extends Service {
 			ask = nudge || CONTINUE_ASK;
 		}
 		if (trigger === 'impersonate') {
+			// The tavern layer knows the preset's template and the user's name; without it, the plain
+			// request stands.
 			const impersonation =
-				this.tavern()?.impersonationPrompt({
-					character: session.character ?? config.tavernCharacter,
-					persona: session.persona ?? config.tavernPersona,
-					preset: session.preset ?? config.tavernPreset,
-				}) ||
-				`Write the next message of this conversation as ${this.ctx.settings.get().tavernUserName || 'the user'}, in their voice, and nothing else.`;
+				this.tavern()?.impersonationPrompt({ character: session.character, persona: session.persona, preset: session.preset }) ??
+				'Write the next message of this conversation as the user, in their voice, and nothing else.';
 			// The words stand in the system prompt as well: an impersonation whose history already ends on
 			// your own turn has nowhere else to be said.
 			contexts.push(impersonation);
 			ask = impersonation;
 		}
-		const system = await this.systemPrompt(session, contexts);
-		this.systems.set(session.id, system);
+		const blocks = await this.promptBlocks(session, contexts, trigger);
+		// The fallback is the only place the user's block order and switches apply: under ST the active
+		// preset owns them, and `compose` receives the full block list rather than this filtered view.
+		const system = promptText(applyPromptLayout(blocks, config.prompts));
 		const ref: TurnRef = { sessionId: session.id, surface: input.surface };
 		// The world-info budget, the context budget and every counter in the panels read the same
 		// counter, so the model's own tokenizer is made exact before anything is measured with it.
 		await this.ctx.tokenizers.warm(this.ctx.llm.modelName(session.policy.model));
-		const budget = this.budgetFor(session.policy, session.contextWindow, system, this.ctx.tools.visible(session.policy));
+		// A silent generation is offered no tools, so its budget is measured without them.
+		const tools = SILENT_TRIGGERS.has(trigger) ? [] : this.ctx.tools.visible(session.policy);
+		const budget = this.budgetFor(session.policy, session.contextWindow, system, tools);
 		let history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
 		// A conversation that no longer fits is summarized before it is sent, not after the endpoint
 		// refuses it. The whole older stretch becomes one summary, so the newest turn is still answered
@@ -351,23 +421,32 @@ export class Agent extends Service {
 				this.notice(ref, `Could not summarize the conversation (${describe(error)}); its older turns stay as they are.`);
 			}
 		}
-		const tavern = await this.tavernTurn(session, seeded, history, system, config, trigger, budget.window);
-		if (tavern?.buckets.overflowed && config.wiOverflowAlert && !this.overflowWarned.has(session.id)) {
+		const tavern = await this.tavernTurn(session, seeded, history, blocks, trigger, budget.window);
+		if (tavern?.overflowAlert && !this.overflowWarned.has(session.id)) {
 			this.overflowWarned.add(session.id);
 			this.notice(
 				ref,
 				`World info budget reached after ${tavern.activated.length} entries — the rest were left out. Raise "Context %", give the book fewer entries, or tick "Ignore budget" on the ones that must always be sent.`,
 			);
 		}
-		// With no tavern content configured this is exactly `[system, …history]`, so the port is invisible
-		// until a character, book, persona or preset is actually selected.
-		const composed = tavern && !tavern.inert;
+		// The ST layer takes the whole request whenever it is on: with nothing selected it composes the
+		// built-in default collection. Only an absent or disabled layer keeps the agent's own shape.
+		const composed = tavern?.takeover === true;
 		const messages = composed ? [...tavern!.messages] : [{ role: 'system', content: system } as Message, ...history];
 		// The ask goes last whenever the request would end in the model's own turn — which is what a
 		// continue and an impersonation look like until something is said as the user.
 		if (ask && messages[messages.length - 1]?.role !== 'user') {
 			messages.push({ role: 'user', content: ask, at: Date.now() } as Message);
 		}
+		// The Tools entry gates the whole request in both shapes: the preset's row under ST, the core
+		// layout's block when the agent composes its own prompt.
+		const toolsEnabled = composed
+			? tavern!.toolsEnabled
+			: config.prompts.find((entry) => entry.id === COMONAD_BLOCK.tools)?.enabled !== false;
+		// `/context` reads what was actually sent: the composed system messages, and the tool overhead
+		// the preset left in place.
+		this.systems.set(session.id, composed ? this.systemText(messages) : system);
+		this.toolModes.set(session.id, toolsEnabled);
 		const state: RunState = {
 			ref,
 			sessionId: session.id,
@@ -377,6 +456,7 @@ export class Agent extends Service {
 			toolCalls: [],
 			gateReason: '',
 			confirmed: null,
+			toolsEnabled,
 			samplers: tavern?.samplers,
 			trigger,
 			prior,
@@ -481,7 +561,7 @@ export class Agent extends Service {
 
 	/**
 	 * Writes a compaction down: the summary replaces the turns it covers, here and in the chat record,
-	 * and the rewind points inside those turns go with them. Answers with the transcript the fold
+	 * and the restore points inside those turns go with them. Answers with the transcript the fold
 	 * leaves, which is what a caller hands on as the request's history.
 	 *
 	 * `covers` counts messages of `source` — the transcript the plan was made from — while the record
@@ -527,14 +607,21 @@ export class Agent extends Service {
 		tools: ToolSpec[],
 	): Promise<{ messages: Message[]; transcript?: Message[] }> {
 		const budget = this.budgetFor(state.policy, session?.contextWindow, this.systemText(state.messages), tools);
-		if (estimateMessages(state.messages) <= budget.input) {
+		// The budget's input already has the system prompt and the tool definitions taken off, so the
+		// body is what has to fit. Measuring the whole message list against it counted the system
+		// messages twice — a rounding error before a preset could place twenty blocks, and a real one now.
+		const body = state.messages.filter((message) => message.role !== 'system');
+		const fixed = estimateMessages(state.messages) - estimateMessages(body);
+		if (estimateMessages(body) <= budget.input) {
 			return { messages: state.messages };
 		}
-		const elided = elideToolResults(state.messages, budget.input);
+		// Elision still walks the whole request; its limit carries the fixed part so only the body shrinks.
+		const elided = elideToolResults(state.messages, budget.input + fixed);
 		if (elided.changed) {
 			this.notice(state.ref, 'Trimmed older tool output to fit the model’s window.');
 		}
-		if (estimateMessages(elided.messages) <= budget.input || !state.foldable || !session) {
+		const elidedBody = elided.messages.filter((message) => message.role !== 'system');
+		if (estimateMessages(elidedBody) <= budget.input || !state.foldable || !session) {
 			return { messages: elided.messages };
 		}
 		const plan = planCompaction(state.transcript, budget.input, SUMMARY_RESERVE);
@@ -754,7 +841,9 @@ export class Agent extends Service {
 		const user = sum('user');
 		const assistant = sum('assistant');
 		const tool = sum('tool');
-		const visible = this.ctx.tools.visible(session.policy);
+		// A composed turn whose Tools entry was off carried no tool overhead; report that turn, not
+		// the policy list that would have been offered without the preset.
+		const visible = this.toolModes.get(session.id) === false ? [] : this.ctx.tools.visible(session.policy);
 		const files = session.instructions ?? [];
 		const profile = this.ctx.llm.profileFor(session.policy.model);
 		const system = this.systems.get(session.id) ?? '';
@@ -948,10 +1037,11 @@ export class Agent extends Service {
 			// A subagent is shown only the read-only tools on its list; the model never learns of a write tool.
 			// A silent generation (an impersonation or a quiet turn) writes nothing down and is offered no
 			// tools at all: a tool it called would run for real, and its reply is thrown away afterwards.
+			// A preset whose Tools entry is off offers none either, for the whole turn.
 			const offered = this.ctx.tools
 				.visible(state.policy)
 				.filter((tool) => !state.filter || (SUBAGENT_CAPABILITIES.has(tool.capability) && (!state.filter.allow || state.filter.allow.includes(tool.name))));
-			const visible = SILENT_TRIGGERS.has(state.trigger) ? [] : offered;
+			const visible = SILENT_TRIGGERS.has(state.trigger) || state.toolsEnabled === false ? [] : offered;
 			const live = this.live.get(state.sessionId);
 			const session = live ?? this.ctx.sessions.get(state.sessionId);
 			// A long turn grows by its own tool results, so the request is checked here as well as at the
@@ -1003,6 +1093,16 @@ export class Agent extends Service {
 		nodes.set('agent.tools', async (state, runtime) => {
 			const results = new Array<Message | null>(state.toolCalls.length).fill(null);
 			const runCall = async (call: ToolCall, index: number): Promise<void> => {
+				// A preset can switch tools off for the whole turn. The router rejects such a call first;
+				// this is the second line for a custom graph or a resumed cursor that reached the tools node.
+				if (state.toolsEnabled === false) {
+					results[index] = { role: 'tool', toolCallId: call.id, content: 'Error: tools are switched off for this turn', at: Date.now() };
+					return;
+				}
+				if (!this.ctx.tools.isEnabled(call.name)) {
+					results[index] = { role: 'tool', toolCallId: call.id, content: `Error: tool ${call.name} is switched off in Prompts`, at: Date.now() };
+					return;
+				}
 				// The second line of defence: a subagent's call is refused if the tool is not on its list, or
 				// if the tool writes, whatever the model asked for.
 				const capability = this.ctx.tools.get(call.name)?.capability;
@@ -1067,6 +1167,19 @@ export class Agent extends Service {
 			if (SILENT_TRIGGERS.has(state.trigger)) {
 				return 'end';
 			}
+			// The Tools entry is the whole turn's switch: a call made anyway is answered as rejected and
+			// never reaches the tool. The model then gets its own turn to reply without one.
+			if (state.toolsEnabled === false) {
+				state.gateReason = 'the Tools entry is off';
+				return 'reject';
+			}
+			// A tool switched off in the Prompts tab is treated like an unknown one: it was not offered,
+			// and a call invented for it must not run.
+			const off = state.toolCalls.find((call) => !this.ctx.tools.isEnabled(call.name));
+			if (off) {
+				state.gateReason = `tool ${off.name} is switched off in Prompts`;
+				return 'reject';
+			}
 			const gate = gateCalls(state.toolCalls, (name) => this.ctx.tools.get(name), state.policy, this.ctx.settings.rules());
 			state.gateReason = gate.reason;
 			if (gate.decision === 'allow') {
@@ -1126,24 +1239,36 @@ export class Agent extends Service {
 			return write();
 		}
 		const rel = relative(resolve(workspace), resolve(path)).split(sep).join('/');
-		// The turn's rewind point is taken before its first write: rewinding to it undoes the whole turn.
-		// `length` is the transcript as it stood before this turn's prompt, which is what `truncate` keeps.
-		if (!session.marks.some((mark) => mark.turn === session.turnIndex)) {
-			const entries = await journal.entries(workspace, session.id);
-			const prompt = session.transcript.findLastIndex((message) => message.role === 'user');
-			session.marks.push({
-				turn: session.turnIndex,
-				entryCount: entries.length,
-				length: Math.max(0, prompt),
-				at: Date.now(),
-				text: (session.transcript[prompt]?.content ?? '').slice(0, 80),
-			});
-			this.ctx.sessions.save(session);
+		let before: string | null;
+		try {
+			// The turn's restore point is taken before its first write: restoring to it undoes the whole
+			// turn. `length` is this turn's prompt index, which is what an edited prompt cuts at.
+			if (!session.marks.some((mark) => mark.turn === session.turnIndex)) {
+				const entries = await journal.entries(workspace, session.id);
+				const prompt = session.transcript.findLastIndex((message) => message.role === 'user');
+				session.marks.push({
+					turn: session.turnIndex,
+					entryCount: entries.length,
+					length: Math.max(0, prompt),
+					at: Date.now(),
+				});
+				this.ctx.sessions.save(session);
+			}
+			before = await journal.store(workspace, state.sessionId, rel);
+		} catch (error) {
+			// A shadow repository that cannot be reached (git missing, storage gone) must not keep the
+			// agent from writing: with nothing recorded, this write is what a disabled journal leaves.
+			this.ctx.log.message(`journal: not recording (${describe(error)}); writing without an entry`);
+			return write();
 		}
-		const before = await journal.store(workspace, state.sessionId, rel);
 		await write();
-		const after = await journal.store(workspace, state.sessionId, rel);
-		await journal.record(workspace, state.sessionId, session.turnIndex, rel, before, after);
+		try {
+			const after = await journal.store(workspace, state.sessionId, rel);
+			await journal.record(workspace, state.sessionId, session.turnIndex, rel, before, after);
+		} catch (error) {
+			// The write already happened; a failure to record it is said, not thrown back over it.
+			this.ctx.log.message(`journal: the write landed but was not recorded (${describe(error)})`);
+		}
 	}
 
 	private async spawnAgent(parent: RunState, request: AgentSpawnRequest): Promise<string> {
@@ -1158,7 +1283,9 @@ export class Agent extends Service {
 		if (request.agent && !definition) {
 			return `Error: unknown agent ${request.agent}`;
 		}
-		const agent = definition ?? this.ctx.catalog.agents[0];
+		// The unnamed spawn is the `explore` agent, by name: `agents[0]` is whatever sorts first once
+		// a user has agents of their own, and that would silently make one of them the default.
+		const agent = definition ?? this.ctx.catalog.agent('explore');
 		const policy: SessionPolicy = { ...parent.policy, model: agent?.model || parent.policy.model };
 		// A subagent never writes: only read-only capabilities are offered, whatever its definition lists.
 		const visible = this.ctx.tools
@@ -1169,7 +1296,10 @@ export class Agent extends Service {
 		const allow = agent ? allowedToolsFor(agent, visible) : visible;
 		const run = async (): Promise<string> => {
 			this.activeSubagents += 1;
-			this.depths.set(parent.sessionId, depth + 1);
+			const subId = `sub-${randomUUID()}`;
+			// The depth is the *child's*: a spawn from inside this run reads it off `subId`, and two
+			// siblings finishing at different times each retire only their own entry.
+			this.depths.set(subId, depth + 1);
 			try {
 				const system = [
 					`You are the ${agent?.name ?? 'explore'} subagent of Comonad.`,
@@ -1179,7 +1309,6 @@ export class Agent extends Service {
 				const parentSession = request.fork ? this.ctx.sessions.get(parent.sessionId) : undefined;
 				const base = request.fork && parentSession ? parentSession.transcript : [];
 				const inherited = request.fork ? parent.messages.filter((message) => message.role !== 'system') : [];
-				const subId = `sub-${randomUUID()}`;
 				const subTranscript: Message[] = [...base, { role: 'user', content: request.prompt }];
 				const state: RunState = {
 					ref: { sessionId: subId },
@@ -1213,7 +1342,7 @@ export class Agent extends Service {
 				}
 			} finally {
 				this.activeSubagents -= 1;
-				this.depths.delete(parent.sessionId);
+				this.depths.delete(subId);
 			}
 		};
 		if (request.background) {
@@ -1234,19 +1363,19 @@ export class Agent extends Service {
 
 	/**
 	 * The tavern layer's contribution to one turn: the chat's character, persona, world books and
-	 * preset composed around the agent's identity block. Returns `undefined` when the layer is off.
+	 * preset composed around the agent's named blocks. Returns `undefined` when the layer is off —
+	 * and when composition failed, because a broken card or book must not cost the user a turn.
 	 */
 	private async tavernTurn(
 		session: Session,
 		transcript: Message[],
 		history: Message[],
-		identity: string,
-		config: Config,
+		blocks: readonly PromptBlock[],
 		trigger: GenerationTrigger,
 		window: number,
 	): Promise<ComposeResult | undefined> {
 		const tavern = this.tavern();
-		if (!config.tavernEnabled || !tavern) {
+		if (!tavern) {
 			return undefined;
 		}
 		try {
@@ -1255,23 +1384,22 @@ export class Agent extends Service {
 				.reverse()
 				.filter((message): message is Message & { role: 'user' | 'assistant' } => message.role === 'user' || message.role === 'assistant')
 				.map((message) => ({ role: message.role, text: message.content }));
-			const binding = {
-				character: session.character ?? config.tavernCharacter,
-				persona: session.persona ?? config.tavernPersona,
-				lorebooks: session.lorebooks ?? config.tavernLorebooks,
-				preset: session.preset ?? config.tavernPreset,
-				authorNote: session.authorNote,
-				effects: session.tavernEffects,
-			};
-			const external = await this.vectorHits(session, scan);
-			const composed = tavern.compose({
-				identity,
+			// The session's own selection travels as it is; the tavern resolves what it leaves unset from
+			// its own settings, and composes (vectors and all) without the kernel knowing any of it.
+			const composed = await tavern.compose({
+				blocks,
 				history,
-				binding,
+				binding: {
+					character: session.character,
+					persona: session.persona,
+					lorebooks: session.lorebooks,
+					preset: session.preset,
+					authorNote: session.authorNote,
+					effects: session.tavernEffects,
+				},
 				scan,
 				turn: transcript.length,
 				trigger,
-				external,
 				model: session.policy.model,
 				contextSize: window,
 			});
@@ -1295,65 +1423,29 @@ export class Agent extends Service {
 	}
 
 	/**
-	 * The entries a vector search picks for this turn, as `<book>.<uid>`, which is the shape the scan's
-	 * buffer uses. Nothing here can fail the turn: with the vectors off, or an endpoint that will not
-	 * answer, the set is simply empty and the scan runs on keys alone.
-	 */
-	private async vectorHits(session: Session, scan: readonly { role: 'user' | 'assistant'; text: string }[]): Promise<ReadonlySet<string> | undefined> {
-		const settings = this.ctx.settings.vectors();
-		if (!settings.enabled) {
-			return undefined;
-		}
-		const books = this.tavern()?.booksFor(session.id);
-		if (!books?.length) {
-			return undefined;
-		}
-		const found = await this.ctx.vectors.activate({ books, messages: scan }, settings);
-		if (!found.size) {
-			return undefined;
-		}
-		const keys = new Set<string>();
-		for (const [book, uids] of found) {
-			for (const uid of uids) {
-				keys.add(`${book}.${uid}`);
-			}
-		}
-		return keys;
-	}
-
-	/**
 	 * Upstream's *Automation ID*: when an entry that names one activates, that automation runs — a
 	 * Quick Reply in SillyTavern, and here the `WorldInfoActivated` hook plus a slash command of the
-	 * same name. A name nothing is registered under is simply ignored, and the whole thing is off
-	 * unless the setting says otherwise: a name is enough to run a command.
+	 * same name. The tavern hands over the names it collected (setting applied, duplicates taken out);
+	 * a name nothing is registered under is simply ignored — a name is enough to run a command.
 	 */
 	private async automate(session: Session, composed: ComposeResult, ref: TurnRef): Promise<void> {
-		if (!this.ctx.settings.get().wiAutomation) {
-			return;
-		}
 		const surface = {
 			markdown: (text: string) => this.notice(ref, text),
 			progress: (text: string) => this.notice(ref, text),
 		};
-		const seen = new Set<string>();
-		for (const hit of composed.activated) {
-			const id = (hit.entry.automationId ?? '').trim();
-			if (!id || seen.has(id)) {
-				continue;
-			}
-			seen.add(id);
+		for (const automation of composed.automations) {
 			try {
 				await this.ctx.hooks.fire('WorldInfoActivated', undefined, {
 					session_id: session.id,
-					automation_id: id,
-					book: hit.book,
-					uid: hit.entry.uid,
-					comment: (hit.entry.comment ?? '').trim(),
+					automation_id: automation.id,
+					book: automation.book,
+					uid: automation.uid,
+					comment: automation.comment,
 				});
-				if (!this.ctx.commands.get(id) && !this.ctx.catalog.command(id)) {
+				if (!this.ctx.commands.get(automation.id) && !this.ctx.catalog.command(automation.id)) {
 					continue;
 				}
-				const outcome = await this.ctx.commands.handle(id, '', surface);
+				const outcome = await this.ctx.commands.handle(automation.id, '', surface);
 				if (outcome.done) {
 					if (outcome.result) {
 						this.notice(ref, outcome.result);
@@ -1361,86 +1453,102 @@ export class Agent extends Service {
 					continue;
 				}
 				// An automation that asked for a generation cannot start one from inside a turn.
-				this.notice(ref, `Automation "${id}" belongs to a generation type — run /${id} to use it.`);
+				this.notice(ref, `Automation "${automation.id}" belongs to a generation type — run /${automation.id} to use it.`);
 			} catch (error) {
-				this.notice(ref, `Automation "${id}" failed: ${describe(error)}`);
+				this.notice(ref, `Automation "${automation.id}" failed: ${describe(error)}`);
 			}
 		}
-	}
-
-	private async systemPrompt(session: Session, contexts: string[]): Promise<string> {
-		return promptText(await this.promptBlocks(session, contexts));
 	}
 
 	/**
-	 * The blocks of the system prompt this chat sends, in order, each with the name of what it is — so a
-	 * panel can show the model's instructions and where each came from. `contexts` is the turn's own
-	 * attached context, which only exists while a turn is being built.
+	 * The blocks of the system prompt this chat sends, in order, each with the stable id a preset uses
+	 * to place it. `contexts` is the turn's own attached context, which only exists while a turn is
+	 * being built; `trigger` decides whether this generation may carry tools at all.
 	 */
-	async promptBlocks(session: Session, contexts: string[] = []): Promise<PromptBlock[]> {
+	async promptBlocks(session: Session, contexts: string[] = [], trigger?: GenerationTrigger): Promise<PromptBlock[]> {
 		const config = this.ctx.settings.get();
 		const host = this.ctx.host;
-		const identity = [
-			'You are Comonad, an agentic coding assistant running inside VS Code.',
-			MODE_CAPS[session.policy.workMode].size
-				? 'Inspect the workspace with the provided tools before editing. Prefer apply_edits for precise changes and write_file for new files or full rewrites.'
-				: 'This chat has no tools: answer from the conversation and your own knowledge.',
-			'Never ask the user for permission in your reply; the host asks whenever a tool needs approval.',
-			`Mode: ${MODE_LABELS[session.policy.workMode] ?? session.policy.workMode}; approval: ${session.policy.approval}; network: ${session.policy.network ? 'on' : 'off'}.`,
-			`Today: ${new Date().toISOString().slice(0, 10)}.`,
-		];
-		if (!session.policy.workingDirectory) {
-			identity.push('This session has no working directory: file, shell and task tools are unavailable.');
+		// A silent generation is offered no tools, so the prompt must not advertise any either.
+		const visible = SILENT_TRIGGERS.has(trigger ?? 'normal') ? [] : this.ctx.tools.visible(session.policy);
+		const has = (name: string): boolean => visible.some((tool) => tool.name === name);
+		const setting = new Map(config.prompts.map((entry) => [entry.id, entry]));
+		const prefixOf = (id: ComonadBlockId): string => setting.get(id)?.prefix ?? DEFAULT_BLOCK_PREFIX[id];
+		const blocks: PromptBlock[] = [];
+		// Only a block with a body is part of this turn. Its static opening is the user's prefix; the
+		// dynamic part is what the agent just built.
+		const push = (id: ComonadBlockId, body: string, separator = '\n'): void => {
+			if (!body.trim()) {
+				return;
+			}
+			const prefix = prefixOf(id);
+			blocks.push({ id, name: blockName(id), prefix, body: body.trim(), text: composeBlockText(prefix, body, separator) });
+		};
+
+		push(
+			COMONAD_BLOCK.identity,
+			[
+				`Mode: ${MODE_LABELS[session.policy.workMode] ?? session.policy.workMode}; approval: ${session.policy.approval}; network: ${session.policy.network ? 'on' : 'off'}.`,
+				`Today: ${new Date().toISOString().slice(0, 10)}.`,
+			].join('\n'),
+		);
+		const toolBody: string[] = [];
+		if (has('apply_edits') || has('write_file')) {
+			toolBody.push('Prefer apply_edits for precise changes and write_file for new files or full rewrites.');
 		}
-		const blocks: PromptBlock[] = [{ name: 'Identity', text: identity.join('\n') }];
+		if (!session.policy.workingDirectory) {
+			toolBody.push('This session has no working directory: file, shell and task tools are unavailable.');
+		}
+		const toolsPrefix = prefixOf(COMONAD_BLOCK.tools);
+		// The user edits the "tools are available" guidance; a turn with no tools uses the built-in
+		// no-tools sentence instead, so the prompt can never tell the model to call what is not there.
+		const toolsText = visible.length
+			? composeBlockText(toolsPrefix, toolBody.join('\n'))
+			: composeBlockText(NO_TOOLS_PREFIX, toolBody.join('\n'));
+		if (toolsText.trim()) {
+			blocks.push({ id: COMONAD_BLOCK.tools, name: blockName(COMONAD_BLOCK.tools), prefix: toolsPrefix, body: toolBody.join('\n').trim(), text: toolsText });
+		}
 		if (config.instructions) {
 			const layers = await loadInstructions(session.policy.workingDirectory, host.home(), host.trusted());
 			session.instructions = layers.map((layer) => layer.source);
-			const text = formatInstructions(layers);
-			if (text) {
-				blocks.push({ name: 'Instructions', text });
-			}
+			push(COMONAD_BLOCK.instructions, instructionBody(layers), '\n\n');
 		}
 		if (config.memory) {
 			const memory = await readMemory(memoryDir(host.storage.root, session.policy.workingDirectory));
-			if (memory.trim()) {
-				blocks.push({ name: 'Memory', text: `Memory from earlier sessions:\n${memory}` });
-			}
+			push(COMONAD_BLOCK.memory, memory);
 		}
 		const todos = this.todoLists.get(session.id) ?? [];
 		if (todos.length) {
-			blocks.push({ name: 'Todos', text: `Current todo list:\n${formatTodos(todos)}` });
+			push(COMONAD_BLOCK.todos, formatTodos(todos));
 		}
-		if (config.skills) {
-			const index = skillIndex(this.ctx.catalog.skills);
-			if (index) {
-				blocks.push({ name: 'Skills', text: index });
-			}
+		// The indexes advertise a tool, so they only travel when that tool does.
+		if (config.skills && has('skill')) {
+			push(COMONAD_BLOCK.skills, skillLines(this.ctx.catalog.skills));
 		}
-		const agents = agentIndex(this.ctx.catalog.agents);
-		if (agents) {
-			blocks.push({ name: 'Sub-agents', text: agents });
+		if (has('agent')) {
+			push(COMONAD_BLOCK.agents, agentLines(this.ctx.catalog.agents));
 		}
-		// The books a chat can look up: without this the model cannot know `lore_lookup` has anything.
-		const lore = config.tavernEnabled ? this.tavern()?.loreIndex(session.id) : undefined;
-		if (lore) {
-			blocks.push({ name: 'Lore index', text: lore });
+		// The books a chat can look up, without the plugin's own heading: the prefix above is the
+		// block's editable opening, and this is only the list it adds below.
+		if (has('lore_lookup')) {
+			push(COMONAD_BLOCK.lore, this.tavern()?.loreIndex(session.id, '') ?? '');
 		}
 		if (contexts.length) {
-			blocks.push({ name: 'Context', text: `Context:\n${contexts.join('\n\n')}` });
+			push(COMONAD_BLOCK.context, contexts.join('\n\n'));
 		}
+		// The pane previews a generated block far more often than it starts a turn, and it cannot await:
+		// the last build is kept so `lastPromptBlocks()` can answer synchronously.
+		this.lastBlocks.set(session.id, blocks);
 		return blocks;
+	}
+
+	/** The blocks of the most recent prompt build for a chat, or an empty list before the first turn. */
+	lastPromptBlocks(sessionId: string): readonly PromptBlock[] {
+		return this.lastBlocks.get(sessionId) ?? [];
 	}
 
 	private notice(ref: TurnRef, text: string): void {
 		this.ctx.emit('agent/notice', ref, text);
 	}
-}
-
-/** One named part of the system prompt, in the order the model receives it. */
-export interface PromptBlock {
-	name: string;
-	text: string;
 }
 
 /** The wire text of a block list: the blocks separated by a blank line, as the model receives them. */

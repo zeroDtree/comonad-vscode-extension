@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { clip, describe, preview } from '../lib/util';
 import type { ApprovalDecision } from '../lib/types';
+import { resolveReferences, scopeOf } from './references';
 
 /** `@comonad` inside VS Code's chat view. The standalone panel lives in chat-panel.ts. */
 
@@ -113,6 +114,7 @@ export function participant(ctx: Context): void {
 					policy: handled.policy,
 					surface,
 					signal: controller.signal,
+					resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
 				});
 				if (result.text.startsWith('Error:') || result.text.startsWith('Blocked by hook')) {
 					response.markdown(result.text);

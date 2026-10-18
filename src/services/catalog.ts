@@ -2,6 +2,7 @@ import type { Dirent } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Service, type Context } from 'cordis';
+import { COMONAD_BLOCK, DEFAULT_BLOCK_PREFIX } from '../lib/blocks';
 import { booleanField, numberField, parseFrontmatter, stringField, stringListField } from '../lib/frontmatter';
 
 /** Skills, subagent definitions and custom slash commands discovered from disk. */
@@ -128,20 +129,32 @@ export class Catalog extends Service {
 
 export const catalogPlugin = Catalog;
 
-export function skillIndex(skills: Skill[]): string {
+/** The skill list itself, without the heading a prompt block adds above it. */
+export function skillLines(skills: Skill[]): string {
 	if (skills.length === 0) {
 		return '';
 	}
-	const lines = skills.map((skill) => `- ${skill.name}: ${skill.description || 'no description'}`);
-	return `Skills (load one with the skill tool before following it):\n${lines.join('\n')}`;
+	return skills.map((skill) => `- ${skill.name}: ${skill.description || 'no description'}`).join('\n');
 }
 
-export function agentIndex(agents: AgentDefinition[]): string {
+export function skillIndex(skills: Skill[], heading = DEFAULT_BLOCK_PREFIX[COMONAD_BLOCK.skills]): string {
+	const body = skillLines(skills);
+	const head = heading.trim();
+	return head && body ? `${head}\n${body}` : head || body;
+}
+
+/** The subagent list itself, without the heading a prompt block adds above it. */
+export function agentLines(agents: AgentDefinition[]): string {
 	if (agents.length === 0) {
 		return '';
 	}
-	const lines = agents.map((agent) => `- ${agent.name}: ${agent.description || 'no description'}`);
-	return `Subagents (delegate with the agent tool):\n${lines.join('\n')}`;
+	return agents.map((agent) => `- ${agent.name}: ${agent.description || 'no description'}`).join('\n');
+}
+
+export function agentIndex(agents: AgentDefinition[], heading = DEFAULT_BLOCK_PREFIX[COMONAD_BLOCK.agents]): string {
+	const body = agentLines(agents);
+	const head = heading.trim();
+	return head && body ? `${head}\n${body}` : head || body;
 }
 
 export function allowedToolsFor(agent: AgentDefinition, available: string[]): string[] {

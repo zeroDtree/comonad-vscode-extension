@@ -76,7 +76,7 @@ export const markup = `
         <small class="wi-or">or</small>
         <select id="wi-pick" title="Pick a book to edit"></select>
         <span class="grow"></span>
-        <div class="group">
+        <div class="wi-tools">
           <button class="secondary" id="wi-import" type="button" title="Copy world info files into Comonad's library">Import</button>
           <button class="secondary" id="wi-export" type="button" title="Write this book to a file">Export</button>
           <button class="secondary" id="wi-rename" type="button" title="Rename this book">Rename</button>
@@ -86,14 +86,14 @@ export const markup = `
       </div>
 
       <div id="wi-toolbar2">
-        <div class="group">
+        <div class="wi-tools">
           <button class="secondary" id="wi-add" type="button" title="New entry">＋</button>
           <button class="secondary" id="wi-open-all" type="button" title="Open every entry">Open all</button>
           <button class="secondary" id="wi-close-all" type="button" title="Fold every entry">Close all</button>
           <button class="secondary" id="wi-backfill" type="button" title="Fill empty titles with the entry's keys">Fill titles</button>
           <button class="secondary" id="wi-apply-order" type="button" title="Write the current order into every entry's Order">Apply as Order</button>
         </div>
-        <div class="group push">
+        <div class="wi-tools push">
           <input id="wi-search" class="control" type="search" placeholder="Search..." />
           <select id="wi-sort" title="Sort the list"></select>
           <button class="secondary" id="wi-refresh" type="button" title="Re-read the library from disk">Refresh</button>
@@ -322,9 +322,9 @@ export const markup = `
     <div id="st-pane-settings">
       <div class="grid">
         <div class="field wide">
-          <label for="tavern-enabled">Content layer</label>
-          <label class="check"><input type="checkbox" id="tavern-enabled" data-key="tavernEnabled" /> Layer a character, world books, a persona and a preset on the agent prompt</label>
-          <p class="hint">With this off nothing from the content layer reaches a request; the agent prompt is sent on its own.</p>
+          <label for="tavern-enabled">ST prompt takeover</label>
+          <label class="check"><input type="checkbox" id="tavern-enabled" data-key="tavernEnabled" /> Compose every turn with the ST prompt collection</label>
+          <p class="hint">With this on, every turn is assembled here — with no preset selected, the built-in <strong>Default</strong> is used. With it off, the agent prompt is sent on its own.</p>
         </div>
         <div class="field">
           <label for="tavern-character">Default character</label>
@@ -339,7 +339,7 @@ export const markup = `
         <div class="field">
           <label for="tavern-preset">Default preset</label>
           <select id="tavern-preset" class="control" data-key="tavernPreset"></select>
-          <p class="hint">Prompts, order and samplers for new chats — the Presets sub-tab edits them.</p>
+          <p class="hint">Prompts, order and samplers for new chats. Empty uses the built-in <strong>Default</strong>; <em>Start from Default</em> in the Presets sub-tab makes an editable copy.</p>
         </div>
         <div class="field">
           <label for="tavern-user">User name</label>

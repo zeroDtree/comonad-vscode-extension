@@ -1,26 +1,34 @@
-import { DEFAULT_ORDER, DEFAULT_PROMPTS } from './prompts';
+import { isComonadBlockId } from '@comonad/lib/blocks';
+import { DEFAULT_ORDER, ST_PROMPTS } from './prompts';
+import { normalisePrompt } from './preset';
 import { sanitisePromptLibrary } from './library';
-import {
-	PERSONA_DEPTH_DEFAULT,
-	PERSONA_POSITION,
-	TALKATIVENESS_DEFAULT,
-	WI_ENTRY_DEFAULTS,
-	WI_LOGIC,
-	WI_POSITION,
-	type Character,
-	type Persona,
-	type PersonaConnection,
-	type PromptItem,
-	type TavernPreset,
-	type WorldBook,
-	type WorldEntry,
-} from '@comonad/lib/tavern/types';
+import { TALKATIVENESS_DEFAULT } from './card';
+import { WI_ENTRY_DEFAULTS, WI_LOGIC, WI_POSITION } from './lore';
+import type { Character, Persona, PersonaConnection, PromptItem, TavernPreset, WorldBook, WorldEntry } from './types';
 
 /**
  * Authoring: blank items and the on-disk writers, all in SillyTavern's own formats so a file made
  * here can be dropped into a SillyTavern installation and read back unchanged. Everything is pure —
  * the service owns the paths and the writes.
  */
+
+/** Where a persona description goes, verbatim from SillyTavern's `persona_description_positions`. */
+export const PERSONA_POSITION = {
+	inPrompt: 0,
+	/** Deprecated upstream; still accepted on load. */
+	afterChar: 1,
+	anTop: 2,
+	anBottom: 3,
+	atDepth: 4,
+	/**
+	 * Sent nowhere: the persona still supplies the user's name, but its description is left out of the
+	 * request entirely. Upstream spells this position `NONE`.
+	 */
+	none: 9,
+} as const;
+
+/** Upstream's own default for a fresh persona: two messages from the end, in the system role. */
+export const PERSONA_DEPTH_DEFAULT = 2;
 
 /** A file-safe id from a title: `My Preset!` becomes `My-Preset`. */
 export function slugId(name: string, fallback = 'item'): string {
@@ -174,8 +182,20 @@ const SAMPLER_FIELDS = [
 export function adoptPreset(raw: unknown): TavernPreset {
 	const value = asObject(raw) as unknown as TavernPreset;
 	const id = asText((raw as { id?: unknown })?.id).trim() || slugId(asText((raw as { name?: unknown })?.name), 'preset');
-	const prompts: (PromptItem & { enabled?: boolean })[] = Array.isArray(value.prompts)
+	// The editor sends the whole collection in send order, Comonad's generated blocks included. Only
+	// their place and switch are stored (`promptOrder`); a definition is never written for them,
+	// because the agent supplies its text again every turn.
+	const entries = Array.isArray(value.prompts)
 		? (value.prompts as (PromptItem & { enabled?: boolean })[]).filter((prompt) => prompt && typeof prompt.identifier === 'string')
+		: [];
+	const prompts = entries
+		.filter((prompt) => !isComonadBlockId(prompt.identifier))
+		.map((prompt) => normalisePrompt(prompt))
+		.filter((prompt): prompt is PromptItem => prompt !== null);
+	const incomingOrder = Array.isArray(value.promptOrder)
+		? value.promptOrder
+				.filter((entry) => entry && typeof entry.identifier === 'string' && entry.identifier.length > 0)
+				.map((entry) => ({ identifier: entry.identifier, enabled: entry.enabled !== false }))
 		: [];
 	// This preset's own prompt library: what the pane saved for this preset alone. An empty library
 	// leaves the key out entirely, so a preset that never used one keeps its file as it arrived.
@@ -186,7 +206,7 @@ export function adoptPreset(raw: unknown): TavernPreset {
 		name: asText(value.name).trim() || id,
 		prompts,
 		promptLibrary: promptLibrary.length ? promptLibrary : undefined,
-		promptOrder: prompts.map((prompt) => ({ identifier: prompt.identifier, enabled: prompt.enabled !== false })),
+		promptOrder: entries.length ? entries.map((prompt) => ({ identifier: prompt.identifier, enabled: prompt.enabled !== false })) : incomingOrder,
 		raw: asObject(value.raw),
 	};
 	for (const field of SAMPLER_FIELDS) {
@@ -453,12 +473,12 @@ export function personaJson(persona: Persona, raw: Record<string, unknown> = {})
 
 /* ------------------------------------------------------------------ presets */
 
-/** A new preset: SillyTavern's shipped prompts and order, no sampler overrides. */
+/** A new preset: SillyTavern's shipped prompts, Comonad's blocks and order, no sampler overrides. */
 export function blankPreset(name: string, id: string): TavernPreset {
 	return {
 		id,
 		name: name.trim() || id,
-		prompts: DEFAULT_PROMPTS.map((prompt) => ({ ...prompt }) as PromptItem),
+		prompts: ST_PROMPTS.map((prompt) => ({ ...prompt }) as PromptItem),
 		promptOrder: DEFAULT_ORDER.map((entry) => ({ ...entry })),
 		raw: {},
 	};

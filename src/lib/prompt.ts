@@ -1,4 +1,4 @@
-import { countMessages, countRaw, countTokens } from './tokens';
+import { countRaw, estimateMessages } from './tokens';
 import type { Message } from './types';
 
 /** How much of the recorded transcript is sent back to the model. Pure module. */
@@ -27,15 +27,6 @@ export function applyContextForm(transcript: Message[], form: ContextForm, toolL
 			? { ...message, content: `${message.content.slice(0, toolLimit)}\n[...trimmed]` }
 			: { ...message },
 	);
-}
-
-/** One string's token count, in the shape SillyTavern reports one (see `lib/tokens.ts`). */
-export function estimateTokens(text: string): number {
-	return countTokens(text);
-}
-
-export function estimateMessages(messages: Message[]): number {
-	return countMessages(messages);
 }
 
 /** How one request's input budget is made up. */

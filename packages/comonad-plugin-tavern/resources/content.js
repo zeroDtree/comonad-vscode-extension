@@ -207,7 +207,10 @@ window.comonadContentPane = function contentPane(options) {
 		const wrap = document.createElement('div');
 		wrap.className = 'field' + (spec.type === 'textarea' || spec.type === 'json' || spec.type === 'list' ? ' wide' : '');
 		const value = item[spec.key];
-		const control = (node) => {
+		// Every control gets a stable id, so a rebuild that lands mid-keystroke can put the caret back.
+		const control = (node, at) => {
+			const nested = spec.type.startsWith('nested') ? spec.key + '-' + spec.type : spec.key;
+			node.id = 'stf-' + nested + (at === undefined ? '' : '-' + at);
 			node.addEventListener('input', markDirty);
 			node.addEventListener('change', markDirty);
 			return node;
@@ -253,7 +256,7 @@ window.comonadContentPane = function contentPane(options) {
 					area.rows = 2;
 					area.spellcheck = false;
 					area.value = String(entry);
-					control(area).addEventListener('input', () => {
+					control(area, index).addEventListener('input', () => {
 						list[index] = area.value;
 					});
 					const remove = document.createElement('button');
@@ -587,6 +590,7 @@ window.comonadContentPane = function contentPane(options) {
 		const add = document.createElement('div');
 		add.className = 'tag-add';
 		const input = document.createElement('input');
+		input.id = 'st-tag-add';
 		input.className = 'control';
 		input.type = 'text';
 		input.placeholder = 'Add a tag…';
@@ -696,6 +700,7 @@ window.comonadContentPane = function contentPane(options) {
 		row.className = 'tag-manager-row';
 		row.dataset.tag = tag.id;
 		const name = document.createElement('input');
+		name.id = 'tgm-name-' + tag.id;
 		name.className = 'control tag-name';
 		name.type = 'text';
 		name.value = tag.name;
@@ -781,9 +786,12 @@ window.comonadContentPane = function contentPane(options) {
 	const promptTokens = (prompt) => Math.ceil(new TextEncoder().encode(String(prompt.content ?? '')).length / 4);
 
 	/** The little markers upstream puts beside a block's name, in our own glyphs. */
-	function promptBadges(prompt) {
+	function promptBadges(prompt, managed = false) {
 		const inChat = Number(prompt.injection_position) === 1;
 		const badges = [];
+		if (managed) {
+			badges.push(['◆', 'Comonad block — its text is generated for every turn']);
+		}
 		if (prompt.marker) {
 			badges.push([
 				inChat ? '💉' : '📌',
@@ -793,7 +801,7 @@ window.comonadContentPane = function contentPane(options) {
 		if (prompt.forbid_overrides) {
 			badges.push(['★', 'Important: a character card cannot replace this block']);
 		}
-		if (prompt.extension) {
+		if (prompt.extension && !managed) {
 			badges.push(['⧉', 'An extension prompt']);
 		}
 		const role = prompt.role === 'user' ? ['👤', 'Sent as the user'] : prompt.role === 'assistant' ? ['🤖', 'Sent as the assistant'] : [];
@@ -806,8 +814,8 @@ window.comonadContentPane = function contentPane(options) {
 	/** The editor redraws with the form, so whatever is being typed into is put back afterwards. */
 	function captureFocus() {
 		const active = document.activeElement;
-		const form = $('st-form');
-		if (!active || !form || !form.contains(active) || !active.id) {
+		const pane = $('st-pane');
+		if (!active || !pane || !pane.contains(active) || !active.id) {
 			return null;
 		}
 		return { id: active.id, start: active.selectionStart, end: active.selectionEnd };
@@ -904,15 +912,21 @@ window.comonadContentPane = function contentPane(options) {
 		}
 	}
 
-	/** Copies one library entry into the prompt list, right after Comonad's own block. */
+	/** Copies one library entry into the prompt list, after the leading Comonad blocks. */
 	function insertFromLibrary(entry) {
 		const copy = libraryCopy(entry);
 		copy.identifier = uniqueId(item.prompts, entry.identifier);
-		// The identity block leads the collection, so a library entry goes straight after it.
-		item.prompts.splice(1, 0, copy);
+		// Comonad's generated blocks lead by default; a library entry goes after that run, where a
+		// user block is easiest to find.
+		const managed = new Set((state.preset && state.preset.comonad) || []);
+		let at = 0;
+		while (at < item.prompts.length && managed.has(item.prompts[at].identifier)) {
+			at += 1;
+		}
+		item.prompts.splice(at, 0, copy);
 		markDirty();
 		render();
-		status(`Inserted “${copy.name || copy.identifier}” at the top of the prompt list.`);
+		status(`Inserted “${copy.name || copy.identifier}” after Comonad’s blocks.`);
 	}
 
 	/**
@@ -1047,9 +1061,19 @@ window.comonadContentPane = function contentPane(options) {
 		// This preset's own library, made on demand: it lives inside the preset and is saved with it.
 		const presetEntries = presetLibrary();
 		const slice = state.preset || {};
+		// Comonad's own blocks: generated for every turn, so their text is read-only here, while their
+		// place and switch are the preset's to decide like any other row.
+		const managedIds = new Set(slice.comonad || []);
+		const isManaged = (prompt) => managedIds.has(prompt.identifier);
 		const known = (prompt) => Object.prototype.hasOwnProperty.call(slice.tokens || {}, prompt.identifier);
-		// The open block counts itself, so the number follows what is being typed.
-		const countOf = (prompt) => (prompt.identifier === editingPrompt || !known(prompt) ? promptTokens(prompt) : slice.tokens[prompt.identifier]);
+		// The open block counts itself, so the number follows what is being typed — except for a
+		// generated block, whose text is not in the form and whose current value came from the host.
+		const countOf = (prompt) => {
+			if (known(prompt) && (isManaged(prompt) || prompt.identifier !== editingPrompt)) {
+				return slice.tokens[prompt.identifier];
+			}
+			return promptTokens(prompt);
+		};
 		const total = prompts.reduce((sum, prompt) => sum + countOf(prompt), 0);
 		// The edited block's row, so the counts beside the editor follow what is typed into it, and the
 		// toolbar's total, which is built below the list.
@@ -1060,7 +1084,7 @@ window.comonadContentPane = function contentPane(options) {
 		const heading = document.createElement('h2');
 		heading.textContent = `Prompts (${prompts.length})`;
 		const hint = hintEl(
-			'Order is the order the model reads. ✎ unfolds a block for editing — its text, its role, the generation types it is sent for, and where it goes.',
+			'Order is the order the model reads. ✎ unfolds a block for editing. The ◆ rows are Comonad’s own blocks: their text is generated for every turn, so only their place and switch can be changed here.',
 		);
 		const list = document.createElement('div');
 		list.className = 'prompt-list';
@@ -1083,9 +1107,9 @@ window.comonadContentPane = function contentPane(options) {
 			moveTo(index, index + delta);
 		};
 
-		// A drop lands at the target index; the identity block stays first, so nothing goes above it.
+		// A drop lands at the target index; any row, Comonad's included, may move anywhere in the list.
 		const moveTo = (from, to) => {
-			if (from === to || from < 1 || to < 1 || from >= prompts.length || to >= prompts.length) {
+			if (from === to || from < 0 || to < 0 || from >= prompts.length || to >= prompts.length) {
 				return;
 			}
 			const moved = prompts.splice(from, 1)[0];
@@ -1101,28 +1125,27 @@ window.comonadContentPane = function contentPane(options) {
 			// single thing they are.
 			const block = document.createElement('div');
 			block.className = 'prompt-item';
-			const identity = prompt.identifier === 'comonad';
-			if (identity) {
-				block.classList.add('is-fixed');
-			} else {
-				// Any other block can be dragged to a new place in the list; the identity block cannot move.
-				block.draggable = true;
-				block.addEventListener('dragstart', (event) => {
-					dragFrom = index;
-					block.classList.add('is-dragging');
-					event.dataTransfer.effectAllowed = 'move';
-					// Firefox will not start a drag without some data on the transfer.
-					event.dataTransfer.setData('text/plain', prompt.identifier);
-				});
-				block.addEventListener('dragend', () => {
-					dragFrom = null;
-					block.classList.remove('is-dragging');
-					list.querySelectorAll('.is-drop-target').forEach((node) => node.classList.remove('is-drop-target'));
-				});
+			const managed = isManaged(prompt);
+			if (managed) {
+				block.classList.add('is-managed');
 			}
-			// A card accepts a drop only from another card in this list, and never above the identity block.
+			// Every row can be dragged, Comonad's generated blocks included.
+			block.draggable = true;
+			block.addEventListener('dragstart', (event) => {
+				dragFrom = index;
+				block.classList.add('is-dragging');
+				event.dataTransfer.effectAllowed = 'move';
+				// Firefox will not start a drag without some data on the transfer.
+				event.dataTransfer.setData('text/plain', prompt.identifier);
+			});
+			block.addEventListener('dragend', () => {
+				dragFrom = null;
+				block.classList.remove('is-dragging');
+				list.querySelectorAll('.is-drop-target').forEach((node) => node.classList.remove('is-drop-target'));
+			});
+			// A card accepts a drop only from another card in this list.
 			block.addEventListener('dragover', (event) => {
-				if (dragFrom === null || identity) {
+				if (dragFrom === null) {
 					return;
 				}
 				event.preventDefault();
@@ -1133,7 +1156,7 @@ window.comonadContentPane = function contentPane(options) {
 				block.classList.remove('is-drop-target');
 			});
 			block.addEventListener('drop', (event) => {
-				if (dragFrom === null || identity) {
+				if (dragFrom === null) {
 					return;
 				}
 				event.preventDefault();
@@ -1153,11 +1176,10 @@ window.comonadContentPane = function contentPane(options) {
 			// The switch: upstream toggles a block with an icon, and this reads the same way.
 			const toggle = document.createElement('label');
 			toggle.className = 'switch';
-			toggle.title = identity ? 'Comonad’s own block always leads' : prompt.enabled === false ? 'Send this block' : 'Stop sending this block';
+			toggle.title = prompt.enabled === false ? 'Send this block' : 'Stop sending this block';
 			const on = document.createElement('input');
 			on.type = 'checkbox';
 			on.checked = prompt.enabled !== false;
-			on.disabled = identity;
 			const knob = document.createElement('span');
 			knob.className = 'knob';
 			toggle.append(on, knob);
@@ -1172,7 +1194,7 @@ window.comonadContentPane = function contentPane(options) {
 			// The name, with upstream's markers beside it: what kind of block it is, and where it goes.
 			const label = document.createElement('div');
 			label.className = 'prompt-name-block';
-			const { badges, role } = promptBadges(prompt);
+			const { badges, role } = promptBadges(prompt, managed);
 			for (const [glyph, tip] of badges) {
 				const badge = document.createElement('span');
 				badge.className = 'prompt-badge';
@@ -1184,7 +1206,7 @@ window.comonadContentPane = function contentPane(options) {
 			name.type = 'button';
 			name.className = 'prompt-open';
 			name.textContent = prompt.name || prompt.identifier;
-			name.title = `Edit ${prompt.name || prompt.identifier}`;
+			name.title = managed ? `Read ${prompt.name || prompt.identifier}` : `Edit ${prompt.name || prompt.identifier}`;
 			name.addEventListener('click', () => {
 				editingPrompt = editingPrompt === prompt.identifier ? null : prompt.identifier;
 				render();
@@ -1202,20 +1224,20 @@ window.comonadContentPane = function contentPane(options) {
 
 			const buttons = document.createElement('div');
 			buttons.className = 'prompt-controls';
-			const control = (glyph, tip, onClick, disabled) => {
+			const control = (glyph, tip, onClick, disabled = false) => {
 				const button = document.createElement('button');
 				button.type = 'button';
 				button.className = 'icon';
 				button.textContent = glyph;
 				button.title = tip;
-				button.disabled = identity || disabled;
+				button.disabled = disabled;
 				button.addEventListener('click', onClick);
 				buttons.append(button);
 				return button;
 			};
-			control('↑', 'Move up', () => move(index, -1));
-			control('↓', 'Move down', () => move(index, 1));
-			control('✎', 'Edit this block', () => {
+			control('↑', 'Move up', () => move(index, -1), index === 0);
+			control('↓', 'Move down', () => move(index, 1), index === prompts.length - 1);
+			control('✎', managed ? 'Read this generated block' : 'Edit this block', () => {
 				editingPrompt = editingPrompt === prompt.identifier ? null : prompt.identifier;
 				render();
 			});
@@ -1225,7 +1247,7 @@ window.comonadContentPane = function contentPane(options) {
 				prompts.splice(index + 1, 0, copy);
 				markDirty();
 				render();
-			});
+			}, managed);
 			control('✕', 'Delete this block', () => {
 				prompts.splice(index, 1);
 				if (editingPrompt === prompt.identifier) {
@@ -1233,7 +1255,7 @@ window.comonadContentPane = function contentPane(options) {
 				}
 				markDirty();
 				render();
-			});
+			}, managed);
 			row.append(buttons);
 
 			const counts = document.createElement('div');
@@ -1387,10 +1409,13 @@ window.comonadContentPane = function contentPane(options) {
 	 */
 	function promptEditor(prompt, refresh) {
 		const slice = state.preset || {};
+		// A Comonad block's content is built again every turn: the row may be moved and switched, but
+		// what it says is the agent's, so its fields are shown read-only.
+		const managed = new Set(slice.comonad || []).has(prompt.identifier);
 		const panel = document.createElement('section');
 		panel.className = 'prompt-edit';
 		const heading = document.createElement('h3');
-		heading.textContent = 'Edit';
+		heading.textContent = managed ? 'Generated block' : 'Edit';
 		panel.append(heading);
 
 		const field = (label, hint, node, wide) => {
@@ -1415,6 +1440,7 @@ window.comonadContentPane = function contentPane(options) {
 		name.type = 'text';
 		name.spellcheck = false;
 		name.value = prompt.name || '';
+		name.disabled = managed;
 		name.addEventListener('input', () => write('name', name.value));
 
 		const role = document.createElement('select');
@@ -1427,6 +1453,7 @@ window.comonadContentPane = function contentPane(options) {
 			option.selected = (prompt.role || 'system') === value;
 			role.append(option);
 		}
+		role.disabled = managed;
 		role.addEventListener('change', () => write('role', role.value));
 
 		// *Triggers*: a block limited to some generation types is left out of the others. An empty
@@ -1448,6 +1475,11 @@ window.comonadContentPane = function contentPane(options) {
 			row.append(box, text);
 			triggers.append(row);
 		}
+		if (managed) {
+			triggers.querySelectorAll('input').forEach((box) => {
+				box.disabled = true;
+			});
+		}
 		triggers.addEventListener('change', () => {
 			write(
 				'injection_trigger',
@@ -1465,6 +1497,7 @@ window.comonadContentPane = function contentPane(options) {
 			option.selected = String(Number(prompt.injection_position ?? 0)) === value;
 			position.append(option);
 		}
+		position.disabled = managed;
 		position.addEventListener('change', () => {
 			write('injection_position', Number(position.value));
 			render();
@@ -1482,8 +1515,9 @@ window.comonadContentPane = function contentPane(options) {
 			return input;
 		};
 		const depth = numeric('pe-depth', 'injection_depth', 4, 0, 9999);
-		depth.disabled = Number(prompt.injection_position ?? 0) !== 1;
+		depth.disabled = managed || Number(prompt.injection_position ?? 0) !== 1;
 		const order = numeric('pe-order', 'injection_order', 100, 0, 9999);
+		order.disabled = managed;
 
 		// The prompt itself. A marker's text comes from the chat, the card or the world books, so there
 		// is nothing here to type into — upstream disables the same field.
@@ -1492,8 +1526,8 @@ window.comonadContentPane = function contentPane(options) {
 		content.className = 'control';
 		content.rows = 8;
 		content.spellcheck = false;
-		content.placeholder = 'The prompt to be sent.';
-		content.value = prompt.content ?? '';
+		content.placeholder = managed ? 'Generated for every turn.' : 'The prompt to be sent.';
+		content.value = managed ? ((slice.preview || {})[prompt.identifier] ?? '') : (prompt.content ?? '');
 		content.disabled = prompt.marker === true;
 		content.addEventListener('input', () => {
 			write('content', content.value);
@@ -1506,6 +1540,7 @@ window.comonadContentPane = function contentPane(options) {
 		forbid.type = 'checkbox';
 		forbid.id = 'pe-forbid';
 		forbid.checked = prompt.forbid_overrides === true;
+		forbid.disabled = managed;
 		forbid.addEventListener('change', () => write('forbid_overrides', forbid.checked));
 		const forbidLabel = document.createElement('label');
 		forbidLabel.className = 'check';
@@ -1529,7 +1564,15 @@ window.comonadContentPane = function contentPane(options) {
 			field('Order', 'Ordered from low/top to high/bottom, and at same order: Assistant, User, System.', order),
 		);
 		panel.append(rows, textLabel, content);
-		if (prompt.marker) {
+		if (managed) {
+			panel.append(
+				hintEl(
+					prompt.identifier === slice.toolsPrompt
+						? 'Tool definitions travel beside the request in the API’s tools parameter, not in this text. This entry is the switch: with it off, the request offers no tools and a call is rejected before it runs.'
+						: 'This block is generated from the agent’s state for every turn. Its place and switch are yours; its text is not editable here. The current text is also shown in Inspect → Prompts.',
+				),
+			);
+		} else if (prompt.marker) {
 			panel.append(hintEl('The content of this prompt is pulled from elsewhere and cannot be edited here.'));
 		}
 
@@ -1547,7 +1590,10 @@ window.comonadContentPane = function contentPane(options) {
 		reset.type = 'button';
 		reset.className = 'secondary reset';
 		reset.textContent = 'Reset';
-		reset.title = 'Put this block back to what Comonad ships — the text, the name and the role it starts with.';
+		reset.disabled = managed;
+		reset.title = managed
+			? 'A generated block has no stored text to put back.'
+			: 'Put this block back to what Comonad ships — the text, the name and the role it starts with.';
 		reset.addEventListener('click', () => {
 			const shipped = (slice.shipped || []).find((entry) => entry.identifier === prompt.identifier);
 			if (shipped) {
@@ -1920,15 +1966,43 @@ window.comonadContentPane = function contentPane(options) {
 		return row;
 	}
 
+	/**
+	 * What the form is drawn from. A push that moves none of it does not redraw it — a caret lives in
+	 * there — and one that does is drawn again with the caret put back (every control has an id).
+	 */
+	function formSignature() {
+		return JSON.stringify([
+			kind,
+			item && item.id,
+			item && item.source,
+			dirty,
+			state.counts,
+			(state.items || []).map((entry) => entry.id).join(),
+			state.tags && state.tags.assigned,
+			state.adopted && state.adopted[kind],
+			state.preset && state.preset.total,
+			state.preset && state.preset.preview,
+			managerOpen,
+			((state.catalog && state.catalog.lorebooks) || []).map((entry) => entry.id).join(),
+			(state.builtInPrompts || []).map((entry) => entry.identifier).join(),
+		]);
+	}
+	let shape = '';
+
 	function render() {
+		const focus = captureFocus();
 		if (!state || !item) {
 			$('st-form').innerHTML = '<p class="hint">Pick something on the left, or start a new item.</p>';
 			renderActions();
 			renderList();
+			shape = formSignature();
+			restoreFocus(focus);
 			return;
 		}
 		if (kind === 'lorebooks') {
-			renderBook();
+			// The world-book page is its own module and draws this kind; without it the tab says so
+			// rather than drawing a form for a book the pane would not know how to write back.
+			$('st-form').innerHTML = '<p class="hint">The world-book page (worldinfo.js) did not load, so books cannot be edited here.</p>';
 		} else if (kind === 'presets') {
 			renderPrompts();
 			const extra = document.createElement('div');
@@ -1947,6 +2021,8 @@ window.comonadContentPane = function contentPane(options) {
 		renderActions();
 		renderList();
 		renderManager();
+		shape = formSignature();
+		restoreFocus(focus);
 	}
 
 	/* ------------------------------------------------------------------ wiring */
@@ -2004,7 +2080,14 @@ window.comonadContentPane = function contentPane(options) {
 				personaPane.render(content);
 				return;
 			}
-			render();
+			// A push that moves nothing the form shows does not redraw it — a caret lives in there.
+			// The skip is only for an edit in progress, where the local copy is the truth by contract;
+			// a clean form takes every push, so an outside change to the file is never left stale.
+			if (dirty && same && formSignature() === shape) {
+				renderList();
+			} else {
+				render();
+			}
 			if (!dirty) {
 				clearDirty();
 			}

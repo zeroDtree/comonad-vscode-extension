@@ -152,9 +152,35 @@ window.comonadPersonas = function personaPane(options) {
 		return node;
 	}
 
+	/** A field the user is in is left alone, and one that already reads right is not written: a state
+	 *  push can land in the middle of a keystroke, and a `.value` write would take the caret with it. */
+	function put(node, value) {
+		const wanted = String(value ?? '');
+		if (node && document.activeElement !== node && node.value !== wanted) {
+			node.value = wanted;
+		}
+	}
+
+	/** The tiles are redrawn only when what they show moves; a push that changes nothing skips them. */
+	let tilesShape = '';
+
+	function tilesSignature(list) {
+		return JSON.stringify([
+			page,
+			grid,
+			work && work.id,
+			list.map((persona) => [persona.id, persona.name, persona.title, persona.avatar, persona.locked.default, persona.locked.chat, persona.locked.character]),
+		]);
+	}
+
 	function renderTiles() {
 		const host = $('pf-tiles');
 		const list = listed();
+		const shape = tilesSignature(list);
+		if (shape === tilesShape) {
+			return;
+		}
+		tilesShape = shape;
 		renderTools(list.length);
 		host.textContent = '';
 		host.classList.toggle('is-grid', grid);
@@ -329,14 +355,14 @@ window.comonadPersonas = function personaPane(options) {
 		renderPositions();
 		renderConnections();
 
-		$('pf-name').value = work.name || '';
-		$('pf-title').value = work.title || '';
-		$('pf-description').value = work.description || '';
+		put($('pf-name'), work.name || '');
+		put($('pf-title'), work.title || '');
+		put($('pf-description'), work.description || '');
 		$('pf-tokens').textContent = String(estimate(work.description));
-		$('pf-position').value = String(work.position);
-		$('pf-depth').value = String(work.depth);
-		$('pf-role').value = String(work.role);
-		$('pf-lorebook').value = work.lorebook || '';
+		put($('pf-position'), String(work.position));
+		put($('pf-depth'), String(work.depth));
+		put($('pf-role'), String(work.role));
+		put($('pf-lorebook'), work.lorebook || '');
 		$('pf-depth').disabled = Number(work.position) !== 4;
 
 		const picture = $('pf-picture');

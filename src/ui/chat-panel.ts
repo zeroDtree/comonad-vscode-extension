@@ -1,15 +1,21 @@
 import { randomBytes } from 'node:crypto';
-import { isAbsolute, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { APPROVAL_LABELS, MODE_LABELS } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
-import { turnsOf, type Step } from '../lib/turns';
+import { turnsOf, type Step, type Turn } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
 import type { Approval, ApprovalDecision, ReasoningEffort, WorkMode } from '../lib/types';
-import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/tavern/types';
-import type { JournalApi } from 'comonad-plugin-checkpoints';
-import type { Session } from '../services/sessions';
+import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
+import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
+import { formatReference } from '../lib/references';
+import { isInside } from '../lib/sandbox';
+import { ChatWebviewAssets, type ChatAssetSpec } from '../services/chat-assets';
+import { markForRestore, type Session } from '../services/sessions';
+import { explainDirty, restoreTo, unsavedPaths } from './journal-actions';
+import { REFERENCE_LIMITS, WorkspaceFileCache, mentionResults, resolveReferences, scopeOf } from './references';
 import { registerCommand } from './register';
 
 /**
@@ -51,14 +57,22 @@ function tavernState(session: Session | undefined): Record<string, unknown> {
 }
 
 export function chatPanel(ctx: Context): void {
+	// The chat's webview asset registry: plugins add scripts/styles to the document through it. It is
+	// mounted here because the chat panel is its only consumer, and its lifetime is the chat's.
+	ctx.plugin(ChatWebviewAssets);
 	const extensionUri = ctx.host.extensionUri as vscode.Uri;
 	const clients = new Set<vscode.Webview>();
+	const readyClients = new Set<vscode.Webview>();
 	const attachments = new Map<vscode.Webview, vscode.Disposable>();
 	let view: vscode.WebviewView | null = null;
 	let panel: vscode.WebviewPanel | null = null;
 	let running = false;
 	let streamed = false;
 	let stopped = false;
+	/** References picked in the editor before the chat webview finished loading. */
+	let pendingReferences: string[] = [];
+	/** The picker's file list, shared by every client and invalidated by a short TTL. */
+	const mentionFiles = new WorkspaceFileCache();
 	let seq = 0;
 	const approvals = new Map<string, (answer: ApprovalDecision) => void>();
 
@@ -88,17 +102,33 @@ export function chatPanel(ctx: Context): void {
 		}
 	};
 
+	/**
+	 * The folders the chat webview may read: its own assets, the plugin library (where every install
+	 * lives, so a contribution that arrives after the webview was created still resolves), and any
+	 * folders the current contributions declare.
+	 */
+	const webviewAssets = (): ChatAssetSpec[] => ctx.get('chatWebview')?.list() ?? [];
+	const resourceRoots = (): vscode.Uri[] => {
+		const roots = new Set<string>([
+			join(extensionUri.fsPath, 'resources'),
+			join(ctx.host.home(), '.comonad', 'plugins'),
+			...(ctx.get('chatWebview')?.directories() ?? []),
+		]);
+		return [...roots].map((root) => vscode.Uri.file(root));
+	};
+
 	const attach = (webview: vscode.Webview): void => {
 		clients.add(webview);
 		attachments.set(
 			webview,
 			webview.onDidReceiveMessage((message: Record<string, unknown>) => void handle(message, webview)),
 		);
-		webview.html = html(webview, extensionUri);
+		webview.html = chatDocument(webview, extensionUri, webviewAssets());
 	};
 
 	const detach = (webview: vscode.Webview): void => {
 		clients.delete(webview);
+		readyClients.delete(webview);
 		focusedClients.delete(webview);
 		syncFocus();
 		attachments.get(webview)?.dispose();
@@ -155,6 +185,19 @@ export function chatPanel(ctx: Context): void {
 		};
 	};
 
+	/** A shell tool's command, kept whole so the expanded card can show it instead of the clipped JSON. */
+	const shellCommand = (name: string | undefined, args: string | undefined): string | undefined => {
+		if (!name || !/^run_shell/.test(name)) {
+			return undefined;
+		}
+		try {
+			const parsed = JSON.parse(args ?? '{}') as { command?: unknown };
+			return typeof parsed.command === 'string' ? parsed.command : undefined;
+		} catch {
+			return undefined;
+		}
+	};
+
 	// The transcript is sent as turns: one prompt plus the steps the agent took for it. The webview
 	// renders live turns and replayed turns with the same code, so the two always look the same.
 	const stepPayload = (step: Step): unknown => ({
@@ -163,11 +206,23 @@ export function chatPanel(ctx: Context): void {
 		id: step.id,
 		name: step.name,
 		args: step.args === undefined ? undefined : clip(step.args, 2_000),
+		command: shellCommand(step.name, step.args),
 		result: step.result === undefined ? undefined : clip(step.result, 30_000),
 		status: step.status,
 		ms: step.ms,
 		at: step.at,
 	});
+
+	/** Whether editing this turn can offer to restore files: the journal knows a point at or after it. */
+	const restorePossible = (session: Session | undefined, turn: Turn | undefined): boolean =>
+		Boolean(
+			session &&
+				turn &&
+				turn.promptAt !== undefined &&
+				session.policy.workingDirectory &&
+				ctx.get('checkpoints') &&
+				markForRestore(session.marks, turn.promptAt),
+		);
 
 	const history = (session: Session | undefined): unknown[] => {
 		if (!session) {
@@ -183,6 +238,8 @@ export function chatPanel(ctx: Context): void {
 				swipes: turn.swipes,
 				swipeId: turn.swipeId,
 				continued: turn.continued,
+				// An edit can offer to restore files written since this prompt.
+				files: restorePossible(session, turn),
 				at: turn.at,
 				startedAt: turn.startedAt,
 				endedAt: turn.endedAt,
@@ -191,10 +248,12 @@ export function chatPanel(ctx: Context): void {
 	};
 
 	/** The turn that just finished, so a live turn settles on the same numbers as a replayed one. */
-	const settledTurn = (): { steps: unknown[]; startedAt?: number; endedAt?: number } => {
-		const turns = turnsOf(ctx.sessions.active()?.transcript ?? []);
+	const settledTurn = (session: Session | undefined = ctx.sessions.active()): { steps: unknown[]; startedAt?: number; endedAt?: number; files?: boolean } => {
+		const turns = turnsOf(session?.transcript ?? []);
 		const last = turns[turns.length - 1];
-		return last ? { steps: last.steps.map(stepPayload), startedAt: last.startedAt, endedAt: last.endedAt } : { steps: [] };
+		return last
+			? { steps: last.steps.map(stepPayload), startedAt: last.startedAt, endedAt: last.endedAt, files: restorePossible(session, last) }
+			: { steps: [] };
 	};
 
 	/** The transcript the panel was last handed: which chat, and how much of it. */
@@ -206,7 +265,30 @@ export function chatPanel(ctx: Context): void {
 		post({ type: 'turns', turns: history(session) });
 	};
 
+	// A contribution changes the document itself (scripts/styles), and a webview's HTML cannot be
+	// amended in place: reload it and let the ready handshake replay state and turns. A live turn is
+	// left alone so its stream survives; the next refresh after it ends reloads.
+	let assetsDirty = false;
+	const rebuildAssets = (): void => {
+		if (!clients.size) {
+			return;
+		}
+		if (running) {
+			assetsDirty = true;
+			return;
+		}
+		assetsDirty = false;
+		const assets = webviewAssets();
+		for (const client of clients) {
+			client.html = chatDocument(client, extensionUri, assets);
+		}
+	};
+	ctx.on('chatWebview/changed', rebuildAssets);
+
 	const refresh = (): void => {
+		if (assetsDirty && !running) {
+			rebuildAssets();
+		}
 		void refreshState();
 		void refreshChanges();
 	};
@@ -255,35 +337,68 @@ export function chatPanel(ctx: Context): void {
 			}
 			return;
 		}
-		// A different chat, or one that was cut shorter behind the panel's back — the fork above, or a
-		// rewind: the panel has to be handed the transcript again, not left drawing what is gone. A chat
-		// that merely grew is a turn the panel watched happen, with its own streaming to keep.
+		// A different chat, or one that was cut shorter behind the panel's back — a fork above, or an
+		// edit: the panel has to be handed the transcript again, not left drawing what is gone. A chat
+		// that merely grew is a turn the panel watched happen, with its own streaming to keep. While a
+		// turn is running its own mid-flight compaction must not wipe the live stream; the final
+		// refresh after it ends catches up.
 		const moved = published?.id !== session.id;
-		const cut = published?.id === session.id && session.transcript.length < published.length;
+		const cut = !running && published?.id === session.id && session.transcript.length < published.length;
 		if (moved || cut) {
 			publishTurns(session);
 		}
 	};
 
-	// Pending checkpoint changes shown as a review chip in the composer.
+	// Pending checkpoint changes: the list above the composer, with the per-file counts the review
+	// would show. The journal is a feature plugin of its own, so without it the list is simply empty.
+	let changesRun = 0;
 	const refreshChanges = async (): Promise<void> => {
 		if (!clients.size) {
 			return;
 		}
+		// The journal announces every write: two reads can overlap, and the older answer must not
+		// overwrite the newer list.
+		const run = ++changesRun;
 		const session = ctx.sessions.active();
 		const workspace = session?.policy.workingDirectory;
-		// The journal is a feature plugin of its own: without it there is no chip, and nothing else
-		// changes — the composer simply has nothing pending to show.
 		const journal = ctx.get('checkpoints') as JournalApi | undefined;
-		let count = 0;
+		let files: unknown[] = [];
 		if (session && workspace && journal) {
 			try {
-				count = (await journal.pending(workspace, session.id)).files.length;
+				const pending = await journal.pending(workspace, session.id, unsavedPaths(workspace));
+				files = pending.files.map((file) => ({
+					path: file.path,
+					additions: file.additions,
+					deletions: file.deletions,
+					created: file.created,
+					deleted: file.deleted,
+					changedOutside: file.changedOutside,
+					dirty: file.dirty,
+				}));
 			} catch {
-				count = 0;
+				files = [];
 			}
 		}
-		post({ type: 'changes', count });
+		// Nothing pending: the list keeps the files that were reviewed instead of disappearing. Once
+		// a new write is pending, that list is what matters and the reviewed one is left out.
+		let reviewed: string[] = [];
+		if (!files.length && session && workspace && journal) {
+			try {
+				const latest = new Map<string, JournalEntry>();
+				for (const entry of await journal.entries(workspace, session.id)) {
+					latest.set(entry.path, entry);
+				}
+				reviewed = [...latest.values()]
+					.filter((entry) => entry.accepted)
+					.sort((left, right) => (right.acceptedAt ?? right.at) - (left.acceptedAt ?? left.at) || left.path.localeCompare(right.path))
+					.map((entry) => entry.path);
+			} catch {
+				reviewed = [];
+			}
+		}
+		if (run === changesRun) {
+			post({ type: 'changes', files, reviewed });
+		}
 	};
 
 	// Stream the agent's events for this surface into the webview.
@@ -301,7 +416,7 @@ export function chatPanel(ctx: Context): void {
 	ctx.on('agent/tool-start', (ref, call) => {
 		if (ref.surface === SURFACE) {
 			streamed = true;
-			post({ type: 'tool-start', id: call.id, name: call.name, args: clip(call.arguments, 1_500) });
+			post({ type: 'tool-start', id: call.id, name: call.name, args: clip(call.arguments, 1_500), command: shellCommand(call.name, call.arguments) });
 		}
 	});
 	ctx.on('agent/tool-result', (ref, call, output) => {
@@ -314,12 +429,22 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text });
 		}
 	});
+	// One refresh answers a burst of events: a content save moves `tavern/changed`, and the settings
+	// it writes through move `settings/changed` a moment later — the panel needs one repaint, not two.
+	let refreshTimer: NodeJS.Timeout | undefined;
+	const refreshSoon = (): void => {
+		clearTimeout(refreshTimer);
+		refreshTimer = setTimeout(() => {
+			refreshTimer = undefined;
+			refresh();
+		}, 50);
+	};
 	ctx.on('sessions/changed', refresh);
-	ctx.on('settings/changed', refresh);
+	ctx.on('settings/changed', refreshSoon);
 	ctx.on('checkpoints/changed', () => void refreshChanges());
 	// Content changes (a reload, a card added) only move what the composer reads out, never the
 	// transcript.
-	ctx.on('tavern/changed', () => void refreshState());
+	ctx.on('tavern/changed', refreshSoon);
 
 	// Approvals for panel turns are answered by the webview buttons.
 	ctx.on('approval/request', (request, next): Promise<ApprovalDecision> | ApprovalDecision => {
@@ -390,6 +515,7 @@ export function chatPanel(ctx: Context): void {
 				policy: handled.policy,
 				trigger: handled.trigger,
 				surface: SURFACE,
+				resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
 			});
 			// `/continue`, `/impersonate`, `/swipe`, `/regenerate` and `/quiet` are the ▾ menu from the
 			// keyboard, so their answer is delivered the same way the menu's is.
@@ -447,7 +573,13 @@ export function chatPanel(ctx: Context): void {
 		post({ type: 'turn-start', text, replaces, continues, draft: trigger === 'impersonate' });
 		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
 		try {
-			const result = await ctx.agent.runTurn({ text, sessionId: session.id, trigger, surface: SURFACE });
+			const result = await ctx.agent.runTurn({
+				text,
+				sessionId: session.id,
+				trigger,
+				surface: SURFACE,
+				resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
+			});
 			settled = deliver(trigger, result.text);
 		} finally {
 			running = false;
@@ -493,7 +625,124 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text: 'Only the last turn can be regenerated.' });
 			return;
 		}
+		// A regenerate re-runs the prompt in place. When that prompt or a turn after it wrote files,
+		// the same choice an edit offers is offered here: keep the workspace, or go back to before
+		// this turn. A prompt that wrote nothing has nothing to ask about.
+		const journal = ctx.get('checkpoints') as JournalApi | undefined;
+		const workspace = session.policy.workingDirectory;
+		const mark = last.promptAt === undefined ? undefined : markForRestore(session.marks, last.promptAt);
+		if (journal && workspace && mark) {
+			const answer = await vscode.window.showWarningMessage(
+				'Regenerate this reply?',
+				{
+					modal: true,
+					detail: 'The agent wrote files at or after this prompt. Restoring puts them back to their content before this turn; keeping them leaves the workspace as it is.',
+				},
+				'Regenerate',
+				'Regenerate and restore files',
+			);
+			if (!answer) {
+				return;
+			}
+			if (answer === 'Regenerate and restore files') {
+				try {
+					if (!(await restoreTo(journal, workspace, session.id, mark, unsavedPaths(workspace)))) {
+						return;
+					}
+				} catch (error) {
+					if (error instanceof DirtyEditorError) {
+						explainDirty(error);
+					} else {
+						post({ type: 'notice', text: `Error: ${describe(error)}` });
+					}
+					return;
+				}
+			}
+		}
 		await generate('regenerate');
+	};
+
+	/**
+	 * Replaces the prompt at `turnIndex` with `text` and runs it again; everything after it is
+	 * discarded. The restore choice is the user's: when checked, files the agent wrote since the
+	 * prompt go back before `runTurn` cuts the transcript, so a cancelled question or a blocking hook
+	 * leaves both sides as they were.
+	 */
+	const editPrompt = async (turnIndex: number, text: string, restoreFiles: boolean): Promise<void> => {
+		const input = text.trim();
+		const session = ctx.sessions.active();
+		if (!session || running || !input) {
+			return;
+		}
+		if (session.cursor) {
+			post({ type: 'notice', text: 'This session has a suspended tool call. Resume or stop it before editing a prompt.' });
+			return;
+		}
+		const turn = turnsOf(session.transcript).find((item) => item.index === turnIndex);
+		if (!turn || turn.greeting || turn.promptAt === undefined) {
+			post({ type: 'notice', text: 'That message is not a prompt that can be edited.' });
+			return;
+		}
+		const promptAt = turn.promptAt;
+		const journal = ctx.get('checkpoints') as JournalApi | undefined;
+		running = true;
+		streamed = false;
+		stopped = false;
+		let started = false;
+		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
+		try {
+			// A resend is a prompt, not a new command: text that starts with `/` is sent literally.
+			const result = await ctx.agent.runTurn({
+				text: input,
+				sessionId: session.id,
+				surface: SURFACE,
+				rewriteAt: promptAt,
+				resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
+				prepareRewrite: async (live) => {
+					const mark = restoreFiles ? markForRestore(live.marks, promptAt) : undefined;
+					const workspace = live.policy.workingDirectory;
+					if (restoreFiles && mark && journal && workspace) {
+						try {
+							if (!(await restoreTo(journal, workspace, live.id, mark, unsavedPaths(workspace)))) {
+								return false;
+							}
+						} catch (error) {
+							if (error instanceof DirtyEditorError) {
+								explainDirty(error);
+							} else {
+								post({ type: 'notice', text: `Error: ${describe(error)}` });
+							}
+							return false;
+						}
+					}
+					// The webview is about to draw the cut. The panel already holds this much of the
+					// transcript, so the `sessions/changed` this rewrite emits cannot repaint the live turn.
+					published = { id: live.id, length: promptAt };
+					post({ type: 'turn-start', text: input, replacesFrom: turnIndex });
+					started = true;
+					return true;
+				},
+			});
+			if (started) {
+				settled = deliver('normal', result.text);
+			} else if (result.text) {
+				// A hook or a stale index stopped the edit before anything was cut or redrawn.
+				post({ type: 'notice', text: result.text });
+			}
+		} finally {
+			running = false;
+			if (started) {
+				// A turn can end with the panel on another chat: settle the one that was edited.
+				const edited = ctx.sessions.get(session.id) ?? ctx.sessions.active();
+				publishTurns(edited);
+				post({ type: 'turn-end', stopped, ...settledTurn(edited) });
+				stopped = false;
+				if (settled) {
+					post(settled);
+				}
+			}
+			refresh();
+		}
 	};
 
 	const resume = async (): Promise<void> => {
@@ -522,9 +771,14 @@ export function chatPanel(ctx: Context): void {
 		try {
 			switch (message.type) {
 				case 'ready':
+					readyClients.add(source);
 					// A fresh guest has no transcript of its own: hand it the one the session holds.
 					published = null;
 					refresh();
+					// References picked before the composer loaded are finally in place to receive them.
+					for (const token of pendingReferences.splice(0)) {
+						post({ type: 'insertReference', token }, source);
+					}
 					break;
 				case 'focusState':
 					if (message.focused === true) {
@@ -558,6 +812,19 @@ export function chatPanel(ctx: Context): void {
 				case 'search': {
 					const query = String(message.query ?? '');
 					post({ type: 'search', query, items: ctx.sessions.search(query) });
+					break;
+				}
+				case 'mentionQuery': {
+					// The picker asks only the webview that is typing; other panels must not repaint.
+					const id = Number(message.id) || 0;
+					const kind =
+						message.kind === 'folder' || message.kind === 'symbol' || message.kind === 'selection'
+							? message.kind
+							: 'file';
+					const query = String(message.query ?? '').slice(0, REFERENCE_LIMITS.queryChars);
+					const policy = ctx.sessions.active()?.policy ?? ctx.agent.policyFor();
+					const result = await mentionResults(kind, query, scopeOf(policy), mentionFiles);
+					post({ type: 'mentionResults', id, kind, query, ...result }, source);
 					break;
 				}
 				case 'openSettings':
@@ -595,9 +862,20 @@ export function chatPanel(ctx: Context): void {
 				case 'regenerate':
 					await regenerate(Number.isFinite(Number(message.turn)) ? Number(message.turn) : undefined);
 					break;
-				case 'generate':
-					await generate(generationTrigger(message.trigger), String(message.text ?? ''));
+				case 'editPrompt':
+					await editPrompt(Number(message.turn), String(message.text ?? ''), message.restoreFiles === true);
 					break;
+				case 'generate': {
+					const trigger = generationTrigger(message.trigger);
+					// The Generate menu's Regenerate is the same action as the footer button: it must
+					// ask about restoring files before it replays the last prompt.
+					if (trigger === 'regenerate') {
+						await regenerate(undefined);
+					} else {
+						await generate(trigger, String(message.text ?? ''));
+					}
+					break;
+				}
 				case 'setSwipe':
 					swipeTo(Number(message.index), Number.isFinite(Number(message.turn)) ? Number(message.turn) : undefined);
 					break;
@@ -651,8 +929,38 @@ export function chatPanel(ctx: Context): void {
 				case 'review':
 					await vscode.commands.executeCommand('comonad.review');
 					break;
+				case 'keepAll':
+					await vscode.commands.executeCommand('comonad.keepAll');
+					break;
+				case 'undoAll':
+					await vscode.commands.executeCommand('comonad.undoAll');
+					break;
+				case 'openFile': {
+					// The row names a workspace-relative path; open the file itself, where the inline
+					// review paints its blocks, rather than the separate Comonad diff tab.
+					const session = ctx.sessions.active();
+					const workspace = session?.policy.workingDirectory;
+					const path = String(message.path ?? '');
+					if (workspace && path) {
+						const target = resolve(workspace, path);
+						if (!isInside(workspace, target)) {
+							break;
+						}
+						if (!existsSync(target)) {
+							post({ type: 'notice', text: `${path} is no longer on disk.` });
+							break;
+						}
+						await vscode.window.showTextDocument(vscode.Uri.file(target), { preview: true });
+					}
+					break;
+				}
 				case 'lorebooks':
-					await vscode.commands.executeCommand('comonad.pickLorebooks');
+					// The picker is the tavern row's own command: with that row off there is nothing to pick.
+					if (ctx.get('tavern')) {
+						await vscode.commands.executeCommand('comonad.pickLorebooks');
+					} else {
+						post({ type: 'notice', text: 'World books come from the SillyTavern content row — turn it on under Settings → Plugins.' });
+					}
 					break;
 			}
 		} catch (error) {
@@ -706,7 +1014,7 @@ export function chatPanel(ctx: Context): void {
 		const created = vscode.window.createWebviewPanel('comonad.chat', 'Comonad', vscode.ViewColumn.Active, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
-			localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'resources')],
+			localResourceRoots: resourceRoots(),
 		});
 		created.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'comonad.svg');
 		created.onDidDispose(() => {
@@ -726,7 +1034,7 @@ export function chatPanel(ctx: Context): void {
 			view = webviewView;
 			webviewView.webview.options = {
 				enableScripts: true,
-				localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'resources')],
+				localResourceRoots: resourceRoots(),
 			};
 			webviewView.onDidDispose(() => {
 				if (view === webviewView) {
@@ -775,14 +1083,53 @@ export function chatPanel(ctx: Context): void {
 		}
 	};
 
+	/** Put a reference token in the composer of the chat the command just revealed. */
+	const insertReference = (token: string): void => {
+		const target = panel?.webview ?? view?.webview;
+		if (target && readyClients.has(target)) {
+			post({ type: 'insertReference', token }, target);
+			return;
+		}
+		// The composer has not loaded yet: the next ready message puts the token in.
+		pendingReferences.push(token);
+	};
+
+	/** Cmd+L on a selection: the editor's lines as the `@path:lines` token in the composer. */
+	const referenceSelection = async (): Promise<void> => {
+		const editor = vscode.window.activeTextEditor;
+		if (!editor || editor.selection.isEmpty) {
+			void vscode.window.showInformationMessage('Comonad: select some code first.');
+			return;
+		}
+		if (editor.document.uri.scheme !== 'file') {
+			void vscode.window.showWarningMessage('Comonad: only selections in file editors can be referenced.');
+			return;
+		}
+		// Prefer the chat's workspace; an outside file keeps its absolute path and the resolver's
+		// policy decides whether it can be read.
+		const workspace = ctx.sessions.active()?.policy.workingDirectory || ctx.settings.workspace();
+		const relativePath = workspace ? relative(workspace, editor.document.uri.fsPath).split(sep).join('/') : '';
+		const path = relativePath && !relativePath.startsWith('..') ? relativePath : editor.document.uri.fsPath;
+		const start = editor.selection.start.line + 1;
+		let end = editor.selection.end.line + 1;
+		if (editor.selection.end.character === 0 && editor.selection.end.line > editor.selection.start.line) {
+			end -= 1;
+		}
+		const token = formatReference({ kind: 'file', path, lines: { start, end: Math.max(start, end) } });
+		await openChat();
+		insertReference(token);
+	};
+
 	ctx.effect(() => () => {
 		panel?.dispose();
 		panel = null;
 		view = null;
 		focusedClients.clear();
+		pendingReferences = [];
 		syncFocus();
 	});
 	registerCommand(ctx, 'comonad.openChat', () => openChat());
+	registerCommand(ctx, 'comonad.referenceSelection', () => referenceSelection());
 	registerCommand(ctx, 'comonad.openChatWindow', () => openPanel({ popOut: true }));
 	// The title-bar icons are commands; the chat list itself lives in the webview.
 	registerCommand(ctx, 'comonad.toggleHistory', () => post({ type: 'toggleHistory' }));
@@ -808,20 +1155,28 @@ function trimTitle(title: string): string {
 	return title.length > 42 ? `${title.slice(0, 42)}…` : title;
 }
 
-function html(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+export function chatDocument(webview: vscode.Webview, extensionUri: vscode.Uri, assets: readonly ChatAssetSpec[] = []): string {
 	const nonce = randomBytes(16).toString('base64');
-	const script = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'chat.js'));
-	const style = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'chat.css'));
+	const uri = (file: string): string => String(webview.asWebviewUri(vscode.Uri.file(file)));
+	const script = String(webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'chat.js')));
+	const highlight = String(webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'highlight.js')));
+	const style = String(webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'chat.css')));
+	const assetStyles = assets.flatMap((asset) => asset.styles ?? []).map(uri);
+	const assetScripts = assets.flatMap((asset) => asset.scripts ?? []).map(uri);
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:;" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource};" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<link rel="stylesheet" href="${style}" />
+<link rel="stylesheet" href="${escapeAttribute(style)}" />
+${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}" />`).join('\n')}
 </head>
 <body>
-<header id="bar">
+<!-- The bar is the recent-chats list's frame and nothing else: born folded, it opens with the list.
+     Left up by default it reads as a black band under the title until the first state push — which
+     waits on model discovery — i.e. as a shadow while the extension is still loading. -->
+<header id="bar" hidden>
 	<div id="chats" hidden>
 		<div id="chats-card">
 			<div id="chats-search">
@@ -835,8 +1190,24 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <main id="messages"></main>
 <footer>
 	<div id="todos" hidden></div>
+	<div id="changes-panel" hidden>
+		<div id="changes-head">
+			<button id="changes-toggle" type="button" class="ghost" data-tip="Collapse the changed files" aria-expanded="true">▾</button>
+			<span id="changes-title"></span>
+			<span id="changes-actions">
+				<button id="changes-undo" type="button" class="ghost">Undo</button>
+				<button id="changes-keep" type="button" class="ghost">Keep</button>
+				<button id="changes-review" type="button" class="primary">Review</button>
+			</span>
+		</div>
+		<div id="changes-list"></div>
+	</div>
 	<div id="editor">
-		<textarea id="input" rows="3" placeholder="Ask Comonad…  Enter to send · Shift+Enter for a new line · /help for commands"></textarea>
+		<textarea id="input" rows="3" placeholder="Ask Comonad…  Enter to send · Shift+Enter for a new line · @ to reference code · /help for commands"></textarea>
+		<div id="mention" class="mention-menu" role="listbox" aria-label="Reference a workspace item" hidden>
+			<div id="mention-head" class="mention-head" hidden></div>
+			<div id="mention-list"></div>
+		</div>
 		<div id="controls">
 			<div class="pill" data-control="model">
 				<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="pill-label"></span><span class="chev">▾</span></button>
@@ -845,12 +1216,11 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 			<!-- What belongs at the right edge of the box: the chips, the generation menu and Send. -->
 			<div id="sendbar">
 				<button id="lore" class="chip" hidden></button>
-				<button id="changes" class="chip" hidden></button>
-				<button id="stop" class="ghost" data-tip="Stop the running turn (Esc)" hidden>Stop</button>
 				<div class="pill pill-caret" data-control="generate">
 					<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false" data-tip="Generation type — Normal, Continue, Impersonate, Swipe, Regenerate, Quiet"><span class="pill-label">Generate</span><span class="chev">▾</span></button>
 					<div class="pill-menu" hidden></div>
 				</div>
+				<button id="stop" class="ghost" data-tip="Stop the running turn (Esc)" hidden>Stop</button>
 				<button id="send" class="primary" data-tip="Send — Enter">Send</button>
 			</div>
 		</div>
@@ -883,7 +1253,19 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 	<div id="status"></div>
 </footer>
 <div id="tip" hidden></div>
-<script nonce="${nonce}" src="${script}"></script>
+${assetScripts.map((src) => `<script nonce="${nonce}" src="${escapeAttribute(src)}"></script>`).join('\n')}
+<script nonce="${nonce}" src="${escapeAttribute(highlight)}"></script>
+<script nonce="${nonce}" src="${escapeAttribute(script)}"></script>
 </body>
 </html>`;
+}
+
+/** A URI written into an HTML attribute; webview URIs can contain characters that would close it. */
+function escapeAttribute(text: string): string {
+	return text
+		.replaceAll('&', '&amp;')
+		.replaceAll('"', '&quot;')
+		.replaceAll('<', '&lt;')
+		.replaceAll('>', '&gt;')
+		.replaceAll("'", '&#39;');
 }

@@ -27,11 +27,6 @@ function bindings(): Record<string, unknown> {
 	return { cordis, schemastery, vscode };
 }
 
-/** Puts the values in place: a plugin's module is read long after this, from a file that only reads them. */
-export function bindModuleShims(): void {
-	(globalThis as Record<symbol, unknown>)[BRIDGE] = bindings();
-}
-
 /** `default` and friends cannot be declared as a binding, and a module may still export them. */
 function declarable(name: string): boolean {
 	return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) && !['default', 'class', 'function', 'import', 'export', 'new', 'delete', 'in', 'with', 'void', 'typeof'].includes(name);

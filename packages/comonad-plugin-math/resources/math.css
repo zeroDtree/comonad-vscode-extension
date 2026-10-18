@@ -1,0 +1,21 @@
+/* The math host wrappers. The core creates them; KaTeX supplies the inner markup. */
+
+.math-inline {
+	display: inline;
+}
+
+.math-block {
+	display: block;
+	margin: 0.6em 0;
+	text-align: center;
+	overflow-x: auto;
+	overflow-y: hidden;
+}
+
+.math-block .katex-display {
+	margin: 0;
+}
+
+.katex {
+	font-size: 1.02em;
+}

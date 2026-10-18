@@ -1,0 +1,30 @@
+{
+	"name": "comonad-plugin-math",
+	"displayName": "Markdown math (KaTeX)",
+	"description": "Typesets $...$ and $$...$$ in the chat, and copies selections as Markdown source.",
+	"version": "0.2.0",
+	"private": true,
+	"main": "./dist/index.js",
+	"comonad": {
+		"plugin": true,
+		"label": "Markdown math (KaTeX)",
+		"webview": {
+			"entry": "src/webview.js",
+			"outfile": "resources/math.js"
+		},
+		"copy": [
+			{
+				"from": "node_modules/katex/dist/katex.min.css",
+				"to": "resources/katex.min.css"
+			},
+			{
+				"from": "node_modules/katex/dist/fonts",
+				"to": "resources/fonts"
+			}
+		]
+	},
+	"files": [
+		"dist",
+		"resources"
+	]
+}

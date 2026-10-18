@@ -1,7 +1,6 @@
 import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
-import { CONFIG_KEYS } from './services/settings';
 import { hostStorage, type Host } from './services/host';
 
 /** The VS Code implementation of the Host contract. This is the only vscode-bound core module. */
@@ -17,6 +16,17 @@ export interface HostConfig {
  */
 export function settingsTarget(hasFolder: boolean): vscode.ConfigurationTarget {
 	return hasFolder ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+}
+
+/** Every `comonad.*` key the manifest declares, kernel and plugin keys alike: what the section holds. */
+function declaredKeys(): string[] {
+	const manifest = vscode.extensions.getExtension('comonad.comonad')?.packageJSON as
+		| { contributes?: { configuration?: { properties?: Record<string, unknown> } } }
+		| undefined;
+	const properties = manifest?.contributes?.configuration?.properties ?? {};
+	return Object.keys(properties)
+		.filter((key) => key.startsWith('comonad.'))
+		.map((key) => key.slice('comonad.'.length));
 }
 
 export function host(ctx: Context, config: HostConfig): void {
@@ -36,7 +46,9 @@ export function host(ctx: Context, config: HostConfig): void {
 		config: () => {
 			const section = vscode.workspace.getConfiguration('comonad');
 			const record: Record<string, unknown> = {};
-			for (const key of CONFIG_KEYS) {
+			// The manifest is the one list of what the section holds — the kernel's keys and a plugin's
+			// own alike — so a key a plugin reads is a key the host reports, with no kernel list to update.
+			for (const key of declaredKeys()) {
 				const value = section.get(key);
 				if (value !== undefined) {
 					record[key] = value;

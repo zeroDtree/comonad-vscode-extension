@@ -18,10 +18,11 @@ import {
 } from '../lib/authoring';
 import { blankPng, cardToJson, cardToPng, loadCard } from '../lib/card';
 import { convertCharacterToPersona, connectionKeys } from '../lib/personas';
+import { tavernSettings, type TavernSettings } from '../lib/settings';
 import { PRESET_TEMPLATES, presetTemplate } from '../lib/templates/presets';
 import { parsePreset, presetId, presetToJson } from '../lib/preset';
-import { DEFAULT_PROMPTS, IDENTITY_PROMPT, promptCollection } from '../lib/prompts';
-import { estimateTokens } from '@comonad/lib/prompt';
+import { COMONAD_PROMPTS, DEFAULT_PROMPTS, ST_PROMPTS, TOOLS_PROMPT, orderOf, promptCollection } from '../lib/prompts';
+import { estimateTokens } from '@comonad/lib/tokens';
 import { DEFAULT_SORT, SEARCH_SORT, SORT_RULES, visibleEntries } from '../lib/search';
 import {
 	TAG_IMPORT,
@@ -37,10 +38,10 @@ import {
 	sorted,
 	tagPatch,
 } from '../lib/tags';
-import type { PromptLibraryEntry, TavernPreset, WorldBook, WorldEntry } from '@comonad/lib/tavern/types';
-import { GENERATION_LABELS, GENERATION_TRIGGERS, PERSONA_POSITION } from '@comonad/lib/tavern/types';
+import type { PromptLibraryEntry, TavernPreset, WorldBook, WorldEntry } from '../lib/types';
+import { GENERATION_LABELS, GENERATION_TRIGGERS } from '@comonad/lib/generations';
+import { PERSONA_POSITION } from '../lib/authoring';
 import { describe } from '@comonad/lib/util';
-import type { Config } from '@comonad/services/settings';
 import type { ContentKind } from '../services/tavern';
 import { assignCharacter } from '../commands';
 
@@ -71,13 +72,25 @@ export interface ContentNote {
 /** The four kinds, in the order the pane shows them. */
 const KINDS: ContentKind[] = ['characters', 'lorebooks', 'personas', 'presets'];
 
+/** One row of the list the pane draws: the identity every kind shares, plus what the list marks. */
+export interface ContentItem {
+	id: string;
+	name: string;
+	detail: string;
+	source: string;
+	/** A card's picture is its own file when it is a PNG, so the row shows it where there is one. */
+	avatar?: string;
+	/** Upstream's `fav`: the list can show only these. */
+	favourite?: boolean;
+	/** When the card was made, for the "newest first" order; an unstamped card sorts last. */
+	createdAt?: string;
+}
+
 export interface ContentController {
 	/** The state slice the settings panel pushes with its own. */
 	state(): Record<string, unknown>;
 	/** Handles one `{type:'content', action}` message. Returns a note for the pane, if any. */
 	action(message: Record<string, unknown>): Promise<ContentNote | null>;
-	/** The pane's selection follows the last chat, so "Use in this chat" starts on the right item. */
-	focus(kind?: ContentKind): void;
 }
 
 export interface ContentOptions {
@@ -88,7 +101,32 @@ export interface ContentOptions {
 	uri?: (file: string) => string;
 }
 
+/**
+ * What the library holds, in the shape every picker draws from — the editor's selects, the world-book
+ * page's target list and the settings half of the tab. One builder, so the halves cannot drift.
+ */
+export function contentCatalog(ctx: Context): Record<string, unknown> | null {
+	const tavern = ctx.get('tavern');
+	if (!tavern) {
+		return null;
+	}
+	return {
+		characters: tavern.characters.map((character) => ({ id: character.id, name: character.name, source: character.source })),
+		lorebooks: tavern.books.map((book) => ({
+			id: book.name,
+			name: book.name,
+			entries: Object.keys(book.book.entries).length,
+			source: book.source,
+		})),
+		personas: tavern.personas.map((persona) => ({ id: persona.id, name: persona.title || persona.name, source: persona.source })),
+		presets: tavern.presets.map((preset) => ({ id: preset.id, name: preset.name })),
+	};
+}
+
 export function contentController(ctx: Context, options: ContentOptions = {}): ContentController {
+	// The real counter is the kernel's, behind the service: this package's bundle carries its own
+	// copy of the pure estimator, and only the service is looking at the tokenizer that is loaded.
+	const count = (text: string): number => ctx.get('tokenizers')?.count(text) ?? estimateTokens(text);
 	let kind: ContentKind = 'characters';	let current: string | null = null;
 	/** An item the pane created but has not saved yet: not in the catalog, and never written. */
 	let draft: unknown = null;
@@ -112,7 +150,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 		return connections.some((connection) => connectionKeys(connection.id).some((key) => keys.has(key)));
 	};
 
-	const items = (wanted: ContentKind): { id: string; name: string; detail: string; source: string }[] => {
+	const items = (wanted: ContentKind): ContentItem[] => {
 		switch (wanted) {
 			case 'characters':
 				return ctx.tavern.characters.map((character) => ({
@@ -145,7 +183,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				return ctx.tavern.presets.map((preset) => ({
 					id: preset.id,
 					name: preset.name,
-					detail: `${preset.prompts?.length ?? 0} prompts${preset.temperature !== undefined ? ` · temp ${preset.temperature}` : ''}`,
+					detail: `${promptCollection(preset).length} prompts${preset.temperature !== undefined ? ` · temp ${preset.temperature}` : ''}`,
 					source: preset.source ?? '',
 				}));
 		}
@@ -154,6 +192,12 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 	/** The full item the form edits, loaded fresh from the catalog unless it is an unsaved draft. */
 	const item = (wanted: ContentKind, id: string | null): unknown => {
 		if (draft && id === current) {
+			// A new preset is a draft file that does not exist yet, but the editor still draws the whole
+			// collection: the shipped prompts plus Comonad's generated rows, in their default order.
+			if (wanted === 'presets') {
+				const preset = draft as TavernPreset;
+				return { ...preset, prompts: promptCollection(preset) };
+			}
 			return draft;
 		}
 		switch (wanted) {
@@ -168,15 +212,19 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 			}
 			case 'personas':
 				return ctx.tavern.persona(id ?? '') ?? null;
-			case 'presets':
-				return ctx.tavern.preset(id ?? '') ?? null;
+			case 'presets': {
+				// The editor draws the whole collection in send order: the shipped blocks, Comonad's
+				// generated ones, and this preset's own. The raw file stores only definitions and order.
+				const found = ctx.tavern.preset(id ?? '');
+				return found ? { ...found, prompts: promptCollection(found) } : null;
+			}
 		}
 	};
 
 	/** What the active chat uses, so the pane can mark it and offer to change it. */
 	const adopted = (): Record<string, string[]> => {
 		const session = ctx.sessions.active();
-		const config = ctx.settings.get();
+		const config = tavernSettings(ctx);
 		return {
 			characters: [session?.character ?? config.tavernCharacter].filter(Boolean),
 			lorebooks: session?.lorebooks ?? config.tavernLorebooks,
@@ -187,9 +235,24 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 
 	const firstItem = (wanted: ContentKind): string | null => items(wanted)[0]?.id ?? null;
 
+	/**
+	 * The item the pane shows: the remembered selection while it still exists, else the first of the
+	 * kind. Opening a kind must show something rather than an empty page, and a selection that a
+	 * delete or another window took away heals to whatever is left.
+	 */
+	const selected = (): string | null => {
+		if (current && item(kind, current)) {
+			return current;
+		}
+		current = firstItem(kind);
+		return current;
+	};
+
 	/** What the world-book panel is showing: the search box and the sort select, which live in the
 	 *  pane but decide the order the host computes for it. */
 	let view = { query: '', sort: DEFAULT_SORT.value };
+	/** The order `ordered` last produced, and for what — see there. */
+	let orderCache: { book: WorldBook | null; query: string; sort: string; order: WorldEntry[] } | null = null;
 
 	/**
 	 * The tag registry as the pane draws it: every tag in upstream's order, how many characters carry
@@ -208,7 +271,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 			list: sorted(store.tags),
 			counts,
 			assigned: kind === 'characters' && current ? ctx.tavern.tagIdsFor(current) : [],
-			import: ctx.settings.get().tagImportSetting,
+			import: tavernSettings(ctx).tagImportSetting,
 		};
 	};
 
@@ -220,18 +283,12 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 	 */
 	const bookState = (): Record<string, unknown> => {
 		const loaded = ctx.tavern.book(current ?? '');
-		const config = ctx.settings.get();
+		const config = tavernSettings(ctx);
 		const entries = loaded ? Object.values(loaded.book.entries).sort((left, right) => left.uid - right.uid) : [];
-		const tokens: Record<number, number> = {};
-		let total = 0;
-		for (const entry of entries) {
-			const count = estimateTokens(String(entry.content ?? ''));
-			tokens[entry.uid] = count;
-			total += count;
-		}
+		const { tokens, total } = counts(entries);
 		return {
 			name: loaded?.name ?? '',
-			order: visibleEntries(entries, view.query, view.sort).map((entry) => entry.uid),
+			order: ordered(loaded?.book ?? null, view.query, view.sort).map((entry) => entry.uid),
 			tokens,
 			total,
 			query: view.query,
@@ -275,7 +332,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 	 */
 	const personaState = (): Record<string, unknown> => {
 		const session = ctx.sessions.active();
-		const config = ctx.settings.get();
+		const config = tavernSettings(ctx);
 		const character = ctx.tavern.character(session?.character ?? config.tavernCharacter);
 		const chat = session?.persona ?? config.tavernPersona;
 		return {
@@ -296,7 +353,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 					chat: persona.id === chat,
 					character: Boolean(character) && connectedTo(persona.connections, character ?? { id: '' }),
 				},
-				tokens: estimateTokens(persona.description),
+				tokens: count(persona.description),
 				position: persona.position,
 				depth: persona.depth,
 				role: persona.role,
@@ -332,22 +389,33 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 	 */
 	const presetState = (): Record<string, unknown> => {
 		const preset = item('presets', current) as TavernPreset | null;
+		const raw = ctx.tavern.preset(current ?? '');
+		const session = ctx.sessions.active();
+		// The agent keeps the last blocks it built, so a generated block's current text can be shown
+		// without making a synchronous pane push await instruction and memory reads.
+		const blocks = ctx.get('agent')?.lastPromptBlocks?.(session?.id ?? '') ?? [];
+		const preview = raw ? ctx.tavern.previewPrompts(raw, blocks) : {};
 		const tokens: Record<string, number> = {};
 		let total = 0;
 		for (const prompt of preset?.prompts ?? []) {
-			const count = estimateTokens(String(prompt.content ?? ''));
-			tokens[prompt.identifier] = count;
-			total += count;
+			const cost = count(String(preview[prompt.identifier] ?? prompt.content ?? ''));
+			tokens[prompt.identifier] = cost;
+			total += cost;
 		}
 		return {
 			tokens,
 			total,
+			preview,
+			comonad: COMONAD_PROMPTS.map((prompt) => prompt.identifier),
+			toolsPrompt: TOOLS_PROMPT,
 			shipped: DEFAULT_PROMPTS.map((prompt) => ({ ...prompt })),
 			generations: GENERATION_TRIGGERS.map((value) => ({ value, label: GENERATION_LABELS[value] })),
 		};
 	};
 
-	const state = (): Record<string, unknown> => ({
+	const state = (): Record<string, unknown> => {
+		current = selected();
+		return {
 		kind,
 		items: items(kind),
 		item: item(kind, current),
@@ -375,33 +443,56 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 		},
 		kindLabels: { characters: 'Characters', lorebooks: 'World books', personas: 'Personas', presets: 'Presets' },
 		library: ctx.tavern.libraryPath(kind),
-		catalog: {
-			characters: ctx.tavern.characters.map((character) => ({ id: character.id, name: character.name })),
-			lorebooks: ctx.tavern.books.map((book) => ({ id: book.name, name: book.name })),
-			personas: ctx.tavern.personas.map((persona) => ({ id: persona.id, name: persona.title || persona.name })),
-			presets: ctx.tavern.presets.map((preset) => ({ id: preset.id, name: preset.name })),
-		},
-	});
+		catalog: contentCatalog(ctx),
+		};
+	};
 
 	/** A draft is only a draft until it is saved; the catalog never sees it. */
+	/**
+	 * A draft's slug is the file it saves to, so two drafts must never share one: a second copy of the
+	 * same card, or two titles that slug to the same fallback, would write over each other's file.
+	 */
+	const freeSlug = (wanted: ContentKind, base: string, fallback: string): string => {
+		const taken = (id: string): boolean => {
+			const key = id.toLowerCase();
+			return wanted === 'lorebooks'
+				? ctx.tavern.books.some((item) => item.name.toLowerCase() === key)
+				: wanted === 'characters'
+					? ctx.tavern.characters.some((item) => item.id.toLowerCase() === key)
+					: wanted === 'personas'
+						? ctx.tavern.personas.some((item) => item.id.toLowerCase() === key)
+						: ctx.tavern.presets.some((item) => item.id.toLowerCase() === key);
+		};
+		let slug = slugId(base, fallback);
+		for (let index = 2; taken(slug); index += 1) {
+			slug = slugId(`${base} ${index}`, fallback);
+		}
+		return slug;
+	};
+
 	const beginDraft = (wanted: ContentKind, copy?: unknown): void => {
 		if (copy) {
 			const name = `${String((copy as { name?: unknown }).name ?? 'item')} (copy)`;
-			const clone: Record<string, unknown> = { ...(structuredClone(copy) as Record<string, unknown>), id: slugId(name, 'item'), name, source: '' };
+			const clone: Record<string, unknown> = {
+				...(structuredClone(copy) as Record<string, unknown>),
+				id: freeSlug(wanted, name, 'item'),
+				name: wanted === 'lorebooks' ? freeName(name) : name,
+				source: '',
+			};
 			if (wanted === 'lorebooks') {
 				clone.raw = {};
 			}
 			draft = clone;
-			current = String(clone.id);
+			current = wanted === 'lorebooks' ? String(clone.name) : String(clone.id);
 			return;
 		}
 		switch (wanted) {
 			case 'characters':
-				draft = blankCharacter('New character', slugId('New character', 'character'));
+				draft = blankCharacter('New character', freeSlug('characters', 'New character', 'character'));
 				current = (draft as { id: string }).id;
 				break;
 			case 'lorebooks': {
-				const book = blankBook('New lorebook');
+				const book = blankBook(freeName('New lorebook'));
 				const uid = nextUid(book);
 				book.entries[String(uid)] = blankEntry(uid);
 				draft = { ...book, source: '', raw: {} };
@@ -409,44 +500,51 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				break;
 			}
 			case 'personas':
-				draft = blankPersona('New persona', slugId('New persona', 'persona'));
+				draft = blankPersona('New persona', freeSlug('personas', 'New persona', 'persona'));
 				current = (draft as { id: string }).id;
 				break;
 			case 'presets':
-				draft = blankPreset('New preset', slugId('New preset', 'preset'));
+				draft = blankPreset('New preset', freeSlug('presets', 'New preset', 'preset'));
 				current = (draft as { id: string }).id;
 				break;
 		}
 	};
 
 	const save = async (wanted: ContentKind, raw: Record<string, unknown>): Promise<string> => {
+		// What the pane opens next is the entry the *file* became: a slug may normalise the id or the
+		// name the form typed, and the catalog is keyed by what a read of the file produces.
+		const landed = (file: string): void => {
+			draft = null;
+			if (wanted === 'lorebooks') {
+				current = ctx.tavern.books.find((item) => item.source === file)?.name ?? current;
+				return;
+			}
+			const list = wanted === 'characters' ? ctx.tavern.characters : wanted === 'personas' ? ctx.tavern.personas : ctx.tavern.presets;
+			current = list.find((item) => item.source === file)?.id ?? current;
+		};
 		switch (wanted) {
 			case 'characters': {
 				const character = adoptCharacter(raw);
 				const file = await ctx.tavern.saveCharacter(character);
-				draft = null;
-				current = character.id;
+				landed(file);
 				return file;
 			}
 			case 'lorebooks': {
 				const book = adoptBook(raw);
 				const file = await ctx.tavern.saveBook(book.name, book, book.source, book.raw);
-				draft = null;
-				current = book.name;
+				landed(file);
 				return file;
 			}
 			case 'personas': {
 				const persona = adoptPersona(raw);
 				const file = await ctx.tavern.savePersona(persona);
-				draft = null;
-				current = persona.id;
+				landed(file);
 				return file;
 			}
 			case 'presets': {
 				const preset = adoptPreset(raw);
 				const file = await ctx.tavern.savePresetValue(preset, preset.source);
-				draft = null;
-				current = preset.id;
+				landed(file);
 				return file;
 			}
 		}
@@ -472,7 +570,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 	const adopt = async (wanted: ContentKind, id: string, asDefault: boolean, on: boolean): Promise<void> => {
 		if (asDefault) {
 			if (wanted === 'lorebooks') {
-				const books = ctx.settings.get().tavernLorebooks;
+				const books = tavernSettings(ctx).tavernLorebooks;
 				await ctx.settings.update('tavernLorebooks', on ? [...new Set([...books, id])] : books.filter((name) => name !== id));
 				return;
 			}
@@ -489,7 +587,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 			return;
 		}
 		if (wanted === 'lorebooks') {
-			const books = new Set(session.lorebooks ?? ctx.settings.get().tavernLorebooks);
+			const books = new Set(session.lorebooks ?? tavernSettings(ctx).tavernLorebooks);
 			if (on) {
 				books.add(id);
 			} else {
@@ -513,9 +611,9 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 
 	/** Writes a card as a PNG, the way cards are shared. Needs a picture to hang it on. */
 	const exportPng = async (id: string): Promise<string> => {
-		const character = ctx.tavern.character(id) ?? ctx.tavern.characters[0];
+		const character = ctx.tavern.character(id);
 		if (!character) {
-			throw new Error('no character to export');
+			throw new Error('pick the character to export first');
 		}
 		const target = await vscode.window.showSaveDialog({
 			title: `Export ${character.name} as a PNG card`,
@@ -562,7 +660,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 	 * because upstream has no Save button here either; the allow list is what keeps an untrusted
 	 * webview from writing a key this panel has no business touching.
 	 */
-	const WI_KEYS = new Set<keyof Config>([
+	const WI_KEYS = new Set<keyof TavernSettings>([
 		'tavernLorebooks',
 		'wiScanDepth',
 		'wiBudget',
@@ -596,32 +694,45 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 		Object.values(book.entries).sort((left, right) => left.uid - right.uid);
 
 	/** The token count of every entry, which the editor shows next to its content. */
-	const counts = (book: WorldBook): { tokens: Record<number, number>; total: number } => {
+	const counts = (entries: readonly WorldEntry[]): { tokens: Record<number, number>; total: number } => {
 		const tokens: Record<number, number> = {};
 		let total = 0;
-		for (const entry of Object.values(book.entries)) {
-			const count = estimateTokens(String(entry.content ?? ''));
-			tokens[entry.uid] = count;
-			total += count;
+		for (const entry of entries) {
+			const cost = count(String(entry.content ?? ''));
+			tokens[entry.uid] = cost;
+			total += cost;
 		}
 		return { tokens, total };
+	};
+
+	/** The display order of the entry list. Cached: the search scores every entry, and a push that
+	 *  moves nothing else must not pay for the search again. A save replaces the book object, which
+	 *  is exactly when the order has to be worked out anew. */
+	const ordered = (book: WorldBook | null, query: string, sort: string): WorldEntry[] => {
+		if (orderCache && orderCache.book === book && orderCache.query === query && orderCache.sort === sort) {
+			return orderCache.order;
+		}
+		const order = book ? visibleEntries(entriesOf(book), query, sort) : [];
+		orderCache = { book, query, sort, order };
+		return order;
 	};
 
 	const writeBook = async (raw: unknown): Promise<ContentNote> => {
 		const book = incoming(raw);
 		await ctx.tavern.saveBook(book.name, book, book.source, book.raw);
-		return { quiet: true, message: 'Saved', ...counts(book) };
+		return { quiet: true, message: 'Saved', ...counts(entriesOf(book)) };
 	};
 
-	/** A file name that is free, so creating or duplicating never overwrites a book by accident. */
+	/** A file name that is free, so creating or duplicating never overwrites a book by accident.
+	 *  Compared case-insensitively: the file it becomes may collide that way on macOS or Windows. */
 	const freeName = (wanted: string): string => {
-		const taken = new Set(ctx.tavern.books.map((book) => book.name));
-		if (!taken.has(wanted)) {
+		const taken = new Set(ctx.tavern.books.map((book) => book.name.toLowerCase()));
+		if (!taken.has(wanted.toLowerCase())) {
 			return wanted;
 		}
 		for (let index = 2; ; index += 1) {
 			const candidate = `${wanted} ${index}`;
-			if (!taken.has(candidate)) {
+			if (!taken.has(candidate.toLowerCase())) {
 				return candidate;
 			}
 		}
@@ -638,8 +749,8 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				if (!loaded) {
 					return null;
 				}
-				const ordered = visibleEntries(entriesOf(loaded.book), view.query, view.sort);
-				return { order: ordered.map((entry) => entry.uid), ...counts(loaded.book) };
+				const shown = ordered(loaded.book, view.query, view.sort);
+				return { order: shown.map((entry) => entry.uid), ...counts(entriesOf(loaded.book)) };
 			}
 			case 'write':
 				return await writeBook(message.book);
@@ -765,6 +876,11 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				if (!name || name === loaded.name) {
 					return null;
 				}
+				// A rename onto a name that is taken would write over that book's file and delete this
+				// one: the name is asked for again rather than a book lost.
+				if (ctx.tavern.book(name)) {
+					return { message: `Another world book is already named ${name}.`, error: true };
+				}
 				await ctx.tavern.saveBook(name, { ...loaded.book, name }, loaded.source, loaded.raw);
 				return { refresh: true, book: name, message: `Renamed to ${name}.` };
 			}
@@ -835,7 +951,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				await ctx.tavern.reload();
 				return { refresh: true, message: 'Re-read the library.' };
 			case 'setting': {
-				const key = String(message.key ?? '') as keyof Config;
+				const key = String(message.key ?? '') as keyof TavernSettings;
 				if (!WI_KEYS.has(key)) {
 					return { message: `${String(message.key)} is not a world-info setting.`, error: true };
 				}
@@ -953,7 +1069,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				if (!character) {
 					return { message: 'Pick a character first.', error: true };
 				}
-				const setting = ctx.settings.get().tagImportSetting;
+				const setting = tavernSettings(ctx).tagImportSetting;
 				let chosen: number = setting;
 				if (setting === TAG_IMPORT.ASK) {
 					const offer = planTagImport(store, character.id, character.tags, TAG_IMPORT.ALL);
@@ -1007,7 +1123,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 	]);
 
 	/** The persona-wide settings the pane may write straight through, as upstream's own panel does. */
-	const PERSONA_KEYS = new Set<keyof Config>(['personaAutoLock', 'personaAllowMultiConnections', 'personaShowNotifications']);
+	const PERSONA_KEYS = new Set<keyof TavernSettings>(['personaAutoLock', 'personaAllowMultiConnections', 'personaShowNotifications']);
 
 	const personaAction = async (message: Record<string, unknown>): Promise<ContentNote | null> => {
 		const id = String(message.id ?? current ?? '');
@@ -1023,7 +1139,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				}
 				// With *Allow multiple persona connections per character* off, upstream keeps one persona per
 				// character: connecting this one takes the character away from whichever persona had it.
-				const keepOne = !ctx.settings.get().personaAllowMultiConnections;
+				const keepOne = !tavernSettings(ctx).personaAllowMultiConnections;
 				if (keepOne) {
 					for (const other of ctx.tavern.personas) {
 						if (other.id === persona.id || !connectedTo(other.connections, character)) {
@@ -1148,7 +1264,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 					: { message: 'That persona is not in Comonad’s library, so nothing was deleted.', error: true };
 			}
 			case 'personaSetting': {
-				const key = String(message.key ?? '') as keyof Config;
+				const key = String(message.key ?? '') as keyof TavernSettings;
 				if (!PERSONA_KEYS.has(key)) {
 					return { message: `${String(message.key)} is not a persona setting.`, error: true };
 				}
@@ -1207,7 +1323,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				};
 			}
 			case 'personaFromCharacter': {
-				const wanted = String(message.character ?? ctx.sessions.active()?.character ?? ctx.settings.get().tavernCharacter ?? '');
+				const wanted = String(message.character ?? ctx.sessions.active()?.character ?? tavernSettings(ctx).tavernCharacter ?? '');
 				const character = ctx.tavern.character(wanted);
 				if (!character) {
 					return { message: 'Pick the character to convert first.', error: true };
@@ -1268,21 +1384,22 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 
 	const characterAction = async (message: Record<string, unknown>): Promise<ContentNote | null> => {
 		const id = String(message.id ?? current ?? '');
-		const character = ctx.tavern.character(id) ?? ctx.tavern.characters[0];
+		const character = ctx.tavern.character(id);
 		switch (message.action) {
 			case 'characterFavourite': {
 				if (!character) {
 					return { message: 'That character is no longer in the library.', error: true };
 				}
-				await ctx.tavern.saveCharacter({ ...character, favourite: Boolean(message.on) });
-				return { quiet: true, message: character.favourite ? `${character.name} is a favourite.` : '' };
+				const on = Boolean(message.on);
+				await ctx.tavern.saveCharacter({ ...character, favourite: on });
+				return { quiet: true, message: on ? `${character.name} is a favourite.` : '' };
 			}
 			case 'characterAvatar': {
 				// Upstream keeps a card and its picture in one file, so a JSON card becomes a PNG card.
 				let target = character;
 				if (!target && message.item) {
 					await save('characters', message.item as Record<string, unknown>);
-					target = ctx.tavern.character(current ?? id) ?? ctx.tavern.characters[0];
+					target = ctx.tavern.character(current ?? id);
 				}
 				if (!target) {
 					return { message: 'That character is no longer in the library.', error: true };
@@ -1499,12 +1616,13 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				if (answer !== 'Restore') {
 					return null;
 				}
-				// The identity block is added at runtime, so the restored file leaves it out.
-				const shipped = promptCollection().filter((prompt) => prompt.identifier !== IDENTITY_PROMPT);
+				// The restored file carries SillyTavern's definitions and the whole order, Comonad's
+				// generated entries included. Their text is never stored: the agent builds it each turn.
+				const shipped = promptCollection();
 				await ctx.tavern.savePresetValue({
 					...preset,
-					prompts: shipped.map((prompt) => ({ ...prompt })),
-					promptOrder: shipped.map((prompt) => ({ identifier: prompt.identifier, enabled: prompt.enabled })),
+					prompts: ST_PROMPTS.map((prompt) => ({ ...prompt })),
+					promptOrder: orderOf(shipped),
 					promptOrders: undefined,
 				});
 				return { refresh: true, message: 'The shipped prompts are back.' };
@@ -1563,11 +1681,10 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 			current = firstItem(kind);
 		}
 		switch (message.action) {
-			case 'ready':
-				current = current && item(kind, current) ? current : firstItem(kind);
-				return null;
 			case 'select':
-				current = String(message.id ?? '');
+				// An empty id means "this kind, not an item": the pane switched tabs and wants that
+				// kind's first entry, not an empty page beside a list that has entries in it.
+				current = String(message.id ?? '').trim() || firstItem(kind);
 				if (kind === 'lorebooks') {
 					// Upstream clears the search box when another book is opened, and keeps the sort select.
 					view = { ...view, query: '' };
@@ -1592,7 +1709,7 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				const id = String(message.id ?? '');
 				await adopt(kind, id, Boolean(message.asDefault), message.on !== false);
 				// Upstream announces the persona it just locked to the chat; the setting can silence it.
-				if (kind === 'personas' && message.on !== false && message.asDefault !== true && ctx.settings.get().personaShowNotifications) {
+				if (kind === 'personas' && message.on !== false && message.asDefault !== true && tavernSettings(ctx).personaShowNotifications) {
 					const persona = ctx.tavern.persona(id);
 					return persona ? { message: `Selected ${persona.name} for this chat.` } : null;
 				}
@@ -1617,15 +1734,6 @@ export function contentController(ctx: Context, options: ContentOptions = {}): C
 				return await action(message);
 			} catch (error) {
 				return { message: describe(error), error: true };
-			}
-		},
-		focus: (wanted) => {
-			if (wanted) {
-				kind = wanted;
-				draft = null;
-				current = firstItem(kind);
-			} else {
-				current = current && item(kind, current) ? current : firstItem(kind);
 			}
 		},
 	};

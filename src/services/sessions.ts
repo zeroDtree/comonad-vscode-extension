@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Service, type Context } from 'cordis';
-import { WORKSPACE_BOUNDARY } from '../lib/policy';
+import { WORKSPACE_BOUNDARY, asApproval, asWorkMode } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { turnsOf } from '../lib/turns';
 import type { Message, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
@@ -23,14 +23,13 @@ export interface SessionUsage {
 	cost: number;
 }
 
-/** A rewind point: the journal position and the transcript length at the end of one turn. */
+/** A restore point: the journal position and the transcript prompt index at one turn. */
 export interface Mark {
 	turn: number;
-	/** Journal entries that existed at this point; rewinding keeps these and undoes the rest. */
+	/** Journal entries that existed at this point; restoring keeps these and undoes the rest. */
 	entryCount: number;
 	length: number;
 	at: number;
-	text: string;
 }
 
 /**
@@ -56,7 +55,7 @@ export function isSummaryMessage(message: Message | undefined): boolean {
 }
 
 /**
- * Moves the rewind points when `removed` messages were folded into one summary at the head. A mark
+ * Moves the restore points when `removed` messages were folded into one summary at the head. A mark
  * inside the folded stretch cannot be honoured any more — those messages are gone — so it is dropped;
  * the rest shift by what was removed, plus the summary that now sits in front of them.
  */
@@ -64,6 +63,24 @@ export function rebaseMarks(marks: readonly Mark[], removed: number): Mark[] {
 	return marks
 		.filter((mark) => mark.length >= removed)
 		.map((mark) => ({ ...mark, length: mark.length - removed + 1 }));
+}
+
+/**
+ * The restore point for an edited prompt: the first turn at or after it that wrote. Every turn that
+ * writes records a mark at its own prompt index, so when the edited turn wrote nothing the first
+ * later mark's `entryCount` is exactly the journal position at the edited prompt.
+ */
+export function markForRestore(marks: readonly Mark[], promptAt: number): Mark | undefined {
+	return marks.find((mark) => mark.length >= promptAt);
+}
+
+/** Whether the message at `index` is a prompt an edit can replace. */
+export function canRewrite(session: Session, index: number): boolean {
+	if (session.cursor || !Number.isInteger(index) || index < 0) {
+		return false;
+	}
+	const message = session.transcript[index];
+	return message?.role === 'user' && !isSummaryMessage(message);
 }
 
 export interface Cursor {
@@ -276,7 +293,7 @@ export class SessionStore {
 		return renamed;
 	}
 
-	/** Fork a session: same conversation, fresh identity, empty checkpoints. */
+	/** Fork a session: same conversation, fresh identity, no restore points. */
 	copy(source: Session, id: string = newSessionId(), title?: string): Session {
 		const clean = safeId(id);
 		if (this.get(clean)) {
@@ -319,10 +336,17 @@ export class SessionStore {
 		return {
 			...session,
 			title: session.title || UNTITLED,
+			// A session on disk is untrusted input like any other: a stale or hand-edited policy that
+			// names a mode or approval the gates do not know falls back to the safe pair.
+			policy: {
+				...session.policy,
+				workMode: asWorkMode(session.policy?.workMode),
+				approval: asApproval(session.policy?.approval),
+			},
 			transcript: session.transcript ?? [],
 			turnIndex: session.turnIndex ?? 0,
 			cursor: session.cursor ?? null,
-			// Marks from the shadow-snapshot era have no journal to rewind to, so they are dropped.
+			// Marks from the shadow-snapshot era have no journal to restore to, so they are dropped.
 			marks: (session.marks ?? []).filter((mark) => typeof mark.entryCount === 'number'),
 			usage: session.usage ?? emptyUsage(),
 			instructions: session.instructions ?? [],
@@ -498,16 +522,31 @@ export class Sessions extends Service {
 		this.changed(id);
 	}
 
-	/** Truncates a session for rewind. `at` also drops the marks recorded after that point. */
-	truncate(id: string, length: number, at?: number): void {
+	/** Truncates a fork at a turn boundary: the copy has no marks of its own. */
+	truncate(id: string, length: number): void {
 		const session = this.require(id);
 		session.transcript = session.transcript.slice(0, length);
-		if (at !== undefined) {
-			session.marks = session.marks.filter((mark) => mark.at <= at);
-		}
 		session.cursor = null;
 		this.save(session);
 		this.changed(id);
+	}
+
+	/**
+	 * Cuts the transcript back to `index` for an edited prompt that is about to be re-run. Takes the
+	 * live session object a running turn holds: reading the chat back from disk would return a second
+	 * copy, and whichever saved last would win. Marks at or after the cut belong to the turns being
+	 * discarded (the edited turn's own mark included) and go with them.
+	 *
+	 * Returns a reason when the message cannot be edited.
+	 */
+	rewriteAt(session: Session, index: number): string | undefined {
+		if (!canRewrite(session, index)) {
+			return 'that message is not a prompt that can be edited';
+		}
+		session.transcript = session.transcript.slice(0, index);
+		session.marks = session.marks.filter((mark) => mark.length < index);
+		this.save(session);
+		this.changed(session.id);
 	}
 
 	/**
@@ -626,17 +665,11 @@ export class Sessions extends Service {
 		return this.get(id)?.greetingIndex;
 	}
 
-	addMark(id: string, mark: Mark): void {
-		const session = this.require(id);
-		session.marks.push(mark);
-		this.save(session);
-	}
-
 	/**
 	 * Writes a compaction down: the summary replaces the turns it covers in the chat record, and the
-	 * rewind points that sat inside those turns move with it. `removed` is how many messages the record
-	 * itself loses, which is not `summary.covers` once a summary is extended. The caller has already
-	 * decided what the summary says; this only keeps the record and the marks consistent.
+	 * restore points that sat inside those turns move with it. `removed` is how many messages the
+	 * record itself loses, which is not `summary.covers` once a summary is extended. The caller has
+	 * already decided what the summary says; this only keeps the record and the marks consistent.
 	 *
 	 * It takes the caller's own session object rather than an id, because a turn holds one live copy
 	 * while it runs — reading the chat back from disk here would return a second copy, and whichever of

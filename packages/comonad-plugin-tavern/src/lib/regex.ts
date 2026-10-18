@@ -1,10 +1,26 @@
-import { REGEX_PLACEMENT, SUBSTITUTE_REGEX, type RegexScript } from '@comonad/lib/tavern/types';
+import type { RegexScript } from './types';
 
 /**
  * Regex scripts: the find-and-replace pass SillyTavern runs over prompts, replies and world info.
  * A script says *where* it applies (`placement`), whether it wants markdown, prompt or raw text,
  * how deep in the chat it is allowed, and how macros inside its pattern are treated.
  */
+
+/** Where a regex script applies, verbatim from SillyTavern's `regex_placement`. */
+export const REGEX_PLACEMENT = {
+	userInput: 1,
+	aiOutput: 2,
+	slashCommand: 3,
+	worldInfo: 5,
+	reasoning: 6,
+} as const;
+
+/** How macros inside `findRegex` are treated, verbatim from `substitute_find_regex`. */
+export const SUBSTITUTE_REGEX = {
+	none: 0,
+	raw: 1,
+	escaped: 2,
+} as const;
 
 export interface RegexContext {
 	/** One of `REGEX_PLACEMENT`: which text is being rewritten. */

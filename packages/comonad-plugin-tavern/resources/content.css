@@ -491,7 +491,7 @@ button.secondary.danger:hover {
 	border-color: var(--st-accent);
 }
 
-/* A block can be dragged to a new place; the identity block stays where it is. */
+/* Every row can be dragged to a new place, Comonad's generated blocks included. */
 #st-form .prompt-item[draggable='true'] {
 	cursor: grab;
 }
@@ -504,11 +504,6 @@ button.secondary.danger:hover {
 #st-form .prompt-item.is-drop-target {
 	border-color: var(--st-accent);
 	box-shadow: inset 0 2px 0 var(--st-accent);
-}
-
-/* Comonad's own block leads the list and cannot be switched off: it reads as the fixed thing it is. */
-#st-form .prompt-item.is-fixed {
-	background: transparent;
 }
 
 #st-form .prompt-row {

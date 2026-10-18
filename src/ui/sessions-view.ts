@@ -10,7 +10,7 @@ import { registerCommand } from './register';
 /**
  * Writes the active chat out as markdown. It lives with the other session commands and not with the
  * journal: exporting a conversation is the sessions view's business, and it works whether or not the
- * change-journal plugin is installed.
+ * journal row is on.
  */
 async function exportSession(ctx: Context): Promise<void> {
 	const session = ctx.sessions.active();

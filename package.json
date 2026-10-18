@@ -78,10 +78,6 @@
             "description": "Create a COMONAD.md project file"
           },
           {
-            "name": "rewind",
-            "description": "Rewind files and conversation"
-          },
-          {
             "name": "export",
             "description": "Export this session as markdown"
           },
@@ -214,10 +210,81 @@
         "enablement": "comonad.checkpoints"
       },
       {
-        "command": "comonad.rewind",
-        "title": "Comonad: Rewind Conversation and Files",
+        "command": "comonad.keepFile",
+        "title": "Comonad: Keep This File",
         "category": "Comonad",
+        "icon": "resources/keep.svg",
         "enablement": "comonad.checkpoints"
+      },
+      {
+        "command": "comonad.undoFile",
+        "title": "Comonad: Undo This File",
+        "category": "Comonad",
+        "icon": "resources/undo.svg",
+        "enablement": "comonad.checkpoints"
+      },
+      {
+        "command": "comonad.openChangeDiff",
+        "title": "Comonad: Open Change Diff",
+        "category": "Comonad",
+        "icon": "resources/diff.svg",
+        "enablement": "comonad.checkpoints"
+      },
+      {
+        "command": "comonad.git.openDiff",
+        "title": "Comonad Git: Open Diff",
+        "category": "Comonad",
+        "icon": "$(diff)",
+        "enablement": "comonad.git"
+      },
+      {
+        "command": "comonad.git.openFile",
+        "title": "Comonad Git: Open File",
+        "category": "Comonad",
+        "icon": "$(go-to-file)",
+        "enablement": "comonad.git"
+      },
+      {
+        "command": "comonad.git.stage",
+        "title": "Comonad Git: Stage",
+        "category": "Comonad",
+        "icon": "$(add)",
+        "enablement": "comonad.git"
+      },
+      {
+        "command": "comonad.git.unstage",
+        "title": "Comonad Git: Unstage",
+        "category": "Comonad",
+        "icon": "$(remove)",
+        "enablement": "comonad.git"
+      },
+      {
+        "command": "comonad.git.discard",
+        "title": "Comonad Git: Discard Changes",
+        "category": "Comonad",
+        "icon": "$(discard)",
+        "enablement": "comonad.git"
+      },
+      {
+        "command": "comonad.git.stageAll",
+        "title": "Comonad Git: Stage All",
+        "category": "Comonad",
+        "icon": "$(add)",
+        "enablement": "comonad.git"
+      },
+      {
+        "command": "comonad.git.unstageAll",
+        "title": "Comonad Git: Unstage All",
+        "category": "Comonad",
+        "icon": "$(remove)",
+        "enablement": "comonad.git"
+      },
+      {
+        "command": "comonad.git.refresh",
+        "title": "Comonad Git: Refresh",
+        "category": "Comonad",
+        "icon": "$(refresh)",
+        "enablement": "comonad.git"
       },
       {
         "command": "comonad.exportSession",
@@ -292,6 +359,11 @@
         "category": "Comonad"
       },
       {
+        "command": "comonad.referenceSelection",
+        "title": "Comonad: Add Selection to Chat",
+        "category": "Comonad"
+      },
+      {
         "command": "comonad.openChat",
         "title": "Comonad: Open Chat",
         "category": "Comonad",
@@ -324,6 +396,11 @@
         {
           "id": "comonad.sessions",
           "name": "Sessions"
+        },
+        {
+          "id": "comonad.git",
+          "name": "Git Changes",
+          "when": "comonad.git"
         },
         {
           "id": "comonad.tasks",
@@ -380,6 +457,21 @@
           "command": "comonad.newSession",
           "when": "view == comonad.chat",
           "group": "navigation@3"
+        },
+        {
+          "command": "comonad.git.refresh",
+          "when": "view == comonad.git",
+          "group": "navigation@0"
+        },
+        {
+          "command": "comonad.git.stageAll",
+          "when": "view == comonad.git",
+          "group": "navigation@1"
+        },
+        {
+          "command": "comonad.git.unstageAll",
+          "when": "view == comonad.git",
+          "group": "navigation@2"
         }
       ],
       "editor/title": [
@@ -402,6 +494,21 @@
           "command": "comonad.newSession",
           "when": "activeWebviewPanelId == comonad.chat",
           "group": "navigation@3"
+        },
+        {
+          "command": "comonad.undoFile",
+          "when": "comonad.activePending",
+          "group": "navigation@10"
+        },
+        {
+          "command": "comonad.keepFile",
+          "when": "comonad.activePending",
+          "group": "navigation@11"
+        },
+        {
+          "command": "comonad.openChangeDiff",
+          "when": "comonad.activePending",
+          "group": "navigation@12"
         }
       ],
       "view/item/context": [
@@ -434,6 +541,31 @@
           "command": "comonad.stopTask",
           "when": "view == comonad.tasks && viewItem == comonad.task",
           "group": "1_manage@1"
+        },
+        {
+          "command": "comonad.git.openDiff",
+          "when": "view == comonad.git && viewItem =~ /^git-change-/",
+          "group": "inline@1"
+        },
+        {
+          "command": "comonad.git.stage",
+          "when": "view == comonad.git && (viewItem == git-change-changes || viewItem == git-change-untracked || viewItem == git-change-merge)",
+          "group": "inline@2"
+        },
+        {
+          "command": "comonad.git.unstage",
+          "when": "view == comonad.git && viewItem == git-change-staged",
+          "group": "inline@2"
+        },
+        {
+          "command": "comonad.git.discard",
+          "when": "view == comonad.git && (viewItem == git-change-changes || viewItem == git-change-untracked)",
+          "group": "inline@3"
+        },
+        {
+          "command": "comonad.git.openFile",
+          "when": "view == comonad.git && viewItem =~ /^git-change-/",
+          "group": "navigation@1"
         }
       ],
       "editor/context": [
@@ -446,6 +578,26 @@
           "command": "comonad.fixSelection",
           "when": "editorHasSelection",
           "group": "comonad@2"
+        },
+        {
+          "command": "comonad.referenceSelection",
+          "when": "editorHasSelection",
+          "group": "comonad@3"
+        },
+        {
+          "command": "comonad.keepFile",
+          "when": "comonad.activePending",
+          "group": "comonad@4"
+        },
+        {
+          "command": "comonad.undoFile",
+          "when": "comonad.activePending",
+          "group": "comonad@5"
+        },
+        {
+          "command": "comonad.openChangeDiff",
+          "when": "comonad.activePending",
+          "group": "comonad@6"
         }
       ]
     },
@@ -471,6 +623,12 @@
         "key": "ctrl+alt+d",
         "mac": "cmd+alt+d",
         "when": "comonad.checkpoints"
+      },
+      {
+        "command": "comonad.referenceSelection",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorTextFocus && editorHasSelection"
       }
     ],
     "configuration": {
@@ -723,10 +881,65 @@
           "default": true,
           "description": "Load and let the agent update project memory."
         },
+        "comonad.prompts": {
+          "type": "array",
+          "default": [],
+          "description": "Comonad prompt blocks: their order, their switch, and the static prefix each one opens with. The dynamic content is generated every turn and is not stored here.",
+          "items": {
+            "type": "object",
+            "required": ["id", "enabled", "prefix"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "enum": [
+                  "comonad",
+                  "comonad-tools",
+                  "comonad-instructions",
+                  "comonad-memory",
+                  "comonad-todos",
+                  "comonad-skills",
+                  "comonad-agents",
+                  "comonad-lore",
+                  "comonad-context"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "prefix": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "comonad.toolPrompts": {
+          "type": "array",
+          "default": [],
+          "description": "Tool order and per-tool switches for the request. A tool's definition still comes from the plugin that registers it; this setting only decides whether and where it is offered.",
+          "items": {
+            "type": "object",
+            "required": ["name", "enabled"],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
         "comonad.checkpoints": {
           "type": "boolean",
           "default": true,
-          "description": "Journal every file the agent writes (per file, not per turn) so the review can keep, undo and rewind them. Needs the Change journal plugin row — install it from Settings → Plugins → Install…; the setting only pauses a journal that is there. Changes made by shell commands are not tracked."
+          "description": "Journal every file the agent writes (per file, not per turn) so the review can keep or undo them, and an edited prompt can restore them. Needs the Change journal plugin row — install it from Settings → Plugins → Install…; the setting only pauses a journal that is there. Changes made by shell commands are not tracked."
+        },
+        "comonad.inlineDiff": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the agent's changes inline in the editor: changed blocks are painted, and Keep / Undo sit above each block and at the top of the file. Needs the Change journal row; turning it off leaves the QuickPick review and the Git Changes view."
         },
         "comonad.chatWindow": {
           "type": "boolean",
@@ -788,12 +1001,7 @@
         "comonad.tavernEnabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Layer a character, world books, a persona and a preset on top of the agent prompt. With this off nothing from the content layer reaches a request."
-        },
-        "comonad.tavernSource": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Deprecated and ignored: content is read from Comonad's own library (`.comonad/{characters,lorebooks,presets,personas}` and `~/.comonad/…`), in SillyTavern's file formats."
+          "markdownDescription": "Compose every turn with the ST prompt collection: Comonad's blocks, a character, world books, a persona and a preset. With no preset selected the built-in **Default** is used. Off sends the agent prompt on its own."
         },
         "comonad.tavernCharacter": {
           "type": "string",
@@ -836,7 +1044,7 @@
         "comonad.tavernPreset": {
           "type": "string",
           "default": "",
-          "description": "Default OpenAI preset (prompts, order and samplers) for new chats, by file name."
+          "description": "Default OpenAI preset (prompts, order and samplers) for new chats, by file name. Empty uses the built-in Default."
         },
         "comonad.tavernAuthorNote": {
           "type": "string",
@@ -1028,6 +1236,8 @@
     "@vscode/test-electron": "^3.0.0",
     "esbuild": "^0.28.1",
     "eslint": "^10.5.0",
+    "highlight.js": "^11.12.0",
+    "katex": "^0.16.47",
     "npm-run-all": "^4.1.5",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.61.1"

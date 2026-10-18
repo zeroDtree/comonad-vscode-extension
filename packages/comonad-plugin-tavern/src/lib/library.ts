@@ -1,6 +1,6 @@
 import { normalisePrompt } from './preset';
 import { blockToPrompt, PROMPT_BLOCKS } from './templates/blocks';
-import type { PromptLibraryEntry } from '@comonad/lib/tavern/types';
+import type { PromptLibraryEntry } from './types';
 
 /**
  * The two prompt libraries, and the pure half of both. A *system* entry lives in the shared

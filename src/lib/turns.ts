@@ -27,7 +27,9 @@ export interface Turn {
 	index: number;
 	prompt: string;
 	steps: Step[];
-	/** Transcript length once this turn is complete: the only safe place to fork or rewind. */
+	/** Index of the user message that opened this turn. Absent for a greeting. */
+	promptAt?: number;
+	/** Transcript length once this turn is complete: the only safe place to fork or truncate. */
 	at: number;
 	startedAt?: number;
 	endedAt?: number;
@@ -75,7 +77,7 @@ export function turnsOf(transcript: Message[], first = 0): Turn[] {
 			if (current) {
 				current.at = index;
 			}
-			current = { index: first + turns.length, prompt: message.content, steps: [], at: index + 1, startedAt: message.at };
+			current = { index: first + turns.length, prompt: message.content, promptAt: index, steps: [], at: index + 1, startedAt: message.at };
 			turns.push(current);
 			return;
 		}

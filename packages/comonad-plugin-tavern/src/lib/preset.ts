@@ -1,20 +1,21 @@
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
-import {
-	GENERATION_TRIGGERS,
-	INJECTION_POSITION,
-	PROMPT_LIBRARY_KEY,
-	type LogitBiasSet,
-	type PromptItem,
-	type PromptOrderEntry,
-	type TavernPreset,
-} from '@comonad/lib/tavern/types';
+import { isComonadBlockId } from '@comonad/lib/blocks';
+import { GENERATION_TRIGGERS } from '@comonad/lib/generations';
+import type { LogitBiasSet, PromptItem, PromptOrderEntry, TavernPreset } from './types';
+import { INJECTION_POSITION } from './prompts';
 
 /**
  * OpenAI presets, read and written under their SillyTavern names: sampler settings, the prompt
  * list, and the per-character prompt order. An unknown key is kept in `raw` so a save round-trips a
  * preset this build does not fully understand.
  */
+
+/**
+ * The key a preset stores its own prompt library under. SillyTavern does not know it and ignores it,
+ * which is how the preset keeps every ST field untouched beside it.
+ */
+export const PROMPT_LIBRARY_KEY = 'comonad_prompt_library';
 
 /** The SillyTavern character id whose order is the default for every other character. */
 export const DEFAULT_CHARACTER_ID = 100_000;
@@ -84,6 +85,17 @@ export function normalisePrompt(value: unknown): PromptItem | null {
 		forbid_overrides: boolAt(raw, 'forbid_overrides'),
 		extension: boolAt(raw, 'extension'),
 	};
+}
+
+/**
+ * A prompt as it is written back: the pane's `enabled` and `inChat` are session state, not fields of
+ * SillyTavern's prompt. The order block carries `enabled`; `inChat` follows the injection position.
+ */
+function storedPrompt(prompt: PromptItem): PromptItem {
+	const copy = { ...prompt } as PromptItem & { enabled?: boolean; inChat?: boolean };
+	delete copy.enabled;
+	delete copy.inChat;
+	return copy;
 }
 
 /**
@@ -234,7 +246,9 @@ export function presetToJson(preset: TavernPreset): string {
 	set('max_context_unlocked', preset.maxContextUnlocked);
 	set('use_sysprompt', preset.useSysprompt);
 	if (preset.prompts) {
-		set('prompts', preset.prompts);
+		// Comonad's generated blocks are reconstructed from their defaults; only their order entry is
+		// stored, so a file opened in SillyTavern has no dead marker rows of ours in its prompt list.
+		set('prompts', preset.prompts.filter((prompt) => !isComonadBlockId(prompt.identifier)).map(storedPrompt));
 	}
 	// The preset's own prompt library, under the key SillyTavern ignores. `set` drops the key when the
 	// library is empty, so a preset that never used one keeps its file exactly as it arrived.

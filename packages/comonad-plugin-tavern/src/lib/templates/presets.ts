@@ -1,11 +1,14 @@
-import { DEFAULT_ORDER, DEFAULT_PROMPTS } from '../prompts';
-import type { PromptItem, TavernPreset } from '@comonad/lib/tavern/types';
+import { DEFAULT_ORDER, DEFAULT_PRESET_ID, ST_PROMPTS } from '../prompts';
+import type { PromptItem, PromptOrderEntry, TavernPreset } from '../types';
 import { blockToPrompt, PROMPT_BLOCKS } from './blocks';
 
 /**
  * The preset templates Comonad ships, written here rather than copied from another tool: a preset is
- * samplers, formats, the nudge prompts and the prompt list, and these four cover the ground a user
- * usually wants to start from.
+ * samplers, formats, the nudge prompts and the prompt list, and these cover the ground a user usually
+ * wants to start from.
+ *
+ * *Default* is the collection an unselected chat already uses: the built-in default, made a file only
+ * when the user asks for an editable copy. The other four add a sampler and nudge set on top of it.
  *
  * Choosing one copies it into the library (`.comonad/presets/<id>.json`), where it is an ordinary
  * preset that can be edited or deleted; *Restore the template* writes it again from here. The
@@ -22,7 +25,7 @@ export interface PresetTemplate {
 	preset: TavernPreset;
 }
 
-/** The nudge prompts every template starts with: our own wording for upstream's three markers. */
+/** The nudge prompts every roleplay template starts with: our own wording for upstream's markers. */
 const NUDGES = {
 	new_chat_prompt: '[A new chat begins.]',
 	new_group_chat_prompt: '[A new group chat begins.]',
@@ -32,19 +35,39 @@ const NUDGES = {
 	send_if_empty: '',
 } as const;
 
-/** The shipped prompt list, copied so a template can be edited without touching the originals. */
+/** The shipped prompt definitions, copied so a template can be edited without touching the originals. */
 function shippedPrompts(): PromptItem[] {
-	return DEFAULT_PROMPTS.map((prompt) => ({ ...prompt }));
+	return ST_PROMPTS.map((prompt) => ({ ...prompt }));
 }
 
-/** The shipped list with one extra block in front of the chat history. */
-function withBlock(id: string): PromptItem[] {
-	const block = PROMPT_BLOCKS.find((entry) => entry.id === id);
+/** The shipped order, copied. */
+function shippedOrder(): PromptOrderEntry[] {
+	return DEFAULT_ORDER.map((entry) => ({ ...entry }));
+}
+
+/** The shipped list with one extra block in front of the chat history, and the order that places it. */
+function withBlock(id: string): { prompts: PromptItem[]; promptOrder: PromptOrderEntry[] } {
 	const prompts = shippedPrompts();
+	const promptOrder = shippedOrder();
+	const block = PROMPT_BLOCKS.find((entry) => entry.id === id);
 	if (block) {
-		prompts.push(blockToPrompt(block));
+		const prompt = blockToPrompt(block);
+		prompts.push(prompt);
+		const at = promptOrder.findIndex((entry) => entry.identifier === 'chatHistory');
+		promptOrder.splice(at < 0 ? promptOrder.length : at, 0, { identifier: prompt.identifier, enabled: true });
 	}
-	return prompts;
+	return { prompts, promptOrder };
+}
+
+/** The built-in Default: exactly the collection a chat with no preset selected sends. */
+export function defaultPreset(): TavernPreset {
+	return {
+		id: DEFAULT_PRESET_ID,
+		name: 'Default',
+		prompts: shippedPrompts(),
+		promptOrder: shippedOrder(),
+		raw: {},
+	};
 }
 
 function template(id: string, name: string, description: string, preset: Partial<TavernPreset>): PresetTemplate {
@@ -62,7 +85,7 @@ function template(id: string, name: string, description: string, preset: Partial
 			personality_format: '{{personality}}',
 			names_behavior: 0,
 			prompts: shippedPrompts(),
-			promptOrder: DEFAULT_ORDER.map((entry) => ({ ...entry })),
+			promptOrder: shippedOrder(),
 			...NUDGES,
 			...preset,
 			raw: {},
@@ -71,6 +94,12 @@ function template(id: string, name: string, description: string, preset: Partial
 }
 
 export const PRESET_TEMPLATES: readonly PresetTemplate[] = [
+	{
+		id: DEFAULT_PRESET_ID,
+		name: 'Default',
+		description: 'Comonad’s blocks, SillyTavern’s shipped prompts and their order — the same collection an unselected chat uses.',
+		preset: defaultPreset(),
+	},
 	template('balanced', 'Balanced', 'The defaults, with a reply of a few paragraphs.', {
 		temperature: 1,
 		top_p: 1,
@@ -90,7 +119,7 @@ export const PRESET_TEMPLATES: readonly PresetTemplate[] = [
 		temperature: 1.05,
 		top_p: 1,
 		maxTokens: 900,
-		prompts: withBlock('comonad-length'),
+		...withBlock('comonad-length'),
 	}),
 ];
 

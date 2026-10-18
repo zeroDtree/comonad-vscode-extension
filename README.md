@@ -70,12 +70,44 @@ same turn after a reload are built by the same renderer, so a refresh never chan
 answer (no more one bubble becoming five). Every step also carries **how long it took** —
 `🧠 Thought 12.4s` (it reads *Thinking…* while the model is still reasoning), `✓ run_shell {"command":"pytest"} 8.1s`, and a plain answer's own round trip —
 climbing live while it runs and settling on the number the extension measured when it finishes, so a
-slow call shows its cost instead of only a spinner. Each turn ends with a dated footer — *Worked for
+slow call shows its cost instead of only a spinner. A shell tool card, expanded, shows the whole
+command first — highlighted, with a Copy button — and the command's output underneath. Fenced code
+blocks are syntax-highlighted for highlight.js's common languages (Python, JavaScript/TypeScript,
+JSON, shell, C/C++, Java, Go, Rust, SQL, Markdown, …) with theme-aware token colors; Copy still
+copies the code source, not the markup. Each turn ends with a dated footer — *Worked for
 12s · 3 tools*, or *Working…* / *Stopped* — and carries the action row, Cursor-style: **copy** (the answer,
 or the raw record in Raw), **fork chat from here** (a new chat with the same conversation through
 the end of that turn) and, on the newest turn, **regenerate** (drops that answer and runs the
-prompt again). Because the fork point is always a turn boundary, a forked chat can never hold a tool
-call without the result that answers it.
+prompt again; when that turn or a later one wrote files, it asks whether to restore them too). A
+user prompt also carries a **pencil**: it turns the bubble into an editor and resends it. Sending
+discards that turn's reply and every later turn; when the agent wrote files since then, the editor
+also offers **Restore files too**. Because the fork point is always a turn boundary, a forked chat
+can never hold a tool call without the result that answers it. The agent's pending changes are
+listed above the composer — file, `+N −M`, with **Undo / Keep / Review** at the top; clicking a row
+opens the file itself, with the inline review's blocks and Keep/Undo actions. Once everything is
+reviewed, the list stays on screen as a **reviewed** list (no actions); as soon as a new change is
+pending, it switches back to showing only the pending files.
+
+**Reference code with `@`.** Type `@` in the composer to open a picker — **Files**, **Folders**,
+**Symbols**, or **Current selection**. Choosing one inserts a token in Cursor's format:
+
+```
+@src/auth.ts              whole file
+@src/auth.ts:9-13         lines 9–13
+@src/lib/                 folder overview
+@symbol:src/auth.ts:AuthService
+@"a file with spaces.md":3-8
+```
+
+Select code in an editor and press **Cmd+L** (`Ctrl+L`) to append its token to the chat composer
+without leaving the editor; the same command is under the editor context menu as **Comonad: Add
+Selection to Chat**. The token stays in the prompt text (you can edit it by hand), is painted as a
+chip in the transcript, and is resolved when the turn runs: the referenced content is added to that
+turn's context with numbered lines, capped at 20k chars per reference and 60k in total and filtered
+by the session's read confinement and deny rules. References are resolved again on regenerate and
+on edit-and-resend; a missing or denied reference becomes a small error note instead of failing the
+turn. Automatic discovery still belongs to the agent's `find_files`, `find_symbols` and
+`grep_files` tools.
 
 Inside the panel you can type plain prompts or slash commands (`/help` lists them all).
 
@@ -140,8 +172,11 @@ written in **SillyTavern's file formats**, so a card, book, persona or preset ca
 the two tools. The layer is **not built into Comonad**: it is a plugin package that ships beside the
 bundle, and it does nothing at all until you install it — **Settings → Plugins → Install… →
 SillyTavern content (ST)**, one click that copies it into `~/.comonad/plugins` and writes its row into
-your `cordis.yml` ([Installing a plugin](#installing-a-plugin)). With the row off, or the plugin never
-installed, a turn is a plain request and the ST tab and its commands are simply not there. It is all managed in one place: the settings panel's **ST** tab
+your `cordis.yml` ([Installing a plugin](#installing-a-plugin)). With the row loaded and the content
+layer on, **every turn is assembled by the ST layer** — with no character, persona, book or preset
+selected it uses the built-in **Default** collection, so the takeover is complete from the first
+turn. With the row off, or the plugin never installed, a turn is a plain request and the ST tab and
+its commands are simply not there. It is all managed in one place: the settings panel's **ST** tab
 (`Comonad: Manage Content` or the book icon in the chat's title bar), whose sub-tabs are
 **Characters / World books / Personas / Presets / Settings**. Create,
 edit, duplicate and delete every kind, then use it in this chat or make it the default for new chats.
@@ -218,7 +253,7 @@ edit, duplicate and delete every kind, then use it in this chat or make it the d
   **Presets** tab: a block is **saved before it is inserted** — the **Prompt library** is one entry box
   whose small button switches between **Built-in** (shared by every preset) and **Custom**
   (this preset's own), with a picker and **+ New** / **Insert**; *Insert* copies the picked entry to the
-  top of the list, right after Comonad's own block, and *+ New* saves one into the library being shown
+  top of the list, after Comonad's leading blocks, and *+ New* saves one into the library being shown
   with its editor opened in place. The **system library** lives in `.comonad/prompt-library.json`,
   seeded from the eight built-in blocks; a preset's **own library** is stored inside the preset's file,
   so it travels with the preset. Picking an entry opens its editor in the space right below the box,
@@ -228,7 +263,13 @@ edit, duplicate and delete every kind, then use it in this chat or make it the d
   under its own row, as a world-book entry does — its name, its role, the **generation types** it
   fires for, *Relative* / *In-chat @ depth*, its depth and order, its text and **Forbid Overrides**,
   with upstream's own hints and its *Reset* putting a shipped block back; a marker says its text is
-  pulled from elsewhere and cannot be edited, as upstream says), the order —
+  pulled from elsewhere and cannot be edited, as upstream says). Comonad's own blocks — **Identity**,
+  **Tools**, **Instructions**, **Memory**, **Todos**, **Skills**, **Sub-agents**, **Lore index** and
+  **Context** — are rows in this same list: their text is generated for every turn, so the editor
+  shows it read-only (the current text is also in the **Prompts** tab), while their place and switch
+  are ordinary preset state. The single **Tools** row is the request's tool switch: definitions still
+  travel beside the request in the API's `tools` parameter, and with the row off no tools are offered
+  and a call is refused before it runs. The order —
   including **an order per character**, which is used for the character it names — the samplers, the
   formats (`wi_format`, `scenario_format`, `personality_format`, `impersonation_prompt`,
   `names_behavior`, `assistant_prefill`, `squash_system_messages`), the six **nudge prompts** (the
@@ -238,12 +279,17 @@ edit, duplicate and delete every kind, then use it in this chat or make it the d
   a preset sets is sent, and only what a chat-completions endpoint understands: the fields it does not
   (`top_k`, `top_a`, `min_p`, `repetition_penalty`, `stream_openai: false`) say so in their own hint
   rather than being dropped silently. **Import…** takes a preset from anywhere, **Export…** writes it
-  out as SillyTavern reads it, and **four templates ship with Comonad** — *Balanced*, *Creative*,
-  *Precise*, *Long-form* — which copy themselves into the library when you pick one, where they are
-  ordinary presets. *Update current preset* is the tab's own Save button.
-- **Identity stays first.** The agent's own block (mode, approval, instructions, memory, skills,
-  todos, tool rules) still leads every request; content only *adds* blocks. With nothing selected,
-  the request is byte-identical to a plain agent turn.
+  out as SillyTavern reads it, and **five templates ship with Comonad** — *Default*, *Balanced*,
+  *Creative*, *Precise*, *Long-form* — which copy themselves into the library when you pick one, where
+  they are ordinary presets. *Default* is the collection an unselected chat already uses: picking it
+  writes an editable copy, and loading the plugin itself writes nothing. *Update current preset* is the
+  tab's own Save button.
+- **Takeover.** With the layer on, every user-facing turn is assembled by the ST collection:
+  Comonad's generated blocks, the character, persona and world books, the preset's prompts and the
+  conversation. Comonad's blocks are preset rows like any other — move them, switch them off, or read
+  their current text in the preset editor and in the **Prompts** tab. With no preset selected the
+  built-in **Default** is used; *Start from Default* makes an editable copy. Subagent, summary and
+  chooser calls are not chat turns and keep their own shape.
 - **Runtime.** A chat can pick a character (its opening line — or an alternate — is inserted as the
   first turn and pinned when the history is trimmed), books (scanned every turn for keywords, with
   the scan depth, budget, cap, recursion, groups, sticky/cooldown/delay and per-entry positions all
@@ -299,7 +345,6 @@ copied.
 | `/regenerate` | generate the last reply again |
 | `/quiet [text]` | generate a reply without adding it to the transcript |
 | `/init` | create a `COMONAD.md` project instruction file |
-| `/rewind` | restore files and conversation to an earlier turn |
 | `/export` | export the session as markdown |
 | `/resume` | resume a suspended (waiting for approval) turn |
 | `/char [name]` | pick the character this chat speaks as (inserts its opening line) |
@@ -310,7 +355,8 @@ copied.
 
 Custom commands are markdown files under `.comonad/commands/*.md` with optional frontmatter
 (`description`, `argument-hint`, `allowed-tools`, `model`). Bodies support `$ARGUMENTS`,
-`` !`shell` `` and `@path` includes.
+`` !`shell` ``, and the same `@` references the composer uses (files, folders, symbols and line
+ranges).
 
 ## Safety model
 
@@ -374,29 +420,21 @@ extends the first instead of starting over. Three things follow from that being 
   current turn is never folded — it is what you just asked for.
 - A summary that fails changes nothing. The conversation stays exactly as it was and the turn is
   answered from it, because losing the record would be worse than a refused request.
-- **Rewind follows the summary.** Compacting replaces turns, so the rewind points that sat inside them
-  cannot be honoured and are dropped; the rest keep naming the same message they always did. After a
-  compaction the earliest point to rewind to is the summary itself.
+- **Restore points follow the summary.** Compacting replaces turns, so the restore points that sat
+  inside them cannot be honoured and are dropped; the rest keep naming the same message they always
+  did. After a compaction the earliest point to restore to is the summary itself.
 
 A request the endpoint refuses as too long — the case the estimate cannot predict — is retried once
 after being shrunk hard, so a mis-sized window costs a retry rather than the turn.
 
 ## Checkpoints and review
 
-Comonad can journal each file the agent writes, one entry per write, in a shadow store outside your
-project (`globalStorage/checkpoints/...`). **It is an installed plugin, not a built-in feature**:
-install **Change journal (shadow git)** from **Settings → Plugins → Install…**, or by hand —
-
-```sh
-# one folder into your library, one row into your list
-cp -r <extension>/packages/comonad-plugin-checkpoints ~/.comonad/plugins/
-# ~/.comonad/cordis.yml
-- { id: comonad-plugin-checkpoints, name: ./plugins/comonad-plugin-checkpoints/dist/index.js }
-```
-
-Nothing is journaled until that row is there, and `comonad.checkpoints: false` pauses a journal that
-is ([Plugins](#plugins)). Nothing is snapshotted on every turn: a turn that writes no file costs
-nothing, and the review only looks at the files the journal names. Your own `.git` is never touched.
+Comonad journals each file the agent writes, one entry per write, in a shadow store outside your
+project (`globalStorage/checkpoints/...`). **It is a row of the shipped tree** — on by default,
+because an irreversible write is a worse default than a shadow repository — and one `cordis.yml` line
+turns it off when the disk costs more than the safety is worth ([Plugins](#plugins)). Nothing is
+snapshotted on every turn: a turn that writes no file costs nothing, and the review only looks at the
+files the journal names. Your own `.git` is never touched.
 
 - **Changes made by shell commands (`run_shell`) are not tracked.** Review those with git. This is
   the same limit Claude Code and Cursor have: a shell can change any file, and the journal only
@@ -404,11 +442,19 @@ nothing, and the review only looks at the files the journal names. Your own `.gi
 - A file you have edited since the agent last wrote it, or one open with unsaved text, is never
   overwritten silently: the review asks, or refuses until you save.
 - Shadow stores from the earlier snapshot design are removed when the journal is mounted. Their
-  sessions keep their transcripts, but cannot be rewound to file state.
+  sessions keep their transcripts, but cannot be restored to an earlier file state.
+- **Editing a prompt can restore files.** Edit a user prompt with the pencil and resend it; if the
+  agent wrote files at or after that turn, the editor offers **Restore files too**, with the same
+  dirty-editor and outside-change checks as undo. **Regenerate** asks the same question about the
+  last turn.
+- **Pending changes sit above the composer.** The list shows each file with its `+N −M` counts;
+  **Undo** and **Keep** act on all of them, and a row opens the file in the normal editor with the
+  inline review (the separate Comonad diff tab is still offered by **Show Diff**). With nothing
+  pending, the list shows the files already reviewed, newest decision first; a new pending change
+  takes the list back.
 
 - **Comonad: Review Pending Changes** — open a diff, keep/undo a file or a single hunk, or keep/undo everything.
-- **Comonad: Rewind Conversation and Files** — restore the workspace *and* truncate the chat to that turn.
-- Those four commands (with `Cmd+Alt+D`) are declared in Comonad's manifest behind
+- The journal's commands (with `Cmd+Alt+D`) are declared in Comonad's manifest behind
   `enablement: comonad.checkpoints`: the palette and the keybinding offer them while the row is
   loaded, and a window without the row has nothing to click rather than something that fails.
 - `Cmd+Alt+.` stops a turn, `Cmd+N` starts a new session while a Comonad surface has focus.
@@ -421,7 +467,7 @@ nothing, and the review only looks at the files the journal names. Your own `.gi
 
 | mechanism | location | notes |
 | --- | --- | --- |
-| instructions | `COMONAD.md`, `AGENTS.md`, `.comonad/instructions.md` | hierarchical, trusted workspaces only; `@path` imports |
+| instructions | `COMONAD.md`, `AGENTS.md`, `.comonad/instructions.md` | hierarchical, trusted workspaces only |
 | rules | `.comonad/rules/*.md` | loaded into the system prompt |
 | skills | `.comonad/skills/<name>/SKILL.md` | listed in the prompt, loaded on demand via the `skill` tool |
 | subagents | `.comonad/agents/*.md` | frontmatter: `tools`, `disallowedTools`, `model`, `maxTurns`; built-ins: explore, plan, review |
@@ -435,13 +481,13 @@ nothing, and the review only looks at the files the journal names. Your own `.gi
 
 **A plugin is what a feature is.** The storage layer, the tools and the panels are rows in
 `cordis.yml`, and so is anything you write — including features Comonad ships but does not build in,
-like the change journal and the ST content layer:
+like the ST content layer:
 
 ```yaml
-# .comonad/cordis.yml — two installed plugins of Comonad's own, one of mine off for now, one on.
-- { id: comonad-plugin-checkpoints, name: ./plugins/comonad-plugin-checkpoints/dist/index.js }
-- { id: comonad-plugin-tavern, disabled: true }
+# .comonad/cordis.yml — an installed plugin of Comonad's own, one of mine off for now, one on.
+- { id: comonad-plugin-tavern, name: ./plugins/comonad-plugin-tavern/dist/index.js }
 - { id: mine, name: ./mine.js, config: { greeting: hello } }
+- { id: scratch, name: ./scratch.js, disabled: true }
 ```
 
 A `name` that is a path is read as a file: `./x` and `../x` relative to the `cordis.yml` that names it, `~/x` from your home folder, and `/abs/x` as it is. Any other name is a package.
@@ -474,10 +520,11 @@ this workspace's `cordis.yml`, or yours), what it resolved to, and what became o
 `not loaded` with the reason in the tooltip (`pending: waiting for tools`, or the error the plugin threw).
 **Disable**/**Enable** writes the change into the workspace's list when the workspace is trusted and into
 yours when it is not, and applies **that row** again — not the whole tree, so the panel you are clicking
-in stays where it is. A row that others inject takes them with it: they go inactive and say what they are
-waiting for (`pending: waiting for tavern`), and come back when it does. The file that changed is named
-above the table, and a `cordis.yml` you edit by hand is applied in full as soon as it is saved — the
-host can tell its own write from yours.
+in stays where it is. **Uninstall** takes a row that is not built in away entirely — that is
+[Installing a plugin](#installing-a-plugin), undone. A row that others inject takes them with it: they
+go inactive and say what they are waiting for (`pending: waiting for tavern`), and come back when it
+does. The file that changed is named above the table, and a `cordis.yml` you edit by hand is applied in
+full as soon as it is saved — the host can tell its own write from yours.
 
 What is worth knowing before writing one:
 
@@ -490,10 +537,9 @@ What is worth knowing before writing one:
   `ctx.get('tavern')`: with those rows off a turn is a plain `[system, …history]` request, writes are not
   journaled, and the surfaces only they own — the ST tab, `/char`, `/lore`, `/preset`, and the review
   commands the journal registers — are simply not there. A feature can even be missing *as a package*:
-  nothing in the shipped tree names either one, so a window that never installed them has no content
-  code, no journal code and no review commands at all — not even a row to turn off. What the host still
-  names of an absent feature is only its vocabulary: the `checkpoints` service's shape as a *type*, the
-  storage folder it may use, and the event it announces.
+  nothing in the shipped tree names the ST layer, so a window that never installed it has no content
+  code at all — not even a row to turn off. What the host still names of an absent feature is only its
+  vocabulary: the content types as *types* and the session fields it reads.
 - **A pane is a plugin's tab.** The settings panel draws the tabs the `panes` service knows: the **ST**
   tab, its markup, its stylesheets, its scripts and its editor are the tavern plugin's own files, loaded
   from its folder. Its settings keys are the pane's too — the panel asks every pane for the keys it owns
@@ -504,12 +550,23 @@ What is worth knowing before writing one:
 **Settings → Plugins → Install…** offers the plugins that ship with Comonad by name, and a folder of
 your own otherwise (`dist/index.js`, or whatever the manifest's `main` says). An install is two steps
 you could take by hand — the folder is copied into `~/.comonad/plugins/<id>` and a row is written into
-your `cordis.yml` — so uninstalling is the same: delete the row, the folder, or both.
+your `cordis.yml` — and **Uninstall** on the row's line is those two steps taken back, after a
+confirmation that names the folder it will delete: the row goes from every list that names it (which
+disposes the plugin), the installed folder goes with it, and the modules lent to plugins stay. A row
+that was never installed can be uninstalled too — only its row goes, because the files it loads are
+yours — and either step can still be done by hand.
 
 ```yaml
 # ~/.comonad/cordis.yml, written by an install
 - { id: comonad-plugin-tavern, name: ./plugins/comonad-plugin-tavern/dist/index.js }
 ```
+
+**Markdown math (KaTeX)** ships as another optional row. It typesets `$...$`, `$$...$$`, `\(...\)`
+and `\[...\]` in assistant replies and command Markdown (code spans and fenced blocks stay literal),
+bundling KaTeX, its stylesheet and its fonts in the plugin folder so it works offline. Select
+typeset text in the chat and copy it, and the clipboard gets the original Markdown back — formulas
+as `$...$` / `$$...$$`, code as fences, emphasis and links in Markdown — while the transcript's own
+Copy buttons still copy the exact raw text. With the row off the delimiters simply stay literal.
 
 The library lives in Comonad's home — `.comonad` under your home directory, or under whatever
 `COMONAD_HOME` names instead, which moves the whole of it: the plugin library, the harness shims, the
@@ -647,15 +704,16 @@ The panel is tabbed — **Graph** (Mermaid source beside a live preview, Max ste
 Routes), **Agent** (model, work mode, approval, display, context, network, working directory,
 command timeout, plan directory, deny read paths, and the **Restrict to workspace** pair that narrows
 reads and writes to the working directory), **Rules** (the `comonad.permissions` allow / ask /
-deny lists, one rule per line, validated on save), **Inspect** (a read-only tab with two sub-tabs:
-**Tool Policy Flow (TPF)** — the tool-call gate as a Mermaid diagram: the work-mode, network and
-workspace checks, then two frames — **your rules** and the **approval policy**, whose five settings each
-get their own node — with the unsandboxed / dangerous-command escalation between them; every
-gate ends in its own **Rejected** / **Asks you** / **Runs** node right beside it, so the chart never
-draws an edge across itself; generated from the policy tables, so it cannot drift from the code — and
-**Prompts** — every prompt the model can be given: Comonad's own named blocks, each tool's definition
-with its parameter schema, and the SillyTavern collection this chat would send; pick one to read it),
-**MCP**, and **Tools** —
+deny lists, one rule per line, validated on save), **Prompts** (Comonad's own prompt blocks and every
+tool definition: reorder them, switch them, and edit each block's static prefix; when ST takes over,
+the block order and switches mirror the active preset read-only, while the prefix still applies),
+**Inspect** (a read-only tab with two sub-tabs: **Tool Policy Flow (TPF)** — the tool-call gate as a
+Mermaid diagram: the work-mode, network and workspace checks, then two frames — **your rules** and the
+**approval policy**, whose five settings each get their own node — with the unsandboxed /
+dangerous-command escalation between them; every gate ends in its own **Rejected** / **Asks you** /
+**Runs** node right beside it, so the chart never draws an edge across itself; generated from the
+policy tables, so it cannot drift from the code — and **Plugins**, the dependency tree of the loaded
+rows), **MCP**, and **Tools** —
 remembers the tab you were on, validates the graph as you type, and applies the form only when you
 press **Save**. Plan files live under `comonad.planDirectory` (empty keeps `.comonad/plans`).
 The built-in flow is `llm.complete → agent.after-llm → agent.tools / agent.confirm / agent.reject → …`.
@@ -683,18 +741,20 @@ kernel), `fuse.js` (the world-book search, with upstream's own options and field
 `gpt-tokenizer` and `@agnai/web-tokenizers` (the tokenizer chain — the first is bundled, the second
 is kept as a real file because its wasm would bloat the bundle four megabytes).
 
-Two packages ship beside the bundle as plugins, and both are built the same way:
-`packages/comonad-plugin-tavern` (the SillyTavern content layer) and
-`packages/comonad-plugin-checkpoints` (the change journal and its review). Each is built as its own
-bundle (`npm run build:plugins`, part of `npm run compile`, one bundle per folder that declares
-`comonad.plugin` in its `package.json`) and neither is part of `dist/extension.js`, which is what makes
-them plugins rather than features. Each imports the host's shared vocabulary by name (`@comonad/*` — the
-content types, the prompt estimator, the command helper, the journal contract) and those imports are
-bundled into its own file, so an install is one folder.
+One package ships beside the bundle as a plugin: `packages/comonad-plugin-tavern` (the SillyTavern
+content layer, its vectors and its tokenizer files). It is built as its own bundle
+(`npm run build:plugins`, part of `npm run compile`, one bundle per folder that declares
+`comonad.plugin` in its `package.json`) and is not part of `dist/extension.js`, which is what makes it
+a plugin rather than a feature. It imports the host's shared vocabulary by name (`@comonad/*` — the
+content types, the prompt estimator, the command helper) and those imports are bundled into its own
+file, so an install is one folder. Its *settings* are its own too: the keys, the defaults and the
+typing live in the plugin (`lib/settings.ts`), read over the same store every setting uses.
 
-The journal is the seam that shows what that buys: the agent, the chat panel and the review all reach it
-through `ctx.get('checkpoints')`, so with the row out of the tree nothing is journaled, no review
-command is registered, and a write is simply a write.
+The journal is the seam that shows what the other side of the line looks like: the agent, the chat
+panel and the review reach it through `ctx.get('checkpoints')`, so with its row off nothing is
+journaled, no review command is registered, and a write is simply a write — but the code is in
+`dist/extension.js`, because a silent loss of the undo story is a worse default than a shadow
+repository.
 
 The test host runs against a home of Comonad's own — a temporary directory named by `COMONAD_HOME` — so
 the plugins installed in your real `~/.comonad`, and the rows you wrote for them, never change what a

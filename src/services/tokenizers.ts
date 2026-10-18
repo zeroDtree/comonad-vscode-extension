@@ -1,105 +1,55 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { gunzipSync } from 'node:zlib';
-import { Tokenizer } from '@agnai/web-tokenizers';
 import { Service, type Context } from 'cordis';
-import { encodingForModel, setEncoder, type TikEncoding } from '../lib/tokens';
+import { encodingForModel, estimateMessages, estimateTokens, setEncoder, type TikEncoding } from '../lib/tokens';
 import { describe } from '../lib/util';
+import { webTokenizers } from './web-tokenizers';
 
 /**
- * Token counting for the configured model, following SillyTavern's own chain:
+ * Token counting for the configured model. The kernel owns two ends of it and leaves the middle to
+ * whoever knows the files:
  *
- * 1. **OpenAI family** — `tiktoken`'s encodings, which is what upstream asks its server for. The
- *    rank tables come from `gpt-tokenizer` (a pure-JS BPE with the same ranks as `tiktoken`), so
- *    there is no wasm file to ship and no request to make.
- * 2. **The models with a published tokenizer** — DeepSeek, Qwen2, Command R/A, Nemo, GLM: upstream
- *    downloads the very same files from the `SillyTavern-Tokenizers` repository on first use and
- *    caches them; so does this, into the extension's storage.
- * 3. **The models upstream ships in its own tree** — Gemma/Gemini, Llama3, Claude, Llama, Mistral,
- *    Yi, Jamba. Those files are part of SillyTavern, not of a public release, so they are read from
- *    a SillyTavern checkout the user points at with `comonad.tokenizerDir` (never guessed, never
- *    copied): the user's own copy of `src/tokenizers/<name>.json`.
- * 4. **Anything else** — upstream's own fallback, `ceil(bytes / 3.35)`, and one log line saying
+ * 1. **The OpenAI family** — `tiktoken`'s encodings, which the rank tables in `gpt-tokenizer`
+ *    reproduce exactly (a pure-JS BPE: no wasm file to ship, no request to make).
+ * 2. **A provider a feature installs** (`ctx.tokenizers.use`) — a plugin that owns tokenizer files of
+ *    its own claims the models they cover and loads them; the tavern layer installs SillyTavern's
+ *    collection this way. A provider that downloads answers at once and hands its encoder over when
+ *    it lands, so a turn never waits on the network.
+ * 3. **Anything else** — upstream's own fallback, `ceil(bytes / 3.35)`, and one log line saying
  *    which tokenizer was missing.
  *
  * Nothing here is on the hot path in a way that can fail it: `warm()` is awaited once per turn, and
  * until it resolves the counter keeps answering with the estimate.
  */
 
-/** Where upstream publishes the tokenizers it does not ship itself. */
-const PUBLIC_BASE = 'https://github.com/SillyTavern/SillyTavern-Tokenizers/raw/main';
+/** The installed encoder: text in, token count out. */
+type Encoder = (text: string) => number;
 
-/** The files upstream downloads, in its own order of checks (`getWebTokenizer`). */
-const DOWNLOADED: Array<{ pattern: RegExp; file: string }> = [
-	{ pattern: /deepseek/, file: 'deepseek.json.gz' },
-	{ pattern: /qwen2/, file: 'qwen2.json.gz' },
-	{ pattern: /command-r/, file: 'command-r.json.gz' },
-	{ pattern: /command-a/, file: 'command-a.json.gz' },
-	{ pattern: /nemo/, file: 'nemo.json.gz' },
-	{ pattern: /\bglm\b|glm-/, file: 'glm-4.6.json.gz' },
-];
+/** What a provider answers with: the encoder it loaded, or the reason there is none. */
+export type EncoderLoad = { encoder: Encoder; label: string } | { why: string };
 
-/** The files upstream keeps in its own tree, read from a SillyTavern checkout the user owns. */
-const LOCAL: Array<{ pattern: RegExp; file: string }> = [
-	{ pattern: /claude/, file: 'claude.json' },
-	{ pattern: /llama-?3/, file: 'llama3.json' },
-	{ pattern: /gemma|gemini|learnlm/, file: 'gemma.model' },
-	{ pattern: /llama/, file: 'llama.model' },
-	{ pattern: /mistral|mixtral/, file: 'mistral.model' },
-	{ pattern: /\byi\b|-yi/, file: 'yi.model' },
-	{ pattern: /jamba/, file: 'jamba.model' },
-];
+/**
+ * A source of exact encoders a feature can install: `ctx.tokenizers.use(...)`. A provider owns the
+ * models whose tokenizer files it knows and writes the status line for them; the kernel asks the
+ * first one that claims a model, and counts with tiktoken or the estimate when none does.
+ */
+export interface EncoderProvider {
+	/** Whether this provider owns the model's tokenizer. */
+	owns(model: string): boolean;
+	/** Whether the load is worth starting in the background: a download, so nothing waits on it. */
+	background?(model: string): boolean;
+	/** How the status line reads while the model is being prepared. */
+	preparing(model: string): string;
+	/** Loads the model's tokenizer: the encoder and its label, or why the estimate stands. */
+	load(model: string): Promise<EncoderLoad>;
+}
 
 /** What the counter is currently backed by, for the settings tab and the log. */
 export interface TokenizerStatus {
 	/** The model the plan was made for. */
 	model: string;
-	/** `tiktoken`, `web`, or `estimate` while nothing is loaded. */
+	/** `tiktoken`, `web` (a provider's file), or `estimate` while nothing is loaded. */
 	kind: 'tiktoken' | 'web' | 'estimate';
 	/** What it says on the tin: the encoding, the tokenizer file, or why it fell back. */
 	label: string;
-}
-
-/** One plan: which encoder a model name maps onto. */
-type Plan =
-	| { kind: 'tiktoken'; encoding: TikEncoding }
-	| { kind: 'download'; file: string }
-	| { kind: 'local'; file: string }
-	| { kind: 'none'; why: string };
-
-/** The installed encoder: text in, token count out. */
-type Encoder = (text: string) => number;
-
-/** How a plan reads in the status line while it is still being prepared. */
-function describePlan(plan: Plan): string {
-	if (plan.kind === 'download') {
-		return `fetching ${plan.file} from SillyTavern's tokenizer repository`;
-	}
-	if (plan.kind === 'local') {
-		return `looking for ${plan.file} in the SillyTavern folder`;
-	}
-	return plan.kind === 'none' ? plan.why : 'preparing the tokenizer';
-}
-
-/** Upstream's `getTokenizerModel`, as a plan: model name in, encoder out. */
-export function planFor(model: string): Plan {
-	const name = (model ?? '').toLowerCase();
-	if (!name) {
-		return { kind: 'none', why: 'no model configured' };
-	}
-	for (const entry of DOWNLOADED) {
-		if (entry.pattern.test(name)) {
-			return { kind: 'download', file: entry.file };
-		}
-	}
-	for (const entry of LOCAL) {
-		if (entry.pattern.test(name)) {
-			return { kind: 'local', file: entry.file };
-		}
-	}
-	// Everything else is an OpenAI-compatible model as far as counting goes, which is upstream's own
-	// default too: an unknown name ends at `gpt-3.5-turbo`, i.e. cl100k_base.
-	return { kind: 'tiktoken', encoding: encodingForModel(name) };
 }
 
 export class Tokenizers extends Service {
@@ -110,16 +60,40 @@ export class Tokenizers extends Service {
 	/** The models being prepared in the background. */
 	private readonly pending = new Set<string>();
 	private status: TokenizerStatus = { model: '', kind: 'estimate', label: 'bytes / 3.35 (nothing loaded yet)' };
-	private readonly web = new Map<string, Tokenizer>();
+	private readonly providers = new Set<EncoderProvider>();
 	private warned = false;
 
 	constructor(ctx: Context) {
 		super(ctx, 'tokenizers');
+		// The web-tokenizer files are this counter's own provider, installed with the kernel: counting
+		// is not a feature that may go missing with a plugin row — a budget must not move because the
+		// content layer is off.
+		this.use(webTokenizers(ctx));
+	}
+
+	/** Installs a provider, so its models count exactly. Returns the remover. */
+	use(provider: EncoderProvider): () => void {
+		this.providers.add(provider);
+		return () => void this.providers.delete(provider);
 	}
 
 	/** The diagnostics line the settings tab shows. */
 	describe(): TokenizerStatus {
 		return { ...this.status };
+	}
+
+	/**
+	 * Counts one string the way upstream shows it. A plugin's bundle carries its own copy of the pure
+	 * estimator, and `setEncoder` only ever reaches the kernel's — so anything outside the kernel that
+	 * wants a real count asks here, through the one process-wide counter.
+	 */
+	count(text: string): number {
+		return estimateTokens(text);
+	}
+
+	/** The same for a message list, framed the way upstream's `countTokensOpenAI(…, full)` does. */
+	countMessages(messages: readonly { content?: string; toolCalls?: unknown }[]): number {
+		return estimateMessages(messages);
 	}
 
 	/**
@@ -138,9 +112,13 @@ export class Tokenizers extends Service {
 			this.status = cached.status;
 			return this.describe();
 		}
-		const plan = planFor(model);
-		if (plan.kind === 'download' || this.pending.has(model)) {
-			this.status = { model, kind: 'estimate', label: `${describePlan(plan)} — counting as bytes / 3.35 until it lands` };
+		const provider = this.providerFor(model);
+		if (provider?.background?.(model) || this.pending.has(model)) {
+			this.status = {
+				model,
+				kind: 'estimate',
+				label: `${provider ? provider.preparing(model) : 'preparing the tokenizer'} — counting as bytes / 3.35 until it lands`,
+			};
 			if (!this.pending.has(model)) {
 				this.pending.add(model);
 				void this.load(model).finally(() => this.pending.delete(model));
@@ -150,28 +128,34 @@ export class Tokenizers extends Service {
 		return await this.load(model);
 	}
 
+	private providerFor(model: string): EncoderProvider | undefined {
+		for (const provider of this.providers) {
+			if (provider.owns(model)) {
+				return provider;
+			}
+		}
+		return undefined;
+	}
+
 	private async load(model: string): Promise<TokenizerStatus> {
-		const plan = planFor(model);
+		const provider = this.providerFor(model);
 		try {
-			if (plan.kind === 'tiktoken') {
-				const encoder = await tiktokenEncoder(plan.encoding);
-				return this.settle(model, { model, kind: 'tiktoken', label: plan.encoding }, encoder);
-			}
-			if (plan.kind === 'download' || plan.kind === 'local') {
-				const path = plan.kind === 'download' ? await this.download(plan.file) : this.localFile(plan.file);
-				if (!path) {
-					return this.fallback(
-						model,
-						plan.kind === 'download' ? `${plan.file} could not be downloaded` : `${plan.file} is not in the SillyTavern folder`,
-					);
+			if (provider) {
+				const loaded = await provider.load(model);
+				if ('why' in loaded) {
+					return this.fallback(model, loaded.why);
 				}
-				const tokenizer = await this.webTokenizer(path);
-				if (!tokenizer) {
-					return this.fallback(model, `${plan.file} could not be loaded`);
-				}
-				return this.settle(model, { model, kind: 'web', label: plan.file }, (text) => tokenizer.encode(text).length);
+				return this.settle(model, { model, kind: 'web', label: loaded.label }, loaded.encoder);
 			}
-			return this.fallback(model, plan.kind === 'none' ? plan.why : 'no tokenizer for this model');
+			// Everything else is an OpenAI-compatible model as far as counting goes, which is upstream's
+			// own default too: an unknown name ends at `gpt-3.5-turbo`, i.e. cl100k_base.
+			const name = (model ?? '').toLowerCase();
+			if (!name) {
+				return this.fallback(model, 'no model configured');
+			}
+			const encoding = encodingForModel(name);
+			const encoder = await tiktokenEncoder(encoding);
+			return this.settle(model, { model, kind: 'tiktoken', label: encoding }, encoder);
 		} catch (error) {
 			return this.fallback(model, describe(error));
 		}
@@ -196,75 +180,6 @@ export class Tokenizers extends Service {
 			this.ctx.log.message(`tokenizers: no tokenizer for ${model} (${why}); counts are estimates, as SillyTavern's fallback is`);
 		}
 		return this.describe();
-	}
-
-	/** The cache upstream keeps under `data/_cache`: one uncompressed file per tokenizer. */
-	private cacheDir(): string {
-		return join(this.ctx.host.storage.root, 'tokenizers');
-	}
-
-	private async download(file: string): Promise<string | null> {
-		const dir = this.cacheDir();
-		const plain = join(dir, file.replace(/\.gz$/, ''));
-		if (existsSync(plain)) {
-			return plain;
-		}
-		if (!this.ctx.settings.get().network) {
-			// Comonad does not reach the internet unless the session allows network at all; upstream has
-			// the same switch (`enableDownloadableTokenizers`).
-			this.ctx.log.message(`tokenizers: ${file} is not cached and network is off, counting with the estimate`);
-			return null;
-		}
-		mkdirSync(dir, { recursive: true });
-		try {
-			const response = await fetch(`${PUBLIC_BASE}/${file}`);
-			if (!response.ok) {
-				this.ctx.log.message(`tokenizers: ${file} download failed (${response.status})`);
-				return null;
-			}
-			const compressed = Buffer.from(await response.arrayBuffer());
-			writeFileSync(plain, gunzipSync(compressed));
-			return plain;
-		} catch (error) {
-			this.ctx.log.message(`tokenizers: ${file} download failed (${describe(error)})`);
-			return null;
-		}
-	}
-
-	/** A tokenizer out of the SillyTavern checkout `comonad.tokenizerDir` points at. */
-	private localFile(file: string): string | null {
-		const dir = this.ctx.settings.get().tokenizerDir ?? '';
-		if (!dir) {
-			return null;
-		}
-		for (const candidate of [join(dir, file), join(dir, 'src', 'tokenizers', file)]) {
-			try {
-				if (existsSync(candidate) && statSync(candidate).isFile()) {
-					return candidate;
-				}
-			} catch {
-				// A path we cannot look at is simply not the file we wanted.
-			}
-		}
-		return null;
-	}
-
-	private async webTokenizer(path: string): Promise<Tokenizer | null> {
-		const cached = this.web.get(path);
-		if (cached) {
-			return cached;
-		}
-		try {
-			// The binding reads bytes: its declaration says `ArrayBuffer`, but a `Buffer` — what
-			// `readFileSync` returns and what upstream passes — is what it actually consumes.
-			const bytes = readFileSync(path);
-			const tokenizer = await Tokenizer.fromJSON(bytes as unknown as ArrayBuffer);
-			this.web.set(path, tokenizer);
-			return tokenizer;
-		} catch (error) {
-			this.ctx.log.message(`tokenizers: ${path} could not be loaded (${describe(error)})`);
-			return null;
-		}
 	}
 }
 

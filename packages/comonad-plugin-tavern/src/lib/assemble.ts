@@ -1,8 +1,8 @@
+import { isComonadBlockId, type ComonadBlockId } from '@comonad/lib/blocks';
 import type { Message } from '@comonad/lib/types';
 import { parseExamples } from './macro';
-import { IDENTITY_PROMPT, isInChat, type ActivePrompt } from './prompts';
-import { parseDecorators } from './lore';
-import { WI_ROLE } from '@comonad/lib/tavern/types';
+import { isInChat, type ActivePrompt } from './prompts';
+import { parseDecorators, WI_ROLE } from './lore';
 
 /**
  * The assembler: turns the prompt collection, the card, the world books and the conversation into
@@ -10,13 +10,13 @@ import { WI_ROLE } from '@comonad/lib/tavern/types';
  * the prompt list puts it, in-chat injections are spliced into the history by depth, and the
  * post-history instructions land after the history because that is where the list puts them.
  *
- * Comonad's own identity block leads, whatever the preset says: the agent's mode, approval,
- * instructions and tools must survive whatever character the chat wears.
+ * Comonad's own blocks travel the same way: the preset decides whether and where each is sent, and
+ * the agent supplies the text for the turn.
  */
 
 export interface AssembleBlocks {
-	/** Comonad's own system prompt. */
-	identity: string;
+	/** Comonad's own blocks, keyed by the identifier the preset places them by. */
+	comonad?: Partial<Record<ComonadBlockId, string>>;
 	charDescription?: string;
 	charPersonality?: string;
 	scenario?: string;
@@ -68,7 +68,6 @@ export function formatWorldInfo(value: string | undefined, format: string | unde
  * than from a chat — the conversation itself, or an entry a depth or an outlet places.
  */
 const MARKER_IDENTIFIERS: ReadonlySet<string> = new Set([
-	IDENTITY_PROMPT,
 	'worldInfoBefore',
 	'worldInfoAfter',
 	'charDescription',
@@ -80,7 +79,7 @@ const MARKER_IDENTIFIERS: ReadonlySet<string> = new Set([
 
 /** Whether a block's text comes from a value the assembler holds rather than from the block itself. */
 export function hasMarkerText(identifier: string): boolean {
-	return MARKER_IDENTIFIERS.has(identifier);
+	return isComonadBlockId(identifier) || MARKER_IDENTIFIERS.has(identifier);
 }
 
 /**
@@ -89,9 +88,10 @@ export function hasMarkerText(identifier: string): boolean {
  * definition, and a preview that re-derived it could disagree with what was actually sent.
  */
 export function markerContent(identifier: string, blocks: AssembleBlocks, options: AssembleOptions): string | undefined {
+	if (isComonadBlockId(identifier)) {
+		return blocks.comonad?.[identifier];
+	}
 	switch (identifier) {
-		case IDENTITY_PROMPT:
-			return blocks.identity;
 		case 'worldInfoBefore':
 			return formatWorldInfo(blocks.worldInfoBefore, options.wiFormat);
 		case 'worldInfoAfter':

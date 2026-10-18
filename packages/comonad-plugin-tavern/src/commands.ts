@@ -5,7 +5,8 @@ import type { Context } from 'cordis';
 import type { CommandSpec } from '@comonad/services/commands';
 import { slugId } from './lib/authoring';
 import { blankPng, cardToPng, greetingsOf } from './lib/card';
-import type { Character, Persona, TavernPreset } from '@comonad/lib/tavern/types';
+import { tavernSettings } from './lib/settings';
+import type { Character, Persona, TavernPreset } from './lib/types';
 import { registerCommand } from '@comonad/ui/register';
 
 /** Picking tavern content for the active chat: a character (with its opening line) and its books. */
@@ -88,10 +89,10 @@ export function tavernCommands(ctx: Context): void {
 			return;
 		}
 		const session = ctx.sessions.active() ?? ctx.sessions.ensureActive(ctx.agent.policyFor());
-		const current = session.persona ?? ctx.settings.get().tavernPersona;
+		const current = session.persona ?? tavernSettings(ctx).tavernPersona;
 		const picked = await vscode.window.showQuickPick(
 			[
-				{ label: '$(circle-slash) None', description: 'Speak as ' + ctx.settings.get().tavernUserName, id: '' },
+				{ label: '$(circle-slash) None', description: 'Speak as ' + tavernSettings(ctx).tavernUserName, id: '' },
 				...ctx.tavern.personas.map((persona) => ({
 					label: (persona.id === current ? '$(check) ' : '') + (persona.title || persona.name),
 					description: describePersona(persona),
@@ -110,15 +111,11 @@ export function tavernCommands(ctx: Context): void {
 	});
 
 	registerCommand(ctx, 'comonad.pickTavernPreset', async () => {
-		if (!ctx.tavern.presets.length) {
-			ctx.host.notify('Comonad: no presets found. Put OpenAI presets in .comonad/presets, or use Comonad: Manage Content.');
-			return;
-		}
 		const session = ctx.sessions.active() ?? ctx.sessions.ensureActive(ctx.agent.policyFor());
-		const current = session.preset ?? ctx.settings.get().tavernPreset;
+		const current = session.preset ?? tavernSettings(ctx).tavernPreset;
 		const picked = await vscode.window.showQuickPick(
 			[
-				{ label: '$(circle-slash) None', description: 'The shipped prompt collection', id: '' },
+				{ label: '$(circle-slash) Default (built-in)', description: 'Comonad’s blocks and SillyTavern’s shipped prompts', id: '' },
 				...ctx.tavern.presets.map((preset) => ({
 					label: (preset.id === current ? '$(check) ' : '') + preset.name,
 					description: describePreset(preset),
@@ -143,7 +140,7 @@ export function tavernCommands(ctx: Context): void {
 			return;
 		}
 		const session = ctx.sessions.active() ?? ctx.sessions.ensureActive(ctx.agent.policyFor());
-		const selected = new Set(session.lorebooks ?? ctx.settings.get().tavernLorebooks);
+		const selected = new Set(session.lorebooks ?? tavernSettings(ctx).tavernLorebooks);
 		const picked = await vscode.window.showQuickPick(
 			ctx.tavern.books.map((entry) => ({
 				label: entry.name,
@@ -180,7 +177,7 @@ export function tavernCommands(ctx: Context): void {
 	 */
 	registerCommand(ctx, 'comonad.exportCharacter', async () => {
 		const session = ctx.sessions.active();
-		const character = ctx.tavern.character(session?.character ?? ctx.settings.get().tavernCharacter) ?? ctx.tavern.characters[0];
+		const character = ctx.tavern.character(session?.character ?? tavernSettings(ctx).tavernCharacter) ?? ctx.tavern.characters[0];
 		if (!character) {
 			ctx.host.notify('Comonad: no character to export. Create one in the ST tab of the settings.');
 			return;
@@ -343,7 +340,7 @@ export function tavernSlashCommands(ctx: Context): void {
 				session.preset = undefined;
 				ctx.sessions.save(session);
 				ctx.sessions.changed(session.id);
-				surface.markdown('This chat uses the shipped prompt collection.');
+				surface.markdown('This chat uses the built-in Default preset.');
 				return { done: true };
 			}
 			const preset = ctx.tavern.findPreset(named);
@@ -369,7 +366,7 @@ export function tavernSlashCommands(ctx: Context): void {
 			session.authorNote = text || undefined;
 			ctx.sessions.save(session);
 			ctx.sessions.changed(session.id);
-			surface.markdown(text ? `Author's note set (depth ${ctx.settings.get().tavernNoteDepth}).` : 'Author’s note cleared.');
+			surface.markdown(text ? `Author's note set (depth ${tavernSettings(ctx).tavernNoteDepth}).` : 'Author’s note cleared.');
 			return { done: true };
 		});
 }

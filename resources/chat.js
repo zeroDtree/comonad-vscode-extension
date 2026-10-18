@@ -6,8 +6,15 @@
 	const $ = (id) => document.getElementById(id);
 	const messagesEl = $('messages');
 	const input = $('input');
+	const mentionEl = $('mention');
+	const mentionHead = $('mention-head');
+	const mentionList = $('mention-list');
 	const networkChip = $('network');
-	const changesChip = $('changes');
+	const changesPanel = $('changes-panel');
+	const changesTitle = $('changes-title');
+	const changesList = $('changes-list');
+	const changesToggle = $('changes-toggle');
+	const changesActions = $('changes-actions');
 	const loreChip = $('lore');
 	const barEl = $('bar');
 	const chatsEl = $('chats');
@@ -103,11 +110,15 @@
 		if (!event.target.closest?.('#chats') && !event.target.closest?.('#history')) {
 			closeChats();
 		}
+		if (mention && !event.target.closest?.('#mention') && !event.target.closest?.('#input')) {
+			closeMention();
+		}
 	});
 	window.addEventListener('blur', () => {
 		hideTip();
 		hideFlyout();
 		closeChats();
+		closeMention();
 	});
 
 	/* ------------------------------------------------------------------ pill menus */
@@ -425,6 +436,9 @@
 	const tavernState = { activated: [], overflow: false };
 
 	let state = null;
+	let shownSession = null;
+	/** The open @ picker, if any. */
+	let mention = null;
 	let running = false;
 	let pinned = true;
 	/** Tool step per call id, so a result can be written back into the step that asked for it. */
@@ -435,13 +449,127 @@
 	const esc = (s) =>
 		String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+	/**
+	 * The optional math renderer a chat asset installs before this script. The core owns the wrapper
+	 * and its `data-tex`, so the source-preserving copy works whichever renderer contributed; without
+	 * the hook every formula stays the literal text the model wrote.
+	 */
+	function mathRender(tex, display) {
+		try {
+			const api = window.__comonadMath;
+			if (!api || typeof api.render !== 'function') {
+				return null;
+			}
+			const html = api.render(String(tex), Boolean(display));
+			return typeof html === 'string' && html ? html : null;
+		} catch {
+			return null;
+		}
+	}
+
+	function mathHost(tex, display) {
+		const html = mathRender(tex, display);
+		if (!html) {
+			return null;
+		}
+		return '<span class="' + (display ? 'math-block' : 'math-inline') + '" data-tex="' + esc(tex) + '">' + html + '</span>';
+	}
+
+	/** Whether the delimiter at `index` is escaped by an odd run of backslashes. */
+	function escapedAt(text, index) {
+		let count = 0;
+		while (index - 1 - count >= 0 && text[index - 1 - count] === '\\') {
+			count += 1;
+		}
+		return count % 2 === 1;
+	}
+
+	function findClose(text, from, close) {
+		for (let index = from; index <= text.length - close.length; index += 1) {
+			if (text.startsWith(close, index) && !escapedAt(text, index)) {
+				return index;
+			}
+		}
+		return -1;
+	}
+
+	/**
+	 * Replaces inline math with placeholders. `$$...$$` / `\[...\]` are display, `\(...\)` / `$...$`
+	 * are inline; dollar signs that look like currency (whitespace at an edge, a digit after the
+	 * closer) stay literal. Math containing a code/link placeholder is left alone so the placeholders
+	 * can still be restored.
+	 */
+	function protectMath(text, out) {
+		if (!window.__comonadMath) {
+			return text;
+		}
+		let result = '';
+		let index = 0;
+		while (index < text.length) {
+			const rest = text.slice(index);
+			let opener = null;
+			if (rest.startsWith('\\(') && !escapedAt(text, index)) {
+				opener = { open: '\\(', close: '\\)', display: false, inline: true };
+			} else if (rest.startsWith('\\[') && !escapedAt(text, index)) {
+				opener = { open: '\\[', close: '\\]', display: true, inline: false };
+			} else if (rest.startsWith('$$') && !escapedAt(text, index)) {
+				opener = { open: '$$', close: '$$', display: true, inline: false };
+			} else if (text[index] === '$' && !escapedAt(text, index)) {
+				opener = { open: '$', close: '$', display: false, inline: true };
+			}
+			if (!opener) {
+				result += text[index];
+				index += 1;
+				continue;
+			}
+			const start = index + opener.open.length;
+			const close = findClose(text, start, opener.close);
+			if (close < 0) {
+				result += text[index];
+				index += 1;
+				continue;
+			}
+			const inner = text.slice(start, close);
+			const after = text.slice(close + opener.close.length);
+			const valid =
+				inner.trim().length > 0 &&
+				!inner.includes('\u0000') &&
+				!inner.includes('\u0001') &&
+				(!opener.inline || (!/^\s|\s$/.test(inner) && !/^\d/.test(after) && !after.startsWith('$')));
+			if (!valid) {
+				// A bad dollar candidate is currency or prose: keep the opener and let the closer be
+				// considered on its own. A bad \(..\)/\[..\]/$$..$$ is left as source.
+				if (opener.open === '$') {
+					result += '$';
+					index += 1;
+				} else {
+					result += text.slice(index, close + opener.close.length);
+					index = close + opener.close.length;
+				}
+				continue;
+			}
+			const host = mathHost(inner, opener.display);
+			if (!host) {
+				result += text.slice(index, close + opener.close.length);
+				index = close + opener.close.length;
+				continue;
+			}
+			out.push(host);
+			result += '\u0002' + (out.length - 1) + '\u0002';
+			index = close + opener.close.length;
+		}
+		return result;
+	}
+
 	function inline(text) {
 		const codes = [];
 		const links = [];
+		const maths = [];
 		let s = String(text).replace(/`([^`]+)`/g, (_, code) => {
 			codes.push(code);
 			return '\u0000' + (codes.length - 1) + '\u0000';
 		});
+		s = protectMath(s, maths);
 		s = esc(s);
 		s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
 			links.push('<a href="#" data-url="' + url + '">' + label + '</a>');
@@ -456,16 +584,140 @@
 			.replace(/(^|[^\w*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
 			.replace(/~~([^~]+)~~/g, '<del>$1</del>');
 		s = s.replace(/\u0001(\d+)\u0001/g, (_, index) => links[Number(index)]);
+		s = s.replace(/\u0002(\d+)\u0002/g, (_, index) => maths[Number(index)]);
 		s = s.replace(/\u0000(\d+)\u0000/g, (_, index) => '<code>' + esc(codes[Number(index)]) + '</code>');
 		return s;
+	}
+
+	/**
+	 * A small bash highlighter for shell commands and fenced bash blocks. It is deliberately not a
+	 * parser: comments, quotes, variables, redirections and the usual keywords are enough to read a
+	 * command at a glance, and the text it returns is still the same text Copy sees.
+	 */
+	function highlightShell(src) {
+		const KEYWORDS = new Set(
+			'if then else elif fi for while until do done case esac in function select time return exit local export readonly declare typeset set unset shift source alias eval exec trap break continue true false'.split(
+				' ',
+			),
+		);
+		const variable = /\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@#*$!?-])/y;
+		const operator = /(?:\|\||&&|\d*>&\d*|\d*>>?|[|&;<>()=])/y;
+		let out = '';
+		let i = 0;
+		let expectCommand = true;
+		const push = (cls, text) => {
+			out += cls ? '<span class="sh-' + cls + '">' + esc(text) + '</span>' : esc(text);
+		};
+		while (i < src.length) {
+			const ch = src[i];
+			if (ch === '\n') {
+				push('', ch);
+				expectCommand = true;
+				i += 1;
+				continue;
+			}
+			if (/\s/.test(ch)) {
+				push('', ch);
+				i += 1;
+				continue;
+			}
+			if (ch === '#' && (i === 0 || /\s/.test(src[i - 1]))) {
+				const end = src.indexOf('\n', i);
+				const stop = end < 0 ? src.length : end;
+				push('comment', src.slice(i, stop));
+				i = stop;
+				continue;
+			}
+			if (ch === "'" || ch === '"') {
+				let j = i + 1;
+				while (j < src.length && src[j] !== ch) {
+					if (ch === '"' && src[j] === '\\') {
+						j += 1;
+					}
+					j += 1;
+				}
+				j = Math.min(j + 1, src.length);
+				push('string', src.slice(i, j));
+				i = j;
+				continue;
+			}
+			variable.lastIndex = i;
+			const cash = variable.exec(src);
+			if (cash) {
+				push('var', cash[0]);
+				i = variable.lastIndex;
+				continue;
+			}
+			operator.lastIndex = i;
+			const op = operator.exec(src);
+			if (op) {
+				push('op', op[0]);
+				if (/[|&;(]/.test(op[0])) {
+					expectCommand = true;
+				}
+				i = operator.lastIndex;
+				continue;
+			}
+			let j = i;
+			while (j < src.length && !/[\s'"$|&;<>()=]/.test(src[j])) {
+				j += 1;
+			}
+			if (j === i) {
+				push('', ch);
+				i += 1;
+				continue;
+			}
+			const token = src.slice(i, j);
+			i = j;
+			if (KEYWORDS.has(token)) {
+				push('kw', token);
+				expectCommand = token === 'then' || token === 'do' || token === 'else' || token === 'elif';
+				continue;
+			}
+			if (expectCommand) {
+				push('cmd', token);
+				expectCommand = false;
+				continue;
+			}
+			if (/^--?[A-Za-z0-9][\w-]*$/.test(token)) {
+				push('flag', token);
+				continue;
+			}
+			if (/^-?\d+(?:\.\d+)?$/.test(token)) {
+				push('num', token);
+				continue;
+			}
+			push('', token);
+		}
+		return out;
+	}
+
+	const SHELL_LANGS = /^(bash|sh|shell|zsh)$/i;
+
+	/** highlight.js when the webview bundle is present; the local shell highlighter otherwise. */
+	function highlightCode(lang, code) {
+		const hljs = window.hljs;
+		if (hljs && lang && !/^(text|plaintext|txt)$/i.test(lang)) {
+			try {
+				if (hljs.getLanguage(lang)) {
+					return hljs.highlight(code, { language: lang }).value;
+				}
+				return hljs.highlightAuto(code).value;
+			} catch {
+				// A broken/growing block still reads as its source; fall through to the local path.
+			}
+		}
+		return SHELL_LANGS.test(lang) ? highlightShell(code) : esc(code);
 	}
 
 	function codeBlock(lang, code) {
 		return (
 			'<div class="codeblock"><div class="codehead"><span>' +
 			esc(lang) +
-			'</span><button class="copy" type="button">Copy</button></div><pre><code>' +
-			esc(code) +
+			'</span><button class="copy" type="button">Copy</button></div><pre data-lang="' +
+			esc(lang) +
+			'"><code>' +
+			highlightCode(lang, code) +
 			'</code></pre></div>'
 		);
 	}
@@ -480,6 +732,47 @@
 			html += '<tr>' + row.map((cell) => '<td>' + inline(cell) + '</td>').join('') + '</tr>';
 		}
 		return html + '</tbody></table>';
+	}
+
+	/**
+	 * A display formula at `lines[i]`: a whole-line `$$…$$` / `\[…\]`, or a block opened by one of
+	 * them and closed on a later line. `null` when there is no renderer or no closer yet, so a
+	 * streaming formula stays its source until the closing delimiter arrives.
+	 */
+	function displayMathAt(lines, i) {
+		if (!window.__comonadMath) {
+			return null;
+		}
+		const opener = /^\s*(\$\$|\\\[)\s*(.*)$/.exec(lines[i]);
+		if (!opener) {
+			return null;
+		}
+		const close = opener[1] === '$$' ? '$$' : '\\]';
+		const rest = opener[2];
+		const oneLine = rest.indexOf(close);
+		if (oneLine >= 0 && !rest.slice(oneLine + close.length).trim()) {
+			const inner = rest.slice(0, oneLine);
+			if (!inner.trim()) {
+				return null;
+			}
+			const host = mathHost(inner, true);
+			return host ? { html: host, end: i + 1 } : null;
+		}
+		const body = rest.trim() ? [rest] : [];
+		for (let next = i + 1; next < lines.length; next += 1) {
+			const at = lines[next].indexOf(close);
+			if (at >= 0 && !escapedAt(lines[next], at) && !lines[next].slice(at + close.length).trim()) {
+				body.push(lines[next].slice(0, at));
+				const inner = body.join('\n');
+				if (!inner.trim()) {
+					return null;
+				}
+				const host = mathHost(inner, true);
+				return host ? { html: host, end: next + 1 } : null;
+			}
+			body.push(lines[next]);
+		}
+		return null;
 	}
 
 	function md(src) {
@@ -506,6 +799,13 @@
 				}
 				i += 1;
 				out.push(codeBlock(fence[1] || 'text', body.join('\n')));
+				continue;
+			}
+			const display = displayMathAt(lines, i);
+			if (display) {
+				closeList();
+				out.push(display.html);
+				i = display.end;
 				continue;
 			}
 			const heading = line.match(/^(#{1,5})\s+(.*)$/);
@@ -565,7 +865,7 @@
 			closeList();
 			const paragraph = [line];
 			i += 1;
-			while (i < lines.length && lines[i].trim() !== '' && !/^(#{1,5}\s|```|>|\s*[-*+]\s|\s*\d+[.)]\s)/.test(lines[i])) {
+			while (i < lines.length && lines[i].trim() !== '' && !/^(#{1,5}\s|```|>|\s*[-*+]\s|\s*\d+[.)]\s|\s*\$\$|\s*\\\[)/.test(lines[i])) {
 				paragraph.push(lines[i]);
 				i += 1;
 			}
@@ -601,6 +901,7 @@
 		check: '<svg viewBox="0 0 16 16"><path d="M3.4 8.6l3 3 6.2-6.6"/></svg>',
 		fork: '<svg viewBox="0 0 16 16"><circle cx="4.6" cy="3.8" r="1.8"/><circle cx="4.6" cy="12.2" r="1.8"/><circle cx="11.4" cy="3.8" r="1.8"/><path d="M4.6 5.6v4.8M11.4 5.6c0 2.4-2 3.2-4.2 3.6"/></svg>',
 		again: '<svg viewBox="0 0 16 16"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.8"/><path d="M13.4 2.6v3.3h-3.3"/></svg>',
+		pencil: '<svg viewBox="0 0 16 16"><path d="M10.8 2.6l2.6 2.6-8.1 8.1-3.3.7.7-3.3z"/><path d="M9.4 4l2.6 2.6"/></svg>',
 	};
 
 	function actionRow(actions) {
@@ -653,6 +954,8 @@
 	let live = null;
 	/** An impersonation is being written into the composer rather than into a turn of the chat. */
 	let draft = false;
+	/** The open prompt editor's restore function, if one is open. */
+	let editing = null;
 
 	function currentView() {
 		return state && (state.display === 'token' || state.display === 'raw') ? state.display : 'rendered';
@@ -696,10 +999,27 @@
 		return minutes + 'm ' + seconds + 's';
 	}
 
+	/** A shell step's command: sent whole by the host, or read back from the (unclipped) args. */
+	function shellCommandOf(step) {
+		if (step.command) {
+			return step.command;
+		}
+		if (!step.name || !/^run_shell/.test(step.name)) {
+			return '';
+		}
+		try {
+			const parsed = JSON.parse(step.args || '{}');
+			return typeof parsed.command === 'string' ? parsed.command : '';
+		} catch {
+			return '';
+		}
+	}
+
 	function toolCard(step) {
 		const card = document.createElement('div');
 		const failed = step.status === 'error' || /^Error:/.test(step.result || '');
 		const mark = step.result === undefined ? 'spin' : failed ? 'bad' : 'good';
+		const command = shellCommandOf(step);
 		card.className = 'card collapsed';
 		card.innerHTML =
 			'<div class="card-head"><span class="' +
@@ -710,10 +1030,14 @@
 			esc(step.name || 'tool') +
 			'</b><span class="args">' +
 			esc(step.args || '') +
-			'</span><span class="timer"></span><span class="chev">▾</span></div><pre class="out"></pre>';
+			'</span><span class="timer"></span><span class="chev">▾</span></div>' +
+			// Expanded, a shell card reads like the command it ran: first the whole script, highlighted,
+			// then what it printed. Other tools keep the one output block.
+			(command ? codeBlock('bash', command) : '') +
+			'<pre class="out"></pre>';
 		card.querySelector('.out').textContent = step.result || '';
 		// Folded by default whatever the size: the head already says which call it was, whether it
-		// worked, what it ran and how long it took. A click shows the output.
+		// worked, what it ran and how long it took. A click shows the command and the output.
 		step._card = card;
 		step._timer = card.querySelector('.timer');
 		return card;
@@ -911,14 +1235,18 @@
 		const root = document.createElement('div');
 		root.className = 'turn';
 		turn._root = root;
+		root._turn = turn;
 
 		const prompt = document.createElement('div');
 		prompt.className = 'msg user';
-		prompt.innerHTML = '<div class="bubble">' + esc(turn.prompt).replace(/\n/g, '<br/>') + '</div>';
+		prompt.innerHTML = '<div class="bubble">' + renderPromptHtml(turn.prompt) + '</div>';
+		turn._bubble = prompt.querySelector('.bubble');
 		if (!turn.command) {
-			prompt.appendChild(
-				actionRow([{ key: 'copy', icon: 'copy', tip: 'Copy message', run: (button) => copyAction(button, turn.prompt) }]),
-			);
+			const actions = [{ key: 'copy', icon: 'copy', tip: 'Copy message', run: (button) => copyAction(button, turn.prompt) }];
+			if (!turn.greeting && turn.prompt) {
+				actions.push({ key: 'edit', icon: 'pencil', tip: 'Edit this prompt and run it again', run: () => beginEdit(turn) });
+			}
+			prompt.appendChild(actionRow(actions));
 		}
 		if (turn.greeting) {
 			// A character's opening line has no prompt behind it: the bubble would be empty.
@@ -944,11 +1272,138 @@
 		return root;
 	}
 
+	/** Closes an open prompt editor, putting the bubble it replaced back. */
+	function closeEdit() {
+		const restore = editing;
+		editing = null;
+		if (restore) {
+			restore();
+		}
+	}
+
+	/**
+	 * Turns a prompt bubble into an editor. The edit replaces this turn and everything after it, so
+	 * the footer count says that before anything is sent; the host asks separately about files.
+	 */
+	function beginEdit(turn) {
+		if (running || (state && state.suspended) || turn.greeting || turn.command || !turn.prompt) {
+			return;
+		}
+		closeEdit();
+		const bubble = turn._bubble;
+		const message = turn._root && turn._root.querySelector('.msg.user');
+		if (!bubble || !message) {
+			return;
+		}
+		const actions = message.querySelector('.msg-actions');
+		const original = bubble.innerHTML;
+		bubble.classList.add('editing');
+		if (actions) {
+			actions.hidden = true;
+		}
+		bubble.innerHTML = '';
+
+		const area = document.createElement('textarea');
+		area.className = 'edit-input';
+		area.value = turn.prompt;
+		area.setAttribute('aria-label', 'Edit prompt');
+		bubble.appendChild(area);
+
+		const bar = document.createElement('div');
+		bar.className = 'edit-bar';
+		const later = turns.filter((item) => item.index > turn.index).length;
+		const hint = document.createElement('span');
+		hint.className = 'edit-hint';
+		hint.textContent = later
+			? 'Sending discards this reply and ' + later + ' later turn' + (later === 1 ? '' : 's') + '.'
+			: 'Sending replaces this reply.';
+		bar.appendChild(hint);
+
+		let restoreBox = null;
+		if (turn.files) {
+			const label = document.createElement('label');
+			label.className = 'edit-restore';
+			label.dataset.tip = 'Files the agent wrote since this prompt go back to their earlier content. Shell changes are not tracked.';
+			restoreBox = document.createElement('input');
+			restoreBox.type = 'checkbox';
+			label.append(restoreBox, document.createTextNode(' Restore files too'));
+			bar.appendChild(label);
+		}
+
+		const restore = () => {
+			bubble.classList.remove('editing');
+			bubble.innerHTML = original;
+			if (actions) {
+				actions.hidden = false;
+			}
+		};
+		editing = restore;
+
+		const submit = () => {
+			const text = area.value.trim();
+			if (!text) {
+				area.focus();
+				return;
+			}
+			const restoreFiles = Boolean(restoreBox && restoreBox.checked);
+			editing = null;
+			restore();
+			vscode.postMessage({ type: 'editPrompt', turn: turn.index, text, restoreFiles });
+			input.focus();
+		};
+
+		const cancel = document.createElement('button');
+		cancel.type = 'button';
+		cancel.className = 'ghost edit-btn';
+		cancel.textContent = 'Cancel';
+		cancel.addEventListener('click', () => {
+			editing = null;
+			restore();
+			input.focus();
+		});
+		const send = document.createElement('button');
+		send.type = 'button';
+		send.className = 'primary edit-btn';
+		send.textContent = 'Send';
+		send.addEventListener('click', submit);
+		bar.append(cancel, send);
+		bubble.appendChild(bar);
+
+		area.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+				event.preventDefault();
+				submit();
+				return;
+			}
+			if (event.key === 'Escape') {
+				// The document's Escape stops a running turn; this one only closes the editor.
+				event.preventDefault();
+				event.stopPropagation();
+				editing = null;
+				restore();
+				input.focus();
+			}
+		});
+		area.addEventListener('input', () => {
+			area.style.height = 'auto';
+			area.style.height = Math.min(area.scrollHeight, Math.round(window.innerHeight * 0.4)) + 'px';
+		});
+
+		area.focus();
+		area.setSelectionRange(area.value.length, area.value.length);
+		area.dispatchEvent(new Event('input'));
+	}
+
 	/** Only the last turn may be regenerated, and never while a turn is running or without a prompt. */
 	function refreshActions() {
 		const last = turns.length ? turns[turns.length - 1] : null;
 		for (const button of messagesEl.querySelectorAll('.foot .act[data-act="again"]')) {
 			button.hidden = !last || button.closest('.turn') !== last._root || running || Boolean(last.greeting);
+		}
+		const suspended = Boolean(state && state.suspended);
+		for (const button of messagesEl.querySelectorAll('.msg.user .act[data-act="edit"]')) {
+			const turn = button.closest('.turn')?._turn;
+			button.hidden = running || suspended || !turn || Boolean(turn.greeting) || Boolean(turn.command) || !turn.prompt;
 		}
 	}
 
@@ -965,6 +1420,7 @@
 	function renderTurns(list) {
 		turns = list || [];
 		live = null;
+		editing = null;
 		toolCards.clear();
 		messagesEl.innerHTML = '';
 		if (!turns.length) {
@@ -987,6 +1443,8 @@
 	// that follows a tool call stays after it instead of being folded into one block.
 
 	function beginTurn(message) {
+		// A turn started anywhere invalidates an editor that was open on an older prompt.
+		closeEdit();
 		// An impersonation is not a turn: upstream clears the composer and streams your next message
 		// into it, so the chat is left alone until you send it yourself.
 		if (message.draft) {
@@ -1007,6 +1465,15 @@
 			scroll();
 			return;
 		}
+		// An edited prompt replaces its turn and every later one: they are about to be cut from the
+		// transcript, so none of them may stay on screen while the replacement streams.
+		const from = message.replacesFrom === undefined ? undefined : Number(message.replacesFrom);
+		if (from !== undefined && Number.isFinite(from)) {
+			for (const removed of turns.filter((turn) => turn.index >= from)) {
+				removed._root?.remove();
+			}
+			turns = turns.filter((turn) => turn.index < from);
+		}
 		const replacing = turns.find((turn) => turn.index === message.replaces);
 		if (replacing) {
 			turns = turns.filter((turn) => turn !== replacing);
@@ -1017,7 +1484,7 @@
 		}
 		const last = turns.length ? turns[turns.length - 1] : null;
 		const turn = {
-			index: last ? last.index + 1 : 0,
+			index: from !== undefined && Number.isFinite(from) ? from : last ? last.index + 1 : 0,
 			// A swipe or a regenerate re-runs the same prompt, and the host sends no text with it.
 			prompt: message.text || replacing?.prompt || '',
 			steps: [],
@@ -1026,6 +1493,7 @@
 			endedAt: undefined,
 			command: false,
 			stopped: false,
+			files: false,
 		};
 		turns.push(turn);
 		turnEl(turn);
@@ -1126,7 +1594,16 @@
 		live.text = null;
 		const step = appendStep(
 			live.turn,
-			{ kind: 'tool', id: message.id, name: message.name, args: message.args || '', status: 'running', startedAt: Date.now(), at: Date.now() },
+			{
+				kind: 'tool',
+				id: message.id,
+				name: message.name,
+				args: message.args || '',
+				command: message.command || '',
+				status: 'running',
+				startedAt: Date.now(),
+				at: Date.now(),
+			},
 			true,
 		);
 		live.turn.steps.push(step);
@@ -1178,6 +1655,9 @@
 		turn.endedAt = message.endedAt ?? settledAt;
 		turn.stopped = Boolean(message.stopped);
 		turn.command = Boolean(message.command);
+		// A normal turn is not republished, so this is how a just-finished reply learns an edit of it
+		// can offer to restore files (the host computes it from the journal).
+		turn.files = message.files === true;
 		// A swipe or a regenerate answers with the whole variant list, which is what the ‹ n/m › nav draws.
 		if (Array.isArray(message.swipes) && message.swipes.length > 1) {
 			turn.swipes = message.swipes;
@@ -1272,9 +1752,16 @@
 	/* ------------------------------------------------------------------ state & history */
 
 	function setRunning(value) {
+		if (value) {
+			closeEdit();
+			closeMention();
+			closeMenus();
+		}
 		running = value;
 		$('send').hidden = value;
 		$('stop').hidden = !value;
+		// Every generation type is refused while a turn runs; a disabled menu says so up front.
+		generationPill.trigger.disabled = value;
 		refreshActions();
 	}
 
@@ -1403,6 +1890,11 @@
 		if (!state) {
 			return;
 		}
+		if (state.sessionId !== shownSession) {
+			// A query belongs to the session that was active when it was typed.
+			shownSession = state.sessionId;
+			closeMention();
+		}
 		renderChats();
 		fillPill(modePill, state.modes, state.mode, 'Work mode — what the agent may do');
 		fillPill(approvalPill, state.approvals, state.approval, 'Approval — what runs without asking');
@@ -1434,16 +1926,69 @@
 		setRunning(Boolean(state.running));
 	}
 
-	function renderChanges(count) {
-		if (!count) {
-			changesChip.hidden = true;
-			changesChip.textContent = '';
+	/** The pending or reviewed changes above the composer: a collapsible file list, Cursor-style. */
+	let changesOpen = true;
+	let pendingChanges = [];
+	let reviewedChanges = [];
+
+	function renderChanges(files, reviewed) {
+		pendingChanges = Array.isArray(files) ? files : [];
+		reviewedChanges = Array.isArray(reviewed) ? reviewed : [];
+		// Nothing waiting on a decision: keep the files that were reviewed on screen, in a list that
+		// carries no Keep/Undo. As soon as something is pending again, that list is the whole story.
+		const showingReviewed = pendingChanges.length === 0 && reviewedChanges.length > 0;
+		const items = showingReviewed ? reviewedChanges.map((path) => ({ path, reviewed: true })) : pendingChanges;
+		if (!items.length) {
+			changesPanel.hidden = true;
+			changesTitle.textContent = '';
+			changesList.innerHTML = '';
 			return;
 		}
-		changesChip.hidden = false;
-		changesChip.textContent = '⊞ ' + count + (count === 1 ? ' change' : ' changes');
-		changesChip.dataset.tip =
-			'Review pending changes — ' + count + (count === 1 ? ' file has' : ' files have') + ' changed since the last checkpoint';
+		changesPanel.hidden = false;
+		changesTitle.textContent =
+			items.length + (items.length === 1 ? ' File' : ' Files') + (showingReviewed ? ' reviewed' : '');
+		changesActions.hidden = showingReviewed;
+		changesToggle.textContent = changesOpen ? '▾' : '▸';
+		changesToggle.setAttribute('aria-expanded', String(changesOpen));
+		changesToggle.dataset.tip = changesOpen ? 'Collapse the changed files' : 'Expand the changed files';
+		changesList.hidden = !changesOpen;
+		changesList.innerHTML = '';
+		for (const file of items) {
+			const row = document.createElement('button');
+			row.type = 'button';
+			row.className = 'change-file';
+			row.dataset.path = file.path;
+			if (file.reviewed) {
+				row.dataset.tip = file.path + ' — reviewed; click to open it';
+				row.innerHTML =
+					'<span class="change-kind reviewed">✓</span><span class="change-path">' +
+					esc(file.path) +
+					'</span><span class="change-stats muted">Reviewed</span>';
+			} else {
+				const flags = [file.changedOutside ? 'changed outside the agent' : '', file.dirty ? 'unsaved in editor' : ''].filter(Boolean);
+				row.dataset.tip = flags.length ? file.path + ' — ' + flags.join(' · ') : file.path;
+				const kind = file.deleted ? 'D' : file.created ? 'A' : 'M';
+				const stats = [];
+				if (file.additions) {
+					stats.push('<span class="stat-add">+' + file.additions + '</span>');
+				}
+				if (file.deletions) {
+					stats.push('<span class="stat-del">−' + file.deletions + '</span>');
+				}
+				row.innerHTML =
+					'<span class="change-kind ' +
+					(file.deleted ? 'deleted' : file.created ? 'created' : 'changed') +
+					'">' +
+					kind +
+					'</span><span class="change-path">' +
+					esc(file.path) +
+					'</span><span class="change-stats">' +
+					(stats.join('') || '<span class="muted">no line changes</span>') +
+					'</span>';
+			}
+			row.addEventListener('click', () => vscode.postMessage({ type: 'openFile', path: file.path }));
+			changesList.appendChild(row);
+		}
 	}
 
 	/** What the last turn's world-book scan injected, so the readout mirrors the request. */
@@ -1502,7 +2047,7 @@
 				renderChats();
 				break;
 			case 'changes':
-				renderChanges(message.count || 0);
+				renderChanges(message.files || [], message.reviewed || []);
 				break;
 			case 'turns':
 				renderTurns(message.turns || []);
@@ -1514,6 +2059,25 @@
 					renderChats();
 				}
 				break;
+			case 'mentionResults': {
+				if (!mention || mention.mode === 'categories') {
+					break;
+				}
+				if (Number(message.id) !== mention.id || message.kind !== mention.mode || String(message.query ?? '') !== mention.query) {
+					break;
+				}
+				mention.items = Array.isArray(message.items) ? message.items : [];
+				mention.hint = typeof message.hint === 'string' ? message.hint : '';
+				mention.active = mention.items.length ? 0 : -1;
+				renderMention();
+				if (mention && mention.autoAccept && mention.items.length === 1) {
+					acceptMention(mention.items[0]);
+				}
+				if (mention) {
+					mention.autoAccept = false;
+				}
+				break;
+			}
 			case 'command':
 				addCommand(message.text);
 				break;
@@ -1567,12 +2131,306 @@
 				draft = false;
 				endTurn(message);
 				break;
+			case 'insertReference':
+				insertReferenceToken(message.token);
+				break;
 			case 'focus':
 				input.focus();
 				break;
 		}
 		scroll();
 	});
+
+	/* ------------------------------------------------------------------ @ references */
+
+	const MENTION_CATEGORIES = [
+		{ kind: 'mode', mode: 'file', label: 'Files', description: 'Search workspace files' },
+		{ kind: 'mode', mode: 'folder', label: 'Folders', description: 'Search workspace folders' },
+		{ kind: 'mode', mode: 'symbol', label: 'Symbols', description: 'Search code symbols' },
+		{ kind: 'mode', mode: 'selection', label: 'Current selection', description: 'Use the code selected in the editor' },
+	];
+
+	/** Whether `@` may start a reference after this character. Mirrors the parser's boundary. */
+	function mentionBoundary(previous) {
+		return previous === undefined || !/[A-Za-z0-9_.@/\\-]/.test(previous);
+	}
+
+	function closeMention() {
+		if (!mention) {
+			return;
+		}
+		clearTimeout(mention.timer);
+		mention.id += 1;
+		mention = null;
+		mentionEl.hidden = true;
+		mentionHead.hidden = true;
+		mentionList.innerHTML = '';
+	}
+
+	function mentionRows() {
+		return mention ? (mention.mode === 'categories' ? MENTION_CATEGORIES : mention.items) : [];
+	}
+
+	function renderMention() {
+		if (!mention) {
+			mentionEl.hidden = true;
+			return;
+		}
+		mentionEl.hidden = false;
+		mentionHead.hidden = mention.mode === 'categories';
+		if (mention.mode !== 'categories') {
+			const label =
+				mention.mode === 'file'
+					? 'Files'
+					: mention.mode === 'folder'
+						? 'Folders'
+						: mention.mode === 'symbol'
+							? 'Symbols'
+							: 'Selection';
+			mentionHead.textContent = label + (mention.query ? ' · ' + mention.query : '');
+		}
+		mentionList.innerHTML = '';
+		const rows = mentionRows();
+		if (!rows.length) {
+			const empty = document.createElement('div');
+			empty.className = 'mention-hint';
+			empty.textContent = mention.hint || (mention.mode === 'symbol' ? 'Type to search symbols' : 'No matches');
+			mentionList.appendChild(empty);
+			return;
+		}
+		mention.active = Math.max(0, Math.min(mention.active, rows.length - 1));
+		rows.forEach((item, index) => {
+			const row = document.createElement('button');
+			row.type = 'button';
+			row.className = 'mention-row' + (index === mention.active ? ' active' : '');
+			row.setAttribute('role', 'option');
+			row.setAttribute('aria-selected', String(index === mention.active));
+			const icon = document.createElement('span');
+			icon.className = 'mention-icon';
+			icon.textContent =
+				item.kind === 'mode' ? '›' : item.kind === 'selection' ? '↔' : item.kind === 'file' ? 'F' : item.kind === 'folder' ? 'D' : 'S';
+			const label = document.createElement('span');
+			label.className = 'mention-label';
+			label.textContent = item.label;
+			const detail = document.createElement('span');
+			detail.className = 'mention-detail';
+			detail.textContent = item.description || '';
+			row.append(icon, label, detail);
+			if (item.token) {
+				row.title = item.token;
+			}
+			row.addEventListener('mousedown', (event) => event.preventDefault());
+			row.addEventListener('mouseenter', () => {
+				if (!mention) {
+					return;
+				}
+				mention.active = index;
+				for (const other of mentionList.querySelectorAll('.mention-row')) {
+					other.classList.toggle('active', other === row);
+					other.setAttribute('aria-selected', String(other === row));
+				}
+			});
+			row.addEventListener('click', () => acceptMention(item));
+			mentionList.appendChild(row);
+		});
+		const active = mentionList.querySelector('.mention-row.active');
+		if (active) {
+			active.scrollIntoView({ block: 'nearest' });
+		}
+	}
+
+	function requestMention(immediate) {
+		if (!mention || mention.mode === 'categories' || mention.composing) {
+			return;
+		}
+		clearTimeout(mention.timer);
+		const send = () => {
+			if (!mention || mention.mode === 'categories') {
+				return;
+			}
+			mention.id += 1;
+			vscode.postMessage({ type: 'mentionQuery', id: mention.id, kind: mention.mode, query: mention.query });
+		};
+		if (immediate) {
+			send();
+		} else {
+			mention.timer = setTimeout(send, 120);
+		}
+	}
+
+	function updateMention() {
+		if (!mention) {
+			return;
+		}
+		const caret = input.selectionStart;
+		if (caret < mention.start + 1) {
+			closeMention();
+			return;
+		}
+		const raw = input.value.slice(mention.start + 1, caret);
+		if (/\s/.test(raw)) {
+			closeMention();
+			return;
+		}
+		mention.caret = caret;
+		if (!raw) {
+			mention.mode = 'categories';
+			mention.query = '';
+			mention.items = [];
+			mention.hint = '';
+			mention.active = 0;
+			renderMention();
+			return;
+		}
+		if (raw.startsWith('"') || raw.startsWith('symbol:"')) {
+			// A path being typed by hand in Cursor's quoted form: the picker has nothing to add.
+			closeMention();
+			return;
+		}
+		let mode = mention.mode;
+		let query = raw;
+		if (raw.startsWith('symbol:')) {
+			mode = 'symbol';
+			query = raw.slice('symbol:'.length);
+		} else if (mode === 'categories') {
+			if (raw.endsWith('/')) {
+				mode = 'folder';
+				query = raw.slice(0, -1);
+			} else {
+				mode = 'file';
+			}
+		} else if (mode === 'symbol') {
+			query = raw.startsWith('symbol:') ? raw.slice('symbol:'.length) : raw;
+		}
+		if (mode === 'selection') {
+			query = '';
+		}
+		if (mode === 'folder' && query.endsWith('/')) {
+			query = query.slice(0, -1);
+		}
+		const changed = mode !== mention.mode || query !== mention.query;
+		mention.mode = mode;
+		mention.query = query;
+		if (changed) {
+			mention.active = 0;
+			mention.hint = '';
+		}
+		renderMention();
+		if (changed) {
+			requestMention(false);
+		}
+	}
+
+	function openMention(start, caret) {
+		closeMention();
+		mention = {
+			mode: 'categories',
+			query: '',
+			start,
+			caret,
+			items: [],
+			hint: '',
+			active: 0,
+			id: 0,
+			timer: 0,
+			composing: false,
+			autoAccept: false,
+		};
+		renderMention();
+		input.focus();
+	}
+
+	function acceptMention(item) {
+		if (!mention) {
+			return;
+		}
+		if (item.kind === 'mode') {
+			mention.mode = item.mode;
+			mention.query = '';
+			mention.items = [];
+			mention.hint = '';
+			mention.active = 0;
+			mention.autoAccept = item.mode === 'selection';
+			renderMention();
+			requestMention(true);
+			return;
+		}
+		const after = input.value.slice(mention.caret);
+		const suffix = /^\s/.test(after) ? '' : ' ';
+		input.setRangeText(item.token + suffix, mention.start, mention.caret, 'end');
+		closeMention();
+		input.focus();
+	}
+
+	function mentionKey(event) {
+		if (!mention || event.isComposing || event.keyCode === 229) {
+			return false;
+		}
+		const rows = mentionRows();
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			event.stopPropagation();
+			closeMention();
+			return true;
+		}
+		if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+			if (rows.length) {
+				event.preventDefault();
+				const delta = event.key === 'ArrowDown' ? 1 : -1;
+				mention.active = (mention.active + delta + rows.length) % rows.length;
+				renderMention();
+			}
+			return true;
+		}
+		if (event.key === 'Enter' || event.key === 'Tab') {
+			if (!rows.length) {
+				closeMention();
+				return false;
+			}
+			event.preventDefault();
+			acceptMention(rows[Math.max(0, Math.min(mention.active, rows.length - 1))]);
+			return true;
+		}
+		return false;
+	}
+
+	/** Escapes a prompt and paints @ references as chips; the textarea itself stays raw. */
+	function renderPromptHtml(text) {
+		const source = String(text ?? '');
+		let out = '';
+		let last = 0;
+		const pattern = /(^|[^A-Za-z0-9_.@/\\-])(@(?:symbol:"[^"]*":[^\s@]+|"[^"]*"(?::\d+(?:-\d+)?|\/)?|symbol:[^\s@]+|[^\s@]+))/g;
+		for (const match of source.matchAll(pattern)) {
+			const index = match.index ?? 0;
+			const start = index + match[1].length;
+			out += esc(source.slice(last, start));
+			const token = match[2];
+			const tailPattern = token.startsWith('@symbol:')
+				? /[.,;:!?，。；：！？]+$/
+				: /[.,;:!?，。；：！？)\]}）】》」』]+$/;
+			const tail = tailPattern.exec(token);
+			const tailText = tail ? tail[0] : '';
+			const body = tailText ? token.slice(0, -tailText.length) : token;
+			out += '<span class="ref-token">' + esc(body) + '</span>' + esc(tailText);
+			last = start + token.length;
+		}
+		out += esc(source.slice(last));
+		return out.replace(/\n/g, '<br/>');
+	}
+
+	/** Cmd+L from the editor: append the selected range as a token, keeping whatever was typed. */
+	function insertReferenceToken(token) {
+		const text = String(token ?? '').trim();
+		if (!text) {
+			return;
+		}
+		closeMention();
+		const at = input.value.length;
+		const lead = input.value && !/\s$/.test(input.value) ? ' ' : '';
+		input.setRangeText(lead + text + ' ', at, at, 'end');
+		input.focus();
+		input.scrollTop = input.scrollHeight;
+	}
 
 	/* ------------------------------------------------------------------ outbound actions */
 
@@ -1581,6 +2439,7 @@
 		if (!text || running) {
 			return;
 		}
+		closeMention();
 		input.value = '';
 		vscode.postMessage({ type: 'send', text });
 		input.focus();
@@ -1591,6 +2450,7 @@
 		if (running) {
 			return;
 		}
+		closeMention();
 		if (trigger === 'normal') {
 			submit();
 			return;
@@ -1621,13 +2481,57 @@
 	$('send').addEventListener('click', submit);
 	$('stop').addEventListener('click', () => vscode.postMessage({ type: 'stop' }));
 	input.addEventListener('keydown', (event) => {
+		if (mention && event.key === 'Enter' && event.shiftKey) {
+			closeMention();
+			return;
+		}
+		if (mentionKey(event)) {
+			return;
+		}
 		if (event.key === 'Enter' && !event.shiftKey) {
+			if (event.isComposing) {
+				return;
+			}
 			event.preventDefault();
 			submit();
 		}
 	});
+	input.addEventListener('input', (event) => {
+		if (mention) {
+			updateMention();
+			return;
+		}
+		if (event.isComposing || event.inputType !== 'insertText' || event.data !== '@') {
+			return;
+		}
+		const caret = input.selectionStart;
+		const at = caret - 1;
+		if (
+			at >= 0 &&
+			input.value[at] === '@' &&
+			mentionBoundary(at === 0 ? undefined : input.value[at - 1]) &&
+			input.value[at + 1] !== '"'
+		) {
+			openMention(at, caret);
+		}
+	});
+	input.addEventListener('compositionstart', () => {
+		if (mention) {
+			mention.composing = true;
+		}
+	});
+	input.addEventListener('compositionend', () => {
+		if (mention) {
+			mention.composing = false;
+			updateMention();
+		}
+	});
 	document.addEventListener('keydown', (event) => {
 		if (event.key !== 'Escape') {
+			return;
+		}
+		if (mention) {
+			closeMention();
 			return;
 		}
 		if (!modelFlyout.hidden) {
@@ -1667,7 +2571,13 @@
 		renderChats();
 	});
 	networkChip.addEventListener('click', () => vscode.postMessage({ type: 'toggleNetwork' }));
-	changesChip.addEventListener('click', () => vscode.postMessage({ type: 'review' }));
+	changesToggle.addEventListener('click', () => {
+		changesOpen = !changesOpen;
+		renderChanges(pendingChanges, reviewedChanges);
+	});
+	$('changes-undo').addEventListener('click', () => vscode.postMessage({ type: 'undoAll' }));
+	$('changes-keep').addEventListener('click', () => vscode.postMessage({ type: 'keepAll' }));
+	$('changes-review').addEventListener('click', () => vscode.postMessage({ type: 'review' }));
 	loreChip.addEventListener('click', () => vscode.postMessage({ type: 'lorebooks' }));
 
 	/* ------------------------------------------------------------------ focus */

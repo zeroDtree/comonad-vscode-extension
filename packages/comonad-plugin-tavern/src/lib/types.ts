@@ -1,81 +1,42 @@
 /**
  * SillyTavern-compatible content types. Field names mirror the on-disk formats exactly — v1/v2/v3
  * character cards, world books, OpenAI presets, personas, regex scripts — so a file written by one
- * tool can be read by the other. This module must not import `vscode` or `cordis`.
+ * tool can be read by the other. Types only: the values that read the formats live with the tavern
+ * plugin, and this module must not import `vscode` or `cordis`.
  */
+
+export type { GenerationTrigger } from '@comonad/lib/generations';
 
 /* ------------------------------------------------------------------ world books */
 
 /** Where an activated entry is injected, verbatim from SillyTavern's `world_info_position`. */
-export const WI_POSITION = {
-	before: 0,
-	after: 1,
-	/** Before the author's note. */
-	anTop: 2,
-	/** After the author's note. */
-	anBottom: 3,
-	atDepth: 4,
-	/** Before the dialogue examples. */
-	emTop: 5,
-	/** After the dialogue examples. */
-	emBottom: 6,
-	outlet: 7,
-} as const;
-
-export type WiPosition = (typeof WI_POSITION)[keyof typeof WI_POSITION];
-
-/**
- * How a generation was started — SillyTavern's `GENERATION_TYPE_TRIGGERS`. An entry may name the
- * types it belongs to; with no types named it belongs to all of them.
- */
-export const GENERATION_TRIGGERS = ['normal', 'continue', 'impersonate', 'swipe', 'regenerate', 'quiet'] as const;
-
-export type GenerationTrigger = (typeof GENERATION_TRIGGERS)[number];
-
-/** How each type reads in the UI, in upstream's wording. */
-export const GENERATION_LABELS: Record<GenerationTrigger, string> = {
-	normal: 'Normal',
-	continue: 'Continue',
-	impersonate: 'Impersonate',
-	swipe: 'Swipe',
-	regenerate: 'Regenerate',
-	quiet: 'Quiet',
-};
-
-export function generationTrigger(value: unknown): GenerationTrigger {
-	return GENERATION_TRIGGERS.includes(value as GenerationTrigger) ? (value as GenerationTrigger) : 'normal';
-}
+export type WiPosition =
+	| 0 // before
+	| 1 // after
+	| 2 // anTop — before the author's note
+	| 3 // anBottom — after the author's note
+	| 4 // atDepth
+	| 5 // emTop — before the dialogue examples
+	| 6 // emBottom — after the dialogue examples
+	| 7; // outlet
 
 /** How secondary keys combine with the primary match, verbatim from `world_info_logic`. */
-export const WI_LOGIC = {
-	/** At least one secondary key matches. */
-	andAny: 0,
-	/** At least one secondary key does not match. */
-	notAll: 1,
-	/** No secondary key matches. */
-	notAny: 2,
-	/** Every secondary key matches. */
-	andAll: 3,
-} as const;
-
-export type WiLogic = (typeof WI_LOGIC)[keyof typeof WI_LOGIC];
+export type WiLogic =
+	| 0 // andAny — at least one secondary key matches
+	| 1 // notAll — at least one secondary key does not match
+	| 2 // notAny — no secondary key matches
+	| 3; // andAll — every secondary key matches
 
 /** How character books and global books are interleaved, verbatim from `world_info_insertion_strategy`. */
-export const WI_STRATEGY = {
-	evenly: 0,
-	characterFirst: 1,
-	globalFirst: 2,
-} as const;
+export type WiStrategy =
+	| 0 // evenly
+	| 1 // characterFirst
+	| 2; // globalFirst
 
-export type WiStrategy = (typeof WI_STRATEGY)[keyof typeof WI_STRATEGY];
-
-export const WI_ROLE = {
-	system: 0,
-	user: 1,
-	assistant: 2,
-} as const;
-
-export type WiRole = (typeof WI_ROLE)[keyof typeof WI_ROLE];
+export type WiRole =
+	| 0 // system
+	| 1 // user
+	| 2; // assistant
 
 /** One `entries[uid]` record of a world book, plus the fields Comonad adds while loading. */
 export interface WorldEntry {
@@ -146,44 +107,6 @@ export interface WorldBook {
 	entries: Record<string, WorldEntry>;
 }
 
-/** The defaults a fresh entry starts from, mirroring SillyTavern's entry template. */
-export const WI_ENTRY_DEFAULTS: Omit<WorldEntry, 'uid' | 'key' | 'content'> = {
-	keysecondary: [],
-	comment: '',
-	constant: false,
-	selective: true,
-	selectiveLogic: WI_LOGIC.andAny,
-	order: 100,
-	position: WI_POSITION.before,
-	disable: false,
-	ignoreBudget: false,
-	excludeRecursion: false,
-	preventRecursion: false,
-	delayUntilRecursion: 0,
-	probability: 100,
-	useProbability: true,
-	depth: 4,
-	group: '',
-	groupOverride: false,
-	groupWeight: 100,
-	vectorized: false,
-};
-
-/** A complete entry, filling every default. */
-export function worldEntry(patch: Partial<WorldEntry> & { uid: number | string; content: string }): WorldEntry {
-	const uid = typeof patch.uid === 'number' ? patch.uid : Number.parseInt(patch.uid, 10) || 0;
-	return { ...WI_ENTRY_DEFAULTS, key: [], ...patch, uid };
-}
-
-export function emptyBook(name: string): WorldBook {
-	return { name, entries: {} };
-}
-
-/** Entries in load order, so a book can be shown without caring about uid keys. */
-export function bookEntries(book: WorldBook): WorldEntry[] {
-	return Object.values(book.entries).sort((left, right) => (left.displayIndex ?? left.uid) - (right.displayIndex ?? right.uid));
-}
-
 /**
  * The character-book format a card carries (V2 spec): a flat array with snake_case keys and the
  * SillyTavern-specific knobs under `extensions`. Cards are stored as written; this is what a world
@@ -235,22 +158,6 @@ export interface RegexScript {
 	minDepth?: number | null;
 	maxDepth?: number | null;
 }
-
-/** Where a regex script applies, verbatim from SillyTavern's `regex_placement`. */
-export const REGEX_PLACEMENT = {
-	userInput: 1,
-	aiOutput: 2,
-	slashCommand: 3,
-	worldInfo: 5,
-	reasoning: 6,
-} as const;
-
-/** How macros inside `findRegex` are treated, verbatim from `substitute_find_regex`. */
-export const SUBSTITUTE_REGEX = {
-	none: 0,
-	raw: 1,
-	escaped: 2,
-} as const;
 
 export interface DepthPrompt {
 	depth: number;
@@ -351,28 +258,7 @@ export interface Character {
 	raw: CharacterCard;
 }
 
-/** Upstream's `talkativeness_default`: the value a card without one speaks at. */
-export const TALKATIVENESS_DEFAULT = 0.5;
-
 /* ------------------------------------------------------------------ personas */
-
-/** Where a persona description goes, verbatim from SillyTavern's `persona_description_positions`. */
-export const PERSONA_POSITION = {
-	inPrompt: 0,
-	/** Deprecated upstream; still accepted on load. */
-	afterChar: 1,
-	anTop: 2,
-	anBottom: 3,
-	atDepth: 4,
-	/**
-	 * Sent nowhere: the persona still supplies the user's name, but its description is left out of the
-	 * request entirely. Upstream spells this position `NONE`.
-	 */
-	none: 9,
-} as const;
-
-/** Upstream's own default for a fresh persona: two messages from the end, in the system role. */
-export const PERSONA_DEPTH_DEFAULT = 2;
 
 /**
  * One end of a persona connection, in upstream's own shape. A `character` id is the card's avatar
@@ -423,18 +309,6 @@ export interface LogitBiasSet {
 	name: string;
 	value: Record<string, number>;
 }
-
-/** `0` keeps a prompt in the ordered list; `1` injects it in chat, at a depth. */
-export const INJECTION_POSITION = {
-	relative: 0,
-	absolute: 1,
-} as const;
-
-/**
- * The key a preset stores its own prompt library under. SillyTavern does not know it and ignores it,
- * which is how the preset keeps every ST field untouched beside it.
- */
-export const PROMPT_LIBRARY_KEY = 'comonad_prompt_library';
 
 /** One entry of the prompt manager: a block, where it goes, and whether it is on. */
 export interface PromptItem {
@@ -559,21 +433,3 @@ export interface WorldInfoSettings {
 	characterStrategy: number;
 	useGroupScoring: boolean;
 }
-
-export const WI_SETTINGS_DEFAULTS: WorldInfoSettings = {
-	scanDepth: 2,
-	budget: 25,
-	budgetCap: 0,
-	recursive: false,
-	maxRecursionSteps: 0,
-	minActivations: 0,
-	maxActivationsDepth: 0,
-	caseSensitive: false,
-	matchWholeWords: false,
-	includeNames: true,
-	characterStrategy: WI_STRATEGY.characterFirst,
-	useGroupScoring: false,
-};
-
-/** What a card import does with the card's tags: ask, keep none, keep all, or keep the known ones. */
-export const TAG_IMPORT = { ASK: 1, NONE: 2, ALL: 3, ONLY_EXISTING: 4 } as const;

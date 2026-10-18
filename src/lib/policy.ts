@@ -26,6 +26,17 @@ export const APPROVAL_LABELS: Record<Approval, string> = {
 	universal_accept: 'Accept all — run everything the mode allows',
 };
 
+/** A mode or approval read from a settings file or a session on disk: a value outside these maps
+ *  falls back, rather than reaching a gate that indexes them and crashes. Own keys only: `in` would
+ *  also accept `toString` and friends off the prototype. */
+export function asWorkMode(value: unknown, fallback: WorkMode = 'sw'): WorkMode {
+	return typeof value === 'string' && Object.hasOwn(MODE_CAPS, value) ? (value as WorkMode) : fallback;
+}
+
+export function asApproval(value: unknown, fallback: Approval = 'manual'): Approval {
+	return typeof value === 'string' && Object.hasOwn(APPROVAL_LABELS, value) ? (value as Approval) : fallback;
+}
+
 export const PRESET_LABELS: Record<string, string> = {
 	ask: 'Ask — edit files with approval, sandboxed shell',
 	plan: 'Plan — research read-only, write a plan',

@@ -4,3 +4,9 @@ node_modules
 .vscode-test/
 *.vsix
 pkgs/
+resources/highlight.js
+resources/highlight.js.map
+packages/comonad-plugin-math/resources/math.js
+packages/comonad-plugin-math/resources/math.js.map
+packages/comonad-plugin-math/resources/katex.min.css
+packages/comonad-plugin-math/resources/fonts/

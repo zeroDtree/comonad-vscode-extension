@@ -1,6 +1,6 @@
 const esbuild = require("esbuild");
-const { readFileSync, readdirSync } = require("node:fs");
-const { join } = require("node:path");
+const { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } = require("node:fs");
+const { dirname, join } = require("node:path");
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -23,13 +23,58 @@ function pluginPackages() {
 		try {
 			const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
 			if (manifest.comonad && manifest.comonad.plugin) {
-				found.push({ name: manifest.name ?? entry.name, entry: join(dir, 'src', 'index.ts'), outfile: join(dir, 'dist', 'index.js') });
+				found.push({
+					name: manifest.name ?? entry.name,
+					dir,
+					manifest,
+					entry: join(dir, 'src', 'index.ts'),
+					outfile: join(dir, 'dist', 'index.js'),
+				});
 			}
 		} catch {
 			// A folder without a readable manifest is not a plugin package.
 		}
 	}
 	return found;
+}
+
+/** A browser bundle a plugin declares (its webview half), and the files it copies from the repo. */
+async function buildPluginAssets(target) {
+	const webview = target.manifest.comonad?.webview;
+	if (webview) {
+		const ctx = await esbuild.context({
+			entryPoints: [join(target.dir, webview.entry)],
+			outfile: join(target.dir, webview.outfile),
+			bundle: true,
+			format: 'iife',
+			platform: 'browser',
+			target: 'es2022',
+			minify: production,
+			sourcemap: !production,
+			sourcesContent: false,
+			logLevel: 'silent',
+			plugins: [esbuildProblemMatcherPlugin],
+		});
+		if (watch) {
+			await ctx.watch();
+		} else {
+			await ctx.rebuild();
+			await ctx.dispose();
+		}
+	}
+	for (const item of target.manifest.comonad?.copy ?? []) {
+		const from = existsSync(join(__dirname, item.from)) ? join(__dirname, item.from) : join(target.dir, item.from);
+		const to = join(target.dir, item.to);
+		if (!existsSync(from)) {
+			throw new Error(`[${target.name}] missing asset ${item.from} — run npm install first`);
+		}
+		mkdirSync(dirname(to), { recursive: true });
+		if (statSync(from).isDirectory()) {
+			cpSync(from, to, { recursive: true, force: true });
+		} else {
+			copyFileSync(from, to);
+		}
+	}
 }
 
 /**
@@ -87,8 +132,31 @@ async function main() {
 				await ctx.rebuild();
 				await ctx.dispose();
 			}
+			await buildPluginAssets(target);
 		}
 		return;
+	}
+
+	// The chat's code highlighter, as its own browser bundle: it is loaded before chat.js and exposes
+	// the `hljs` global. Built here (not as a plugin) because every chat uses it.
+	const highlight = await esbuild.context({
+		entryPoints: ['src/webview/highlight.ts'],
+		outfile: 'resources/highlight.js',
+		bundle: true,
+		format: 'iife',
+		platform: 'browser',
+		target: 'es2022',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		logLevel: 'silent',
+		plugins: [esbuildProblemMatcherPlugin],
+	});
+	if (watch) {
+		await highlight.watch();
+	} else {
+		await highlight.rebuild();
+		await highlight.dispose();
 	}
 
 	const ctx = await esbuild.context(

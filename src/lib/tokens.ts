@@ -16,7 +16,7 @@
 
 /** Upstream's `BYTES_PER_TOKEN`, used by its `guesstimate` fallback. */
 export const BYTES_PER_TOKEN = 3.35;
-/** Upstream's `tokensPerMessage` (4 for `gpt-3.5-turbo-0301`, which nothing sends anymore). */
+/** Upstream's `tokensPerMessage` (3; an older GPT-3.5 framing used 4, which nothing sends anymore). */
 export const TOKENS_PER_MESSAGE = 3;
 /** Upstream's `tokensPadding`, added once per count. */
 export const TOKENS_PADDING = 3;
@@ -36,15 +36,22 @@ type Encoder = (text: string) => number;
 let encoder: Encoder | null = null;
 
 /**
+ * What the encoder last answered for a string. A panel that draws token counts re-counts the same
+ * fields on every push, and a BPE encode is the most expensive thing in that path — so the count of
+ * a string it has already seen is remembered. Bounded: a library that replaces every string simply
+ * starts the cache over.
+ */
+const counted = new Map<string, number>();
+const COUNTED_MAX = 4096;
+
+/**
  * Installs the real encoder, or `null` to fall back to the estimate. Called by the tokenizer service
  * when it has a model loaded (and again with `null` when the model has no tokenizer).
  */
 export function setEncoder(next: Encoder | null): void {
 	encoder = next;
-}
-
-export function hasEncoder(): boolean {
-	return encoder !== null;
+	// Every cached count belongs to the encoder that produced it: a different one answers differently.
+	counted.clear();
 }
 
 /** The encoding of one string, with no message framing. */
@@ -52,11 +59,20 @@ export function countRaw(text: string): number {
 	if (typeof text !== 'string' || !text.length) {
 		return 0;
 	}
-	return encoder ? encoder(text) : guesstimate(text);
+	const seen = counted.get(text);
+	if (seen !== undefined) {
+		return seen;
+	}
+	const count = encoder ? encoder(text) : guesstimate(text);
+	if (counted.size >= COUNTED_MAX) {
+		counted.clear();
+	}
+	counted.set(text, count);
+	return count;
 }
 
 /** One string counted the way upstream counts it: as a message of its own. */
-export function countTokens(text: string): number {
+export function estimateTokens(text: string): number {
 	if (typeof text !== 'string' || !text.length) {
 		return 0;
 	}
@@ -64,7 +80,7 @@ export function countTokens(text: string): number {
 }
 
 /** A message list counted the way upstream's `countTokensOpenAI(…, full)` does. */
-export function countMessages(messages: readonly { content?: string; toolCalls?: unknown }[]): number {
+export function estimateMessages(messages: readonly { content?: string; toolCalls?: unknown }[]): number {
 	let total = 0;
 	for (const message of messages) {
 		total += TOKENS_PER_MESSAGE;

@@ -48,7 +48,7 @@
 }
 
 #wi-worlds {
-	min-height: 76px;
+	min-height: calc(var(--st-row) + 6px);
 	max-height: 112px;
 	overflow-y: auto;
 	display: flex;
@@ -80,7 +80,7 @@
 
 /* A list of tick boxes that stands in for a multi-select: scrolls instead of growing. */
 .wi-checks {
-	min-height: 76px;
+	min-height: calc(var(--st-row) + 6px);
 	max-height: 112px;
 	overflow-y: auto;
 	display: flex;
@@ -192,8 +192,8 @@
 
 #wi-toolbar,
 #wi-toolbar2,
-#wi-toolbar .group,
-#wi-toolbar2 .group {
+#wi-toolbar .wi-tools,
+#wi-toolbar2 .wi-tools {
 	display: flex;
 	align-items: center;
 	gap: 6px;
@@ -207,25 +207,25 @@
 
 /* The file verbs travel together, and sit at the right: the row then breaks between groups rather
    than in the middle of one. */
-#wi-toolbar .group,
+#wi-toolbar .wi-tools,
 #wi-pager {
 	margin-left: auto;
 }
 
 /* The five file verbs share one width (the widest label's), and wrap as a unit when the sidebar is
    too narrow for a single row, so none of them is ever pushed out of view. */
-#wi-toolbar .group {
+#wi-toolbar .wi-tools {
 	flex: 0 1 auto;
 	justify-content: flex-end;
 }
 
-#wi-toolbar .group > button {
+#wi-toolbar .wi-tools > button {
 	flex: 1 1 84px;
 	min-width: 0;
 }
 
 /* The search, the sort and the paging of the list are a group of their own, on its own line. */
-#wi-toolbar2 .group.push {
+#wi-toolbar2 .wi-tools.push {
 	flex: 1 1 100%;
 }
 

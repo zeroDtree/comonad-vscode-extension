@@ -1,6 +1,6 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Service, type Context, type Fiber, type Plugin } from 'cordis';
 import type * as vscode from 'vscode';
@@ -160,6 +160,53 @@ function waiting(fiber: Fiber): string {
 /** The state names, for a row that is not loaded: `pending` is a missing service, `failed` an error. */
 const STATE_NAMES: Record<number, string> = { 0: 'pending', 1: 'loading', 2: 'active', 3: 'failed', 4: 'disposed', 5: 'unloading' };
 
+/**
+ * Copies `from` onto `to` when the bytes differ, creating folders as needed; answers whether anything
+ * was written. A directory is walked, so a file that is already current is left alone.
+ */
+function syncTree(from: string, to: string): boolean {
+	if (!statSync(from).isDirectory()) {
+		try {
+			if (readFileSync(from).equals(readFileSync(to))) {
+				return false;
+			}
+		} catch {
+			// Missing on one side: the copy below creates or replaces it.
+		}
+		mkdirSync(dirname(to), { recursive: true });
+		copyFileSync(from, to);
+		return true;
+	}
+	mkdirSync(to, { recursive: true });
+	let changed = false;
+	for (const entry of readdirSync(from)) {
+		changed = syncTree(join(from, entry), join(to, entry)) || changed;
+	}
+	return changed;
+}
+
+/**
+ * The files an installed copy runs from: its manifest, plus what the manifest's `files` lists. The
+ * packages here declare `dist` and `resources`; a manifest that says nothing gets those two.
+ */
+function runtimeFiles(dir: string): string[] {
+	const names = new Set(['package.json', 'dist', 'resources']);
+	try {
+		const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { files?: unknown };
+		if (Array.isArray(manifest.files)) {
+			for (const name of manifest.files) {
+				// A glob is not a folder to copy: npm's `files` allows patterns, this host does not.
+				if (typeof name === 'string' && name.trim() && !/[{}*?[\]]/.test(name)) {
+					names.add(name.trim());
+				}
+			}
+		}
+	} catch {
+		// A manifest that cannot be read: the defaults above still cover the usual layout.
+	}
+	return [...names];
+}
+
 /** Whether a row's `name` is a file rather than a package: `./x`, `../x`, `/x`, `C:\\x` or `~/x`. */
 export function isPathName(name: string): boolean {
 	return name.startsWith('.') || name === '~' || name.startsWith('~/') || name.startsWith('~\\') || isAbsolute(name);
@@ -213,12 +260,22 @@ export function readRows(file: string): PluginRow[] {
 	});
 }
 
+/** Writes a row list into a `cordis.yml` as it is (comments are not kept). */
+function writeRows(file: string, rows: PluginRow[]): void {
+	mkdirSync(dirname(file), { recursive: true });
+	writeFileSync(file, stringifyYaml(rows.map((row) => ({ ...row, name: row.name || undefined, config: row.config ?? undefined }))));
+}
+
 /** Writes one row's patch into a `cordis.yml`, keeping the rows already there (comments are not). */
 export function writeRow(file: string, patch: PluginRow): void {
 	const rows = readRows(file).filter((row) => row.id !== patch.id);
 	rows.push(patch);
-	mkdirSync(dirname(file), { recursive: true });
-	writeFileSync(file, stringifyYaml(rows.map((row) => ({ ...row, name: row.name || undefined, config: row.config ?? undefined }))));
+	writeRows(file, rows);
+}
+
+/** Takes one row out of a `cordis.yml`, leaving the others as they were. */
+export function removeRow(file: string, id: string): void {
+	writeRows(file, readRows(file).filter((row) => row.id !== id));
 }
 
 /**
@@ -294,10 +351,38 @@ export class Plugins extends Service {
 	}
 
 	/**
+	 * Refreshes the installed copies of the plugins this extension ships. The copy in the library is a
+	 * build artifact and the tree loads it; left at whatever the extension looked like the day it was
+	 * installed, an update makes the kernel and the plugin disagree about what the plugin can do — a
+	 * panel calling a method the old bundle does not have is exactly that. Only a bundled id is
+	 * touched: a plugin of the user's own is never rewritten.
+	 */
+	refreshBundled(): string[] {
+		const updated: string[] = [];
+		for (const source of this.bundled()) {
+			const target = join(this.library, source.id);
+			if (!existsSync(target)) {
+				continue;
+			}
+			let changed = false;
+			for (const name of runtimeFiles(source.dir)) {
+				const from = join(source.dir, name);
+				if (existsSync(from)) {
+					changed = syncTree(from, join(target, name)) || changed;
+				}
+			}
+			if (changed) {
+				updated.push(source.id);
+				this.ctx.log.message(`plugins: refreshed the installed copy of ${source.id} from this build`);
+			}
+		}
+		return updated;
+	}
+
+	/**
 	 * Installs a plugin from a folder: the files are copied into the library and a row naming them is
-	 * written into the user's `cordis.yml` — the same two steps a user would take by hand, so an
-	 * install can be undone by deleting the row, the folder, or both. The list is applied again at the
-	 * end, which is what mounts it.
+	 * written into the user's `cordis.yml` — the same two steps a user would take by hand, and the two
+	 * `uninstall` takes back. The list is applied again at the end, which is what mounts it.
 	 */
 	async install(source: string, id?: string): Promise<PluginState[]> {
 		const name = (id ?? basename(source)).trim();
@@ -332,6 +417,50 @@ export class Plugins extends Service {
 			// and a row that names a file that is not there is reported like any other broken row.
 		}
 		return 'dist/index.js';
+	}
+
+	/**
+	 * The folder in the library an installed row was copied into — what `uninstall` deletes — or
+	 * `undefined` when the row's code is not a copy of one: a built-in, a package, or a file of yours
+	 * that an install never touched.
+	 */
+	installedDirOf(id: string): string | undefined {
+		const row = this.resolveRows().rows.find((entry) => entry.id === id);
+		const name = row?.name ?? row?.id ?? '';
+		if (!row || !name || !isPathName(name) || this.config.plugins[name]) {
+			return undefined;
+		}
+		const file = resolve(row.nameDir || this.ctx.host.home(), expandHome(name));
+		if (!file.startsWith(this.library + sep)) {
+			return undefined;
+		}
+		// The folder below the library the file sits in — and the lent modules are no plugin's folder.
+		const folder = relative(this.library, file).split(sep)[0];
+		return folder === 'node_modules' ? undefined : join(this.library, folder);
+	}
+
+	/**
+	 * Undoes an install: the row is taken out of every list that names it — which disposes it, as
+	 * `apply` finds no row left to load — and the folder the row was copied into is deleted. A row that
+	 * was never installed still goes from the lists; the files it loads are a user's own and stay.
+	 */
+	async uninstall(id: string): Promise<PluginState[]> {
+		const dir = this.installedDirOf(id);
+		for (const file of [this.userFile, this.projectFile]) {
+			// A workspace that is not trusted has no list that is read, so it has none that is written.
+			if (!file || (file === this.projectFile && !this.ctx.host.trusted())) {
+				continue;
+			}
+			if (readRows(file).some((row) => row.id === id)) {
+				removeRow(file, id);
+				this.written.set(file, readFileSync(file, 'utf8'));
+			}
+		}
+		const states = await this.apply(id);
+		if (dir) {
+			rmSync(dir, { recursive: true, force: true });
+		}
+		return states;
 	}
 
 	/** The project's `cordis.yml` — where `set` writes, and where a workspace's own rows live. */
@@ -495,6 +624,9 @@ export class Plugins extends Service {
 			settle = resolve;
 		});
 		try {
+			// Before a row is imported: a bundled plugin's installed copy is what the tree loads, and
+			// it has to be this build's, not the one from the day it was installed.
+			this.refreshBundled();
 			return await this.mountRows();
 		} finally {
 			this.mounting = undefined;

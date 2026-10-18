@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import { COMONAD_BLOCK, DEFAULT_BLOCK_PREFIX } from './blocks';
 
 /** Project instructions (COMONAD.md / AGENTS.md / rules) and auto memory. Pure module. */
 
@@ -64,12 +65,18 @@ export async function loadInstructions(workspace: string, home: string, trusted:
 	return layers;
 }
 
-export function formatInstructions(layers: InstructionLayer[]): string {
+/** The instruction files' own text, without the heading a prompt block adds above it. */
+export function instructionBody(layers: InstructionLayer[]): string {
 	if (layers.length === 0) {
 		return '';
 	}
-	const parts = layers.map((layer) => `### ${layer.source}\n\n${stripHtmlComments(layer.content)}`);
-	return `Project instructions:\n\n${parts.join('\n\n')}`;
+	return layers.map((layer) => `### ${layer.source}\n\n${stripHtmlComments(layer.content)}`).join('\n\n');
+}
+
+export function formatInstructions(layers: InstructionLayer[], heading = DEFAULT_BLOCK_PREFIX[COMONAD_BLOCK.instructions]): string {
+	const body = instructionBody(layers);
+	const head = heading.trim();
+	return head && body ? `${head}\n\n${body}` : head || body;
 }
 
 export function stripHtmlComments(text: string): string {

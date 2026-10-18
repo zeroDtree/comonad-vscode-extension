@@ -1,14 +1,16 @@
 import { deflateSync } from 'node:zlib';
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
-import type { Character, CharacterCard, CharacterData, DepthPrompt, RegexScript } from '@comonad/lib/tavern/types';
-import { TALKATIVENESS_DEFAULT } from '@comonad/lib/tavern/types';
+import type { Character, CharacterCard, CharacterData, DepthPrompt, RegexScript } from './types';
 
 /**
  * Character cards, read and written the way SillyTavern stores them: a PNG with the card in a `tEXt`
  * chunk (`chara` for V2, `ccv3` for V3, base64 JSON), or a plain JSON document. Dependency-free —
  * only the text chunks are touched, so no image decoding is needed.
  */
+
+/** Upstream's `talkativeness_default`: the value a card without one speaks at. */
+export const TALKATIVENESS_DEFAULT = 0.5;
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 /** The `tEXt` keywords a card lives in: V2 in `chara`, V3 in `ccv3`, which wins on read. */

@@ -6,20 +6,197 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
-- **The change journal (shadow git) is a plugin you install, not a feature built in.** It moved out of
-  `src/` into a package of its own, `packages/comonad-plugin-checkpoints`, built as its own bundle
-  (`npm run build:plugins`, part of `npm run compile`): nothing in the shipped tree names it, so
-  `dist/extension.js` carries no journal code at all — no shadow repository, no review commands, no
-  `Cmd+Alt+D` — until the row is there. **Settings → Plugins → Install…** offers it by name (and any
-  other plugin folder): the folder is copied into `~/.comonad/plugins/<id>`, a row is written into your
-  `cordis.yml`, and the list is applied again. Uninstalling is deleting either one. **A window that had
-  the journal before has it off until you install it** — the review commands are hidden rather than
-  offered and broken, `/rewind` says where to install it, and `comonad.checkpoints: false` still pauses a
-  journal that is there. What stays in the host is the vocabulary: the `JournalApi` the agent and the chat
-  panel look up as a type, the storage folder, and the `checkpoints/changed` event. Exporting a chat is
-  not the journal's business, so `comonad.exportSession` stayed with the sessions view. The build now
-  bundles *every* folder under `packages/` that declares `comonad.plugin`, so a third plugin needs no
-  build change.
+- **A first-class Prompts tab edits Comonad's blocks and tool list.** The read-only Prompts sub-tab
+  moved out of Inspect into its own settings page. It lists only Comonad's nine prompt blocks and the
+  registered tool definitions: blocks can be reordered, switched off, and their static prefix edited
+  (dynamic content stays generated and read-only); tools can be reordered and individually switched,
+  while their descriptions and schemas remain read-only. Under ST the block order and switches mirror
+  the active preset read-only, with a link to ST → Presets; the edited prefixes still reach the
+  composed request. The layout is stored in `comonad.prompts` and `comonad.toolPrompts`.
+
+- **ST takes over every turn, with a built-in Default preset.** When the tavern row is loaded and
+  `tavernEnabled` is on, each user-facing turn is composed by the ST collection — even with no
+  character, persona, book or preset selected, which now uses the built-in **Default**. Comonad's
+  nine blocks (Identity, Tools, Instructions, Memory, Todos, Skills, Sub-agents, Lore index, Context)
+  are ordinary preset rows: reorder or switch them like any other entry, while their generated text
+  stays read-only and is previewed in the editor and in Inspect → Prompts. A single **Tools** row
+  controls the request's API tool list: definitions still travel in the `tools` parameter, and with
+  the row off no tools are offered and a call is refused before it runs. Presets store only the
+  generated rows' place and switch; *Start from Default* writes an editable copy, and merely loading
+  the plugin writes nothing. A `compose` failure still falls back to `[system, …history]`.
+
+- **The settings sidebar resizes and collapses to an icon rail.** Drag the sash between the sidebar
+  and the page (150–380px); below the minimum it snaps to a 52px rail with only the tab icons — one
+  hand-drawn 16px stroke icon per page (Agent, Graph, ST, Rules, MCP, Tools, Inspect, Plugins), and
+  a plugin pane can bring its own SVG icon. Double-click the sash toggles the rail; arrow keys,
+  Home and End work on it when focused; the width is kept with the panel's tab state.
+
+- **Fenced code blocks are syntax-highlighted.** A generated `resources/highlight.js` (highlight.js's
+  common language set) loads before `chat.js`; code fences are colored by their language — Python,
+  JavaScript/TypeScript, JSON, shell, C/C++, Java, Go, Rust, SQL, Markdown and the rest — with
+  theme-aware token colors, while `text`/`plaintext` stay literal and unknown languages fall back to
+  auto-detection. Shell tool cards use the same highlighter. Copy still returns the exact source.
+
+- **Markdown math is an external KaTeX plugin, and selecting it copies the source.** The new
+  `comonad-plugin-math` row contributes its browser bundle, KaTeX stylesheet and fonts to the chat
+  through a generic `chatWebview` asset service; the core renderer recognizes `$...$`, `$$...$$`,
+  `\(...\)` and `\[...\]` in assistant and command Markdown and calls the plugin's renderer (code
+  stays literal, and with the row off the delimiters stay literal). The same webview script
+  intercepts in-message copy: a selection is walked back to Markdown, formulas come out as
+  `$...$` / `$$...$$`, code as fences, and emphasis/links as Markdown — while the message Copy
+  buttons still copy the exact raw text. Install it from Settings → Plugins; fonts are local.
+
+- **A prompt can be edited and resent in place; Rewind is gone.** A user message now carries a pencil:
+  the bubble becomes a textarea (Enter resends, Shift+Enter is a newline, Esc cancels), and sending
+  discards that turn's reply and every later turn. When the agent wrote files at or after the turn,
+  the editor offers **Restore files too**, using the journal's per-turn restore point with the usual
+  dirty-editor and outside-change checks. The `comonad.rewind` command, `/rewind` and its QuickPick
+  were removed: they were not discoverable from the chat, and the edit makes the same decision where
+  the prompt is.
+
+- **Cursor-style `@` references in the composer.** Typing `@` opens a keyboard-driven picker for
+  files, folders, symbols and the current editor selection. Choosing an item inserts a text token in
+  the prompt — `@src/a.ts`, `@src/a.ts:9-13`, `@src/lib/`, `@symbol:src/a.ts:AuthService`, with
+  quoted paths for spaces — which the transcript paints as a chip. The token is resolved when the
+  turn runs (and again on regenerate/edit-and-resend) into a numbered context block: 20k chars per
+  reference, 60k total, read confinement and deny rules applied, missing/denied references reported
+  as error blocks instead of failing the turn. Selecting code in an editor and pressing **Cmd+L**
+  (`Ctrl+L`, or **Comonad: Add Selection to Chat**) appends the same `@path:lines` token to the
+  composer and opens the chat; with no selection the chord still falls through to VS Code's
+  select-line command. `@` references in custom command templates now use this richer resolver too.
+
+- **An expanded shell card shows the command before its output.** `run_shell` / `run_shell_readonly`
+  cards now open with the whole command — not the clipped JSON args in the header — highlighted as
+  bash with a Copy button, followed by the result. The same highlighter is used for fenced `bash`
+  blocks in replies and tool output.
+
+- **Pending changes are a list above the composer, and Regenerate can restore files too.** The
+  journal's pending files now sit above the input as a collapsible Cursor-style list — path, `+N −M`,
+  **Undo / Keep / Review** for all of them, and a click opens the file in the normal editor with the
+  inline review (the separate Comonad diff tab is still on **Show Diff**). When nothing is pending,
+  the list stays as the files already reviewed, newest decision first; a new pending change takes
+  the list back, so it never mixes the two. Regenerating the last
+  reply asks whether the files the agent wrote since that prompt should be restored too, with the
+  same dirty-editor and outside-change checks as the edit flow. The old `⊞ N changes` chip is gone.
+  The Comonad diff tab's baseline side was empty — the baseline document's own URI scheme was
+  rejected when resolving its path — so it painted every current line as an addition; it now shows
+  the accepted baseline and the real hunks.
+
+- **Agent edits are reviewed inline, block by block — and the repository has its own changes view.**
+  A file the agent wrote now opens with its changed lines painted in the editor — additions as solid
+  green blocks with a green gutter bar, deletions as a red-marked block with the removed text on a red
+  chip — and **Undo / Keep** at the bottom edge of every change block, while **Undo File / Keep
+  File / Show Diff** are both a text row at the top of the file and coloured actions in the editor
+  title bar (a green Keep, a neutral Undo, a blue Diff; a code lens itself cannot carry colours).
+  **Show Diff** opens the
+  one-column (inline) diff editor, so the same review is also available as real red and green lines
+  with VS Code's own hunk navigation. Keep accepts that block into the file's *accepted
+  baseline* and leaves the rest pending; Undo puts the block back; the review survives further agent
+  turns until every block is accepted. The journal therefore tracks an accepted baseline per file
+  (`keepHunk`), `undo` now restores that baseline rather than the pre-agent file, and a restore drops
+  the blocks accepted after its mark while keeping the ones accepted before it. A dirty editor hides
+  the block actions until it is saved; a file changed outside the agent keeps only the file-level
+  actions, so a manual edit is never silently folded into an agent change. `comonad.inlineDiff` turns
+  the editor layer off; the QuickPick review and `/review` are unchanged. Alongside it, the
+  new **Git Changes** view (Sessions → Git Changes) lists the real repository's **Staged**,
+  **Changes**, **Untracked** and **Merge** files through the built-in Git extension: clicking opens
+  VS Code's diff, and stage / unstage / discard (confirmed when destructive) work from the item and
+  from the view title. The journal still only records what the agent's own tools write — shell
+  commands show up in the Git view, not in the inline review.
+
+- **The ST world-book page is laid out without the settings cards.** The settings panel's own `.group`
+  card style — border, padding, a 22px margin and a max width — leaked into the world-book toolbar,
+  which used the same generic class name for its button clusters: the file verbs, the list tools and
+  the search row were drawn as three separate cards, and the verbs wrapped onto a line of their own.
+  The toolbar clusters are `wi-tools` now, so only their own layout applies. The *Active World(s)*
+  and character/tag filter lists also size to their contents up to their scroll limit instead of
+  reserving 76px of empty box under a single tick.
+
+- **An installed plugin copy follows the extension's build.** A plugin the extension ships is copied
+  into `~/.comonad/plugins` when it is installed, and the tree loads *that* copy — which used to stay
+  at whatever the extension looked like the day it was installed. After an update the kernel and the
+  plugin then disagreed about what the plugin can do (the settings panel calling a method the old
+  bundle no longer had), and reinstalling was the only cure. A plugin host now refreshes an installed
+  copy of a bundled plugin from the extension's own `dist` and `resources` at startup, copying only
+  files whose bytes differ; a plugin of the user's own is never touched. The ST pane also opens each
+  kind on its first item (switching tabs sent an empty selection, which blanked the editor beside a
+  full list), heals its selection when the open item disappears, and the Inspect → Prompts pane says
+  why the SillyTavern collection could not be read instead of waiting on "Reading the prompts…"
+  forever.
+
+- **Editing in the ST tab no longer stutters.** One autosave used to cost two full library re-reads
+  (the save itself re-read every file, including parsing every PNG card, and the `.comonad` file
+  watcher re-read everything again for the write Comonad had just made) plus two or three full state
+  pushes that re-counted every entry's tokens and redrew every tab of the settings panel. Now a save
+  writes one file and puts *that file* back into the catalog — exactly what a full read would have
+  produced — the watcher only reacts to edits made elsewhere (it compares what is on disk with what
+  Comonad last wrote there), and the pushes a single action used to multiply into are coalesced into
+  one. The panels redraw only what changed: a state push that lands mid-keystroke no longer rebuilds
+  the form under the caret (every field has a stable id and is put back if it must be redrawn), the
+  world-book pickers and knobs are guarded like the entry list already was, and only the tab on screen
+  is rendered. The model list is fetched off the push path, so a slow endpoint cannot stall a state
+  message, and token counts are cached per text. The `comonad.tavernSource` setting is gone — it has
+  been ignored for a while, and content is read from Comonad's own library only.
+
+- **Bugs fixed along the way.** An action whose id was no longer in the library (favourite, avatar,
+  export, card lore, rename) fell back to the *first* character and acted on the wrong card; renaming
+  a world book onto a name that was taken overwrote that book's file and deleted the old one — it is
+  refused now, and a renamed book follows into the settings, chats and personas that named it. The
+  unnamed subagent spawn was `agents[0]`, which silently became whichever custom agent sorts first
+  alphabetically; it is the `explore` agent by name. Two parallel background subagents deleted each
+  other's depth tracking, so the depth limit never tripped for nested spawns. A hand-edited settings
+  file or a stale session with an unknown mode crashed the policy gate; both fall back to safe values
+  now. Saving the settings without ever opening the ST tab wrote the tab's empty form over the whole
+  content configuration — a pane only contributes what it has drawn. A restore whose outside-changes
+  question was cancelled still cut the conversation; an *Undo* chosen per file could never restore
+  the picked subset. Two drafts of the same name wrote over each other's file; a character rename
+  onto a name another card owns did too. The chat panel's lorebook picker no longer errors when the
+  tavern row is off (it says which row to turn on). A journal that cannot be reached (git missing)
+  no longer fails the write itself — the write lands unrecorded, as with the row off — and
+  `journal.json` is replaced atomically instead of being truncated into an empty history. Token
+  counting now always goes through the kernel's counter (a plugin's bundle carries its own copy of
+  the pure estimator, which never sees the loaded tokenizer), and the web-tokenizer files — DeepSeek,
+  Qwen2, Claude, Llama and the rest — are a provider the *kernel* installs again: counting is not a
+  feature that may go missing with a content row, and `comonad.tokenizerDir` moved to the kernel's
+  keys with it. The journal's vocabulary moved to `lib/journal.ts`, so the review surface and the
+  service behind it no longer import each other, and the ST file-format types moved into the tavern
+  plugin beside the code that reads those formats.
+
+
+
+- **A plugin can be uninstalled.** Every row that is not built in gets an **Uninstall** button in
+  **Settings → Plugins**, behind a confirmation that names the folder it will delete. The row is taken
+  out of every `cordis.yml` that names it — which disposes the plugin and anything that stood on it —
+  and the folder an install copied into `~/.comonad/plugins` goes with it; the modules lent to plugins
+  stay. A row that was never installed is uninstalled the same way, but only its row goes: the files it
+  loads are yours. Both steps can still be done by hand.
+
+- **The change journal (shadow git) is a row of the shipped tree — on by default.** An irreversible
+  write is a worse default than a shadow repository, so the journal ships in `dist/extension.js` and
+  loads with the kernel (`src/services/checkpoints.ts`, with its `src/lib/diff.ts` and
+  `src/ui/review.ts`): every window has the review commands and `Cmd+Alt+D` with no install step. One
+  `cordis.yml` line still turns the row off — and then a write is simply a write: nothing is journaled,
+  no review command is registered, and `comonad.checkpoints: false` still pauses a journal that is
+  there. The agent and the chat panel still reach it through
+  `ctx.get('checkpoints')`, so the row toggle is the same optional read it always was. Exporting a chat
+  is not the journal's business, so `comonad.exportSession` stays with the sessions view.
+
+- **A plugin owns its settings and its formats; the kernel keeps only the seam.** The line between the
+  kernel and the ST content layer now follows one rule — a feature whose absence is a *simpler* product
+  may live in a plugin, one whose absence is a silently *worse* one may not — and the code says so:
+  the tavern's 37 settings keys, their defaults and their typing moved into the plugin's own
+  `lib/settings.ts` (the kernel's `Config` and `CONFIG_KEYS` know none of them; writes still go through
+  `ctx.settings.update`, and `Host.config()` reports every key the manifest declares, kernel and plugin
+  alike). `src/lib/tavern/types.ts` is types only now — the format constants and factories live in the
+  plugin beside the code that reads the formats, and the generation vocabulary (`/continue`, the Send
+  menu) turned out to be the kernel's own and moved to `src/lib/generations.ts`. The vectors service
+  and `lib/vectors.ts` went where their only customer is: the tavern mounts them and `compose` (now
+  async) runs the vectorized world-info scan itself, handing the agent an overflow alert and the
+  automations to run instead of asking it to read `wi*` settings. The kernel keeps the whole counter —
+  tiktoken, the bytes estimate, the `ctx.tokenizers.use(...)` socket, and the web-tokenizer files it
+  installs itself. The build
+  now bundles *every* folder under `packages/` that declares `comonad.plugin`, so a third plugin needs
+  no build change.
 
 - **A setting picked from the chat sticks in a window with no folder open.** A mode, an approval, a model or
   the display form all write through the host, which asked for *workspace* settings — a write VS Code refuses
@@ -34,7 +211,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   instead of keeping the index it took before the fold. A continuation therefore still extends the reply it was
   asked to continue — the stale index could name the turn's own tool call, which left the record with an
   assistant call no result answered (every later request refused) or wrote the text twice onto itself. A fold
-  during a quiet turn or an impersonation keeps the summary it wrote, so the record, the rewind points and the
+  during a quiet turn or an impersonation keeps the summary it wrote, so the record, the restore points and the
   summary describe the same conversation again, and a summary that is extended keeps the count of turns it
   already stood in for rather than restarting at the one message it replaced. Elision steps every oversized
   tool result down when the request still does not fit (the running estimate no longer forgets the steps it
@@ -112,8 +289,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   Neither takes the rest with it: without the tavern plugin a turn is exactly `[system, …history]` (the
   agent reads the layer as `ctx.get('tavern')`, so the composition port is simply absent), the ST tab
   disappears from the settings panel, and `/char`, `/persona`, `/lore`, `/preset` and the tavern's title
-  bar commands are not registered — while `/help`, `/status`, `/rewind` and the model, tools, MCP, rules
-  and inspect tabs are untouched. Without the journal, a write is just a write (nothing is recorded, the
+  bar commands are not registered — while `/help`, `/status` and the model, tools, MCP, rules and
+  inspect tabs are untouched. Without the journal, a write is just a write (nothing is recorded, the
   tool is unaffected), and the review pane goes with it. Every reference the tavern layer had grown into
   the agent, the slash commands, the settings panel and the environment watchers is behind one of those
   seams now, and the agent reaches both features the same way: `ctx.get(...)`, never as an injection.
@@ -151,9 +328,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   turn the model answers, which is where a preset's `send_if_empty` sits upstream. A quiet generation's
   prompt is sent that way too; it used to be dropped entirely, since a quiet turn is never written down.
 
-- **The composer's actions sit at the right edge of the input box.** Send, the review chip and the
-  generation caret were held apart by a `grow` spacer whose rule only exists in the *settings*
-  webview's stylesheet, so the whole row read left-aligned. They are one group now (`#sendbar`), pinned
+- **The composer's actions sit at the right edge of the input box.** Send and the generation caret
+  were held apart by a `grow` spacer whose rule only exists in the *settings* webview's stylesheet,
+  so the whole row read left-aligned. They are one group now (`#sendbar`), pinned
   right and kept together when the row wraps on a narrow panel.
 - **Gemini 3's thought signatures are kept.** A Gemini 3 function call comes back with a
   `thought_signature` in `extra_content`, and the next request is refused —
@@ -178,7 +355,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   — a fork is announced twice, as a new chat and then as the copy with the turns after the click
   removed, and the snapshot taken before the second one won — so a fork from a middle turn looked like
   the whole conversation. The transcript a panel is given is now read after the wait, and one that got
-  shorter behind its back (the same fork, or a rewind) is handed over again.
+  shorter behind its back (the same fork, or a prompt edit) is handed over again.
 
 - **Checkpoints are per file, not per turn.** Every write the agent makes (`write_file`, `apply_patch`,
   `apply_edits`, `write_plan`) is journaled with the file's content before and after it, through
@@ -186,13 +363,15 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   session keeps its full history.
   - **Review** lists only the journaled files, from one `git diff` against a temporary index that holds
     just those paths (no `ls-files`, no process per file). A file the user changed outside the agent is
-    flagged; undo and rewind ask once — *Restore all* or *Choose per file* — and never overwrite it
+    flagged; undo and restore ask once — *Restore all* or *Choose per file* — and never overwrite it
     silently. A file open with **unsaved** text refuses until it is saved, and nothing is written on a
     refusal.
   - **Shell commands are not tracked**, and the review says so in its title.
-  - **Rewind** goes back to a turn's rewind point, which is taken before that turn's first write.
-  - The old `Revert Files to Checkpoint` command is gone: rewind covers it, with the same checks.
-  - Shadow stores from the snapshot design are removed on startup; old rewind points are dropped.
+  - **Editing a prompt** can restore the files the agent wrote at or after that turn; the restore
+    point is taken before the turn's first write.
+  - The old `Revert Files to Checkpoint` and `Rewind Conversation and Files` commands are gone: editing
+    a prompt covers the file side, with the same checks.
+  - Shadow stores from the snapshot design are removed on startup; old restore points are dropped.
 - **An Inspect tab: what the model is told, and how a tool call is gated.** The read-only views now live
   under one top-level tab, **Inspect**, with two sub-tabs of its own:
   - **Tool Policy Flow (TPF)** — the old **Flow** tab under a name that says what it draws; the chart is
@@ -518,8 +697,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   Chat** reveals the `comonad.chat` webview view. The `⧉` button and **Comonad: Open Chat in a
   New Window** still open the standalone editor panel (`comonad.chatWindow` pops it out).
 - The composer is now the Comonad send-bar: Work mode, Approval, Context and Network pills beside
-  the model picker, plus a chip for pending changes that opens the review. The Comonad status-bar
-  items were removed.
+  the model picker, with pending changes listed above the input. The Comonad status-bar items were
+  removed.
 - The Context pill decides what this chat sends back and is stored per chat (new chats start from the
   Context setting; replies start from the Display setting).
 - The model pill is now a Cursor-style menu: **Reasoning** effort (sent as `reasoning_effort` to

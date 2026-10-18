@@ -82,7 +82,7 @@
 
 	/* ------------------------------------------------------------------ tabs */
 
-	/* The Inspect tab's own sub-tabs: the tool policy flow and the prompt list. */
+	/* The Inspect tab's own sub-tabs: the tool policy flow and the plugin dependency tree. */
 	function showInspect(name) {
 		if (!document.querySelector('.subtab[data-inspect="' + name + '"]')) {
 			name = 'flow';
@@ -96,12 +96,6 @@
 		}
 		for (const pane of document.querySelectorAll('[data-inspect-pane]')) {
 			pane.hidden = pane.dataset.inspectPane !== name;
-		}
-		if (name === 'prompts') {
-			// Show what was read last — or say it is being read — before asking for a fresh slice, so
-			// reopening the sub-tab is never a blank pane.
-			renderPrompts();
-			post({ type: 'prompts' });
 		}
 		scheduleFlow();
 	}
@@ -127,16 +121,168 @@
 		if (name === 'inspect') {
 			showInspect(activeInspect);
 		}
+		if (name === 'prompts') {
+			// Paint the last slice (or "reading…") before asking for a fresh one, so reopening the tab
+			// is never a blank page.
+			renderPrompts();
+			post({ type: 'prompts' });
+		}
 		// A pane may remember a sub-tab of its own: it is shown the tab that is now on screen.
 		if (panes.has(name) && panes.get(name).show) {
 			panes.get(name).show();
 		}
+		// Only the tab on screen is drawn — the pushes that landed while it was hidden are cached, and
+		// this is where the cache is spent.
+		renderActive();
+		// The sidebar search travels from page to page: the new page's rows answer to it too.
+		applySearch();
 		schedulePreview();
 		scheduleFlow();
 	}
 
 	for (const tab of document.querySelectorAll('.tab')) {
 		tab.addEventListener('click', () => showTab(tab.dataset.tab));
+	}
+
+	/* ------------------------------------------------------------------ sidebar width */
+
+	// Cursor's settings rail: drag the sash to resize; past the minimum it becomes an icon rail, and
+	// double-click (or Home/End on the focused sash) toggles between the two. The width is kept in the
+	// webview state beside the active tab, so it survives the panel reloading.
+	const SIDE_RAIL = 52;
+	const SIDE_MIN = 150;
+	const SIDE_MAX = 380;
+	const side = $('side');
+	const resizer = $('side-resizer');
+	const clampSide = (value) => Math.max(SIDE_MIN, Math.min(SIDE_MAX, value));
+	let sideWidth = clampSide(Number((vscode.getState() || {}).sideWidth) || 180);
+	let sideCompact = Boolean((vscode.getState() || {}).sideCompact);
+	const applySide = (persist) => {
+		if (!side || !resizer) {
+			return;
+		}
+		side.classList.toggle('compact', sideCompact);
+		side.style.width = (sideCompact ? SIDE_RAIL : sideWidth) + 'px';
+		resizer.setAttribute('aria-valuenow', String(sideCompact ? SIDE_RAIL : sideWidth));
+		resizer.setAttribute('aria-valuemin', String(SIDE_RAIL));
+		resizer.setAttribute('aria-valuemax', String(SIDE_MAX));
+		if (persist) {
+			store.set({ sideWidth, sideCompact });
+		}
+	};
+	applySide(false);
+	if (side && resizer) {
+		let drag = null;
+		const end = (event) => {
+			if (drag === null) {
+				return;
+			}
+			drag = null;
+			document.body.classList.remove('resizing');
+			if (resizer.hasPointerCapture?.(event.pointerId)) {
+				resizer.releasePointerCapture(event.pointerId);
+			}
+			applySide(true);
+		};
+		resizer.addEventListener('pointerdown', (event) => {
+			if (event.button !== 0) {
+				return;
+			}
+			drag = event.pointerId;
+			resizer.setPointerCapture?.(event.pointerId);
+			document.body.classList.add('resizing');
+			event.preventDefault();
+		});
+		resizer.addEventListener('pointermove', (event) => {
+			if (drag === null) {
+				return;
+			}
+			const width = event.clientX - side.getBoundingClientRect().left;
+			if (width < SIDE_MIN - 12) {
+				sideCompact = true;
+			} else {
+				sideCompact = false;
+				sideWidth = clampSide(width);
+			}
+			applySide(false);
+		});
+		resizer.addEventListener('pointerup', end);
+		resizer.addEventListener('pointercancel', end);
+		resizer.addEventListener('dblclick', () => {
+			sideCompact = !sideCompact;
+			applySide(true);
+		});
+		resizer.addEventListener('keydown', (event) => {
+			if (event.key === 'ArrowLeft') {
+				if (sideCompact) {
+					return;
+				}
+				if (sideWidth <= SIDE_MIN) {
+					sideCompact = true;
+				} else {
+					sideWidth = clampSide(sideWidth - 12);
+				}
+			} else if (event.key === 'ArrowRight') {
+				if (sideCompact) {
+					sideCompact = false;
+					sideWidth = SIDE_MIN;
+				} else {
+					sideWidth = clampSide(sideWidth + 12);
+				}
+			} else if (event.key === 'Home') {
+				sideCompact = true;
+			} else if (event.key === 'End') {
+				sideCompact = false;
+				sideWidth = SIDE_MAX;
+			} else {
+				return;
+			}
+			event.preventDefault();
+			applySide(true);
+		});
+	}
+
+	/* ------------------------------------------------------------------ search */
+
+	// The sidebar search, Cursor's: it filters the settings rows of the page on screen, and the query
+	// travels from page to page. A row is its title and its description, which is what is in the DOM.
+	const search = $('search');
+	function applySearch() {
+		if (!search) {
+			return;
+		}
+		const query = search.value.trim().toLowerCase();
+		for (const field of document.querySelectorAll('section[data-pane]:not([hidden]) .field')) {
+			field.hidden = Boolean(query) && !field.textContent.toLowerCase().includes(query);
+		}
+		// A group with nothing left in it goes too, and so does the title above it, so the page reads as
+		// the hits and nothing else.
+		for (const group of document.querySelectorAll('section[data-pane]:not([hidden]) .group')) {
+			group.hidden = Boolean(query) && ![...group.querySelectorAll('.field')].some((field) => !field.hidden);
+		}
+		for (const title of document.querySelectorAll('section[data-pane]:not([hidden]) .group-title')) {
+			const group = title.nextElementSibling;
+			title.hidden = Boolean(query) && (!group || group.hidden);
+		}
+	}
+	if (search) {
+		search.addEventListener('input', () => {
+			applySearch();
+		});
+		search.addEventListener('keydown', (event) => {
+			if (event.key === 'Escape') {
+				search.value = '';
+				applySearch();
+				search.blur();
+			}
+		});
+		document.addEventListener('keydown', (event) => {
+			if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
+				event.preventDefault();
+				search.focus();
+				search.select();
+			}
+		});
 	}
 	/* ------------------------------------------------------------------ form */
 
@@ -149,7 +295,18 @@
 		return option;
 	}
 
+	/** A field the user is in is left alone: a state push can land in the middle of a keystroke. */
+	function put(node, value) {
+		const wanted = String(value ?? '');
+		if (node && document.activeElement !== node && node.value !== wanted) {
+			node.value = wanted;
+		}
+	}
+
 	function fillSelect(node, items, current) {
+		if (!node || document.activeElement === node) {
+			return;
+		}
 		node.innerHTML = '';
 		for (const entry of Object.entries(items || {})) {
 			node.append(option(entry, current));
@@ -161,6 +318,9 @@
 
 	function fillModels(models, current) {
 		const node = $('model');
+		if (!node || document.activeElement === node) {
+			return;
+		}
 		node.innerHTML = '';
 		for (const model of models || []) {
 			node.append(option([model.id, model.label + (model.description ? ' — ' + model.description : '')], current));
@@ -177,19 +337,25 @@
 		fillSelect($('display'), state.labels.displays, config.displayForm);
 		fillSelect($('context'), state.labels.contexts, config.contextForm);
 		fillModels(state.models, config.model);
-		$('network').checked = Boolean(config.network);
-		$('wd').value = config.workingDirectory;
-		$('timeout').value = String(config.commandTimeout);
-		$('plans').value = config.planDirectory;
-		$('deny').value = (config.denyReadPaths || []).join('\n');
-		$('confine-read').checked = Boolean(config.confineRead);
-		$('confine-write').checked = Boolean(config.confineWrite);
-		$('steps').value = String(config.maxSteps);
+		const checked = (id, value) => {
+			const node = $(id);
+			if (node && document.activeElement !== node) {
+				node.checked = Boolean(value);
+			}
+		};
+		checked('network', config.network);
+		put($('wd'), config.workingDirectory);
+		put($('timeout'), String(config.commandTimeout));
+		put($('plans'), config.planDirectory);
+		put($('deny'), (config.denyReadPaths || []).join('\n'));
+		checked('confine-read', config.confineRead);
+		checked('confine-write', config.confineWrite);
+		put($('steps'), String(config.maxSteps));
 		const rules = config.permissions || {};
-		$('rules-allow').value = (rules.allow || []).join('\n');
-		$('rules-ask').value = (rules.ask || []).join('\n');
-		$('rules-deny').value = (rules.deny || []).join('\n');
-		$('graph').value = config.graph;
+		put($('rules-allow'), (rules.allow || []).join('\n'));
+		put($('rules-ask'), (rules.ask || []).join('\n'));
+		put($('rules-deny'), (rules.deny || []).join('\n'));
+		put($('graph'), config.graph);
 		clearDirty();
 	}
 
@@ -238,7 +404,14 @@
 	}
 
 	$('model-refresh').addEventListener('click', () => post({ type: 'refresh' }));
-	$('pr-refresh').addEventListener('click', () => post({ type: 'prompts' }));
+	$('pr-refresh').addEventListener('click', () => {
+		// A refresh is a fresh read: unsaved layout edits are dropped, as on the Inspect tab.
+		promptDirty = false;
+		promptLayout = null;
+		post({ type: 'prompts' });
+	});
+	$('pr-save').addEventListener('click', savePrompts);
+	$('pr-reset').addEventListener('click', resetPrompts);
 	$('model-add').addEventListener('click', () => post({ type: 'configureModel' }));
 	$('graph-reset').addEventListener('click', () => {
 		$('graph').value = state ? state.defaultGraph : '';
@@ -593,6 +766,7 @@
 	 * The plugin list: what each row is, where it came from, and whether it is loaded. A row that is
 	 * enabled can be turned off here — the host writes that into the workspace's `cordis.yml` and applies
 	 * the list again, so the change is the same one you would make by hand, and it survives a reload.
+	 * A row that is not built in can also be uninstalled: its row goes and its installed folder with it.
 	 */
 	function renderPlugins() {
 		const plugins = state.plugins || { rows: [], project: '', user: '', writable: '', trusted: true };
@@ -642,6 +816,19 @@
 			button.title = row.enabled ? 'Turn this row off' : 'Turn this row on';
 			button.addEventListener('click', () => post({ type: 'plugins', action: 'toggle', id: row.id, disabled: row.enabled }));
 			actions.append(button);
+			// A built-in row ships with Comonad and cannot be uninstalled, only turned off; anything
+			// else is something the user put there — an installed copy in the library, or a row of
+			// their own — and can be taken away again (the host asks before it deletes anything).
+			if (row.target !== 'built-in') {
+				const remove = document.createElement('button');
+				remove.className = 'secondary';
+				remove.type = 'button';
+				remove.textContent = 'Uninstall';
+				remove.disabled = !plugins.writable;
+				remove.title = 'Remove this row — and the copy in your library, when there is one';
+				remove.addEventListener('click', () => post({ type: 'plugins', action: 'uninstall', id: row.id }));
+				actions.append(remove);
+			}
 			tr.append(actions);
 			node.append(tr);
 		}
@@ -674,106 +861,383 @@
 
 	/* ------------------------------------------------------------------ prompts */
 
-	// Every prompt the model can be given, grouped by where it comes from: Comonad's own system-prompt
-	// blocks, each tool's definition, and the SillyTavern collection this chat would send. The host reads
-	// the slice on demand; the row that is picked is remembered with the tab.
+	// The Prompts tab: Comonad's blocks (order, switch, editable static prefix) and the tool
+	// definitions (order, switch, read-only definition). The host reads the slice on demand; under ST
+	// the block order/switches mirror the active preset, while the prefix stays ours.
 	let promptsData = null;
+	/** The editable copy: arrays whose order is the send order. */
+	let promptLayout = null;
+	let promptDirty = false;
+	/** The row being dragged: { group, index }, or null. */
+	let promptDrag = null;
 
-	function promptRows(data) {
-		const rows = [];
-		for (const block of data.comonad || []) {
-			rows.push({
-				group: 'Comonad',
-				id: 'comonad:' + block.name,
-				name: block.name,
-				note: block.tokens + ' tokens',
-				meta: "Comonad — " + block.name,
-				text: block.text,
-			});
+	const promptKey = (group, row) => group + ':' + (group === 'comonad' ? row.id : row.name);
+	const firstPromptKey = () =>
+		promptLayout && promptLayout.comonad.length
+			? promptKey('comonad', promptLayout.comonad[0])
+			: promptLayout && promptLayout.tools.length
+				? promptKey('tools', promptLayout.tools[0])
+				: '';
+
+	function acceptPrompts(data, saved) {
+		if (!data) {
+			return;
 		}
-		for (const tool of data.tools || []) {
-			rows.push({
-				group: 'Tools',
-				id: 'tool:' + tool.name,
-				name: tool.name,
-				note: (tool.visible ? '' : 'not offered · ') + tool.capability + ' · ' + tool.tokens + ' tokens',
-				meta: 'Tool — ' + tool.capability + (tool.visible ? '' : ' (not offered in this chat’s mode)'),
-				text: (tool.description || '') + '\n\n' + JSON.stringify(tool.parameters || {}, null, 2),
-			});
+		promptsData = data;
+		// A push can land while the user is editing. Only a save response (or a clean form) replaces
+		// the local copy; a dirty one keeps its edits and merely refreshes the banner.
+		if (!promptLayout || !promptDirty || saved) {
+			promptLayout = {
+				comonad: (data.comonad || []).map((row) => ({ ...row })),
+				tools: (data.tools || []).map((row) => ({ ...row })),
+			};
+			promptDirty = false;
 		}
-		for (const prompt of data.st || []) {
-			const bits = [prompt.role];
-			if (prompt.enabled === false) {
-				bits.push('off');
-			}
-			if (prompt.marker) {
-				bits.push('marker');
-			}
-			if (prompt.inChat) {
-				bits.push('@ ' + Number(prompt.depth ?? 4));
-			}
-			// A marker the chat cannot fill is filled while the turn is built, and saying so beats
-			// reporting the empty slot it still is as "0 tokens".
-			bits.push(prompt.tokens === null ? 'filled from ' + prompt.source : prompt.tokens + ' tokens');
-			rows.push({
-				group: 'SillyTavern',
-				id: 'st:' + prompt.identifier,
-				name: prompt.name,
-				note: bits.join(' · '),
-				meta: 'SillyTavern — ' + prompt.identifier + ' · ' + prompt.role,
-				text: prompt.content || (prompt.source ? 'Nothing here yet: this block is filled while the turn is built, from ' + prompt.source + '.' : ''),
-			});
-		}
-		return rows;
+		renderPrompts();
 	}
 
-	function renderPrompts(data) {
-		if (data) {
-			promptsData = data;
+	function promptMarkDirty() {
+		promptDirty = true;
+		const save = $('pr-save');
+		if (save) {
+			save.disabled = false;
 		}
+	}
+
+	function movePromptRow(group, from, to) {
+		const rows = promptLayout && promptLayout[group];
+		if (!rows || from === to || from < 0 || to < 0 || from >= rows.length || to >= rows.length) {
+			return;
+		}
+		const moved = rows.splice(from, 1)[0];
+		rows.splice(to, 0, moved);
+		promptMarkDirty();
+		renderPrompts();
+	}
+
+	function promptRowElement(group, row, index, picked) {
+		const readOnlyOrder = group === 'comonad' && row.readOnlyOrder === true;
+		const item = document.createElement('div');
+		item.className = 'pr-item' + (row.enabled === false ? ' is-off' : '');
+		item.draggable = !readOnlyOrder;
+		if (!readOnlyOrder) {
+			item.addEventListener('dragstart', (event) => {
+				promptDrag = { group, index };
+				item.classList.add('is-dragging');
+				event.dataTransfer.effectAllowed = 'move';
+				// Firefox needs some data on the transfer before it starts a drag.
+				event.dataTransfer.setData('text/plain', promptKey(group, row));
+			});
+			item.addEventListener('dragend', () => {
+				promptDrag = null;
+				item.classList.remove('is-dragging');
+				document.querySelectorAll('#pr-list .is-drop-target').forEach((node) => node.classList.remove('is-drop-target'));
+			});
+			item.addEventListener('dragover', (event) => {
+				if (!promptDrag || promptDrag.group !== group) {
+					return;
+				}
+				event.preventDefault();
+				item.classList.add('is-drop-target');
+			});
+			item.addEventListener('dragleave', () => item.classList.remove('is-drop-target'));
+			item.addEventListener('drop', (event) => {
+				if (!promptDrag || promptDrag.group !== group) {
+					return;
+				}
+				event.preventDefault();
+				const from = promptDrag.index;
+				promptDrag = null;
+				movePromptRow(group, from, index);
+			});
+		}
+		const line = document.createElement('div');
+		line.className = 'pr-row' + (picked ? ' is-on' : '');
+
+		const toggle = document.createElement('label');
+		toggle.className = 'switch';
+		toggle.title = readOnlyOrder ? 'ST owns this switch' : row.enabled === false ? 'Send this block' : 'Stop sending this block';
+		const input = document.createElement('input');
+		input.type = 'checkbox';
+		input.checked = row.enabled !== false;
+		input.disabled = readOnlyOrder;
+		input.addEventListener('change', () => {
+			row.enabled = input.checked;
+			promptMarkDirty();
+			renderPrompts();
+		});
+		toggle.append(input, Object.assign(document.createElement('span'), { className: 'knob' }));
+
+		const name = document.createElement('button');
+		name.type = 'button';
+		name.className = 'pr-name';
+		name.textContent = row.name;
+		name.title = group === 'comonad' ? 'Edit the static prefix' : 'Read this tool definition';
+		name.addEventListener('click', () => {
+			store.set({ prompt: promptKey(group, row) });
+			renderPrompts();
+		});
+
+		const note = document.createElement('span');
+		note.className = 'pr-note';
+		note.textContent =
+			group === 'comonad'
+				? (readOnlyOrder ? 'ST order · ' : '') + (row.tokens || 0) + ' tokens'
+				: (row.enabled === false ? 'off · ' : '') + (row.visible ? row.capability : row.reason || 'not offered') + ' · ' + row.tokens + ' tokens';
+
+		const controls = document.createElement('div');
+		controls.className = 'pr-controls';
+		const control = (glyph, tip, onClick, disabled) => {
+			const button = document.createElement('button');
+			button.type = 'button';
+			button.className = 'icon';
+			button.textContent = glyph;
+			button.title = tip;
+			button.disabled = disabled;
+			button.addEventListener('click', onClick);
+			controls.append(button);
+		};
+		control('↑', 'Move up', () => movePromptRow(group, index, index - 1), readOnlyOrder || index === 0);
+		control('↓', 'Move down', () => movePromptRow(group, index, index + 1), readOnlyOrder || index === promptLayout[group].length - 1);
+
+		line.append(toggle, name, note, controls);
+		item.append(line);
+		return item;
+	}
+
+	function renderPromptPreview(picked) {
+		const editor = $('pr-editor');
+		const view = $('pr-view');
+		editor.innerHTML = '';
+		view.hidden = false;
+		const comonad = promptLayout.comonad.find((row) => promptKey('comonad', row) === picked);
+		if (comonad) {
+			$('pr-title').textContent = 'Comonad — ' + comonad.name;
+			$('pr-meta').textContent =
+				(comonad.enabled === false ? 'off' : 'on') +
+				' · ' +
+				comonad.tokens +
+				' tokens' +
+				(comonad.readOnlyOrder ? ' · order and switch come from the active ST preset' : '');
+			const label = document.createElement('label');
+			label.textContent = 'Static prefix';
+			label.htmlFor = 'pr-prefix';
+			const hint = document.createElement('p');
+			hint.className = 'hint';
+			hint.textContent =
+				comonad.id === 'comonad-tools'
+					? 'This guidance is sent when at least one tool is available. A turn with no tools uses the built-in no-tools sentence; the dynamic lines below are always appended.'
+					: 'Only this static opening is editable. The generated content below it is rebuilt every turn and is shown read-only.';
+			const area = document.createElement('textarea');
+			area.id = 'pr-prefix';
+			area.className = 'control';
+			area.rows = 4;
+			area.spellcheck = false;
+			area.value = comonad.prefix;
+			area.addEventListener('input', () => {
+				comonad.prefix = area.value;
+				promptMarkDirty();
+			});
+			const reset = document.createElement('button');
+			reset.type = 'button';
+			reset.className = 'secondary';
+			reset.textContent = 'Reset prefix';
+			reset.addEventListener('click', () => {
+				comonad.prefix = comonad.defaultPrefix;
+				promptMarkDirty();
+				renderPrompts();
+			});
+			editor.append(label, hint, area, reset);
+			view.textContent = comonad.text || '(not sent this turn)';
+			return;
+		}
+		const tool = promptLayout.tools.find((row) => promptKey('tools', row) === picked);
+		if (tool) {
+			$('pr-title').textContent = 'Tool — ' + tool.name;
+			$('pr-meta').textContent =
+				(tool.enabled === false ? 'off' : 'on') +
+				' · ' +
+				(tool.visible ? 'offered' : tool.reason || 'not offered') +
+				' · ' +
+				tool.capability +
+				' · ' +
+				tool.tokens +
+				' tokens';
+			view.textContent = (tool.description || '') + '\n\n' + JSON.stringify(tool.parameters || {}, null, 2);
+			return;
+		}
+		$('pr-title').textContent = 'Preview';
+		$('pr-meta').textContent = '';
+		view.textContent = 'Pick a prompt on the left.';
+	}
+
+	function renderPrompts() {
 		const list = $('pr-list');
 		const view = $('pr-view');
+		if (!list || !view) {
+			return;
+		}
 		list.innerHTML = '';
-		if (!promptsData) {
+		if (!promptLayout) {
 			list.innerHTML = '<p class="hint">Reading the prompts…</p>';
+			$('pr-editor').innerHTML = '';
+			$('pr-title').textContent = 'Preview';
+			$('pr-meta').textContent = '';
 			view.textContent = '';
 			return;
 		}
-		const rows = promptRows(promptsData);
-		const picked = (vscode.getState() || {}).prompt || '';
-		const shown = rows.find((row) => row.id === picked) || rows[0];
-		let group = '';
-		for (const row of rows) {
-			if (row.group !== group) {
-				group = row.group;
-				const heading = document.createElement('h3');
-				heading.textContent = group;
-				const count = rows.filter((entry) => entry.group === group).length;
-				heading.append(Object.assign(document.createElement('span'), { className: 'pr-count', textContent: String(count) }));
-				list.append(heading);
+		const groups = [
+			['Comonad', promptLayout.comonad, 'comonad'],
+			['Tools', promptLayout.tools, 'tools'],
+		];
+		const keys = [];
+		for (const [, rows, group] of groups) {
+			for (const row of rows) {
+				keys.push(promptKey(group, row));
 			}
-			const line = document.createElement('button');
-			line.type = 'button';
-			line.className = 'pr-row' + (row === shown ? ' is-on' : '');
-			line.append(
-				Object.assign(document.createElement('span'), { className: 'pr-name', textContent: row.name }),
-				Object.assign(document.createElement('span'), { className: 'pr-note', textContent: row.note }),
-			);
-			line.addEventListener('click', () => {
-				store.set({ prompt: row.id });
-				renderPrompts();
-			});
-			list.append(line);
 		}
-		if (!rows.length) {
+		const picked = (vscode.getState() || {}).prompt || '';
+		const shown = keys.includes(picked) ? picked : firstPromptKey();
+		for (const [label, rows, group] of groups) {
+			if (!rows.length) {
+				continue;
+			}
+			const heading = document.createElement('h3');
+			heading.textContent = label;
+			heading.append(Object.assign(document.createElement('span'), { className: 'pr-count', textContent: String(rows.length) }));
+			list.append(heading);
+			rows.forEach((row, index) => {
+				list.append(promptRowElement(group, row, index, promptKey(group, row) === shown));
+			});
+		}
+		if (!keys.length) {
 			list.innerHTML = '<p class="hint">Nothing to show yet.</p>';
 		}
-		$('pr-title').textContent = shown ? shown.meta : 'Preview';
-		$('pr-meta').textContent = shown ? shown.name + ' · ' + shown.note : '';
-		view.textContent = shown ? shown.text || '(empty)' : 'Pick a prompt on the left.';
+
+		const note = $('prompts-note');
+		note.textContent = '';
+		if (promptsData && promptsData.takeover) {
+			note.append(
+				document.createTextNode(
+					'ST takes over the prompts: the block order and switches below come from the active preset. Edit them in ST → Presets; the prefixes here are still used by the composed request. ',
+				),
+			);
+			const open = document.createElement('button');
+			open.type = 'button';
+			open.className = 'secondary';
+			open.textContent = 'Open ST tab';
+			open.addEventListener('click', () => post({ type: 'openTab', tab: 'st' }));
+			note.append(open);
+		}
+		if (promptsData && promptsData.stToolsEnabled === false) {
+			const line = document.createElement('p');
+			line.className = 'hint';
+			line.textContent = "ST's Tools entry is off: no tools will be sent this turn. The tool switches below still save for when it is on.";
+			note.append(line);
+		}
+		if (promptsData && !promptsData.takeover && promptsData.toolsBlockEnabled === false) {
+			const line = document.createElement('p');
+			line.className = 'hint';
+			line.textContent = 'The Tools block is off: no tools will be sent this turn. Turn it back on to offer them.';
+			note.append(line);
+		}
+		$('pr-chat').textContent =
+			promptsData && promptsData.chat
+				? 'The next turn would run as ' + promptsData.chat.mode + ' · ' + promptsData.chat.approval + '.'
+				: 'No active chat: tools are reported as not offered.';
+		renderPromptPreview(shown);
+		updatePromptSave();
+	}
+
+	function updatePromptSave() {
+		const save = $('pr-save');
+		if (save) {
+			save.disabled = !promptDirty;
+		}
+	}
+
+	function savePrompts() {
+		if (!promptLayout) {
+			return;
+		}
+		post({
+			type: 'savePrompts',
+			prompts: promptLayout.comonad.map((row) => ({ id: row.id, enabled: row.enabled !== false, prefix: row.prefix })),
+			toolPrompts: promptLayout.tools.map((row) => ({ name: row.name, enabled: row.enabled !== false })),
+		});
+	}
+
+	function resetPrompts() {
+		if (!promptsData || !promptLayout) {
+			return;
+		}
+		const current = new Map(promptLayout.comonad.map((row) => [row.id, row]));
+		const defaults = (promptsData.defaults && promptsData.defaults.comonad) || [];
+		promptLayout.comonad = defaults.map((row, index) => {
+			const live = current.get(row.id) || {};
+			return {
+				...live,
+				...row,
+				order: index,
+				enabled: true,
+				prefix: row.prefix,
+				readOnlyOrder: promptsData.takeover,
+				body: live.body || '',
+				text: live.text || '',
+				tokens: live.tokens || 0,
+			};
+		});
+		promptLayout.tools = promptLayout.tools
+			.slice()
+			.sort((left, right) => left.name.localeCompare(right.name))
+			.map((row) => ({ ...row, enabled: true }));
+		promptMarkDirty();
+		renderPrompts();
 	}
 
 	/* ------------------------------------------------------------------ inbound */
+
+	/** Draws the tab on screen from the state the panel last pushed. Hidden tabs are not drawn at
+	 *  all: their widgets are rebuilt when they are next shown, from this same cache. */
+	function renderActive() {
+		if (!state) {
+			return;
+		}
+		switch (activeTab) {
+			case 'agent':
+				// A form the user is in the middle of keeps its edits; the next push after the save
+				// is the one that redraws it.
+				if (!dirty || !ready) {
+					renderForm();
+				}
+				break;
+			case 'graph':
+				renderGraphInfo();
+				break;
+			case 'rules':
+				if (!dirty || !ready) {
+					renderForm();
+				}
+				break;
+			case 'mcp':
+			case 'tools':
+				renderReadOnly();
+				break;
+			case 'plugins':
+				renderPlugins();
+				break;
+			case 'inspect':
+				renderPluginDeps();
+				renderLegend();
+				renderGraphInfo();
+				break;
+			default:
+				break;
+		}
+		if (panes.has(activeTab)) {
+			renderPane(activeTab);
+		}
+	}
 
 	window.addEventListener('message', (event) => {
 		const message = event.data;
@@ -790,18 +1254,7 @@
 				state = message;
 				paneSlices = message.panes || {};
 				graphInfo = message.graphInfo || graphInfo;
-				if (!dirty || !ready) {
-					renderForm();
-				}
-				renderPlugins();
-				renderPluginDeps();
-				renderReadOnly();
-				renderLegend();
-				renderGraphInfo();
-				// Every pane is fed on every push, not only when its tab is shown: it keeps its own state.
-				for (const id of panes.keys()) {
-					renderPane(id);
-				}
+				renderActive();
 				if (!ready) {
 					ready = true;
 					showTab(activeTab);
@@ -810,7 +1263,10 @@
 				}
 				break;
 			case 'prompts':
-				renderPrompts(message.prompts);
+				acceptPrompts(message.prompts, message.saved === true);
+				if (message.saved === true) {
+					status('Prompts saved.');
+				}
 				break;
 			case 'models':
 				fillModels(message.models, state ? state.config.model : '');

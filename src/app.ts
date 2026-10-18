@@ -7,6 +7,7 @@ import { agentPlugin } from './services/agent';
 import { approvalPlugin } from './services/approval';
 import { auditPlugin } from './services/audit';
 import { catalogPlugin } from './services/catalog';
+import { checkpointsPlugin } from './services/checkpoints';
 import { commandsPlugin } from './services/commands';
 import { hooksPlugin } from './services/hooks';
 import { llmPlugin } from './services/llm';
@@ -20,7 +21,6 @@ import { tasksPlugin } from './services/tasks';
 import { tokenizersPlugin } from './services/tokenizers';
 import { toolsPlugin } from './services/tools';
 import { usagePlugin } from './services/usage';
-import { vectorsPlugin } from './services/vectors';
 import { fsTools } from './tools/fs';
 import { mathTools } from './tools/math';
 import { agentTools, askTools, memoryTools, skillTools } from './tools/misc';
@@ -30,6 +30,7 @@ import { todoTools } from './tools/todo';
 import { vscodeTools } from './tools/vscode';
 import { webTools } from './tools/web';
 import { chatPanel } from './ui/chat-panel';
+import { gitView } from './ui/git-view';
 import { inline } from './ui/inline';
 import { palette } from './ui/palette';
 import { participant } from './ui/participant';
@@ -65,12 +66,12 @@ export const PLUGINS: Record<string, Plugin> = {
 	harness: harnessCompat,
 	audit: auditPlugin,
 	sessions: sessionsPlugin,
+	checkpoints: checkpointsPlugin,
 	usage: usagePlugin,
 	tasks: tasksPlugin,
 	tools: toolsPlugin,
 	catalog: catalogPlugin,
 	panes: panesPlugin,
-	vectors: vectorsPlugin,
 	tokenizers: tokenizersPlugin,
 	llm: llmPlugin,
 	hooks: hooksPlugin,
@@ -95,6 +96,7 @@ export const PLUGINS: Record<string, Plugin> = {
 	'ui-controls': controls,
 	'ui-sessions': sessionsView,
 	'ui-tasks': tasksView,
+	'ui-git': gitView,
 	'ui-settings': settingsPanel,
 	'ui-inline': inline,
 	'ui-chat': chatPanel,
@@ -113,13 +115,16 @@ export const ROWS: PluginRow[] = [
 	// Kernel services.
 	{ id: 'audit', group: 'kernel' },
 	{ id: 'sessions', group: 'kernel' },
+	// The change journal: on by default, because an irreversible write is a worse default than a
+	// shadow repository. One row for the journal and its review surface — off, and a write is just
+	// a write again.
+	{ id: 'checkpoints', group: 'kernel' },
 	{ id: 'usage', group: 'kernel' },
 	{ id: 'tasks', group: 'kernel' },
 	{ id: 'tools', group: 'kernel' },
 	{ id: 'catalog', group: 'kernel' },
 	// The settings panel draws whatever panes are registered, whichever plugin brought them.
 	{ id: 'panes', group: 'kernel' },
-	{ id: 'vectors', group: 'kernel' },
 	{ id: 'tokenizers', group: 'kernel' },
 	{ id: 'llm', group: 'kernel' },
 	{ id: 'hooks', group: 'kernel' },
@@ -150,6 +155,8 @@ export const ROWS: PluginRow[] = [
 	{ id: 'ui-controls', group: 'ui' },
 	{ id: 'ui-sessions', group: 'ui' },
 	{ id: 'ui-tasks', group: 'ui' },
+	// The real repository's changes: staged, unstaged, untracked and merge.
+	{ id: 'ui-git', group: 'ui' },
 	{ id: 'ui-settings', group: 'ui' },
 	{ id: 'ui-inline', group: 'ui' },
 	{ id: 'ui-chat', group: 'ui' },

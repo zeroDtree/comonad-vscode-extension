@@ -1,8 +1,10 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule, WORKSPACE_BOUNDARY } from '../lib/policy';
@@ -10,26 +12,29 @@ import {
 	applyContextForm,
 	DEFAULT_OUTPUT_RESERVE,
 	elideToolResults,
-	estimateMessages,
 	planCompaction,
 	resolveBudget,
 } from '../lib/prompt';
 import { isContextOverflow, ModelRequestError } from '../lib/openai';
 import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, PathEscapeError, resolveInside, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
+import { applyHunk, diffLines, editForHunk, revertHunk } from '../lib/line-diff';
 import { listEndpointModels, openAiChat } from '../lib/openai';
 import type { ApprovalRequest, Message, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
-import { ChangedOutsideError, Checkpoints, DirtyEditorError } from 'comonad-plugin-checkpoints/services/journal';
-import { parseDiffs } from 'comonad-plugin-checkpoints/lib/diff';
+import { findSymbolRange, formatReference, parseReferences, rankPaths } from '../lib/references';
+import { mentionItems, resolveReferences, WorkspaceFileCache } from '../ui/references';
+import { ChangedOutsideError, DirtyEditorError } from '../lib/journal';
+import { Checkpoints, checkpointsPlugin } from '../services/checkpoints';
+import { parseDiffs } from '../lib/diff';
 import { fsTools } from '../tools/fs';
 import { agentTools } from '../tools/misc';
 import { hostStorage, type Host } from '../services/host';
 import { Context, Service, type Plugin } from 'cordis';
-import { rebaseMarks, isSummaryMessage, SessionStore, unusedChat, type Mark } from '../services/sessions';
+import { markForRestore, rebaseMarks, isSummaryMessage, SessionStore, unusedChat, type Mark } from '../services/sessions';
 import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
-import { CONFIG_KEYS, DEFAULT_CONTEXT_WINDOW, DEPRECATED_CONFIG_KEYS, profileKeyEnvs } from '../services/settings';
+import { CONFIG_KEYS, DEFAULT_CONTEXT_WINDOW, profileKeyEnvs } from '../services/settings';
 import { toolset } from '../services/tools';
 import { promptText } from '../services/agent';
 import { PLUGINS, ROWS } from '../app';
@@ -41,16 +46,18 @@ import { harnessAliases, harnessCompat } from '../plugins/harness';
 import { pluginHost, readRows, writeRow } from '../services/plugins';
 import { blankPng, cardTextFromPng, characterToCard, greetingsOf, loadCard, normaliseCard, parseCard, readPngText, writePngText } from 'comonad-plugin-tavern/lib/card';
 import { adoptBook, adoptCharacter, adoptPersona, adoptPreset, blankBook, blankCharacter, blankPersona, blankPreset, entryToJson } from 'comonad-plugin-tavern/lib/authoring';
-import { readBookFile } from 'comonad-plugin-tavern/services/tavern';
+import { readBookFile, turnPrompts } from 'comonad-plugin-tavern/services/tavern';
 import { convertCharacterToPersona } from 'comonad-plugin-tavern/lib/personas';
 import { parseExamples, substituteMacros } from 'comonad-plugin-tavern/lib/macro';
 import { parsePreset, presetSamplers, presetToJson } from 'comonad-plugin-tavern/lib/preset';
 import { builtInBlocks, librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from 'comonad-plugin-tavern/lib/library';
 import { PRESET_TEMPLATES } from 'comonad-plugin-tavern/lib/templates/presets';
 import { PROMPT_BLOCKS } from 'comonad-plugin-tavern/lib/templates/blocks';
-import { DEFAULT_ORDER, DEFAULT_PROMPTS, IDENTITY_PROMPT, movePrompt, promptCollection, setEnabled, shippedPrompt, triggersGeneration, withoutIdentityBlock } from 'comonad-plugin-tavern/lib/prompts';
+import { COMONAD_PROMPTS, CONTEXT_PROMPT, DEFAULT_ORDER, DEFAULT_PROMPTS, IDENTITY_PROMPT, ST_PROMPTS, TOOLS_PROMPT, completeOrder, movePrompt, promptCollection, setEnabled, shippedPrompt, triggersGeneration } from 'comonad-plugin-tavern/lib/prompts';
+import { COMONAD_BLOCK, type PromptBlock } from '../lib/blocks';
+import { applyPromptLayout, defaultPromptLayout, mergePromptPrefixes, mergeToolLayout, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
 import { activateLore, toWorldBook, worldInfoToBook, type LoreBook, type LoreInput } from 'comonad-plugin-tavern/lib/lore';
-import type { TavernPreset } from '../lib/tavern/types';
+import type { TavernPreset } from 'comonad-plugin-tavern/lib/types';
 import { assemble, exampleMessages, injectAtDepth } from 'comonad-plugin-tavern/lib/assemble';
 import { applyRegex, makeScript } from 'comonad-plugin-tavern/lib/regex';
 import { ruleOf, searchEntries, visibleEntries } from 'comonad-plugin-tavern/lib/search';
@@ -72,22 +79,33 @@ import {
 	tagIdsOf,
 	tagsOf,
 } from 'comonad-plugin-tavern/lib/tags';
-import { REGEX_PLACEMENT, INJECTION_POSITION, PROMPT_LIBRARY_KEY, WI_LOGIC, WI_POSITION, WI_ROLE, WI_SETTINGS_DEFAULTS, WI_STRATEGY, worldEntry, type GenerationTrigger, type WorldEntry } from '../lib/tavern/types';
+import { WI_LOGIC, WI_POSITION, WI_ROLE, WI_STRATEGY, worldEntry } from 'comonad-plugin-tavern/lib/lore';
+import { REGEX_PLACEMENT } from 'comonad-plugin-tavern/lib/regex';
+import { INJECTION_POSITION } from 'comonad-plugin-tavern/lib/prompts';
+import { PROMPT_LIBRARY_KEY } from 'comonad-plugin-tavern/lib/preset';
+import { tavernSettings, TAVERN_SETTING_KEYS, WI_SETTINGS_DEFAULTS } from 'comonad-plugin-tavern/lib/settings';
+import { embedTexts } from 'comonad-plugin-tavern/lib/vectors';
+import { webPlan } from '../services/web-tokenizers';
+import type { GenerationTrigger, WorldEntry } from 'comonad-plugin-tavern/lib/types';
 /** The tavern plugin is a package beside the host: its files are read from there, not from `src/`. */
 const PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-tavern');
 const PACKAGE_SRC = join(PACKAGE, 'src');
 const PACKAGE_RESOURCES = join(PACKAGE, 'resources');
+/** The math plugin, built by `npm run compile` beside the host. */
+const MATH_PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-math');
+const MATH_RESOURCES = join(MATH_PACKAGE, 'resources');
+import mathEntry from 'comonad-plugin-math';
+import { ChatWebviewAssets } from '../services/chat-assets';
+import { chatDocument } from '../ui/chat-panel';
 import tavernEntry from 'comonad-plugin-tavern';
-import checkpointsEntry from 'comonad-plugin-checkpoints';
 import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
+import { contentController } from 'comonad-plugin-tavern/panel/controller';
 import { settingsDocument } from '../ui/settings-panel';
 import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
 import { settingsTarget } from '../host';
 import { McpConnection } from '../services/mcp';
-import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, countMessages, countRaw, countTokens, encodingForModel, guesstimate, setEncoder } from '../lib/tokens';
-import { embedTexts } from '../lib/vectors';
-import { planFor } from '../services/tokenizers';
+import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, estimateMessages, countRaw, estimateTokens, encodingForModel, guesstimate, setEncoder } from '../lib/tokens';
 
 const readTool: ToolSpec = {
 	name: 'read_file',
@@ -123,16 +141,18 @@ const call = (name: string, args: Record<string, unknown>): ToolCall => ({ id: '
 
 suite('Token counting', () => {
 	test('a model name picks the same tokenizer SillyTavern picks', () => {
-		assert.strictEqual(planFor('deepseek-chat').kind, 'download');
-		assert.deepStrictEqual(planFor('deepseek-reasoner'), { kind: 'download', file: 'deepseek.json.gz' });
-		assert.deepStrictEqual(planFor('gemini-2.5-flash'), { kind: 'local', file: 'gemma.model' });
-		assert.deepStrictEqual(planFor('claude-3-5-sonnet'), { kind: 'local', file: 'claude.json' });
-		assert.deepStrictEqual(planFor('llama-3.1-70b'), { kind: 'local', file: 'llama3.json' });
-		assert.deepStrictEqual(planFor('qwen2.5-72b'), { kind: 'download', file: 'qwen2.json.gz' });
-		assert.deepStrictEqual(planFor('gpt-4o'), { kind: 'tiktoken', encoding: 'o200k_base' });
-		// An unknown name is an OpenAI-compatible model, which is where upstream's default ends too.
-		assert.deepStrictEqual(planFor('some-local-model'), { kind: 'tiktoken', encoding: 'cl100k_base' });
-		assert.strictEqual(planFor('').kind, 'none');
+		// The SillyTavern collection is the tavern layer's provider: it claims the models its files cover.
+		assert.deepStrictEqual(webPlan('deepseek-chat'), { file: 'deepseek.json.gz', download: true });
+		assert.deepStrictEqual(webPlan('deepseek-reasoner'), { file: 'deepseek.json.gz', download: true });
+		assert.deepStrictEqual(webPlan('gemini-2.5-flash'), { file: 'gemma.model', download: false });
+		assert.deepStrictEqual(webPlan('claude-3-5-sonnet'), { file: 'claude.json', download: false });
+		assert.deepStrictEqual(webPlan('llama-3.1-70b'), { file: 'llama3.json', download: false });
+		assert.deepStrictEqual(webPlan('qwen2.5-72b'), { file: 'qwen2.json.gz', download: true });
+		// Everything else is the kernel's own tiktoken mapping, which is where upstream's default ends too.
+		assert.strictEqual(webPlan('gpt-4o'), null);
+		assert.strictEqual(encodingForModel('gpt-4o'), 'o200k_base');
+		assert.strictEqual(encodingForModel('some-local-model'), 'cl100k_base');
+		assert.strictEqual(webPlan(''), null);
 	});
 
 	test('the encoding table follows the model families that matter', () => {
@@ -152,14 +172,14 @@ suite('Token counting', () => {
 			setEncoder(() => 7);
 			assert.strictEqual(countRaw('anything'), 7);
 			// Upstream counts a string as a message of its own: 3 per message, 3 of padding.
-			assert.strictEqual(countTokens('anything'), 13);
-			assert.strictEqual(countTokens(''), 0, 'an empty field costs nothing');
+			assert.strictEqual(estimateTokens('anything'), 13);
+			assert.strictEqual(estimateTokens(''), 0, 'an empty field costs nothing');
 
 			// Without an encoder it degrades to upstream's own estimate rather than to zero.
 			setEncoder(null);
 			assert.strictEqual(guesstimate('abcd'), Math.ceil(4 / BYTES_PER_TOKEN));
-			assert.ok(countTokens('四字漢字') > 0, 'multibyte text is measured in bytes');
-			assert.strictEqual(countMessages([{ content: 'a' }, { content: 'b' }]), 2 * (TOKENS_PER_MESSAGE + 1) + TOKENS_PADDING);
+			assert.ok(estimateTokens('四字漢字') > 0, 'multibyte text is measured in bytes');
+			assert.strictEqual(estimateMessages([{ content: 'a' }, { content: 'b' }]), 2 * (TOKENS_PER_MESSAGE + 1) + TOKENS_PADDING);
 
 			// The real thing: the kernel's tokenizer service installs a BPE for the model.
 			setEncoder(null);
@@ -167,7 +187,7 @@ suite('Token counting', () => {
 			assert.strictEqual(status.kind, 'tiktoken');
 			assert.strictEqual(status.label, 'o200k_base');
 			assert.strictEqual(countRaw('Hello world'), 2, 'o200k counts this in two tokens');
-			assert.strictEqual(countTokens('Hello world'), 8, 'and the field shows two plus the framing');
+			assert.strictEqual(estimateTokens('Hello world'), 8, 'and the field shows two plus the framing');
 			assert.strictEqual(kernel.ctx.tokenizers.describe().kind, 'tiktoken');
 		} finally {
 			setEncoder(null);
@@ -427,6 +447,28 @@ suite('Comonad domain', () => {
 			}
 		});
 
+		test('an absolute deny pattern also covers paths outside the workspace', async () => {
+			const { root, outside, workspace } = tree();
+			try {
+				const open = { confinement: { read: false, write: false } };
+				await assert.rejects(
+					guardPath(workspace, join(outside, 'secret.txt'), { access: 'read', denyReadPaths: [outside], ...open }),
+					PathEscapeError,
+				);
+				await assert.rejects(
+					guardPath(workspace, join(workspace, 'inside.txt'), {
+						access: 'read',
+						denyReadPaths: [join(workspace, 'inside.txt')],
+						...open,
+					}),
+					PathEscapeError,
+				);
+			} finally {
+				cleanup(root);
+				cleanup(outside);
+			}
+		});
+
 		test('the macOS profile applies each boundary flag', () => {
 			const base: SandboxOptions = { writable: true, confinement: { read: false, write: false }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
 			const open = buildSbpl('/ws', base);
@@ -485,6 +527,86 @@ suite('Comonad domain', () => {
 		assert.ok(file, 'the diff is keyed by its path');
 		assert.strictEqual(file.additions, 1);
 		assert.ok(file.hunks.length >= 1);
+	});
+
+	test('a line diff names each change block, and both sides patch back exactly', () => {
+		// Two edits with one untouched line between them: two blocks, one Keep/Undo each.
+		const oldText = 'one\ntwo\nthree\n';
+		const newText = 'ONE\ntwo\nTHREE\n';
+		const { hunks, truncated } = diffLines(oldText, newText);
+		assert.strictEqual(truncated, false);
+		assert.deepStrictEqual(
+			hunks.map((hunk) => [hunk.oldStart, hunk.oldLines, hunk.newStart, hunk.newLines]),
+			[
+				[1, 1, 1, 1],
+				[3, 1, 3, 1],
+			],
+		);
+		assert.strictEqual(applyHunk(oldText, hunks[0]!), 'ONE\ntwo\nthree\n', 'keeping a block moves the old side');
+		assert.strictEqual(revertHunk(newText, hunks[1]!), 'ONE\ntwo\nthree\n', 'undoing a block restores it on the new side');
+		assert.strictEqual(applyHunk(oldText, hunks[0]!).length > 0, true);
+
+		// Identical texts have no blocks.
+		assert.deepStrictEqual(diffLines('a\nb\n', 'a\nb\n'), { hunks: [], truncated: false });
+
+		// A created file: everything is one insertion at the start.
+		const created = diffLines('', 'x\ny\n').hunks[0]!;
+		assert.deepStrictEqual([created.oldStart, created.oldLines, created.newStart, created.newLines], [0, 0, 1, 2]);
+		assert.strictEqual(applyHunk('', created), 'x\ny\n');
+
+		// A deleted file: everything is one deletion.
+		const deleted = diffLines('x\n', '').hunks[0]!;
+		assert.deepStrictEqual([deleted.oldStart, deleted.oldLines, deleted.newStart, deleted.newLines], [1, 1, 0, 0]);
+		assert.strictEqual(revertHunk('', deleted), 'x\n');
+
+		// A missing final newline is part of the line, not a separate empty one: appending after `a\n`
+		// is a pure insertion, and the last line of `a\nb` has no terminator of its own.
+		const noFinal = diffLines('a\n', 'a\nb').hunks[0]!;
+		assert.deepStrictEqual([noFinal.oldStart, noFinal.oldLines, noFinal.newStart, noFinal.newLines], [1, 0, 2, 1]);
+		assert.strictEqual(applyHunk('a\n', noFinal), 'a\nb');
+		assert.strictEqual(revertHunk('a\nb', noFinal), 'a\n');
+
+		// CRLF survives in both directions.
+		const crlf = diffLines('a\r\nb\r\n', 'a\r\nB\r\n').hunks[0]!;
+		assert.strictEqual(applyHunk('a\r\nb\r\n', crlf), 'a\r\nB\r\n');
+		assert.strictEqual(revertHunk('a\r\nB\r\n', crlf), 'a\r\nb\r\n');
+
+		// A hunk that no longer matches the text is refused rather than patched in the wrong place.
+		assert.throws(() => applyHunk('changed\n', crlf), /no longer matches/);
+	});
+
+	test('the edit that undoes a block keeps line endings and the final newline right', () => {
+		// Replace a middle line.
+		const middle = diffLines('a\nx\nb\n', 'a\nX\nb\n').hunks[0]!;
+		assert.deepStrictEqual(editForHunk('a\nX\nb\n', '\n', middle), { start: 2, end: 4, text: 'x\n' });
+
+		// Replace the last line of a file that ends with a newline: the newline stays.
+		const last = diffLines('a\nb\n', 'a\nB\n').hunks[0]!;
+		assert.deepStrictEqual(editForHunk('a\nB\n', '\n', last), { start: 2, end: 4, text: 'b\n' });
+
+		// Replace the last line of a file with no final newline: no newline is invented.
+		const noNewline = diffLines('a\nb', 'a\nB').hunks[0]!;
+		assert.deepStrictEqual(editForHunk('a\nB', '\n', noNewline), { start: 2, end: 3, text: 'b' });
+
+		// Undo a deleted middle line: it comes back where it was, on its own line.
+		const removed = diffLines('a\nb\nc\n', 'a\nc\n').hunks[0]!;
+		assert.deepStrictEqual(editForHunk('a\nc\n', '\n', removed), { start: 2, end: 2, text: 'b\n' });
+
+		// Undo a deleted last line: it comes back with the final newline it had.
+		const removedLast = diffLines('a\nb\n', 'a\n').hunks[0]!;
+		assert.deepStrictEqual(editForHunk('a\n', '\n', removedLast), { start: 2, end: 2, text: 'b\n' });
+
+		// Undo an added line: it leaves no dangling line break.
+		const added = diffLines('a\nc\n', 'a\nb\nc\n').hunks[0]!;
+		assert.deepStrictEqual(editForHunk('a\nb\nc\n', '\n', added), { start: 2, end: 4, text: '' });
+
+		// Changing a last line back to the version with no final newline invents none.
+		const noFinal = diffLines('a', 'a\nb\n').hunks[0]!;
+		assert.deepStrictEqual(editForHunk('a\nb\n', '\n', noFinal), { start: 0, end: 4, text: 'a' });
+
+		// The same edit in a CRLF document restores CRLF, and its offsets count both bytes.
+		const crlf = diffLines('a\r\nx\r\nb\r\n', 'a\r\nX\r\nb\r\n').hunks[0]!;
+		assert.deepStrictEqual(editForHunk('a\r\nX\r\nb\r\n', '\r\n', crlf), { start: 3, end: 6, text: 'x\r\n' });
 	});
 
 	test('dangerous commands are detected', () => {
@@ -913,14 +1035,14 @@ suite('Comonad domain', () => {
 		}
 	});
 
-	test('a compaction moves the rewind points that survive it, and drops the rest', () => {
-		const marks: Mark[] = [0, 3, 8, 12].map((length) => ({ turn: length, entryCount: length, length, at: length, text: `t${length}` }));
+	test('a compaction moves the restore points that survive it, and drops the rest', () => {
+		const marks: Mark[] = [0, 3, 8, 12].map((length) => ({ turn: length, entryCount: length, length, at: length }));
 		const rebased = rebaseMarks(marks, 5);
 		// A mark inside the folded stretch points at messages that no longer exist, so it goes.
 		assert.deepStrictEqual(rebased.map((mark) => mark.length), [4, 8]);
 		assert.deepStrictEqual(rebased.map((mark) => mark.turn), [8, 12], 'everything else about a mark is untouched');
-		// A mark exactly at the fold keeps only the summary: that is the earliest point left to rewind to.
-		assert.deepStrictEqual(rebaseMarks([{ turn: 0, entryCount: 0, length: 5, at: 0, text: 't' }], 5).map((mark) => mark.length), [1]);
+		// A mark exactly at the fold keeps only the summary: that is the earliest point left to restore to.
+		assert.deepStrictEqual(rebaseMarks([{ turn: 0, entryCount: 0, length: 5, at: 0 }], 5).map((mark) => mark.length), [1]);
 		assert.deepStrictEqual(rebaseMarks(marks, 100), [], 'a stretch longer than every mark leaves none of them');
 	});
 
@@ -945,6 +1067,16 @@ suite('Comonad domain', () => {
 				`${file} must force \`[hidden]\` to hide, or every module in that document that toggles it breaks`,
 			);
 		}
+	});
+
+	test('the chat’s header is born folded: the chats list is all it holds', () => {
+		// `#bar` is the recent-chats dropdown's frame and nothing else — with the list closed it is not
+		// there at all. Born visible, it read as a black band under the title until the first state push
+		// (which waits on model discovery): a shadow while the extension was still loading.
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(panel, /<header id="bar" hidden>/, 'the bar starts folded');
+		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.css'), 'utf8');
+		assert.match(css, /#bar\[hidden\]/, 'and the stylesheet knows how to hide it');
 	});
 
 	test('the persona page takes the personas kind over, and the item list steps aside', () => {
@@ -975,7 +1107,7 @@ suite('Comonad domain', () => {
 		const dir = PACKAGE_RESOURCES;
 		const pane = readFileSync(join(dir, 'content.js'), 'utf8');
 		// A new entry is *saved* first: the two entry boxes carry *+ New*, and only their *Insert* puts a
-		// saved one into the list, at the top, right after Comonad’s own block.
+		// saved one into the list, after the leading Comonad blocks.
 		assert.match(pane, /'Built-in'/, 'the built-in library is a labelled entry box');
 		assert.match(pane, /'Custom'/, 'and this preset’s custom library is one too');
 		assert.match(pane, /addToPresetLibrary/, 'the custom box’s *+ New* saves rather than inserts');
@@ -984,7 +1116,10 @@ suite('Comonad domain', () => {
 		assert.match(pane, /editingLibrary/, 'each library entry has an editor of its own');
 		assert.match(pane, /builtInPrompts/, 'the built-in library comes from the top-level host slice, whatever kind is showing');
 		const serviceSource = readFileSync(join(PACKAGE_SRC, 'services', 'tavern.ts'), 'utf8');
-		assert.match(serviceSource, /prompts\.filter\(\(prompt\) => prompt\.identifier !== IDENTITY_PROMPT\)/, 'a saved preset never carries the identity block');
+		assert.doesNotMatch(serviceSource, /withoutIdentityBlock/, 'the identity block is now part of the preset order, not stripped on save');
+		assert.match(pane, /slice\.comonad/, 'Comonad’s generated blocks are rows like any other');
+		assert.match(pane, /slice\.toolsPrompt/, 'and the one Tools entry has a note of its own');
+		assert.match(pane, /is-managed/, 'their content is read-only while their place and switch are editable');
 		assert.match(pane, /block\.draggable = true/, 'a prompt card can be dragged to reorder the list');
 		assert.match(pane, /moveTo\(from, index\)/, 'a drop moves the card to its new index');
 		assert.match(readFileSync(join(dir, 'content.css'), 'utf8'), /is-drop-target/, 'the drop target is shown while dragging');
@@ -1011,16 +1146,21 @@ suite('Comonad domain', () => {
 		try {
 			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
 			const blocks = await kernel.ctx.agent.promptBlocks(session);
-			assert.ok(blocks.length, 'there is always at least the identity block');
+			assert.ok(blocks.length >= 2, 'there is always at least the identity and the tools block');
+			assert.strictEqual(blocks[0].id, COMONAD_BLOCK.identity);
 			assert.strictEqual(blocks[0].name, 'Identity', 'and it leads');
+			assert.strictEqual(blocks[1].id, COMONAD_BLOCK.tools);
+			assert.strictEqual(blocks[1].name, 'Tools');
 			assert.strictEqual(new Set(blocks.map((block) => block.name)).size, blocks.length, 'no block is named twice');
 			// The identity block is the part a refactor must never disturb: its lines are the agent’s contract.
 			const identity = blocks[0].text.split('\n');
 			assert.strictEqual(identity[0], 'You are Comonad, an agentic coding assistant running inside VS Code.');
-			assert.match(identity[1], /Inspect the workspace with the provided tools/);
-			assert.strictEqual(identity[2], 'Never ask the user for permission in your reply; the host asks whenever a tool needs approval.');
-			assert.match(identity[3], /^Mode: .+; approval: .+; network: (on|off)\.$/);
-			assert.match(identity[4], /^Today: \d{4}-\d{2}-\d{2}\.$/);
+			assert.strictEqual(identity[1], 'Never ask the user for permission in your reply; the host asks whenever a tool needs approval.');
+			assert.match(identity[2], /^Mode: .+; approval: .+; network: (on|off)\.$/);
+			assert.match(identity[3], /^Today: \d{4}-\d{2}-\d{2}\.$/);
+			// The tool guidance lives in its own block now, so a preset can place it like any other prompt.
+			assert.match(blocks[1].text, /Inspect the workspace with the provided tools/);
+			assert.match(blocks[1].text, /never write a tool call into your reply as text/);
 			// The joiner is the only thing that turns blocks into wire text, and it is one blank line.
 			assert.strictEqual(promptText(blocks), blocks.map((block) => block.text).join('\n\n'));
 			assert.ok(!promptText(blocks).includes('\n\n\n'), 'blocks are separated by exactly one blank line');
@@ -1030,36 +1170,41 @@ suite('Comonad domain', () => {
 		}
 	});
 
-	test('the Inspect tab holds the tool policy flow and every prompt the model can be given', () => {
+	test('Prompts is a top-level tab: Comonad blocks and tool definitions, editable and sortable', () => {
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
-		// One top-level tab, two sub-tabs: the flow and the prompt list live together under Inspect.
-		assert.match(panel, /data-tab="inspect"/, 'the panel has an Inspect tab');
-		assert.match(panel, /data-pane="inspect"/, 'and a pane for it');
-		assert.match(panel, /data-inspect="flow"[^>]*>Tool Policy Flow \(TPF\)</, 'the flow is its first sub-tab, under its new name');
-		assert.match(panel, /data-inspect="prompts"/, 'and Prompts is the second');
-		assert.match(panel, /data-inspect-pane="flow"/, 'the flow has a pane of its own');
-		assert.match(panel, /data-inspect-pane="prompts" hidden/, 'so does the prompt list, hidden to start');
-		assert.ok(!/data-tab="flow"/.test(panel) && !/data-tab="prompts"/.test(panel), 'and neither is a top-level tab any more');
+		// Prompts left Inspect: it is a first-class tab with its own pane.
+		assert.match(panel, /tabButton\('prompts'/, 'the panel has a Prompts tab');
+		assert.match(panel, /data-pane="prompts"/, 'and a pane for it');
+		assert.ok(!/data-inspect="prompts"/.test(panel), 'Inspect no longer has a Prompts sub-tab');
+		assert.ok(!/data-inspect-pane="prompts"/.test(panel), 'nor a prompt pane');
+		assert.match(panel, /tabButton\('inspect'/, 'Inspect is still there');
+		assert.match(panel, /data-inspect="flow"[^>]*>Tool Policy Flow \(TPF\)</, 'with the tool policy flow');
+		assert.match(panel, /data-inspect="plugins"/, 'and the plugin dependency view');
 
 		assert.match(panel, /case 'prompts'/, 'the host answers the prompt list’s request on demand');
+		assert.match(panel, /case 'savePrompts'/, 'and writes the edited layout back');
 		assert.match(panel, /ctx\.agent\.promptBlocks/, 'with the agent’s own named blocks');
-		assert.match(panel, /tavern\(\)\?\.promptsFor/, 'the SillyTavern collection the chat would send, when its plugin is loaded');
-		assert.match(panel, /parameters: tool\.parameters/, 'and each tool’s definition, schema included');
+		assert.match(panel, /tavern\(\)\?\.promptsFor/, 'mirroring the active preset’s order when ST takes over');
+		assert.match(panel, /ctx\.tools\.layout/, 'and every tool in the user’s order');
+		assert.match(panel, /parameters: tool\.parameters/, 'with each tool’s definition, schema included');
 
 		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
-		assert.match(guest, /function showInspect/, 'the guest switches the sub-tabs');
-		assert.match(guest, /function renderPrompts/, 'renders the prompt list');
+		assert.match(guest, /function showInspect/, 'the guest still switches the Inspect sub-tabs');
+		assert.match(guest, /function renderPrompts/, 'renders the prompt layout');
 		assert.match(guest, /case 'prompts':/, 'and handles the reply');
-		for (const group of ['Comonad', 'Tools', 'SillyTavern']) {
-			assert.ok(guest.includes(`group: '${group}'`), `the list is grouped: ${group}`);
-		}
+		assert.ok(guest.includes("'Comonad'") && guest.includes("'Tools'"), 'the list has the two groups');
+		assert.ok(!guest.includes('SillyTavern'), 'the SillyTavern collection is not in this tab');
+		assert.match(guest, /pr-prefix/, 'a Comonad row opens its editable static prefix');
+		assert.match(guest, /promptDrag/, 'rows can be dragged into a new order');
+		assert.match(guest, /savePrompts/, 'and the layout is saved as a whole');
 		// Mermaid measures its container, so the flow may only be drawn while it is on screen.
 		assert.match(guest, /activeTab !== 'inspect' \|\| activeInspect !== 'flow'/, 'the flow only draws while its sub-tab shows');
 
 		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.css'), 'utf8');
 		assert.match(css, /#inspect-tabs\s*\{/, 'the sub-tab strip has its own rule');
-		assert.match(css, /#pr-wrap\s*\{/, 'the pane has its own layout');
+		assert.match(css, /#pr-wrap\s*\{/, 'the tab has its own layout');
 		assert.match(css, /\.pr-row\s*\{/, 'with a row per prompt');
+		assert.match(css, /\.pr-item\s*\{/, 'and a card that can be dragged');
 	});
 
 	test('a setting picked with no folder open is written to the user’s own settings', () => {
@@ -1075,13 +1220,13 @@ suite('Comonad domain', () => {
 			contributes: { configuration: { properties: Record<string, unknown> } };
 		};
 		const declared = new Set(Object.keys(manifest.contributes.configuration.properties).map((key) => key.replace(/^comonad\./, '')));
-		const read = new Set<string>(CONFIG_KEYS);
-		const deprecated = new Set<string>(DEPRECATED_CONFIG_KEYS);
-		// `Host.config()` only reports the keys it is handed, so a setting the manifest declares but the
-		// code never reads is a setting the user cannot change: the panel writes it and nothing comes
-		// back. Every `comonad.tavern*` and `comonad.wi*` setting was in exactly that state.
+		// The kernel reads its own keys; the tavern layer's keys are its own list, in its own package.
+		const read = new Set<string>([...CONFIG_KEYS, ...TAVERN_SETTING_KEYS]);
+		// A setting the manifest declares but no code reads is a setting the user cannot change: the
+		// panel writes it and nothing comes back. Every `comonad.tavern*` and `comonad.wi*` setting was
+		// in exactly that state.
 		assert.deepStrictEqual(
-			[...declared].filter((key) => !read.has(key) && !deprecated.has(key)).sort(),
+			[...declared].filter((key) => !read.has(key)).sort(),
 			[],
 			'the manifest declares settings nothing reads',
 		);
@@ -1184,7 +1329,10 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(continued[continued.length - 1]!.role, 'user', 'a continue ends on the user');
 			assert.match(continued[continued.length - 1]!.content, /Continue the last message/);
 			assert.strictEqual(continued[0]!.role, 'system');
-			assert.match(continued[0]!.content, /Continue the last message/, 'the system prompt keeps the standing instruction');
+			assert.ok(
+				continued.some((message) => message.role === 'system' && /Continue the last message/.test(message.content)),
+				'the composed prompt keeps the standing instruction in its Context block',
+			);
 
 			await kernel.ctx.agent.runTurn({ text: '', trigger: 'impersonate', sessionId: 'ask' });
 			const asked = seen[2]!;
@@ -1417,6 +1565,44 @@ suite('Cordis kernel', () => {
 			await plugins.set('beta', { disabled: false });
 			assert.ok(kernel.ctx.tools.get('probe_beta'));
 			assert.strictEqual(readRows(join(library, 'cordis.yml')).find((row) => row.id === 'beta')?.disabled, false);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an installed copy of a bundled plugin is refreshed from this build', async () => {
+		const kernel = await createTestKernel();
+		try {
+			// The extension's own tree: one package that declares itself a plugin.
+			const extension = join(kernel.root, 'extension');
+			const source = join(extension, 'packages', 'demo');
+			mkdirSync(join(source, 'dist'), { recursive: true });
+			mkdirSync(join(source, 'resources'), { recursive: true });
+			writeFileSync(
+				join(source, 'package.json'),
+				JSON.stringify({ name: 'demo', main: './dist/index.js', comonad: { plugin: true }, files: ['dist', 'resources'] }),
+			);
+			writeFileSync(join(source, 'dist', 'index.js'), 'module.exports = () => {};');
+			writeFileSync(join(source, 'resources', 'page.js'), '// current');
+			(kernel.host as { extensionUri?: unknown }).extensionUri = vscode.Uri.file(extension);
+
+			// The copy an install left in the library, from an older build of the same plugin.
+			const installed = join(kernel.host.home(), '.comonad', 'plugins', 'demo');
+			mkdirSync(join(installed, 'dist'), { recursive: true });
+			mkdirSync(join(installed, 'resources'), { recursive: true });
+			writeFileSync(join(installed, 'dist', 'index.js'), 'module.exports = () => {}; // old');
+			writeFileSync(join(installed, 'resources', 'page.js'), '// old');
+			// A plugin of the user's own is not the extension's to rewrite.
+			const own = join(kernel.host.home(), '.comonad', 'plugins', 'mine');
+			mkdirSync(join(own, 'dist'), { recursive: true });
+			writeFileSync(join(own, 'dist', 'index.js'), '// mine');
+
+			// Mounting is what refreshes: the row that loads next must be this build's bundle.
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			assert.strictEqual(readFileSync(join(installed, 'dist', 'index.js'), 'utf8'), 'module.exports = () => {};', 'the bundle is this build’s');
+			assert.strictEqual(readFileSync(join(installed, 'resources', 'page.js'), 'utf8'), '// current', 'and so are its client files');
+			assert.strictEqual(readFileSync(join(own, 'dist', 'index.js'), 'utf8'), '// mine', 'a plugin of the user’s own is left alone');
+			assert.deepStrictEqual(kernel.ctx.plugins.refreshBundled(), [], 'a copy that is current is not rewritten');
 		} finally {
 			await kernel.dispose();
 		}
@@ -1802,7 +1988,7 @@ suite('Cordis kernel', () => {
 	test('the settings panel is where the plugin list is read and changed', () => {
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
 		const script = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
-		assert.match(panel, /data-tab="plugins"/, 'the panel has a Plugins tab');
+		assert.match(panel, /tabButton\('plugins'/, 'the panel has a Plugins tab');
 		assert.match(panel, /data-pane="plugins"/, 'and a pane for it');
 		// The host is what mounts this row, so the list has to be read when the tab is drawn.
 		assert.match(panel, /ctx\.get\('plugins'\)/, 'the row that draws it does not inject the host’s own service');
@@ -1810,6 +1996,9 @@ suite('Cordis kernel', () => {
 		assert.match(panel, /pluginHost\(\)\?\.set\(/, 'a toggle goes through the host, so it is written down');
 		assert.match(script, /function renderPlugins\(/, 'the pane renders the list');
 		assert.match(script, /action: 'toggle'/, 'with a button per row');
+		assert.match(script, /action: 'uninstall'/, 'and an Uninstall one for a row that is not built in');
+		assert.match(panel, /installedDirOf\(/, 'the confirmation says what an uninstall would delete');
+		assert.match(panel, /\.uninstall\(/, 'and the host undoes the install');
 		assert.match(script, /plugin-error/, 'and a row that did not load says so');
 	});
 
@@ -1819,7 +2008,7 @@ suite('Cordis kernel', () => {
 		assert.match(panel, /data-inspect="plugins"/, 'Inspect has a Plugins sub-tab');
 		assert.match(panel, /data-inspect-pane="plugins" hidden/, 'and a pane for it');
 		assert.match(panel, /case 'pluginTree'/, 'the host answers the per-row drill-down');
-		assert.match(panel, /dependencies: pluginDependencies\(\)/, 'and pushes what the table is built from');
+		assert.match(panel, /dependencies = pluginDependencies\(\)|dependencies: pluginDependencies\(\)/, 'and pushes what the table is built from');
 		assert.match(script, /function renderPluginDeps\(/, 'the pane is a table');
 		assert.match(script, /action: \'pluginTree\'|type: 'pluginTree'/, 'whose rows can be picked');
 		// The diagram was asked for and then not wanted: nothing here may draw the tree as Mermaid.
@@ -1876,9 +2065,56 @@ suite('Cordis kernel', () => {
 			const written = readRows(join(kernel.host.home(), '.comonad', 'cordis.yml'));
 			assert.deepStrictEqual(written.map((entry) => [entry.id, entry.name]), [['mine', './plugins/mine/dist/index.js']], 'the row names the copy in your library');
 
-			// Uninstalling is deleting the row, exactly as the tab writes it.
+			// Turning the row off is what the tab writes — a disable, not a delete.
 			await kernel.ctx.plugins.set('mine', { disabled: true });
 			assert.strictEqual(kernel.ctx.get('ledger'), undefined, 'a disabled row provides nothing');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('uninstalling a plugin undoes the install: the row goes, the folder goes, the plugin with it', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			const source = join(kernel.root, 'download', 'mine');
+			mkdirSync(join(source, 'dist'), { recursive: true });
+			writeFileSync(join(source, 'package.json'), JSON.stringify({ name: 'mine', main: './dist/index.js', comonad: { plugin: true } }));
+			writeFileSync(
+				join(source, 'dist', 'index.js'),
+				[
+					"const { Service } = require('cordis');",
+					'class Ledger extends Service {',
+					"	constructor(ctx) { super(ctx, 'ledger'); }",
+					'}',
+					'module.exports = function plugin(ctx) { ctx.plugin(Ledger); };',
+					'module.exports.inject = [];',
+				].join('\n'),
+			);
+			await kernel.ctx.plugins.install(source);
+			assert.ok(kernel.ctx.get('ledger'), 'the install brought the service up');
+
+			// What the confirmation names before anything is deleted: the folder an install copied.
+			assert.strictEqual(kernel.ctx.plugins.installedDirOf('mine'), join(kernel.ctx.plugins.library, 'mine'));
+
+			const states = await kernel.ctx.plugins.uninstall('mine');
+			assert.ok(!states.some((entry) => entry.id === 'mine'), 'the row is gone from the list');
+			assert.strictEqual(kernel.ctx.get('ledger'), undefined, 'and the plugin is disposed with it');
+			assert.ok(!existsSync(join(kernel.ctx.plugins.library, 'mine')), 'the folder it was copied into is deleted');
+			assert.deepStrictEqual(readRows(join(kernel.host.home(), '.comonad', 'cordis.yml')), [], 'the row is gone from your cordis.yml');
+			assert.ok(existsSync(join(kernel.ctx.plugins.library, 'node_modules', 'cordis', 'package.json')), 'the modules lent to plugins stay');
+
+			// A row of yours, whose code is not a copy in the library: the row goes, the file stays.
+			const workspace = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(workspace, { recursive: true });
+			writeFileSync(join(workspace, 'mine.js'), `module.exports = { name: 'hand', apply: () => void 0 };`);
+			writeRow(join(workspace, 'cordis.yml'), { id: 'hand', name: './mine.js' });
+			await kernel.ctx.plugins.reconcile();
+			assert.strictEqual(kernel.ctx.plugins.installedDirOf('hand'), undefined, 'nothing of it was ever installed');
+			await kernel.ctx.plugins.uninstall('hand');
+			assert.deepStrictEqual(kernel.ctx.plugins.state(), [], 'the row is gone from the list');
+			assert.deepStrictEqual(readRows(join(workspace, 'cordis.yml')), [], 'and from the project’s own yml');
+			assert.ok(existsSync(join(workspace, 'mine.js')), 'but the file it loaded is yours and stays');
 		} finally {
 			await kernel.dispose();
 		}
@@ -2028,9 +2264,10 @@ suite('Cordis kernel', () => {
 			await kernel.ctx.plugin(slashCommands);
 			const slash = kernel.ctx.commands.list().map((command) => command.name);
 			assert.ok(slash.includes('help'), 'the slash commands loaded without the tavern plugin');
-			for (const name of ['status', 'rewind', 'continue']) {
+			for (const name of ['status', 'continue']) {
 				assert.ok(slash.includes(name), `/${name} is still there`);
 			}
+			assert.ok(!slash.includes('rewind'), '/rewind was removed with the rewind feature');
 			for (const name of ['char', 'persona', 'lore', 'preset']) {
 				assert.ok(!slash.includes(name), `/${name} came with the tavern plugin, so it is gone`);
 			}
@@ -2077,10 +2314,13 @@ suite('Cordis kernel', () => {
 			const host = { uri: () => '', refresh: () => undefined };
 			const controller = pane?.controller?.(host);
 			assert.ok(controller, 'the pane brings an editor');
-			const owned = controller?.patch?.(
-				{ tavernCharacter: '  kestrel ', tavernLorebooks: 'one\ntwo, three', tavernNoteDepth: '4', wiRecursive: true, mode: 'full' },
-				kernel.ctx.settings.get(),
-			) ?? {};
+			const owned = controller?.patch?.({
+				tavernCharacter: '  kestrel ',
+				tavernLorebooks: 'one\ntwo, three',
+				tavernNoteDepth: '4',
+				wiRecursive: true,
+				mode: 'full',
+			}) ?? {};
 			assert.strictEqual(owned.tavernCharacter, 'kestrel', 'text is trimmed');
 			assert.deepStrictEqual(owned.tavernLorebooks, ['one', 'two', 'three'], 'a book list takes lines and commas');
 			assert.strictEqual(owned.tavernNoteDepth, 4, 'a count is read as a number');
@@ -2094,22 +2334,16 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('the journal is an installable plugin: the shipped tree has no row for it, and mounting one brings it back', async () => {
+	test('the change journal is a row of the shipped tree: on by default, one row to turn it off', async () => {
+		// The safety net is in the tree itself: no install step stands between a fresh window and a
+		// journaled write — and one row is still all it takes to opt out.
+		assert.ok(ROWS.some((row) => row.id === 'checkpoints' && row.group === 'kernel'), 'the shipped tree names it');
+		assert.strictEqual(PLUGINS.checkpoints, checkpointsPlugin, 'one row mounts the journal and its review');
+		assert.ok(!PLUGINS.tavern, 'the content layer is still something you install');
 		const kernel = await createTestKernel({ skip: ['checkpoints'], config: { checkpoints: true } });
 		try {
-			// Not built in: nothing in the shipped tree names it, so a fresh window journals nothing and has
-			// no review command — a write is simply a write.
-			assert.ok(!ROWS.some((row) => row.id === 'checkpoints'), 'the shipped rows mount no journal');
-			assert.strictEqual(PLUGINS.checkpoints, undefined, 'and no built-in plugin to name');
-			assert.strictEqual(kernel.ctx.get('checkpoints'), undefined, 'so a tree without the row has no journal');
-			assert.deepStrictEqual(
-				kernel.ctx.sessions.require(kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plain').id).marks,
-				[],
-				'nothing to rewind to without the row',
-			);
-
-			// A row of one's own, mounted the way a `cordis.yml` mounts it: the plugin package's entry.
-			await kernel.ctx.plugin(checkpointsEntry);
+			// The row, mounted the way the tree mounts it.
+			await kernel.ctx.plugin(pluginHost, { rows: [{ id: 'checkpoints' }], plugins: { checkpoints: checkpointsPlugin } });
 			assert.ok(kernel.ctx.get('checkpoints'), 'the row provides the journal');
 
 			// And it journals for real: the agent's own write tools go through the row it found.
@@ -2137,60 +2371,15 @@ suite('Cordis kernel', () => {
 			});
 			const pending = await kernel.ctx.checkpoints.pending(workspace, 'journaled');
 			assert.deepStrictEqual(pending.files.map((file) => file.path), ['journaled.txt'], 'the row journals the write');
-		} finally {
-			await kernel.dispose();
-		}
-	});
 
-	test('the journal that ships with Comonad installs from its own folder and loads', async () => {
-		// The real thing, end to end: the package as it is packaged (its `dist` bundle, built by
-		// `npm run compile`), copied into the library the way the panel's Install… does it, and loaded by
-		// the host from there — so the bundle's own `require('cordis')` and `require('vscode')` are the
-		// modules Comonad lends it.
-		const extension = vscode.extensions.getExtension('comonad.comonad');
-		assert.ok(extension, 'the extension is installed in the test host');
-		const source = join(extension!.extensionUri.fsPath, 'packages', 'comonad-plugin-checkpoints');
-		assert.ok(existsSync(join(source, 'dist', 'index.js')), 'the plugin bundle is built beside the extension');
-
-		const kernel = await createTestKernel({ skip: ['checkpoints'], config: { checkpoints: true } });
-		try {
-			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
-			// What the panel's Install… reads: the `comonad` block in the package's own manifest, found
-			// under the extension's `packages` folder — so the journal is offered by name, not by a list.
-			(kernel.host as { extensionUri: unknown }).extensionUri = extension!.extensionUri;
-			const offered = kernel.ctx.plugins.bundled().find((entry) => entry.id === 'comonad-plugin-checkpoints');
-			assert.strictEqual(offered?.label, 'Change journal (shadow git)', 'the panel offers the journal by name');
-			assert.strictEqual(offered?.dir, source, 'from the folder that ships beside the extension');
-
-			const state = await kernel.ctx.plugins.install(source);
-			const row = state.find((entry) => entry.id === 'comonad-plugin-checkpoints');
-			assert.strictEqual(row?.loaded, true, `the shipped plugin loads from the library (${row?.error ?? ''})`);
-			assert.ok(kernel.ctx.get('checkpoints'), 'and it brought the journal with it');
-			// A write the agent makes now reaches the journal the *installed bundle* provides.
-			const workspace = kernel.host.workspace();
-			writeFileSync(join(workspace, 'installed.txt'), 'before\n');
-			await kernel.ctx.plugin(fsTools);
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'installed');
-			kernel.ctx.sessions.save(session);
-			kernel.ctx.llm.use({
-				name: 'writer',
-				async chat(request) {
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						const toolCall: ToolCall = { id: `w${request.messages.length}`, name: 'write_file', arguments: JSON.stringify({ path: 'installed.txt', content: 'written\n' }) };
-						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
-					}
-					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			await kernel.ctx.agent.runTurn({
-				text: 'write it',
-				sessionId: 'installed',
-				policy: { workMode: 'aw', approval: 'universal_accept' },
-				surface: 'test',
-			});
-			const pending = await kernel.ctx.checkpoints.pending(workspace, 'installed');
-			assert.deepStrictEqual(pending.files.map((file) => file.path), ['installed.txt'], 'the installed journal records the write');
+			// One toggle: off, and a write is just a write again.
+			await kernel.ctx.plugins.set('checkpoints', { disabled: true });
+			assert.strictEqual(kernel.ctx.get('checkpoints'), undefined, 'the row off leaves no journal');
+			assert.deepStrictEqual(
+				kernel.ctx.sessions.require(kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plain').id).marks,
+				[],
+				'and no restore point is recorded',
+			);
 		} finally {
 			await kernel.dispose();
 		}
@@ -2240,6 +2429,8 @@ suite('Cordis kernel', () => {
 			assert.match(document, /<button class="tab" type="button" role="tab" data-tab="st" title="ST —/, 'the pane is a tab');
 			assert.match(document, /<section data-pane="st" hidden>/, 'and a section of its own');
 			assert.match(document, /id="st-pane"/, 'holding the markup it brought');
+			assert.match(document, /id="side-resizer"/, 'the sidebar has a resize sash');
+			assert.match(document, /class="tab-icon"/, 'and every tab carries an icon');
 			const scripts = [...document.matchAll(/<script nonce="[^"]*" src="([^"]+)"/g)].map((match) => basename(decodeURIComponent(match[1])));
 			assert.deepStrictEqual(scripts, ['settings.js', 'worldinfo.js', 'persona.js', 'content.js', 'st.js'], 'the host’s client comes first, and the pane’s last');
 			assert.match(document, /id="plugins-install"/, 'and the host’s own tabs are still there');
@@ -2505,6 +2696,23 @@ suite('Cordis kernel', () => {
 		assert.ok(String(binding.when).includes('comonad.chatFocused'), 'the chat publishes its own focus');
 	});
 
+	test('Cmd+L on a selection adds it to the chat without taking the line-selection chord', () => {
+		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+			contributes: {
+				commands: { command: string }[];
+				keybindings: { command: string; key: string; mac?: string; when?: string }[];
+			};
+		};
+		assert.ok(manifest.contributes.commands.some((entry) => entry.command === 'comonad.referenceSelection'));
+		const binding = manifest.contributes.keybindings.find((entry) => entry.command === 'comonad.referenceSelection');
+		assert.ok(binding, 'comonad.referenceSelection is bound');
+		assert.strictEqual(binding.mac, 'cmd+l');
+		assert.strictEqual(binding.key, 'ctrl+l');
+		// With no selection the chord must fall through to VS Code's select-line command.
+		assert.match(String(binding.when), /editorTextFocus/);
+		assert.match(String(binding.when), /editorHasSelection/);
+	});
+
 	test('the rule lists the Rules tab edits are the ones the gate uses', async () => {
 		const kernel = await createTestKernel();
 		try {
@@ -2641,7 +2849,7 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('a compaction keeps every rewind point it can still honour', async () => {
+	test('a compaction keeps every restore point it can still honour', async () => {
 		const kernel = await createTestKernel();
 		try {
 			kernel.ctx.llm.use({
@@ -2656,13 +2864,13 @@ suite('Cordis kernel', () => {
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'marks');
 			session.contextWindow = 8_000;
 			session.policy.maxTokens = 500;
-			// Five turns, each with a rewind point recorded the way the agent records one: the transcript
+			// Five turns, each with a restore point recorded the way the agent records one: the transcript
 			// length at the end of the turn.
 			const original: Message[] = [];
 			for (let turn = 0; turn < 5; turn += 1) {
 				original.push({ role: 'user', content: `ask-${turn}-${'a'.repeat(4_000)}` });
 				original.push({ role: 'assistant', content: `answer-${turn}-${'b'.repeat(4_000)}` });
-				session.marks.push({ turn, entryCount: turn, length: original.length, at: turn, text: `t${turn}` });
+				session.marks.push({ turn, entryCount: turn, length: original.length, at: turn });
 			}
 			session.transcript.push(...original);
 			kernel.ctx.sessions.save(session);
@@ -2692,7 +2900,7 @@ suite('Cordis kernel', () => {
 				assert.strictEqual(
 					landed?.content,
 					original[length - 1]?.content,
-					`rewinding to the mark lands on the message it always meant (length ${length})`,
+					`restoring to the mark lands on the message it always meant (length ${length})`,
 				);
 			}
 			assert.ok(folded.marks.every((mark) => mark.length <= folded.transcript.length), 'no mark points past the transcript');
@@ -2762,7 +2970,9 @@ suite('Cordis kernel', () => {
 	});
 
 	test('a fold during a continue moves the reply it extends, and never orphans a tool call', async () => {
-		const kernel = await createTestKernel();
+		// The mid-turn fold belongs to the agent's own request shape; a composed ST request is not
+		// folded in place. Switch the layer off so this tests the path that still folds.
+		const kernel = await createTestKernel({ config: { tavernEnabled: false } });
 		try {
 			// A tool whose output alone overruns the window, so the turn's own step is what forces the
 			// fold after the request was built.
@@ -2793,7 +3003,7 @@ suite('Cordis kernel', () => {
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'cont');
 			// A conversation far past the window, so the fold happens before the turn's own messages and
 			// the reply a continue extends has to be found again in the transcript the fold leaves.
-			session.contextWindow = 12_000;
+			session.contextWindow = 8_000;
 			session.policy.maxTokens = 500;
 			for (let turn = 0; turn < 6; turn += 1) {
 				session.transcript.push({ role: 'user', content: `ask ${turn} ${'a'.repeat(3_000)}` });
@@ -2820,7 +3030,7 @@ suite('Cordis kernel', () => {
 				[],
 				'no call is left without its result',
 			);
-			assert.ok(after.marks.every((mark) => mark.length <= after.transcript.length), 'no rewind point is past the transcript');
+			assert.ok(after.marks.every((mark) => mark.length <= after.transcript.length), 'no restore point is past the transcript');
 		} finally {
 			await kernel.dispose();
 		}
@@ -2857,7 +3067,7 @@ suite('Cordis kernel', () => {
 			assert.ok(isSummaryMessage(after.transcript[0]), 'the record keeps the summary');
 			assert.ok(after.transcript.some((message) => message.content.startsWith('answer 8')), 'and the turns the fold kept');
 			assert.ok(!after.transcript.some((message) => message.content === 'answer this privately'), 'while the quiet prompt is still not a turn of the chat');
-			assert.ok(after.marks.every((mark) => mark.length <= after.transcript.length), 'no rewind point is past the transcript');
+			assert.ok(after.marks.every((mark) => mark.length <= after.transcript.length), 'no restore point is past the transcript');
 		} finally {
 			await kernel.dispose();
 		}
@@ -2925,7 +3135,9 @@ suite('Cordis kernel', () => {
 	});
 
 	test('an endpoint that refuses the prompt as too long is retried once, shrunk', async () => {
-		const kernel = await createTestKernel();
+		// Emergency folding belongs to the agent's own request shape; a composed ST request can only
+		// elide tool output. Test the retry through the path that still folds.
+		const kernel = await createTestKernel({ config: { tavernEnabled: false } });
 		try {
 			let attempts = 0;
 			let second: Message[] = [];
@@ -2954,7 +3166,7 @@ suite('Cordis kernel', () => {
 					{ role: 'assistant', content: `answer ${turn} ${'b'.repeat(400)}` },
 				);
 			}
-			session.marks.push({ turn: 0, entryCount: 0, length: 2, at: 0, text: 't0' });
+			session.marks.push({ turn: 0, entryCount: 0, length: 2, at: 0 });
 			kernel.ctx.sessions.save(session);
 
 			const result = await kernel.ctx.agent.runTurn({ text: 'the newest ask', sessionId: 'retry' });
@@ -3515,14 +3727,15 @@ suite('Tavern content', () => {
 		}, 'only an endpoint-compatible sampler is sent, and the selected bias set comes along');
 
 		const messages = promptCollection(preset);
-		assert.strictEqual(messages[0].identifier, IDENTITY_PROMPT, 'the agent identity leads');
-		assert.deepStrictEqual(messages.slice(1, 4).map((item) => item.identifier), ['main', 'chatHistory', 'authorsNote']);
+		const generated = COMONAD_PROMPTS.map((prompt) => prompt.identifier);
+		assert.deepStrictEqual(messages.slice(0, generated.length).map((item) => item.identifier), generated, 'Comonad’s blocks lead, injected into an order that did not know them');
+		assert.deepStrictEqual(messages.slice(generated.length, generated.length + 3).map((item) => item.identifier), ['main', 'chatHistory', 'authorsNote']);
 		assert.deepStrictEqual(messages.filter((item) => item.identifier === 'authorsNote').map((item) => item.enabled), [false]);
 		assert.ok(messages.some((item) => item.identifier === 'jailbreak'), 'the shipped blocks still ride along');
 		// A character with an order of its own uses it instead of the preset's default block.
 		assert.deepStrictEqual(
-			promptCollection(preset, 'Kestrel').slice(2, 3).map((item) => item.identifier),
-			['main'],
+			promptCollection(preset, 'Kestrel').slice(generated.length, generated.length + 2).map((item) => item.identifier),
+			['chatHistory', 'main'],
 			'a character’s own order is used for that character',
 		);
 		// A preset is written back with its blocks kept: ours first, the one we cannot map last.
@@ -3561,14 +3774,18 @@ suite('Tavern content', () => {
 		assert.strictEqual(bare.promptLibrary, undefined);
 		assert.ok(!(PROMPT_LIBRARY_KEY in (JSON.parse(presetToJson(bare)) as Record<string, unknown>)), 'an unused library is not written');
 
-		// A preset saved before the identity block stopped being written: the block is taken out of every
-		// order and the prompt list, and a preset without it is handed back untouched.
-		const stale = { id: 'stale', name: 'Stale', raw: {}, prompts: [{ identifier: 'comonad', role: 'system' as const, marker: true }, { identifier: 'main', role: 'system' as const, content: 'hi' }], promptOrder: [{ identifier: 'comonad', enabled: true }, { identifier: 'main', enabled: true }], promptOrders: { 'Alice': [{ identifier: 'comonad', enabled: true }] } } as unknown as TavernPreset;
-		const cleaned = withoutIdentityBlock(stale);
-		assert.deepStrictEqual(cleaned.prompts?.map((prompt) => prompt.identifier), ['main'], 'the list keeps every other block');
-		assert.deepStrictEqual(cleaned.promptOrder?.map((entry) => entry.identifier), ['main']);
-		assert.deepStrictEqual(cleaned.promptOrders?.Alice, [], 'a character order loses it too');
-		assert.strictEqual(withoutIdentityBlock(cleaned), cleaned, 'a clean preset is returned as it is');
+		// A preset whose order knows nothing of Comonad's blocks — an imported SillyTavern file, say.
+		// completeOrder injects them once, in front; a save keeps only their place and switch, never a
+		// generated definition.
+		const stale = { id: 'stale', name: 'Stale', raw: {}, prompts: [{ identifier: 'main', role: 'system' as const, content: 'hi' }], promptOrder: [{ identifier: 'main', enabled: true }] } as unknown as TavernPreset;
+		const injected = COMONAD_PROMPTS.map((prompt) => prompt.identifier);
+		const collection = promptCollection(stale);
+		assert.deepStrictEqual(collection.slice(0, injected.length).map((prompt) => prompt.identifier), injected, 'the generated blocks lead an imported order');
+		assert.strictEqual(collection.filter((prompt) => prompt.identifier === IDENTITY_PROMPT).length, 1, 'and each appears once');
+		assert.deepStrictEqual(completeOrder(stale.promptOrder ?? []).slice(0, injected.length).map((entry) => entry.identifier), injected);
+		const adopted = adoptPreset({ ...stale, prompts: collection });
+		assert.ok(!(adopted.prompts ?? []).some((prompt) => injected.includes(prompt.identifier)), 'a save never writes a generated definition');
+		assert.deepStrictEqual(adopted.promptOrder?.slice(0, injected.length).map((entry) => entry.identifier), injected, 'only their place and switch are stored');
 
 		// A pane is untrusted input: what it sends back is filtered before it can be written.
 		assert.deepStrictEqual(sanitisePromptLibrary([{ identifier: 'ok', content: 'x' }, { content: 'no id' }, null]).map((entry) => entry.identifier), ['ok']);
@@ -3628,17 +3845,124 @@ suite('Tavern content', () => {
 		}
 	});
 
-	test('the prompt collection can be switched and reordered, the identity block cannot', () => {
+	test('the prompt collection can be switched and reordered, Comonad’s blocks included', () => {
 		const collection = promptCollection();
-		assert.deepStrictEqual(collection.slice(1, 4).map((item) => item.identifier), DEFAULT_ORDER.slice(0, 3).map((entry) => entry.identifier));
+		assert.deepStrictEqual(
+			collection.map((item) => item.identifier),
+			DEFAULT_ORDER.map((entry) => entry.identifier),
+			'the shipped order is the collection',
+		);
 		const off = setEnabled(collection, 'charPersonality', false);
 		assert.strictEqual(off.find((item) => item.identifier === 'charPersonality')?.enabled, false);
 		const moved = movePrompt(collection, 'jailbreak', -2);
 		const index = moved.findIndex((item) => item.identifier === 'jailbreak');
-		assert.strictEqual(index, 10, 'jailbreak moved two places earlier');
+		assert.strictEqual(index, DEFAULT_ORDER.length - 3, 'jailbreak moved two places earlier');
 		assert.strictEqual(moved[index + 1].identifier, 'dialogueExamples');
 		assert.strictEqual(moved[index - 1].identifier, 'worldInfoAfter');
-		assert.strictEqual(movePrompt(collection, IDENTITY_PROMPT, 3)[0].identifier, IDENTITY_PROMPT, 'the identity block stays first');
+		const identityMoved = movePrompt(collection, IDENTITY_PROMPT, 3);
+		assert.strictEqual(identityMoved[3].identifier, IDENTITY_PROMPT, 'the identity block can move like any other');
+		assert.strictEqual(identityMoved[0].identifier, TOOLS_PROMPT);
+	});
+
+	test('a preset places and switches Comonad’s generated blocks like any other row', () => {
+		const preset = {
+			id: 'ordered',
+			name: 'Ordered',
+			raw: {},
+			prompts: [],
+			promptOrder: [
+				{ identifier: CONTEXT_PROMPT, enabled: true },
+				{ identifier: IDENTITY_PROMPT, enabled: false },
+				{ identifier: TOOLS_PROMPT, enabled: true },
+				{ identifier: COMONAD_BLOCK.memory, enabled: false },
+				{ identifier: 'chatHistory', enabled: true },
+			],
+		} as unknown as TavernPreset;
+		const collection = promptCollection(preset);
+		assert.strictEqual(collection[0].identifier, CONTEXT_PROMPT, 'an explicit place wins');
+		assert.strictEqual(collection.find((prompt) => prompt.identifier === IDENTITY_PROMPT)?.enabled, false);
+		assert.strictEqual(collection.find((prompt) => prompt.identifier === COMONAD_BLOCK.memory)?.enabled, false);
+		const messages = assemble(
+			collection,
+			{
+				comonad: {
+					[COMONAD_BLOCK.identity]: 'identity',
+					[COMONAD_BLOCK.context]: 'context',
+					[COMONAD_BLOCK.memory]: 'memory',
+				},
+			},
+			[{ role: 'user', content: 'hi' }],
+		);
+		assert.strictEqual(messages[0].content, 'context', 'the context block moves to where the preset put it');
+		assert.ok(!messages.some((message) => message.content === 'identity'), 'a switched-off generated block is not sent');
+		assert.ok(!messages.some((message) => message.content === 'memory'));
+	});
+
+	test('a prompt layout keeps its order, switches and prefixes, and a tool layout its own order', () => {
+		const defaults = defaultPromptLayout();
+		assert.deepStrictEqual(defaults.map((entry) => entry.id), COMONAD_PROMPTS.map((prompt) => prompt.identifier));
+		assert.ok(defaults.every((entry) => entry.enabled && entry.prefix), 'the canonical layout is on, with default prefixes');
+		const parsed = parsePromptLayout([
+			{ id: CONTEXT_PROMPT, enabled: true, prefix: 'Context:' },
+			{ id: IDENTITY_PROMPT, enabled: false, prefix: '' },
+			{ id: 'nope', enabled: false },
+			{ id: CONTEXT_PROMPT, enabled: false, prefix: 'duplicate' },
+		]);
+		assert.strictEqual(parsed[0]?.id, CONTEXT_PROMPT, 'the saved order wins');
+		assert.strictEqual(parsed[0]?.enabled, true);
+		assert.strictEqual(parsed[0]?.prefix, 'Context:');
+		assert.strictEqual(parsed.find((entry) => entry.id === IDENTITY_PROMPT)?.enabled, false);
+		assert.strictEqual(parsed.find((entry) => entry.id === IDENTITY_PROMPT)?.prefix, '', 'an empty prefix is deliberate');
+		assert.strictEqual(parsed.filter((entry) => entry.id === CONTEXT_PROMPT).length, 1, 'a duplicate is dropped');
+		assert.strictEqual(parsed.length, COMONAD_PROMPTS.length, 'every missing block is appended');
+
+		const blocks: PromptBlock[] = [
+			{ id: COMONAD_BLOCK.identity, name: 'Identity', prefix: 'I', body: 'body', text: 'I\nbody' },
+			{ id: COMONAD_BLOCK.context, name: 'Context', prefix: 'C', body: 'ctx', text: 'C\nctx' },
+		];
+		assert.deepStrictEqual(applyPromptLayout(blocks, parsed).map((block) => block.id), [COMONAD_BLOCK.context], 'disabled and empty blocks are left out, in layout order');
+
+		const merged = mergeToolLayout(
+			[{ name: 'a' }, { name: 'b' }, { name: 'c' }],
+			[
+				{ name: 'c', enabled: false },
+				{ name: 'a', enabled: true },
+				{ name: 'gone', enabled: true },
+			],
+		);
+		assert.deepStrictEqual(
+			merged.map((entry) => [entry.tool.name, entry.enabled]),
+			[
+				['c', false],
+				['a', true],
+				['b', true],
+			],
+			'configured order first; the rest alphabetical and on',
+		);
+		assert.deepStrictEqual(
+			parseToolLayout([{ name: 'a', enabled: false }, { name: 'a', enabled: true }, { name: '', enabled: true }]),
+			[{ name: 'a', enabled: false }],
+			'a duplicate or nameless tool is dropped',
+		);
+
+		const kept = mergePromptPrefixes(
+			[
+				{ id: IDENTITY_PROMPT, enabled: false, prefix: 'old identity' },
+				{ id: CONTEXT_PROMPT, enabled: true, prefix: 'old context' },
+			],
+			[
+				{ id: CONTEXT_PROMPT, enabled: false, prefix: 'new context' },
+				{ id: IDENTITY_PROMPT, enabled: true, prefix: 'new identity' },
+			],
+		);
+		assert.deepStrictEqual(
+			kept,
+			[
+				{ id: IDENTITY_PROMPT, enabled: false, prefix: 'new identity' },
+				{ id: CONTEXT_PROMPT, enabled: true, prefix: 'new context' },
+			],
+			'the ST mirror keeps its order/switches; only prefixes move into the core layout',
+		);
 	});
 
 	test('an entry activates by key, by constant, by decorator — never after @@dont_activate', () => {
@@ -3936,7 +4260,7 @@ suite('Tavern content', () => {
 		const messages = assemble(
 			promptCollection(),
 			{
-				identity: 'You are Comonad.',
+				comonad: { [COMONAD_BLOCK.identity]: 'You are Comonad.' },
 				charDescription: 'A cartographer.',
 				charPersonality: 'Terse.',
 				scenario: 'Dusk.',
@@ -3963,18 +4287,18 @@ suite('Tavern content', () => {
 		assert.deepStrictEqual(messages.filter((message) => message.content === 'hm').map((message) => message.role), ['assistant']);
 
 		// Switching a block off removes it, and an empty block is never sent.
-		const trimmed = assemble(setEnabled(promptCollection(), 'charPersonality', false), { identity: 'You are Comonad.', charPersonality: 'Terse.' }, []);
+		const trimmed = assemble(setEnabled(promptCollection(), 'charPersonality', false), { comonad: { [COMONAD_BLOCK.identity]: 'You are Comonad.' }, charPersonality: 'Terse.' }, []);
 		assert.ok(!trimmed.some((message) => message.content === 'Terse.'));
 		assert.strictEqual(trimmed[0].content, 'You are Comonad.');
 		assert.ok(trimmed.length <= 2, 'only the identity and the main prompt have text of their own');
 
 		// `wi_format` wraps the world-info blocks.
-		const wrapped = assemble(promptCollection(), { identity: 'i', worldInfoBefore: 'the flats' }, [], { wiFormat: 'Lore: {0}' });
+		const wrapped = assemble(promptCollection(), { comonad: { [COMONAD_BLOCK.identity]: 'i' }, worldInfoBefore: 'the flats' }, [], { wiFormat: 'Lore: {0}' });
 		assert.ok(wrapped.some((message) => message.content === 'Lore: the flats'));
 
 		// A collection that never mentions the history still gets the conversation.
 		const noHistory = promptCollection().filter((prompt) => prompt.identifier !== 'chatHistory');
-		const withHistory = assemble(noHistory, { identity: 'i' }, [{ role: 'user', content: 'kept' }]);
+		const withHistory = assemble(noHistory, { comonad: { [COMONAD_BLOCK.identity]: 'i' } }, [{ role: 'user', content: 'kept' }]);
 		assert.ok(withHistory.some((message) => message.content === 'kept'));
 
 		// And it gets the in-chat injections too: a block in chat only ever travels inside the history, so
@@ -3985,7 +4309,7 @@ suite('Tavern content', () => {
 			injection_position: INJECTION_POSITION.absolute,
 			injection_depth: 0,
 		};
-		const withNote = assemble([...noHistory, note], { identity: 'i' }, [{ role: 'user', content: 'kept' }]);
+		const withNote = assemble([...noHistory, note], { comonad: { [COMONAD_BLOCK.identity]: 'i' } }, [{ role: 'user', content: 'kept' }]);
 		assert.deepStrictEqual(
 			withNote.filter((message) => message.content === 'kept' || message.content === 'Keep it short.').map((message) => message.content),
 			['kept', 'Keep it short.'],
@@ -4068,7 +4392,7 @@ suite('Tavern content', () => {
 		assert.strictEqual(applyRegex([makeScript({ findRegex: 'foo', replaceString: 'bar' })], 'foo foo', { placement: REGEX_PLACEMENT.aiOutput }), 'bar foo');
 	});
 
-	test('with no content selected the request is the agent prompt plus the history, nothing else', async () => {
+	test('with the ST layer on every turn is composed; only an absent or disabled layer falls back', async () => {
 		const kernel = await createTestKernel();
 		try {
 			let seen: Message[] = [];
@@ -4080,26 +4404,285 @@ suite('Tavern content', () => {
 				},
 			});
 			await kernel.ctx.agent.runTurn({ text: 'hi', sessionId: 'plain' });
-			// The guard that makes the whole port risk-free: an idle tavern layer changes nothing.
-			assert.strictEqual(seen.length, 2, `expected the identity and the prompt, got ${JSON.stringify(seen)}`);
+			// The layer owns every turn even with nothing selected: the built-in Default is the collection.
+			assert.ok(seen.length >= 3, `expected the default collection and the prompt, got ${JSON.stringify(seen)}`);
 			assert.strictEqual(seen[0].role, 'system');
 			assert.ok(seen[0].content.startsWith('You are Comonad'), 'the identity block still leads');
-			assert.ok(!seen[0].content.includes('lore_lookup'), 'and never advertises a tool with no books behind it');
-			assert.strictEqual(seen[1].role, 'user');
-			assert.strictEqual(seen[1].content, 'hi');
+			assert.ok(seen.some((message) => message.content.includes('Inspect the workspace with the provided tools')), 'the Tools block is a message of its own');
+			assert.ok(!seen.some((message) => message.content.includes("Write {{char}}'s next reply")), 'and no roleplay main without a character or preset');
+			assert.ok(!seen.some((message) => message.content.includes('lore_lookup')), 'and never advertises a tool with no books behind it');
+			assert.strictEqual(seen[seen.length - 1].role, 'user');
+			assert.strictEqual(seen[seen.length - 1].content, 'hi');
 
-			const inert = kernel.ctx.tavern.compose({
-				identity: 'identity',
+			const composed = await kernel.ctx.tavern.compose({
+				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
 				history: [{ role: 'user', content: 'hi' }],
 				binding: {},
 				scan: [{ role: 'user', text: 'hi' }],
 				turn: 1,
 			});
-			assert.strictEqual(inert.inert, true);
-			assert.deepStrictEqual(inert.activated, []);
-			assert.deepStrictEqual(inert.messages.map((message) => message.content), ['identity', 'hi']);
+			assert.strictEqual(composed.takeover, true);
+			assert.strictEqual(composed.toolsEnabled, true);
+			assert.deepStrictEqual(composed.activated, []);
+			assert.deepStrictEqual(composed.messages.map((message) => message.content), ['identity', 'hi']);
 		} finally {
 			await kernel.dispose();
+		}
+
+		// Switched off: the agent's own shape is sent, exactly as before the layer existed.
+		const off = await createTestKernel({ config: { tavernEnabled: false } });
+		try {
+			let seen: Message[] = [];
+			off.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					seen = request.messages;
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await off.ctx.agent.runTurn({ text: 'hi', sessionId: 'plain' });
+			assert.strictEqual(seen.length, 2, `expected the identity and the prompt, got ${JSON.stringify(seen)}`);
+			assert.strictEqual(seen[0].role, 'system');
+			assert.ok(seen[0].content.startsWith('You are Comonad'));
+			assert.strictEqual(seen[1].role, 'user');
+			assert.strictEqual(seen[1].content, 'hi');
+			const inert = await off.ctx.tavern.compose({
+				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
+				history: [{ role: 'user', content: 'hi' }],
+				binding: {},
+				scan: [{ role: 'user', text: 'hi' }],
+				turn: 1,
+			});
+			assert.strictEqual(inert.takeover, false);
+		} finally {
+			await off.dispose();
+		}
+	});
+
+	test('the preset’s Tools entry switches the whole tool set, and a call is refused before it runs', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let ran = 0;
+			kernel.ctx.tools.register({
+				name: 'probe_tool',
+				description: 'A tool the test watches.',
+				capability: 'ro',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: objectSchema({}),
+				execute: async () => {
+					ran += 1;
+					return 'ran';
+				},
+			});
+			const library = join(kernel.root, 'ws', '.comonad');
+			mkdirSync(join(library, 'presets'), { recursive: true });
+			writeFileSync(
+				join(library, 'presets', 'NoTools.json'),
+				JSON.stringify({
+					prompts: [],
+					prompt_order: [{ character_id: 100000, order: [{ identifier: TOOLS_PROMPT, enabled: false }] }],
+				}),
+			);
+			await kernel.ctx.tavern.reload();
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'no-tools');
+			session.preset = 'NoTools';
+			kernel.ctx.sessions.save(session);
+
+			const requests: { tools: string[]; messages: Message[] }[] = [];
+			let attempts = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					attempts += 1;
+					requests.push({ tools: request.tools.map((tool) => tool.name), messages: request.messages });
+					if (attempts === 1) {
+						const call: ToolCall = { id: 'probe-1', name: 'probe_tool', arguments: '{}' };
+						return { message: { role: 'assistant', content: '', toolCalls: [call] }, toolCalls: [call], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'answered without a tool' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'use a tool', sessionId: 'no-tools' });
+			assert.strictEqual(result.text, 'answered without a tool');
+			assert.strictEqual(attempts, 2, 'the rejection went back to the model once');
+			assert.deepStrictEqual(requests[0]!.tools, [], 'the request carries no tools at all');
+			assert.strictEqual(ran, 0, 'and the call never reached the tool');
+			assert.ok(
+				requests[1]!.messages.some((message) => message.role === 'tool' && /Tools entry is off/.test(message.content)),
+				'the model was told why',
+			);
+
+			// The editor preview applies the same switch: a block that advertises a tool is blank when
+			// the request would carry none.
+			const preset = kernel.ctx.tavern.preset('NoTools')!;
+			const preview = kernel.ctx.tavern.previewPrompts(preset, [
+				{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' },
+				{ id: COMONAD_BLOCK.skills, name: 'Skills', text: 'skills' },
+				{ id: COMONAD_BLOCK.agents, name: 'Sub-agents', text: 'agents' },
+				{ id: COMONAD_BLOCK.lore, name: 'Lore index', text: 'lore' },
+			]);
+			assert.strictEqual(preview[COMONAD_BLOCK.identity], 'identity');
+			assert.strictEqual(preview[COMONAD_BLOCK.skills], undefined);
+			assert.strictEqual(preview[COMONAD_BLOCK.agents], undefined);
+			assert.strictEqual(preview[COMONAD_BLOCK.lore], undefined);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('with ST off, the core Tools block is the request’s tool switch', async () => {
+		const layout = defaultPromptLayout().map((entry) => (entry.id === COMONAD_BLOCK.tools ? { ...entry, enabled: false } : entry));
+		const kernel = await createTestKernel({ config: { tavernEnabled: false, prompts: layout } });
+		try {
+			let ran = 0;
+			kernel.ctx.tools.register({
+				name: 'probe_tool',
+				description: 'A tool the test watches.',
+				capability: 'ro',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: objectSchema({}),
+				execute: async () => {
+					ran += 1;
+					return 'ran';
+				},
+			});
+			const requests: { tools: string[]; messages: Message[] }[] = [];
+			let attempts = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					attempts += 1;
+					requests.push({ tools: request.tools.map((tool) => tool.name), messages: request.messages });
+					if (attempts === 1) {
+						const call: ToolCall = { id: 'probe-1', name: 'probe_tool', arguments: '{}' };
+						return { message: { role: 'assistant', content: '', toolCalls: [call] }, toolCalls: [call], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const result = await kernel.ctx.agent.runTurn({ text: 'use a tool', sessionId: 'core-tools-off' });
+			assert.strictEqual(result.text, 'done');
+			assert.deepStrictEqual(requests[0]!.tools, [], 'the core Tools block being off sends no tools');
+			assert.strictEqual(ran, 0, 'and a call made anyway never runs');
+			assert.ok(
+				requests[1]!.messages.some((message) => message.role === 'tool' && /Tools entry is off/.test(message.content)),
+				'the model is told why',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the tool layout orders and switches tools, and a switched-off call is refused', async () => {
+		const kernel = await createTestKernel({
+			config: {
+				toolPrompts: [
+					{ name: 'z_probe', enabled: true },
+					{ name: 'a_probe', enabled: false },
+				],
+			},
+		});
+		try {
+			const ran: string[] = [];
+			for (const name of ['a_probe', 'z_probe']) {
+				kernel.ctx.tools.register({
+					name,
+					description: `The ${name} tool.`,
+					capability: 'ro',
+					needsNetwork: false,
+					needsWorkspace: false,
+					parameters: objectSchema({}),
+					execute: async () => {
+						ran.push(name);
+						return name;
+					},
+				});
+			}
+			const visible = kernel.ctx.tools.visible(kernel.ctx.agent.policyFor()).map((tool) => tool.name);
+			assert.strictEqual(visible[0], 'z_probe', 'the configured order leads');
+			assert.ok(!visible.includes('a_probe'), 'a switched-off tool is not offered');
+			assert.strictEqual(kernel.ctx.tools.layout().find((entry) => entry.tool.name === 'a_probe')?.enabled, false, 'but it keeps its row and switch');
+
+			const requests: { tools: string[]; messages: Message[] }[] = [];
+			let attempts = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					attempts += 1;
+					requests.push({ tools: request.tools.map((tool) => tool.name), messages: request.messages });
+					if (attempts === 1) {
+						const call: ToolCall = { id: 'a-1', name: 'a_probe', arguments: '{}' };
+						return { message: { role: 'assistant', content: '', toolCalls: [call] }, toolCalls: [call], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const result = await kernel.ctx.agent.runTurn({ text: 'use a tool', sessionId: 'tool-layout' });
+			assert.strictEqual(result.text, 'done');
+			assert.strictEqual(attempts, 2, 'the rejection went back to the model once');
+			assert.deepStrictEqual(requests[0]!.tools[0], 'z_probe', 'the offered list follows the configured order');
+			assert.ok(!requests[0]!.tools.includes('a_probe'), 'and never offers the switched-off tool');
+			assert.deepStrictEqual(ran, [], 'the switched-off tool never ran');
+			assert.ok(
+				requests[1]!.messages.some((message) => message.role === 'tool' && /switched off in Prompts/.test(message.content)),
+				'the model was told why the call was refused',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the Prompts layout drives the fallback, while ST keeps its own order and still uses the prefixes', async () => {
+		const layout = defaultPromptLayout().map((entry) => ({ ...entry }));
+		const context = layout.find((entry) => entry.id === COMONAD_BLOCK.context)!;
+		layout.splice(layout.indexOf(context), 1);
+		layout.unshift(context);
+		layout.find((entry) => entry.id === COMONAD_BLOCK.identity)!.prefix = 'Custom identity.';
+		layout.find((entry) => entry.id === COMONAD_BLOCK.instructions)!.enabled = false;
+
+		const off = await createTestKernel({ config: { tavernEnabled: false, instructions: true, prompts: layout } });
+		try {
+			writeFileSync(join(off.root, 'ws', 'COMONAD.md'), 'Project rules.');
+			let seen: Message[] = [];
+			off.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					seen = request.messages;
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await off.ctx.agent.runTurn({ text: 'hi', sessionId: 'layout', systemContext: 'CTX' });
+			const system = seen[0]!.content;
+			assert.ok(system.startsWith('Context:\nCTX'), 'the context block moved to the front');
+			assert.ok(system.includes('Custom identity.'), 'the edited prefix is used');
+			assert.ok(!system.includes('Project instructions:'), 'the disabled Instructions block is left out of the fallback');
+		} finally {
+			await off.dispose();
+		}
+
+		const on = await createTestKernel({ config: { tavernEnabled: true, instructions: true, prompts: layout } });
+		try {
+			writeFileSync(join(on.root, 'ws', 'COMONAD.md'), 'Project rules.');
+			let seen: Message[] = [];
+			on.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					seen = request.messages;
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await on.ctx.agent.runTurn({ text: 'hi', sessionId: 'layout', systemContext: 'CTX' });
+			const texts = seen.map((message) => message.content);
+			const identityAt = texts.findIndex((text) => text.startsWith('Custom identity.'));
+			const contextAt = texts.findIndex((text) => text.includes('CTX'));
+			assert.ok(identityAt === 0, 'ST uses the edited prefix on the identity block');
+			assert.ok(contextAt > identityAt, 'and keeps its own order: identity first, context later');
+			assert.ok(texts.some((text) => text.includes('Project instructions:')), 'and its preset enables Instructions even though the core layout disabled it');
+		} finally {
+			await on.dispose();
 		}
 	});
 
@@ -4280,35 +4863,50 @@ suite('Tavern content', () => {
 			await kernel.ctx.tavern.reload();
 
 			const collection = kernel.ctx.tavern.promptsFor();
-			const defaultOrder = collection.map((prompt) => prompt.identifier);
-			assert.deepStrictEqual(defaultOrder.slice(0, 3), ['comonad', 'main', 'worldInfoBefore'], 'the shipped order is what the panel edits');
+			assert.deepStrictEqual(
+				collection.slice(0, 3).map((prompt) => prompt.identifier),
+				[IDENTITY_PROMPT, TOOLS_PROMPT, COMONAD_BLOCK.instructions],
+				'the generated blocks lead the shipped collection',
+			);
 
-			// Rearrange and switch one block off, the way the Prompts table does.
-			const edited = collection.map((prompt) => (prompt.identifier === 'nsfw' ? { ...prompt, enabled: false } : prompt));
-			const moved = [
-				edited[0]!,
-				edited[2]!,
-				edited[1]!,
-				...edited.slice(3),
-			].map((prompt, index) => (prompt.identifier === 'dialogueExamples' ? { ...prompt, injection_position: 1, injection_depth: 2 } : prompt));
-			const id = await kernel.ctx.tavern.savePreset('Edited', moved, kernel.ctx.tavern.preset('Test'));
-			assert.strictEqual(id, 'Edited');
+			// Rearrange and switch blocks off, the way the Prompts table does — Comonad's generated rows
+			// included, whose switch lives in the same order.
+			const moved = collection.map((prompt) =>
+				prompt.identifier === 'nsfw' || prompt.identifier === COMONAD_BLOCK.memory ? { ...prompt, enabled: false } : prompt,
+			);
+			const main = moved.splice(moved.findIndex((prompt) => prompt.identifier === 'main'), 1)[0]!;
+			moved.splice(1, 0, main);
+			const edited = moved.map((prompt) =>
+				prompt.identifier === 'dialogueExamples' ? { ...prompt, injection_position: 1, injection_depth: 2 } : prompt,
+			);
+			const base = kernel.ctx.tavern.preset('Test');
+			await kernel.ctx.tavern.savePresetValue(adoptPreset({ ...base, id: 'Edited', name: 'Edited', prompts: edited, raw: base?.raw ?? {} }));
 
 			const saved = kernel.ctx.tavern.preset('Edited');
-			assert.ok(saved, 'the preset is in the catalog after the reload the save performs');
+			assert.ok(saved, 'the preset is in the catalog after the save');
 			assert.strictEqual(saved?.temperature, 0.5, 'the samplers of the base preset survive');
+			const written = JSON.parse(readFileSync(join(library, 'presets', 'Edited.json'), 'utf8')) as {
+				prompts: { identifier: string }[];
+				prompt_order: { character_id: unknown; order: { identifier: string; enabled: boolean }[] }[];
+			};
+			assert.ok(!written.prompts.some((prompt) => prompt.identifier.startsWith('comonad')), 'generated definitions are never written');
+			const order = written.prompt_order.find((block) => block.character_id === 100_000)?.order ?? [];
+			assert.deepStrictEqual(order.slice(0, 2).map((entry) => entry.identifier), [IDENTITY_PROMPT, 'main'], 'the edited order is stored');
+			assert.ok(order.some((entry) => entry.identifier === COMONAD_BLOCK.memory && entry.enabled === false), 'a generated block’s switch lives in the order');
 			// A chat that selects the new preset reads the edited collection back.
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor());
 			session.preset = 'Edited';
 			kernel.ctx.sessions.save(session);
 			const reread = kernel.ctx.tavern.promptsFor(session.id);
-			assert.strictEqual(reread[0]?.identifier, 'comonad', 'the identity block still leads');
-			assert.strictEqual(reread[1]?.identifier, 'worldInfoBefore', 'the move is what the file stores');
+			assert.strictEqual(reread[0]?.identifier, IDENTITY_PROMPT, 'the identity block still leads');
+			assert.strictEqual(reread[1]?.identifier, 'main', 'the move is what the file stores');
 			assert.strictEqual(reread.find((prompt) => prompt.identifier === 'nsfw')?.enabled, false);
+			assert.strictEqual(reread.find((prompt) => prompt.identifier === COMONAD_BLOCK.memory)?.enabled, false, 'and a generated block’s switch survives the reload');
 			assert.strictEqual(reread.find((prompt) => prompt.identifier === 'dialogueExamples')?.injection_depth, 2);
 			// The file is Comonad's own: a name with spaces becomes a safe file name.
 			assert.ok(existsSync(join(library, 'presets', 'Edited.json')));
-			assert.strictEqual(await kernel.ctx.tavern.savePreset('My Preset!', moved), 'My-Preset');
+			await kernel.ctx.tavern.savePresetValue(adoptPreset({ ...base, id: 'My-Preset', name: 'My Preset!', prompts: edited, raw: base?.raw ?? {} }));
+			assert.ok(kernel.ctx.tavern.preset('My-Preset'), 'a name with spaces becomes a safe file name');
 		} finally {
 			await kernel.dispose();
 		}
@@ -4373,6 +4971,49 @@ suite('Tavern content', () => {
 			const loaded = await loadCard(stray);
 			assert.strictEqual(await kernel.ctx.tavern.saveCharacter(loaded), join(library, 'characters', 'Stray.json'));
 			assert.strictEqual(existsSync(stray), true, 'the original file is left where it was');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the content pane opens a kind on its first item, and heals after a delete', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const salt = blankBook('Salt');
+			salt.entries['0'] = worldEntry({ uid: 0, key: ['salt'], content: 'The flats drink sound.' });
+			await kernel.ctx.tavern.saveBook('Salt', salt);
+			await kernel.ctx.tavern.saveBook('Sand', blankBook('Sand'));
+			const controller = contentController(kernel.ctx, {});
+
+			// Switching a kind sends no item: the pane asked for the kind, and must open on its first
+			// entry rather than on an empty page beside a full list.
+			await controller.action({ kind: 'lorebooks', action: 'select', id: '' });
+			const state = controller.state() as { item?: { name?: string }; book?: { name?: string } };
+			assert.strictEqual(state.item?.name, 'Salt', 'the kind opens on its first book');
+			assert.strictEqual(state.book?.name, 'Salt', 'and the world-book slice is that book');
+
+			// A selection that another window (or a delete) took away heals to what is left.
+			await kernel.ctx.tavern.deleteBook('Salt');
+			const after = controller.state() as { item?: { name?: string } };
+			assert.strictEqual(after.item?.name, 'Sand');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a new preset draft already shows Comonad’s generated rows in the editor', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const controller = contentController(kernel.ctx, {});
+			await controller.action({ kind: 'presets', action: 'new' });
+			const state = controller.state() as {
+				item?: { prompts?: { identifier: string }[] };
+				preset?: { comonad?: string[]; toolsPrompt?: string };
+			};
+			const generated = COMONAD_PROMPTS.map((prompt) => prompt.identifier);
+			assert.deepStrictEqual(state.item?.prompts?.slice(0, generated.length).map((prompt) => prompt.identifier), generated, 'the draft carries the generated rows');
+			assert.deepStrictEqual(state.preset?.comonad, generated, 'and the pane knows which rows are read-only');
+			assert.strictEqual(state.preset?.toolsPrompt, TOOLS_PROMPT);
 		} finally {
 			await kernel.dispose();
 		}
@@ -4469,8 +5110,8 @@ suite('Tavern content', () => {
 			kernel.ctx.sessions.save(session);
 			assert.deepStrictEqual(kernel.ctx.tavern.booksFor(session.id).map((book) => book.name), ['Salt']);
 
-			const composed = kernel.ctx.tavern.compose({
-				identity: 'identity',
+			const composed = await kernel.ctx.tavern.compose({
+				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
 				history: [
 					{ role: 'user', content: 'About the salt?' },
 					{ role: 'assistant', content: 'hm.' },
@@ -4512,8 +5153,8 @@ suite('Tavern content', () => {
 			// A stale pick falls back to the link: losing a persona because a file was renamed is worse.
 			assert.strictEqual(kernel.ctx.tavern.personaFor('nobody', character)?.id, 'Cartographer');
 
-			const composed = kernel.ctx.tavern.compose({
-				identity: 'identity',
+			const composed = await kernel.ctx.tavern.compose({
+				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
 				history: [{ role: 'user', content: '{{user}} here.' }],
 				binding: { character: 'kestrel' },
 				scan: [{ role: 'user', text: 'hi' }],
@@ -4542,8 +5183,8 @@ suite('Tavern content', () => {
 			await kernel.ctx.tavern.reload();
 			assert.strictEqual(kernel.ctx.tavern.persona('Ada')?.position, 9, 'upstream’s NONE position survives the read');
 
-			const composed = kernel.ctx.tavern.compose({
-				identity: 'identity',
+			const composed = await kernel.ctx.tavern.compose({
+				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
 				history: [{ role: 'user', content: 'Here.' }],
 				binding: { character: 'kestrel', persona: 'Ada' },
 				scan: [{ role: 'user', text: 'hi' }],
@@ -4627,7 +5268,7 @@ suite('Tavern content', () => {
 			assert.ok(existsSync(join(library, 'personas', 'The-Narrator.json')));
 			assert.strictEqual(kernel.ctx.tavern.persona('The-Narrator')?.position, 4);
 			assert.strictEqual(kernel.ctx.tavern.persona('The-Narrator')?.connections[0]?.id, 'Kestrel');
-			assert.strictEqual(kernel.ctx.settings.get().tavernPersona, 'The-Narrator', 'the document’s own default is adopted with it');
+			assert.strictEqual(tavernSettings(kernel.ctx).tavernPersona, 'The-Narrator', 'the document’s own default is adopted with it');
 		} finally {
 			await kernel.dispose();
 		}
@@ -4827,11 +5468,17 @@ suite('Tavern content', () => {
 	test('Comonad’s own preset templates are presets, and each one is written like any other', async () => {
 		const kernel = await createTestKernel();
 		try {
-			assert.ok(PRESET_TEMPLATES.length >= 4, 'there are templates to start from');
+			assert.ok(PRESET_TEMPLATES.length >= 5, 'there are templates to start from');
+			// The built-in Default is not a file until the user asks for a copy.
+			assert.strictEqual(kernel.ctx.tavern.preset('default'), undefined, 'loading the plugin writes no default preset');
+			const generated = COMONAD_PROMPTS.map((prompt) => prompt.identifier);
 			for (const template of PRESET_TEMPLATES) {
 				assert.ok(template.preset.prompts?.length, `${template.name} ships the prompt list`);
 				assert.ok(template.preset.promptOrder?.length, `${template.name} ships its order`);
-				assert.ok(template.preset.new_chat_prompt, `${template.name} marks a new chat`);
+				assert.deepStrictEqual(template.preset.promptOrder?.slice(0, generated.length).map((entry) => entry.identifier), generated, `${template.name} orders Comonad’s blocks`);
+				if (template.id !== 'default') {
+					assert.ok(template.preset.new_chat_prompt, `${template.name} marks a new chat`);
+				}
 				const file = await kernel.ctx.tavern.savePresetValue({ ...template.preset, source: '' });
 				const back = kernel.ctx.tavern.preset(template.id);
 				assert.ok(back, `${template.name} lands in the library as ${template.id}`);
@@ -4839,6 +5486,24 @@ suite('Tavern content', () => {
 				assert.deepStrictEqual(presetSamplers(back), presetSamplers(template.preset), 'and reads back with its samplers');
 				assert.strictEqual(back.new_chat_prompt, template.preset.new_chat_prompt, 'and with its nudges');
 			}
+			// Default is exactly the implicit collection: the shipped definitions, Comonad's order, and
+			// nothing of a roleplay sampler or nudge set that an unselected chat does not use.
+			const fallback = PRESET_TEMPLATES.find((template) => template.id === 'default');
+			assert.ok(fallback, 'Default is one of the templates');
+			assert.deepStrictEqual(fallback!.preset.prompts?.map((prompt) => prompt.identifier), ST_PROMPTS.map((prompt) => prompt.identifier), 'its file holds SillyTavern’s definitions only');
+			assert.deepStrictEqual(presetSamplers(fallback!.preset), {}, 'and no sampler overrides');
+			assert.strictEqual(fallback!.preset.new_chat_prompt, undefined, 'and no nudge an unselected chat would not send');
+			assert.strictEqual(
+				turnPrompts(fallback!.preset, undefined).find((prompt) => prompt.identifier === 'main')?.content,
+				'',
+				'the Default copy behaves like an unselected chat: no roleplay main without a character',
+			);
+			assert.ok(
+				(turnPrompts(PRESET_TEMPLATES.find((template) => template.id === 'balanced')!.preset, undefined).find(
+					(prompt) => prompt.identifier === 'main',
+				)?.content ?? '').length > 0,
+				'a roleplay template keeps its main prompt',
+			);
 			// A block's identifier is its own, so inserting one never collides with a shipped block.
 			const shipped = new Set(['main', 'nsfw', 'chatHistory', 'jailbreak', 'worldInfoBefore', 'worldInfoAfter', 'dialogueExamples']);
 			for (const block of PROMPT_BLOCKS) {
@@ -4880,8 +5545,8 @@ suite('Tavern content', () => {
 			await kernel.ctx.tavern.reload();
 			assert.ok(presetSamplers(kernel.ctx.tavern.preset('Nudges')) !== undefined);
 
-			const composed = kernel.ctx.tavern.compose({
-				identity: 'identity',
+			const composed = await kernel.ctx.tavern.compose({
+				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
 				history: [
 					{ role: 'user', content: 'hi' },
 					{ role: 'assistant', content: 'hm.' },
@@ -4911,8 +5576,8 @@ suite('Tavern content', () => {
 			);
 
 			// `send_if_empty` fills a turn the history would otherwise end on.
-			const filled = kernel.ctx.tavern.compose({
-				identity: 'identity',
+			const filled = await kernel.ctx.tavern.compose({
+				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
 				history: [{ role: 'assistant', content: 'hm.' }],
 				binding: { character: 'kestrel', preset: 'Nudges' },
 				scan: [],
@@ -4956,7 +5621,7 @@ suite('Tavern content', () => {
 			{ role: 'assistant' as const, content: 'two' },
 			{ role: 'user' as const, content: 'three' },
 		];
-		const messages = assemble(promptCollection(preset), { identity: 'identity' }, history);
+		const messages = assemble(promptCollection(preset), { comonad: { [COMONAD_BLOCK.identity]: 'identity' } }, history);
 		assert.strictEqual(messages.find((message) => message.content === 'A prefill.')?.role, 'assistant', 'an in-chat block keeps the role it was given');
 		assert.deepStrictEqual(
 			messages.filter((message) => ['one', 'two', 'three', 'A prefill.'].includes(message.content)).map((message) => message.content),
@@ -4999,12 +5664,13 @@ suite('Tavern content', () => {
 				},
 			});
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'preview');
-			const identity = promptText(await kernel.ctx.agent.promptBlocks(session));
-			const shown = kernel.ctx.tavern.displayPrompts(session.id, identity);
+			const blocks = await kernel.ctx.agent.promptBlocks(session);
+			const shown = kernel.ctx.tavern.displayPrompts(session.id, blocks);
 
-			// The block the panel used to report as "0 tokens" is the agent's whole system prompt.
-			assert.strictEqual(shown[IDENTITY_PROMPT], identity);
-			assert.ok(identity.length > 0, 'and it is not empty');
+			// Each generated block is previewed from the same block the request is built from.
+			assert.strictEqual(shown[IDENTITY_PROMPT], blocks[0]?.text);
+			assert.ok((shown[IDENTITY_PROMPT] ?? '').length > 0, 'and it is not empty');
+			assert.match(shown[TOOLS_PROMPT] ?? '', /provided tools/, 'the Tools block is previewed too');
 			// The card's own fields are resolved, formats and all.
 			assert.strictEqual(shown.charDescription, 'A cartographer of dead cities.');
 			assert.strictEqual(shown.charPersonality, 'Terse, watchful.');
@@ -5019,7 +5685,7 @@ suite('Tavern content', () => {
 			// What the preview promises is what the request carries — the two share one resolver.
 			await kernel.ctx.agent.runTurn({ text: 'hello', sessionId: 'preview' });
 			const sent = seen.map((message) => message.content).join('\n');
-			assert.ok(sent.includes(identity), 'the identity the preview showed is in the request');
+			assert.ok(sent.includes(blocks[0]!.text), 'the identity the preview showed is in the request');
 			assert.ok(sent.includes('A cartographer of dead cities.'));
 			assert.ok(sent.includes('Terse, watchful.'));
 			assert.ok(sent.includes('The salt flats, at dusk.'));
@@ -5086,8 +5752,9 @@ suite('Tavern content', () => {
 			const texts = seen.map((message) => message.content);
 			const at = (needle: string): number => texts.findIndex((text) => text.includes(needle));
 			assert.ok(texts[0].startsWith('You are Comonad'), 'the agent identity still leads');
-			assert.ok(texts[0].includes('lore_lookup'), 'the identity block says the books can be looked up');
-			assert.ok(texts[0].includes('- Salt: salt'), 'and names the entries it may ask about');
+			const loreAt = texts.findIndex((text) => text.includes('lore_lookup'));
+			assert.ok(loreAt > 0, 'a Lore index block says the books can be looked up');
+			assert.ok(texts[loreAt].includes('- Salt: salt'), 'and names the entries it may ask about');
 			assert.ok(at('A cartographer of dead cities.') > 0, 'the card description is in the prompt');
 			assert.ok(at('Terse, watchful.') > 0, 'the card personality is in the prompt');
 			assert.ok(at('The salt flats, at dusk.') > 0, 'the scenario is in the prompt');
@@ -5659,7 +6326,7 @@ suite('Tavern content', () => {
 /**
  * The per-file journal against a real shadow repository on a temporary disk. These tests cover
  * what the review relies on: nothing outside the journal is touched, unsaved text and outside
- * edits refuse before any write, and rewinds restore exactly the files written after a point.
+ * edits refuse before any write, and restores put back exactly the files written after a point.
  */
 
 interface Harness {
@@ -5763,6 +6430,9 @@ suite('Per-file checkpoints', () => {
 			await agentWrite(h, 's', 1, 'a.txt', 'one\ntwo\n');
 			await h.checkpoints.keep(h.work, 's', ['a.txt']);
 			assert.strictEqual((await h.checkpoints.pending(h.work, 's')).files.length, 0);
+			const kept = (await h.checkpoints.entries(h.work, 's'))[0]!;
+			assert.strictEqual(kept.accepted, true);
+			assert.strictEqual(typeof kept.acceptedAt, 'number', 'a review records when it happened');
 			// A later write by the agent is pending again, against the accepted baseline.
 			await agentWrite(h, 's', 2, 'a.txt', 'one\ntwo\nthree\n');
 			const [again] = (await h.checkpoints.pending(h.work, 's')).files;
@@ -5818,7 +6488,7 @@ suite('Per-file checkpoints', () => {
 		}
 	});
 
-	test('a rewind restores exactly the files written after its point, and keeps earlier ones', async () => {
+	test('a restore puts back exactly the files written after its point, and keeps earlier ones', async () => {
 		const h = await harness();
 		try {
 			writeFileSync(join(h.work, 'a.txt'), 'a0\n');
@@ -5836,7 +6506,7 @@ suite('Per-file checkpoints', () => {
 		}
 	});
 
-	test('a rewind refuses as one unit when any file would be overwritten, and writes none', async () => {
+	test('a restore refuses as one unit when any file would be overwritten, and writes none', async () => {
 		const h = await harness();
 		try {
 			writeFileSync(join(h.work, 'a.txt'), 'a0\n');
@@ -5852,7 +6522,7 @@ suite('Per-file checkpoints', () => {
 		}
 	});
 
-	test('a rewind can skip one file and keep its later entries', async () => {
+	test('a restore can skip one file and keep its later entries', async () => {
 		const h = await harness();
 		try {
 			writeFileSync(join(h.work, 'a.txt'), 'a0\n');
@@ -5870,7 +6540,7 @@ suite('Per-file checkpoints', () => {
 		}
 	});
 
-	test('a rewind refuses an unsaved document before anything is written', async () => {
+	test('a restore refuses an unsaved document before anything is written', async () => {
 		const h = await harness();
 		try {
 			writeFileSync(join(h.work, 'a.txt'), 'a0\n');
@@ -5964,7 +6634,7 @@ suite('Per-file checkpoints', () => {
 		}
 	});
 
-	test('the journal is a feature plugin: without it, a write is just a write', async () => {
+	test('the journal is a row like any other: with it off, a write is just a write', async () => {
 		const kernel = await createTestKernel({ config: { checkpoints: true }, skip: ['checkpoints'] });
 		try {
 			assert.strictEqual(kernel.ctx.get('checkpoints'), undefined, 'the row is off, so nothing provides the journal');
@@ -6059,7 +6729,7 @@ suite('Per-file checkpoints', () => {
 		}
 	});
 
-	test('the agent journals its own writes: one rewind point per turn, cut at the prompt', async () => {
+	test('the agent journals its own writes: one restore point per turn, cut at the prompt', async () => {
 		const kernel = await createTestKernel({ config: { checkpoints: true } });
 		try {
 			const workspace = kernel.host.workspace();
@@ -6083,7 +6753,7 @@ suite('Per-file checkpoints', () => {
 			const id = first.sessionId;
 			const session = kernel.ctx.sessions.require(id);
 			// Diagnostic: what the agent actually did, so a missing mark is explained, not guessed at.
-			assert.strictEqual(session.marks.length, 2, 'each turn that wrote a file has a rewind point');
+			assert.strictEqual(session.marks.length, 2, 'each turn that wrote a file has a restore point');
 			assert.strictEqual(session.marks[0]!.length, 0, 'turn one cuts to an empty transcript: its prompt is the first message');
 			// Turn one is user, assistant, tool, assistant (four messages); turn two's prompt is the fifth.
 			// Cutting at the prompt keeps all four and drops turn two.
@@ -6095,7 +6765,7 @@ suite('Per-file checkpoints', () => {
 			assert.deepStrictEqual(pending.files.map((file) => file.path), ['note.txt'], 'the agent’s writes are pending');
 			assert.strictEqual(pending.files[0]!.created, false, 'note.txt existed before the agent');
 
-			// Rewinding to turn two restores what the file was before turn two's write.
+			// Restoring to turn two puts the file back to what it was before turn two's write.
 			await kernel.ctx.checkpoints.revert(workspace, id, { entryCount: session.marks[1]!.entryCount });
 			assert.strictEqual(readFileSync(join(workspace, 'note.txt'), 'utf8'), 'one\n', 'the file is back to its content before turn two');
 		} finally {
@@ -6123,5 +6793,751 @@ suite('Per-file checkpoints', () => {
 		assert.strictEqual(parsed.get('x.txt')?.deletions, 1);
 		assert.strictEqual(parsed.get('y.txt')?.additions, 1);
 		assert.strictEqual(parsed.get('y.txt')?.deletions, 0);
+	});
+
+	test('a change block can be kept while the rest stays pending', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'one\ntwo\nthree\nfour\nfive\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'ONE\ntwo\nthree\nfour\nFIVE\n');
+			const before = await h.checkpoints.change(h.work, 's', 'a.txt');
+			assert.strictEqual(before.hunks.length, 2, 'two separated edits are two blocks');
+			assert.deepStrictEqual(
+				[before.created, before.deleted, before.changedOutside, before.binary, before.truncated],
+				[false, false, false, false, false],
+			);
+
+			await h.checkpoints.keepHunk(h.work, 's', 'a.txt', before.hunks[0]!);
+			const after = await h.checkpoints.change(h.work, 's', 'a.txt');
+			assert.strictEqual(after.hunks.length, 1, 'the kept block is gone from the diff');
+			assert.strictEqual(after.baseline, 'ONE\ntwo\nthree\nfour\nfive\n', 'the baseline advanced by exactly that block');
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'ONE\ntwo\nthree\nfour\nFIVE\n', 'keeping writes nothing to disk');
+			const pending = await h.checkpoints.pending(h.work, 's');
+			assert.deepStrictEqual(
+				pending.files.map((file) => [file.path, file.additions, file.deletions]),
+				[['a.txt', 1, 1]],
+			);
+
+			await h.checkpoints.keepHunk(h.work, 's', 'a.txt', after.hunks[0]!);
+			assert.deepStrictEqual((await h.checkpoints.pending(h.work, 's')).files, [], 'the file is accepted once every block is');
+			assert.strictEqual(await h.checkpoints.baselineContent(h.work, 's', 'a.txt'), 'ONE\ntwo\nthree\nfour\nFIVE\n', 'the accepted baseline is the file');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('undo after a partial keep restores the accepted baseline, not the pre-agent file', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'one\ntwo\nthree\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'ONE\ntwo\nTHREE\n');
+			const change = await h.checkpoints.change(h.work, 's', 'a.txt');
+			await h.checkpoints.keepHunk(h.work, 's', 'a.txt', change.hunks[0]!);
+			await h.checkpoints.undo(h.work, 's', ['a.txt']);
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'ONE\ntwo\nthree\n', 'the kept block stays, the rest is undone');
+			assert.strictEqual(await h.checkpoints.baselineContent(h.work, 's', 'a.txt'), 'ONE\ntwo\nthree\n');
+			assert.deepStrictEqual((await h.checkpoints.pending(h.work, 's')).files, []);
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('a block is refused when the text was saved dirty or changed outside the agent', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'one\ntwo\nthree\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'ONE\ntwo\nTHREE\n');
+			const change = await h.checkpoints.change(h.work, 's', 'a.txt');
+
+			await assert.rejects(
+				h.checkpoints.keepHunk(h.work, 's', 'a.txt', change.hunks[0]!, { isDirty: () => true }),
+				(error: unknown) => error instanceof DirtyEditorError,
+			);
+
+			// Someone else edited the file after the agent: a block shown before that is not applied
+			// silently, and with an explicit overwrite a block that no longer reads the same is still
+			// refused.
+			writeFileSync(join(h.work, 'a.txt'), 'ONE\ntwo\nTHREE\nand more\n');
+			await assert.rejects(
+				h.checkpoints.keepHunk(h.work, 's', 'a.txt', change.hunks[1]!),
+				(error: unknown) => error instanceof ChangedOutsideError,
+			);
+			await assert.rejects(
+				h.checkpoints.keepHunk(h.work, 's', 'a.txt', change.hunks[1]!, { overwrite: 'all' }),
+				/the file changed since this change was shown/,
+			);
+			const pending = await h.checkpoints.pending(h.work, 's');
+			assert.strictEqual(pending.files[0]?.changedOutside, true, 'the manual edit is reported honestly');
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('amend turns an edit the review made itself into the new written state', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'one\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'ONE\n');
+			writeFileSync(join(h.work, 'a.txt'), 'ONE\nreview edit\n');
+			assert.strictEqual((await h.checkpoints.pending(h.work, 's')).files[0]?.changedOutside, true);
+			await h.checkpoints.amend(h.work, 's', 'a.txt');
+			assert.strictEqual((await h.checkpoints.pending(h.work, 's')).files[0]?.changedOutside, false);
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('a restore keeps the blocks accepted before its mark and drops the ones after', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'one\ntwo\nthree\nfour\nfive\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'ONE\ntwo\nthree\nfour\nFIVE\n');
+			const first = await h.checkpoints.change(h.work, 's', 'a.txt');
+			assert.strictEqual(first.hunks.length, 2);
+			await h.checkpoints.keepHunk(h.work, 's', 'a.txt', first.hunks[0]!);
+			const entries = await h.checkpoints.entries(h.work, 's');
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			const mark = { entryCount: entries.length, at: Date.now() };
+
+			// Turn two edits the middle; the accepted block from turn one must survive the restore, and
+			// the block kept after the mark must not.
+			await agentWrite(h, 's', 2, 'a.txt', 'ONE\ntwo\nTHREE\nfour\nFIVE\n');
+			const second = await h.checkpoints.change(h.work, 's', 'a.txt');
+			await h.checkpoints.keepHunk(h.work, 's', 'a.txt', second.hunks[0]!);
+			await h.checkpoints.revert(h.work, 's', mark);
+
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'ONE\ntwo\nthree\nfour\nFIVE\n', 'the file is back to the mark');
+			assert.strictEqual(
+				await h.checkpoints.baselineContent(h.work, 's', 'a.txt'),
+				'ONE\ntwo\nthree\nfour\nfive\n',
+				'the block kept before the mark is still the baseline',
+			);
+			const pending = await h.checkpoints.pending(h.work, 's');
+			assert.deepStrictEqual(
+				pending.files.map((file) => [file.path, file.additions, file.deletions]),
+				[['a.txt', 1, 1]],
+				'only the block never kept is pending again',
+			);
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('a new file diffs against nothing, and one block accepts it', async () => {
+		const h = await harness();
+		try {
+			await agentWrite(h, 's', 1, 'new.txt', 'first\nsecond\n');
+			const change = await h.checkpoints.change(h.work, 's', 'new.txt');
+			assert.strictEqual(change.created, true);
+			assert.strictEqual(change.baseline, '', 'a file that did not exist diffs against nothing');
+			assert.strictEqual(change.hunks.length, 1);
+			await h.checkpoints.keepHunk(h.work, 's', 'new.txt', change.hunks[0]!);
+			assert.deepStrictEqual((await h.checkpoints.pending(h.work, 's')).files, []);
+			assert.strictEqual(readFileSync(join(h.work, 'new.txt'), 'utf8'), 'first\nsecond\n', 'the file itself was never rewritten');
+		} finally {
+			h.dispose();
+		}
+	});
+});
+
+suite('Prompt editing', () => {
+	test('a turn names the user message that opened it', () => {
+		const transcript: Message[] = [
+			{ role: 'assistant', content: 'hello', greeting: true },
+			{ role: 'user', content: 'one' },
+			{ role: 'assistant', content: 'first' },
+			{ role: 'user', content: 'two' },
+			{ role: 'assistant', content: 'second' },
+		];
+		const turns = turnsOf(transcript);
+		assert.strictEqual(turns[0]!.greeting, true);
+		assert.strictEqual(turns[0]!.promptAt, undefined, 'a greeting has no prompt to edit');
+		assert.strictEqual(turns[1]!.promptAt, 1);
+		assert.strictEqual(turns[2]!.promptAt, 3);
+	});
+
+	test('the restore point for a prompt is the first turn at or after it that wrote', () => {
+		const marks: Mark[] = [
+			{ turn: 1, entryCount: 2, length: 0, at: 1 },
+			{ turn: 3, entryCount: 5, length: 4, at: 3 },
+			{ turn: 4, entryCount: 7, length: 6, at: 4 },
+		];
+		assert.strictEqual(markForRestore(marks, 4)?.entryCount, 5, 'a silent edited turn uses the next writer’s boundary');
+		assert.strictEqual(markForRestore(marks, 6)?.entryCount, 7);
+		assert.strictEqual(markForRestore(marks, 7), undefined, 'nothing wrote at or after this prompt');
+	});
+
+	test('rewriteAt cuts at a prompt, drops later restore points, and refuses everything else', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'edit');
+			session.transcript = [
+				{ role: 'user', content: 'one' },
+				{ role: 'assistant', content: 'a1' },
+				{ role: 'user', content: 'two' },
+				{ role: 'assistant', content: 'a2' },
+				{ role: 'user', content: 'three' },
+				{ role: 'assistant', content: 'a3' },
+			];
+			session.marks = [
+				{ turn: 1, entryCount: 0, length: 0, at: 1 },
+				{ turn: 2, entryCount: 1, length: 2, at: 2 },
+				{ turn: 3, entryCount: 2, length: 4, at: 3 },
+			];
+			assert.strictEqual(kernel.ctx.sessions.rewriteAt(session, 2), undefined);
+			assert.deepStrictEqual(session.transcript.map((message) => message.content), ['one', 'a1']);
+			assert.deepStrictEqual(session.marks.map((mark) => mark.length), [0], 'the edited turn’s own mark goes too');
+			const stored = kernel.ctx.sessions.get(session.id)!;
+			assert.deepStrictEqual(stored.transcript.map((message) => message.content), ['one', 'a1'], 'saved for the next read');
+			assert.deepStrictEqual(stored.marks.map((mark) => mark.length), [0]);
+
+			const fresh = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'refuse');
+			fresh.transcript = [
+				{ role: 'user', content: 'q' },
+				{ role: 'assistant', content: 'a' },
+				{ role: 'system', content: 'summary', summarized: true },
+			];
+			assert.ok(kernel.ctx.sessions.rewriteAt(fresh, 1), 'an assistant message is not a prompt');
+			assert.ok(kernel.ctx.sessions.rewriteAt(fresh, 2), 'a summary is not a prompt');
+			assert.ok(kernel.ctx.sessions.rewriteAt(fresh, 9), 'an out-of-range index is refused');
+			fresh.cursor = { node: 'n', payload: {}, step: 0, state: {} };
+			assert.ok(kernel.ctx.sessions.rewriteAt(fresh, 0), 'a suspended turn is refused');
+			assert.deepStrictEqual(fresh.transcript.map((message) => message.content), ['q', 'a', 'summary']);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an edited prompt replaces its turn and every later one', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'echo',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					return {
+						message: { role: 'assistant', content: `reply: ${last?.content ?? ''}` },
+						toolCalls: [],
+						usage: { input: 1, output: 1 },
+					};
+				},
+			});
+			const first = await kernel.ctx.agent.runTurn({ text: 'one', surface: 'test' });
+			await kernel.ctx.agent.runTurn({ text: 'two', sessionId: first.sessionId, surface: 'test' });
+			await kernel.ctx.agent.runTurn({ text: 'three', sessionId: first.sessionId, surface: 'test' });
+			const session = kernel.ctx.sessions.require(first.sessionId);
+			const two = turnsOf(session.transcript).find((turn) => turn.prompt === 'two');
+			const result = await kernel.ctx.agent.runTurn({
+				text: 'two edited',
+				sessionId: first.sessionId,
+				surface: 'test',
+				rewriteAt: two!.promptAt,
+			});
+			assert.ok(!result.text.startsWith('Error'), result.text);
+			const edited = kernel.ctx.sessions.require(first.sessionId);
+			assert.deepStrictEqual(
+				edited.transcript.map((message) => message.content),
+				['one', 'reply: one', 'two edited', 'reply: two edited'],
+				'the later turn and the old reply are gone',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('prepareRewrite can cancel before the transcript is cut, and a blocked prompt never calls it', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'echo',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					return { message: { role: 'assistant', content: `reply: ${last?.content ?? ''}` }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const first = await kernel.ctx.agent.runTurn({ text: 'one', surface: 'test' });
+			const before = kernel.ctx.sessions.require(first.sessionId).transcript.map((message) => message.content);
+
+			let prepared = false;
+			const cancelled = await kernel.ctx.agent.runTurn({
+				text: 'edited',
+				sessionId: first.sessionId,
+				surface: 'test',
+				rewriteAt: 0,
+				prepareRewrite: async () => {
+					prepared = true;
+					return false;
+				},
+			});
+			assert.strictEqual(prepared, true, 'the surface is asked before the cut');
+			assert.strictEqual(cancelled.text, '');
+			assert.deepStrictEqual(kernel.ctx.sessions.require(first.sessionId).transcript.map((message) => message.content), before, 'a cancelled edit changes nothing');
+
+			writeFileSync(
+				join(kernel.host.storage.root, 'hooks.json'),
+				JSON.stringify({ UserPromptSubmit: [{ hooks: [{ type: 'command', command: process.execPath, args: ['-e', 'process.exit(2)'] }] }] }),
+			);
+			let blockedPrepared = false;
+			const blocked = await kernel.ctx.agent.runTurn({
+				text: 'edited again',
+				sessionId: first.sessionId,
+				surface: 'test',
+				rewriteAt: 0,
+				prepareRewrite: async () => {
+					blockedPrepared = true;
+					return true;
+				},
+			});
+			assert.match(blocked.text, /Blocked by hook/);
+			assert.strictEqual(blockedPrepared, false, 'the hook refuses before any restore or cut');
+			assert.deepStrictEqual(kernel.ctx.sessions.require(first.sessionId).transcript.map((message) => message.content), before);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('restoring before an edit puts files back where the edited turn began', async () => {
+		const kernel = await createTestKernel({ config: { checkpoints: true } });
+		try {
+			kernel.ctx.llm.use({
+				name: 'writer',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						const toolCall: ToolCall = {
+							id: `w${request.messages.length}`,
+							name: 'write_file',
+							arguments: JSON.stringify({ path: 'note.txt', content: `${last.content}\n` }),
+						};
+						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			const first = await kernel.ctx.agent.runTurn({ text: 'one', surface: 'test' });
+			await kernel.ctx.agent.runTurn({ text: 'two', sessionId: first.sessionId, surface: 'test' });
+			const workspace = kernel.host.workspace();
+			assert.strictEqual(readFileSync(join(workspace, 'note.txt'), 'utf8'), 'two\n');
+
+			const session = kernel.ctx.sessions.require(first.sessionId);
+			const two = turnsOf(session.transcript).find((turn) => turn.prompt === 'two')!;
+			const mark = markForRestore(session.marks, two.promptAt!)!;
+			assert.strictEqual(mark.length, two.promptAt, 'the edited turn’s own restore point');
+			await kernel.ctx.checkpoints.revert(workspace, first.sessionId, { entryCount: mark.entryCount, at: mark.at });
+			assert.strictEqual(readFileSync(join(workspace, 'note.txt'), 'utf8'), 'one\n', 'files are back to the edited turn’s start');
+
+			await kernel.ctx.agent.runTurn({ text: 'two edited', sessionId: first.sessionId, surface: 'test', rewriteAt: two.promptAt });
+			assert.strictEqual(readFileSync(join(workspace, 'note.txt'), 'utf8'), 'two edited\n', 'the replacement turn wrote again');
+			assert.deepStrictEqual(turnsOf(kernel.ctx.sessions.require(first.sessionId).transcript).map((turn) => turn.prompt), ['one', 'two edited']);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+});
+
+suite('Explicit references', () => {
+	test('the token grammar covers files, ranges, folders, symbols and quoted paths', () => {
+		const refs = parseReferences(
+			'see @src/a.ts, @content/计算机/AI提示词.md:9-13 and @src/lib/ and @symbol:src/auth.ts:AuthService, @"a b.ts":2-3 and @symbol:"a:b.ts":Foo',
+		);
+		assert.deepStrictEqual(
+			refs.map(({ kind, path, lines, name }) => ({ kind, path, lines, name })),
+			[
+				{ kind: 'file', path: 'src/a.ts', lines: undefined, name: undefined },
+				{ kind: 'file', path: 'content/计算机/AI提示词.md', lines: { start: 9, end: 13 }, name: undefined },
+				{ kind: 'folder', path: 'src/lib', lines: undefined, name: undefined },
+				{ kind: 'symbol', path: 'src/auth.ts', lines: undefined, name: 'AuthService' },
+				{ kind: 'file', path: 'a b.ts', lines: { start: 2, end: 3 }, name: undefined },
+				{ kind: 'symbol', path: 'a:b.ts', lines: undefined, name: 'Foo' },
+			],
+		);
+	});
+
+	test('a reference starts at a word boundary, and emails, URLs and escapes stay literal', () => {
+		assert.deepStrictEqual(parseReferences('mail a@b.com https://x/@y \\@z'), []);
+		const adjacent = parseReferences('请看@src/a.ts');
+		assert.strictEqual(adjacent.length, 1);
+		assert.strictEqual(adjacent[0]!.path, 'src/a.ts');
+	});
+
+	test('only a numeric suffix is a range, so colon paths and drive letters survive', () => {
+		const refs = parseReferences('@a:b.ts @a:b.ts:9 @C:\\ws\\a.ts:9-13 @symbol:C:\\ws\\a.ts:Name');
+		assert.deepStrictEqual(
+			refs.map((ref) => [ref.kind, ref.path, ref.lines?.start, ref.lines?.end, ref.name]),
+			[
+				['file', 'a:b.ts', undefined, undefined, undefined],
+				['file', 'a:b.ts', 9, 9, undefined],
+				['file', 'C:\\ws\\a.ts', 9, 13, undefined],
+				['symbol', 'C:\\ws\\a.ts', undefined, undefined, 'Name'],
+			],
+		);
+	});
+
+	test('malformed tokens are ignored', () => {
+		for (const text of ['@', '@ x', '@symbol:x', '@symbol:x:', '@:9', '@a:0', '@a:13-9']) {
+			assert.deepStrictEqual(parseReferences(text), [], text);
+		}
+	});
+
+	test('the formatter writes tokens the parser reads back', () => {
+		const refs = [
+			{ kind: 'file' as const, path: 'src/a.ts' },
+			{ kind: 'file' as const, path: 'a b.ts', lines: { start: 2, end: 3 } },
+			{ kind: 'folder' as const, path: 'src/lib' },
+			{ kind: 'symbol' as const, path: 'src/a.ts', name: 'A.b' },
+			{ kind: 'symbol' as const, path: 'a:b.ts', name: 'Foo' },
+		];
+		for (const ref of refs) {
+			const token = formatReference(ref);
+			const parsed = parseReferences(token);
+			assert.strictEqual(parsed.length, 1, token);
+			assert.strictEqual(parsed[0]!.kind, ref.kind);
+			assert.strictEqual(parsed[0]!.path, ref.path);
+			assert.deepStrictEqual(parsed[0]!.lines, ref.lines);
+			assert.strictEqual(parsed[0]!.name, ref.name);
+		}
+	});
+
+	test('the picker ranks basename prefixes over path substrings', () => {
+		const paths = ['src/auth.ts', 'src/lib/auth/helper.ts', 'docs/auth.md', 'content/计算机/AI提示词.md'];
+		assert.strictEqual(rankPaths('auth', paths)[0], 'src/auth.ts');
+		assert.deepStrictEqual(rankPaths('计算机', paths), ['content/计算机/AI提示词.md']);
+		assert.deepStrictEqual(rankPaths('nothing', paths), []);
+	});
+
+	test('a dotted symbol picks the smallest matching range', () => {
+		const classRange = { start: { line: 0, character: 0 }, end: { line: 10, character: 0 } };
+		const methodRange = { start: { line: 2, character: 2 }, end: { line: 5, character: 3 } };
+		const symbols = [{ name: 'Auth', range: classRange, children: [{ name: 'login', range: methodRange }] }];
+		assert.strictEqual(findSymbolRange(symbols, 'Auth.login'), methodRange);
+		assert.strictEqual(findSymbolRange(symbols, 'login'), methodRange);
+		assert.strictEqual(findSymbolRange(symbols, 'Auth'), classRange);
+		assert.strictEqual(findSymbolRange(symbols, 'missing'), undefined);
+	});
+
+	test('the mention picker derives folders and ranks files by name', () => {
+		const paths = ['src/a.ts', 'src/lib/b.ts', 'docs/readme.md'];
+		assert.strictEqual(mentionItems('file', 'b', paths)[0]!.token, '@src/lib/b.ts');
+		assert.strictEqual(mentionItems('folder', 'lib', paths)[0]!.token, '@src/lib/');
+	});
+
+	test('the picker cache lists files under the session root', async () => {
+		const root = mkdtempSync(join(tmpdir(), 'comonad-cache-'));
+		try {
+			mkdirSync(join(root, 'src'));
+			writeFileSync(join(root, 'src', 'a.ts'), 'a');
+			const cache = new WorkspaceFileCache();
+			const files = await cache.list({ workingDirectory: root, confinement: { read: false, write: false }, denyReadPaths: [] });
+			assert.deepStrictEqual(files, ['src/a.ts']);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('references resolve files, ranges and folders into numbered blocks', async () => {
+		const root = mkdtempSync(join(tmpdir(), 'comonad-references-'));
+		try {
+			mkdirSync(join(root, 'src'));
+			writeFileSync(join(root, 'src', 'a.ts'), 'line one\nline two\nline three\n');
+			writeFileSync(join(root, 'src', 'b.ts'), 'b\n');
+			const scope = { workingDirectory: root, confinement: { read: false, write: false }, denyReadPaths: [] };
+			const text = await resolveReferences('see @src/a.ts:2-3 and @src/ and @missing.ts', scope);
+			assert.ok(text, 'a block is produced');
+			assert.ok(text!.includes('<file path="src/a.ts" lines="2-3">'), text);
+			assert.ok(text!.includes('2\tline two\n3\tline three'), text);
+			assert.ok(text!.includes('<folder path="src">'), text);
+			assert.ok(text!.includes('a.ts') && text!.includes('b.ts'), text);
+			assert.ok(text!.includes('error="'), 'the missing file is reported, not thrown');
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('a prompt without references or without a workspace resolves to nothing', async () => {
+		const empty = { workingDirectory: '', confinement: { read: false, write: false }, denyReadPaths: [] };
+		assert.strictEqual(await resolveReferences('see @src/a.ts', empty), undefined);
+		const workspace = { ...empty, workingDirectory: tmpdir() };
+		assert.strictEqual(await resolveReferences('no references here', workspace), undefined);
+	});
+
+	test('the agent resolves references into its Context block', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let seen: Message[] = [];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					seen = request.messages;
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			let received = '';
+			await kernel.ctx.agent.runTurn({
+				text: 'read @note.txt',
+				surface: 'test',
+				resolveSystemContext: async (_session, text) => {
+					received = text;
+					return 'RESOLVED REFERENCES';
+				},
+			});
+			assert.strictEqual(received, 'read @note.txt');
+			assert.ok(
+				seen.some((message) => message.role === 'system' && message.content.includes('RESOLVED REFERENCES')),
+				'the references travel in their own generated Context block',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a blocked prompt never resolves references', async () => {
+		const kernel = await createTestKernel();
+		try {
+			writeFileSync(
+				join(kernel.host.storage.root, 'hooks.json'),
+				JSON.stringify({ UserPromptSubmit: [{ hooks: [{ type: 'command', command: process.execPath, args: ['-e', 'process.exit(2)'] }] }] }),
+			);
+			let called = false;
+			const result = await kernel.ctx.agent.runTurn({
+				text: 'read @note.txt',
+				surface: 'test',
+				resolveSystemContext: async () => {
+					called = true;
+					return 'x';
+				},
+			});
+			assert.match(result.text, /Blocked by hook/);
+			assert.strictEqual(called, false);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a resolver failure does not fail the turn', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const result = await kernel.ctx.agent.runTurn({
+				text: 'read @note.txt',
+				surface: 'test',
+				resolveSystemContext: async () => {
+					throw new Error('boom');
+				},
+			});
+			assert.strictEqual(result.text, 'ok');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('references resolve after a rewrite has cut the transcript', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'refs');
+			session.transcript = [
+				{ role: 'user', content: 'one' },
+				{ role: 'assistant', content: 'a1' },
+				{ role: 'user', content: 'two' },
+				{ role: 'assistant', content: 'a2' },
+			];
+			kernel.ctx.sessions.save(session);
+			let prepared = false;
+			let cutLength = -1;
+			await kernel.ctx.agent.runTurn({
+				text: 'two edited',
+				sessionId: 'refs',
+				surface: 'test',
+				rewriteAt: 2,
+				prepareRewrite: async () => {
+					prepared = true;
+					return true;
+				},
+				resolveSystemContext: async (live) => {
+					cutLength = live.transcript.length;
+					return 'RESOLVED';
+				},
+			});
+			assert.strictEqual(prepared, true);
+			assert.strictEqual(cutLength, 2, 'the callback sees the cut transcript, not the old one');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the chat document has a reference picker and the assets style it', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.css'), 'utf8');
+		const js = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.js'), 'utf8');
+		assert.ok(panel.includes('id="mention"'), 'the picker is in the document');
+		assert.ok(css.includes('.mention-menu') && css.includes('.ref-token'));
+		assert.ok(js.includes('mentionQuery') && js.includes('mentionResults') && js.includes('compositionstart'));
+	});
+});
+
+suite('Markdown math plugin', () => {
+	test('a chat asset contribution registers, replaces and removes with one event each', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(ChatWebviewAssets);
+			let events = 0;
+			kernel.ctx.on('chatWebview/changed', () => {
+				events += 1;
+			});
+			const remove = kernel.ctx.chatWebview.register({
+				id: 'a',
+				scripts: ['/x/a.js'],
+				styles: ['/x/a.css'],
+				roots: ['/x/fonts'],
+			});
+			assert.deepStrictEqual(kernel.ctx.chatWebview.list().map((spec) => spec.id), ['a']);
+			assert.deepStrictEqual(kernel.ctx.chatWebview.directories(), ['/x', '/x/fonts']);
+			kernel.ctx.chatWebview.register({ id: 'a', scripts: ['/y/a.js'] });
+			assert.strictEqual(kernel.ctx.chatWebview.list().length, 1, 'the same id replaces, it does not duplicate');
+			assert.deepStrictEqual(kernel.ctx.chatWebview.list()[0]!.scripts, ['/y/a.js']);
+			remove();
+			assert.deepStrictEqual(kernel.ctx.chatWebview.list(), []);
+			assert.strictEqual(events, 3, 'register, replace, remove');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the chat document loads contributions before chat.js and allows fonts', () => {
+		const root = join(__dirname, '..', '..');
+		const panel = vscode.window.createWebviewPanel('comonad.test.chat', 'chat', vscode.ViewColumn.Active, {
+			enableScripts: true,
+			localResourceRoots: [vscode.Uri.file(root)],
+		});
+		try {
+			const document = chatDocument(panel.webview, vscode.Uri.file(root), [
+				{
+					id: 'math',
+					scripts: [join(MATH_RESOURCES, 'math.js')],
+					styles: [join(MATH_RESOURCES, 'katex.min.css'), join(MATH_RESOURCES, 'math.css')],
+				},
+			]);
+			const scripts = [...document.matchAll(/<script nonce="[^"]*" src="([^"]+)"/g)].map((match) =>
+				basename(decodeURIComponent(match[1]!)),
+			);
+			assert.deepStrictEqual(scripts, ['math.js', 'highlight.js', 'chat.js'], 'hooks and the highlighter load before the chat script');
+			const styles = [...document.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map((match) =>
+				basename(decodeURIComponent(match[1]!)),
+			);
+			assert.deepStrictEqual(styles, ['chat.css', 'katex.min.css', 'math.css']);
+			assert.match(document, /font-src [^;]+;/, 'KaTeX may load its fonts');
+			const plain = chatDocument(panel.webview, vscode.Uri.file(root));
+			assert.strictEqual([...plain.matchAll(/<script nonce="[^"]*" src="/g)].length, 2, 'the highlighter and the chat script, even with no contribution');
+		} finally {
+			panel.dispose();
+		}
+	});
+
+	test('the math plugin contributes its bundle, styles and fonts', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(ChatWebviewAssets);
+			let events = 0;
+			kernel.ctx.on('chatWebview/changed', () => {
+				events += 1;
+			});
+			const fiber = await kernel.ctx.plugin(mathEntry, { resources: MATH_RESOURCES });
+			const math = kernel.ctx.chatWebview.list().find((spec) => spec.id === 'math');
+			assert.ok(math, 'the contribution is registered');
+			assert.deepStrictEqual(math!.scripts?.map((file) => basename(file)), ['math.js']);
+			assert.deepStrictEqual(math!.styles?.map((file) => basename(file)), ['katex.min.css', 'math.css']);
+			assert.deepStrictEqual(math!.roots, [MATH_RESOURCES]);
+			for (const file of [...(math!.scripts ?? []), ...(math!.styles ?? [])]) {
+				assert.ok(existsSync(file), `${basename(file)} exists beside the plugin`);
+			}
+			assert.ok(existsSync(join(MATH_RESOURCES, 'fonts', 'KaTeX_Main-Regular.woff2')));
+			await fiber.dispose();
+			assert.deepStrictEqual(kernel.ctx.chatWebview.list(), [], 'disposing the row removes its files');
+			assert.ok(events >= 2, 'the panel is told to rebuild');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the plugin ships as an installable row with its built Math bundle', async () => {
+		const extension = vscode.extensions.getExtension('comonad.comonad');
+		assert.ok(extension, 'the extension is installed in the test host');
+		const source = join(extension!.extensionUri.fsPath, 'packages', 'comonad-plugin-math');
+		assert.ok(existsSync(join(source, 'dist', 'index.js')), 'the plugin bundle is built beside the extension');
+		assert.ok(existsSync(join(source, 'resources', 'math.js')), 'and its browser bundle is built');
+		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
+		try {
+			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
+			await kernel.ctx.plugin(ChatWebviewAssets);
+			const state = await kernel.ctx.plugins.install(source);
+			const row = state.find((entry) => entry.id === 'comonad-plugin-math');
+			assert.strictEqual(row?.loaded, true, `the shipped plugin loads from the library (${row?.error ?? ''})`);
+			const math = kernel.ctx.chatWebview.list().find((spec) => spec.id === 'math');
+			assert.ok(math, 'and registers its webview assets');
+			for (const file of [...(math?.scripts ?? []), ...(math?.styles ?? [])]) {
+				assert.ok(existsSync(file), `${basename(file)} is found beside the installed build`);
+			}
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the math bundle and its KaTeX assets are valid', () => {
+		const bundle = join(MATH_RESOURCES, 'math.js');
+		assert.ok(existsSync(bundle), 'the browser bundle is built');
+		execFileSync(process.execPath, ['--check', bundle]);
+		const source = readFileSync(bundle, 'utf8');
+		for (const needle of ['__comonadMath', 'clipboardData', 'cloneContents', 'data-tex']) {
+			assert.ok(source.includes(needle), needle);
+		}
+		const css = readFileSync(join(MATH_RESOURCES, 'katex.min.css'), 'utf8');
+		assert.ok(css.includes('@font-face'));
+		assert.ok(existsSync(join(MATH_RESOURCES, 'fonts', 'KaTeX_Main-Regular.woff2')));
+	});
+
+	test('the copy formatter writes the requested dollar delimiters', async () => {
+		const format = (await import(pathToFileURL(join(MATH_PACKAGE, 'src', 'format.mjs')).href)) as {
+			wrapTex(tex: string, display: boolean): string;
+			fenceFor(text: string): string;
+		};
+		assert.strictEqual(format.wrapTex('x^2', false), '$x^2$');
+		assert.strictEqual(format.wrapTex('x', true), '$$x$$');
+		assert.strictEqual(format.wrapTex('a\nb', true), '$$\na\nb\n$$');
+		assert.strictEqual(format.wrapTex('  ', false), '');
+		assert.strictEqual(format.fenceFor('a```b'), '````');
+	});
+
+	test('the core and plugin sources carry the math and copy seams', () => {
+		const chat = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.js'), 'utf8');
+		for (const needle of ['__comonadMath', 'mathHost', 'data-tex', 'math-block', 'displayMathAt']) {
+			assert.ok(chat.includes(needle), needle);
+		}
+		const copy = readFileSync(join(MATH_PACKAGE, 'src', 'copy.js'), 'utf8');
+		for (const needle of ['clipboardData', 'cloneContents', 'data-tex', "getElementById('messages')"]) {
+			assert.ok(copy.includes(needle), needle);
+		}
+	});
+
+	test('the code highlighter bundle is built and loaded before chat.js', () => {
+		const root = join(__dirname, '..', '..');
+		const bundle = join(root, 'resources', 'highlight.js');
+		assert.ok(existsSync(bundle), 'the highlighter is built beside chat.js');
+		execFileSync(process.execPath, ['--check', bundle]);
+		assert.ok(readFileSync(bundle, 'utf8').includes('hljs'));
+		const chat = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		assert.ok(chat.includes('highlightCode') && chat.includes('window.hljs'));
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.ok(css.includes('.hljs-keyword') && css.includes('.hljs-string'));
 	});
 });

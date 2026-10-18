@@ -1,13 +1,21 @@
-import { INJECTION_POSITION, type PromptItem, type PromptOrderEntry, type TavernPreset } from '@comonad/lib/tavern/types';
+import { COMONAD_BLOCK, COMONAD_BLOCKS, COMONAD_BLOCK_IDS, isComonadBlockId } from '@comonad/lib/blocks';
+import type { PromptItem, PromptOrderEntry, TavernPreset } from './types';
 
 /**
- * The prompt collection: the twelve blocks SillyTavern ships, the default order, and the rules for
- * merging a preset's own prompts and order over them. A *marker* block has no content of its own —
- * the assembler fills it from the chat, the card, the world books or the persona.
+ * The prompt collection: the blocks SillyTavern ships, Comonad's own generated blocks, the default
+ * order, and the rules for merging a preset's prompts and order over them. A *marker* block has no
+ * content of its own — the assembler fills it from the chat, the card, the world books, the persona
+ * or, for Comonad's blocks, from the agent's state for the turn.
  */
 
-/** The shipped prompts, verbatim from SillyTavern's `chatCompletionDefaultPrompts`. */
-export const DEFAULT_PROMPTS: readonly PromptItem[] = [
+/** `0` keeps a prompt in the ordered list; `1` injects it in chat, at a depth. */
+export const INJECTION_POSITION = {
+	relative: 0,
+	absolute: 1,
+} as const;
+
+/** The twelve prompts SillyTavern ships, verbatim from its `chatCompletionDefaultPrompts`. */
+export const ST_PROMPTS: readonly PromptItem[] = [
 	{
 		identifier: 'main',
 		name: 'Main Prompt',
@@ -49,8 +57,30 @@ export const DEFAULT_PROMPTS: readonly PromptItem[] = [
 	{ identifier: 'personaDescription', name: 'Persona Description', system_prompt: true, role: 'system', marker: true },
 ];
 
-/** The order the shipped prompts are applied in, verbatim from `promptManagerDefaultPromptOrder`. */
+/**
+ * Comonad's own blocks. They are markers with no stored text: the agent builds their content for
+ * every turn, and the preset decides only whether and where they are sent. `extension` is
+ * SillyTavern's own flag for an extension prompt, so a file opened there reads the rows as ours.
+ */
+export const COMONAD_PROMPTS: readonly PromptItem[] = COMONAD_BLOCKS.map(({ id, name }) => ({
+	identifier: id,
+	name,
+	role: 'system' as const,
+	system_prompt: true,
+	marker: true,
+	extension: true,
+}));
+
+/** Everything a collection starts from: Comonad's blocks, then SillyTavern's shipped prompts. */
+export const DEFAULT_PROMPTS: readonly PromptItem[] = [...COMONAD_PROMPTS, ...ST_PROMPTS];
+
+/**
+ * The order the default collection uses. Comonad's meta blocks lead, the conversation follows, and
+ * the turn's own Context stays inside that meta group rather than after the history — a request
+ * should end on the conversation, not on a system message appended after the user's turn.
+ */
 export const DEFAULT_ORDER: readonly PromptOrderEntry[] = [
+	...COMONAD_BLOCK_IDS.map((identifier) => ({ identifier, enabled: true })),
 	{ identifier: 'main', enabled: true },
 	{ identifier: 'worldInfoBefore', enabled: true },
 	{ identifier: 'personaDescription', enabled: true },
@@ -65,29 +95,34 @@ export const DEFAULT_ORDER: readonly PromptOrderEntry[] = [
 	{ identifier: 'jailbreak', enabled: true },
 ];
 
-/**
- * Comonad's own identity block, as a prompt. It is first and stays first: the agent's mode,
- * approval, instructions and tools must survive whatever character the chat wears.
- */
-export const IDENTITY_PROMPT = 'comonad';
+/** Comonad's identity block, the first entry of the shipped collection. */
+export const IDENTITY_PROMPT = COMONAD_BLOCK.identity;
+/** The one entry that switches the request's API tools on or off. */
+export const TOOLS_PROMPT = COMONAD_BLOCK.tools;
+/** The built-in Default template's id; an unselected chat uses the same collection. */
+export const DEFAULT_PRESET_ID = 'default';
+/** The turn's own attached context. */
+export const CONTEXT_PROMPT = COMONAD_BLOCK.context;
 
 /**
- * A preset with Comonad's identity block taken out of its prompt list and every order. Returns the
- * same object when there is nothing to remove, so a caller can tell a change from no change.
+ * Adds every Comonad block an order does not mention. The block is inserted right after Identity,
+ * which keeps a preset's own placement untouched; an order that has lost Identity gets the whole
+ * group in front. This is what lets an imported SillyTavern preset — whose order knows nothing of
+ * Comonad — still send the agent's instructions and tools.
  */
-export function withoutIdentityBlock(preset: TavernPreset): TavernPreset {
-	const has = (entries: readonly { identifier: string }[] | undefined) => (entries ?? []).some((entry) => entry.identifier === IDENTITY_PROMPT);
-	const orders = preset.promptOrders ? Object.fromEntries(Object.entries(preset.promptOrders).map(([key, order]) => [key, order.filter((entry) => entry.identifier !== IDENTITY_PROMPT)])) : undefined;
-	const ordersHad = Object.values(preset.promptOrders ?? {}).some((order) => has(order));
-	if (!has(preset.prompts) && !has(preset.promptOrder) && !ordersHad) {
-		return preset;
+export function completeOrder(order: readonly PromptOrderEntry[]): PromptOrderEntry[] {
+	const result = order.map((entry) => ({ ...entry }));
+	const present = new Set(result.map((entry) => entry.identifier));
+	const missing = COMONAD_BLOCK_IDS.filter((identifier) => !present.has(identifier));
+	if (!missing.length) {
+		return result;
 	}
-	return {
-		...preset,
-		prompts: preset.prompts?.filter((prompt) => prompt.identifier !== IDENTITY_PROMPT),
-		promptOrder: preset.promptOrder?.filter((entry) => entry.identifier !== IDENTITY_PROMPT),
-		promptOrders: orders,
-	};
+	const identityAt = result.findIndex((entry) => entry.identifier === IDENTITY_PROMPT);
+	if (identityAt < 0) {
+		return [...missing.map((identifier) => ({ identifier, enabled: true })), ...result];
+	}
+	const rest = missing.filter((identifier) => identifier !== IDENTITY_PROMPT);
+	return [...result.slice(0, identityAt + 1), ...rest.map((identifier) => ({ identifier, enabled: true })), ...result.slice(identityAt + 1)];
 }
 
 /** Upstream's `shouldTrigger`: a block with no trigger list is sent for every generation type. */
@@ -101,57 +136,50 @@ export function shippedPrompt(identifier: string): PromptItem | undefined {
 	return found ? { ...found } : undefined;
 }
 
-/** A prompt plus whether the order turns it on. */
+/** A prompt plus what the collection decides about it: on, and in chat at a depth rather than listed. */
 export interface ActivePrompt extends PromptItem {
 	enabled: boolean;
+	inChat: boolean;
 }
 
 /**
  * Merges a preset's prompts and order over the shipped ones. A prompt the preset defines replaces
  * the shipped block of the same identifier; a prompt the preset adds is appended; an identifier that
  * appears in the order but nowhere else becomes a marker, so a preset can place a block the build
- * does not know about. `character` picks the order: upstream keeps one per character, and the preset's
- * default block stands in for every character that has none. `trigger` picks the blocks themselves: a
- * block limited to some generation types is left out of the others, as upstream's `shouldTrigger` says.
+ * does not know about. Comonad's own blocks are never taken from the preset: their text is generated
+ * for the turn, and only their place and switch come from the order. `character` picks the order:
+ * upstream keeps one per character, and the preset's default block stands in for every character that
+ * has none. `trigger` picks the blocks themselves: a block limited to some generation types is left
+ * out of the others, as upstream's `shouldTrigger` says.
  */
 export function promptCollection(preset?: TavernPreset, characterId = '', trigger?: string): ActivePrompt[] {
 	const prompts = new Map<string, PromptItem>();
-	prompts.set(IDENTITY_PROMPT, {
-		identifier: IDENTITY_PROMPT,
-		name: 'Comonad',
-		role: 'system',
-		system_prompt: true,
-		marker: true,
-	});
 	for (const prompt of DEFAULT_PROMPTS) {
 		prompts.set(prompt.identifier, { ...prompt });
 	}
 	for (const prompt of preset?.prompts ?? []) {
+		if (isComonadBlockId(prompt.identifier)) {
+			continue;
+		}
 		const existing = prompts.get(prompt.identifier);
 		prompts.set(prompt.identifier, existing ? { ...existing, ...prompt } : { ...prompt });
 	}
 	// The character's own order wins over the preset's default block, which wins over the shipped one.
 	const perCharacter = characterId ? preset?.promptOrders?.[characterId] : undefined;
-	const order = perCharacter?.length ? perCharacter : preset?.promptOrder?.length ? preset.promptOrder : DEFAULT_ORDER;
-	// Comonad's identity block leads whatever the preset says; the shipped order predates it.
-	const ordered: ActivePrompt[] = [{ ...prompts.get(IDENTITY_PROMPT)!, enabled: true }];
+	const order = completeOrder(perCharacter?.length ? perCharacter : preset?.promptOrder?.length ? preset.promptOrder : DEFAULT_ORDER);
+	const placed = (prompt: PromptItem, enabled: boolean): ActivePrompt => ({ ...prompt, enabled, inChat: isInChat(prompt) });
+	const ordered: ActivePrompt[] = [];
 	for (const entry of order) {
-		if (entry.identifier === IDENTITY_PROMPT) {
-			continue;
-		}
 		const prompt = prompts.get(entry.identifier) ?? { identifier: entry.identifier, role: 'system' as const, marker: false };
 		prompts.delete(entry.identifier);
 		if (triggersGeneration(prompt, trigger)) {
-			ordered.push({ ...prompt, enabled: entry.enabled });
+			ordered.push(placed(prompt, entry.enabled));
 		}
 	}
 	// Anything the order never mentions rides along at the end, switched on, rather than vanishing.
 	for (const prompt of prompts.values()) {
-		if (prompt.identifier === IDENTITY_PROMPT) {
-			continue;
-		}
 		if (triggersGeneration(prompt, trigger)) {
-			ordered.push({ ...prompt, enabled: true });
+			ordered.push(placed(prompt, true));
 		}
 	}
 	return ordered;
@@ -186,9 +214,9 @@ export function applyCardOverrides(
 }
 
 /**
- * Silences the shipped blocks that only make sense with a character behind them. Without a card or a
- * preset there is nothing to write a reply *as*, and the default main prompt would otherwise tell a
- * coding agent to roleplay.
+ * Silences the shipped blocks that only make sense with a character behind them. Without a card and
+ * without an explicitly selected preset there is nothing to write a reply *as*, and the default main
+ * prompt would otherwise tell a coding agent to roleplay.
  */
 export function withoutRoleplayScaffolding(prompts: readonly ActivePrompt[]): ActivePrompt[] {
 	return prompts.map((prompt) => (prompt.identifier === 'main' ? { ...prompt, content: '' } : prompt));
@@ -199,13 +227,13 @@ export function setEnabled(prompts: ActivePrompt[], identifier: string, enabled:
 	return prompts.map((prompt) => (prompt.identifier === identifier ? { ...prompt, enabled } : prompt));
 }
 
-/** Moves one prompt by `delta` places; the first entry (the identity block) never moves. */
+/** Moves one prompt by `delta` places; the list is the whole order, so the first entry may move too. */
 export function movePrompt(prompts: ActivePrompt[], identifier: string, delta: number): ActivePrompt[] {
 	const index = prompts.findIndex((prompt) => prompt.identifier === identifier);
-	if (index < 1) {
+	if (index < 0) {
 		return prompts;
 	}
-	const target = Math.min(prompts.length - 1, Math.max(1, index + delta));
+	const target = Math.min(prompts.length - 1, Math.max(0, index + delta));
 	if (target === index) {
 		return prompts;
 	}
@@ -216,6 +244,6 @@ export function movePrompt(prompts: ActivePrompt[], identifier: string, delta: n
 }
 
 /** Whether a prompt is injected in chat at a depth rather than sitting in the ordered list. */
-export function isInChat(prompt: ActivePrompt): boolean {
+export function isInChat(prompt: Pick<PromptItem, 'injection_position'>): boolean {
 	return prompt.injection_position === INJECTION_POSITION.absolute;
 }

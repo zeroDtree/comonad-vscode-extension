@@ -1,5 +1,6 @@
 import { Service, type Context, type Plugin } from 'cordis';
 import { capabilityAllowed } from '../lib/policy';
+import { mergeToolLayout } from '../lib/prompt-layout';
 import { hasWorkspace, type SessionPolicy, type ToolCall, type ToolContext, type ToolSpec } from '../lib/types';
 
 export interface ToolFilter {
@@ -96,31 +97,51 @@ export class Tools extends Service {
 		return [...this.specs.values()].sort((left, right) => left.name.localeCompare(right.name));
 	}
 
+	/**
+	 * Every registered tool in the user's order, with its switch from the Prompts tab. A tool the
+	 * saved layout does not mention yet follows the configured ones, switched on, alphabetically.
+	 */
+	layout(): { tool: ToolSpec; enabled: boolean }[] {
+		const entries = this.ctx.get('settings')?.get().toolPrompts ?? [];
+		return mergeToolLayout(this.all(), entries);
+	}
+
+	/** Whether the Prompts tab's switch lets this tool be offered. A tool not in the layout is on. */
+	isEnabled(name: string): boolean {
+		return this.layout().find((entry) => entry.tool.name === name)?.enabled !== false;
+	}
+
 	visible(policy: SessionPolicy, filter?: ToolFilter): ToolSpec[] {
-		return this.all().filter((tool) => {
-			if (!capabilityAllowed(tool.capability, policy.workMode)) {
-				return false;
-			}
-			if (tool.needsNetwork && !policy.network) {
-				return false;
-			}
-			if (tool.needsWorkspace && !hasWorkspace(policy)) {
-				return false;
-			}
-			if (filter?.allow && !filter.allow.includes(tool.name)) {
-				return false;
-			}
-			if (filter?.deny?.includes(tool.name)) {
-				return false;
-			}
-			return true;
-		});
+		return this.layout()
+			.filter((entry) => entry.enabled)
+			.map((entry) => entry.tool)
+			.filter((tool) => {
+				if (!capabilityAllowed(tool.capability, policy.workMode)) {
+					return false;
+				}
+				if (tool.needsNetwork && !policy.network) {
+					return false;
+				}
+				if (tool.needsWorkspace && !hasWorkspace(policy)) {
+					return false;
+				}
+				if (filter?.allow && !filter.allow.includes(tool.name)) {
+					return false;
+				}
+				if (filter?.deny?.includes(tool.name)) {
+					return false;
+				}
+				return true;
+			});
 	}
 
 	async invoke(call: ToolCall, ctx: ToolContext): Promise<string> {
 		const tool = this.get(call.name);
 		if (!tool) {
 			return `Error: unknown tool ${call.name}`;
+		}
+		if (!this.isEnabled(call.name)) {
+			return `Error: tool ${call.name} is switched off in Prompts`;
 		}
 		if (!capabilityAllowed(tool.capability, ctx.policy.workMode)) {
 			return `Error: tool ${call.name} is not allowed in mode ${ctx.policy.workMode}`;

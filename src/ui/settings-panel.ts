@@ -3,30 +3,21 @@ import { readdirSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { COMONAD_BLOCK, COMONAD_BLOCKS, DEFAULT_BLOCK_PREFIX, isComonadBlockId, type ComonadBlockId } from '../lib/blocks';
+import { defaultPromptLayout, mergePromptPrefixes, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
 import { compileGraphs } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { pluginNodeStatus, pluginTree, type PluginNode } from '../lib/plugins';
-import { APPROVAL_LABELS, gateFlow, modeCapabilities, MODE_LABELS, parseRule } from '../lib/policy';
-import { estimateTokens, type ContextForm } from '../lib/prompt';
-import { INJECTION_POSITION } from '../lib/tavern/types';
+import { APPROVAL_LABELS, capabilityAllowed, gateFlow, modeCapabilities, MODE_LABELS, parseRule } from '../lib/policy';
+import { type ContextForm } from '../lib/prompt';
+import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
-import { promptText } from '../services/agent';
 import { profileKeyEnvs, type Config, type Profile } from '../services/settings';
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
 /** Webview settings panel: tabs for the agent policy, the graph editor, MCP servers and tools. */
-
-/**
- * Where a marker's text comes from when no chat value can stand for it: the two that are only known
- * while a turn is being built.
- */
-const MARKER_SOURCE: Record<string, string> = {
-	worldInfoBefore: 'the world-book entries this turn activates',
-	worldInfoAfter: 'the world-book entries this turn activates',
-	chatHistory: 'the conversation itself',
-};
 
 const DISPLAY_LABELS: Record<ContextForm, string> = {
 	rendered: 'Rendered — folded thoughts and tool calls',
@@ -66,7 +57,7 @@ export function settingsPanel(ctx: Context): void {
 	const paneList = (): PaneSpec[] => ctx.get('panes')?.list() ?? [];
 	const paneHost = (): PaneHost => ({
 		uri: (file: string) => (panel ? String(panel.webview.asWebviewUri(vscode.Uri.file(file))) : ''),
-		refresh: () => void pushState(),
+		refresh: () => void schedulePush(),
 	});
 	// A pane arrives with its row, so its reveal command is registered the first time it is seen.
 	const paneCommands = new Set<string>();
@@ -90,7 +81,7 @@ export function settingsPanel(ctx: Context): void {
 			// document, not a list, that changes.
 			panel.webview.html = settingsDocument(panel.webview, ctx.host.extensionUri as vscode.Uri, wanted, paneList());
 		}
-		void pushState();
+		void schedulePush();
 	};
 	ctx.inject(['panes'], (scope) => {
 		scope.on('panes/changed', () => buildPanes(scope));
@@ -101,8 +92,15 @@ export function settingsPanel(ctx: Context): void {
 		};
 	});
 
-	/** Nodes and routes of a Mermaid source, or the reason it does not compile. */
+	/** Nodes and routes of a Mermaid source, or the reason it does not compile. Cached: the graph
+	 *  source almost never moves between two pushes, and compiling it is not free. */
+	const graphCache = new Map<string, { nodes: string[]; routes: string[]; error: string }>();
 	const inspectGraph = (source: string): { nodes: string[]; routes: string[]; error: string } => {
+		const cached = graphCache.get(source);
+		if (cached) {
+			return cached;
+		}
+		let info: { nodes: string[]; routes: string[]; error: string };
 		try {
 			const parsed = parseGraphSource(source.trim() || DEFAULT_GRAPH_SOURCE);
 			compileGraphs(parsed, { nodes: new Map(), routes: new Map() }, { ignoreMissing: true });
@@ -116,10 +114,18 @@ export function settingsPanel(ctx: Context): void {
 					routes.add(node.route);
 				}
 			}
-			return { nodes: [...nodes].sort(), routes: [...routes].sort(), error: '' };
+			info = { nodes: [...nodes].sort(), routes: [...routes].sort(), error: '' };
 		} catch (error) {
-			return { nodes: [], routes: [], error: describe(error) };
+			info = { nodes: [], routes: [], error: describe(error) };
 		}
+		graphCache.set(source, info);
+		if (graphCache.size > 16) {
+			const oldest = graphCache.keys().next().value;
+			if (oldest !== undefined) {
+				graphCache.delete(oldest);
+			}
+		}
+		return info;
 	};
 
 	/** One level of directories for the working-directory picker. */
@@ -165,7 +171,7 @@ export function settingsPanel(ctx: Context): void {
 	/**
 	 * Installs a plugin: the ones that ship with Comonad are offered by name, and anything else by its
 	 * folder. The host copies it into the library and writes the row, so this is a shortcut for a step
-	 * a user can take by hand — and undo by deleting the row.
+	 * a user can take by hand — and `uninstallPlugin` is the same two steps taken back.
 	 */
 	const installPlugin = async (): Promise<void> => {
 		const sources = pluginHost()?.bundled() ?? [];
@@ -205,11 +211,36 @@ export function settingsPanel(ctx: Context): void {
 		);
 	};
 
+	/**
+	 * Uninstalls a plugin: the host takes its row out of every list (which disposes it) and deletes the
+	 * folder an install copied into the library. A row that was never installed is still removed — its
+	 * files are a user's own and stay — so the confirmation says which of the two this one is.
+	 */
+	const uninstallPlugin = async (id: string): Promise<void> => {
+		const host = pluginHost();
+		if (!host) {
+			return;
+		}
+		const dir = host.installedDirOf(id);
+		const sure = await vscode.window.showWarningMessage(
+			dir
+				? `Uninstall "${id}"? Its row is removed from your cordis.yml, and ${dir} is deleted.`
+				: `Uninstall "${id}"? Its row is removed from your cordis.yml; the files it loads stay where they are.`,
+			{ modal: true },
+			'Uninstall',
+		);
+		if (sure !== 'Uninstall') {
+			return;
+		}
+		await host.uninstall(id);
+		void vscode.window.showInformationMessage(`Comonad: ${id} is uninstalled.`);
+	};
+
 	/** What the panes own of a save: every controller is asked for the keys it is responsible for. */
-	const panePatch = (patch: Record<string, unknown>, current: Config): Record<string, unknown> => {
+	const panePatch = (patch: Record<string, unknown>): Record<string, unknown> => {
 		const owned: Record<string, unknown> = {};
 		for (const controller of controllers.values()) {
-			Object.assign(owned, controller.patch?.(patch, current) ?? {});
+			Object.assign(owned, controller.patch?.(patch) ?? {});
 		}
 		return owned;
 	};
@@ -242,11 +273,15 @@ export function settingsPanel(ctx: Context): void {
 				ask: ruleList(patch.ask ?? current.permissions.ask, 'ask'),
 				deny: ruleList(patch.deny ?? current.permissions.deny, 'deny'),
 			},
-			...panePatch(patch, current),
+			...panePatch(patch),
 		};
+		// Pane keys live outside the kernel's `Config`, so what is compared against is the raw store
+		// under the defaulted view: a kernel key reads exactly as it always did, and a pane's own key
+		// against the value the host reports for it.
+		const seen: Record<string, unknown> = { ...ctx.host.config(), ...current };
 		for (const [key, value] of Object.entries(next)) {
-			if (!same(current[key as keyof typeof current], value)) {
-				await ctx.settings.update(key as keyof typeof current, value);
+			if (!same(seen[key], value)) {
+				await ctx.settings.update(key, value);
 			}
 		}
 		if (patch.mcpServers && typeof patch.mcpServers === 'object') {
@@ -255,12 +290,44 @@ export function settingsPanel(ctx: Context): void {
 		}
 	};
 
-	const pushState = async (refresh = false): Promise<void> => {
+	/**
+	 * The model list the panel shows. It is fetched off the push path — an endpoint that is slow or
+	 * down must never stall a state message — and posted on its own when it lands.
+	 */
+	let lastModels: Awaited<ReturnType<typeof ctx.llm.availableModels>> = [];
+	let modelsAt = 0;
+	let modelsInFlight: Promise<void> | null = null;
+	const refreshModels = (force = false): Promise<void> => {
+		if (modelsInFlight) {
+			return modelsInFlight;
+		}
+		if (!force && Date.now() - modelsAt < 60_000) {
+			return Promise.resolve();
+		}
+		modelsInFlight = (async () => {
+			try {
+				lastModels = await ctx.llm.availableModels({ refresh: force });
+				modelsAt = Date.now();
+				if (panel) {
+					void panel.webview.postMessage({ type: 'models', models: lastModels });
+				}
+			} catch (error) {
+				void panel?.webview.postMessage({ type: 'error', message: describe(error) });
+			} finally {
+				modelsInFlight = null;
+			}
+		})();
+		return modelsInFlight;
+	};
+
+	const pushState = (): void => {
 		if (!panel) {
 			return;
 		}
 		const config = ctx.settings.get();
 		const graph = config.graph || DEFAULT_GRAPH_SOURCE;
+		// One walk of the plugin tree answers every question the panel asks about it.
+		const dependencies = pluginDependencies();
 		void panel.webview.postMessage({
 			type: 'state',
 			config: {
@@ -284,15 +351,15 @@ export function settingsPanel(ctx: Context): void {
 			// pane that is not registered is simply a tab that is not there.
 			panes: Object.fromEntries([...controllers].map(([id, controller]) => [id, controller.state()])),
 			plugins: {
-				rows: pluginDependencies(),
-				dependencies: pluginDependencies(),
+				rows: dependencies,
+				dependencies,
 				project: String(pluginHost()?.projectFile ?? ''),
 				user: String(pluginHost()?.userFile ?? ''),
 				writable: String(pluginHost()?.patchFile ?? ''),
 				trusted: Boolean(ctx.host.trusted()),
 			},
 			labels: { modes: MODE_LABELS, approvals: APPROVAL_LABELS, displays: DISPLAY_LABELS, contexts: CONTEXT_LABELS },
-			models: await ctx.llm.availableModels({ refresh }),
+			models: lastModels,
 			mcpServers: config.mcpServers,
 			mcp: ctx.mcp.status(),
 			tools: ctx.tools.all().map((tool) => ({
@@ -309,53 +376,140 @@ export function settingsPanel(ctx: Context): void {
 			workspace: config.workingDirectory,
 			home: ctx.settings.home(),
 		});
+		void refreshModels();
 	};
 
 	/**
-	 * Every prompt the model can be given: the agent's own blocks, each tool's definition, and the
-	 * SillyTavern collection the active chat would send. Read on demand — it reads instruction files and
-	 * memory from disk — so the tab asks for it rather than waiting for a state push.
+	 * The one way a state is pushed. A single action lands as two or three events — the answer to the
+	 * message, `tavern/changed`, `settings/changed` — and each of them used to rebuild and resend the
+	 * whole state; they collapse into one push here. Never cancelled, only pushed later: the panes
+	 * treat the push after a note as its ack.
+	 */
+	let pushTimer: NodeJS.Timeout | undefined;
+	const schedulePush = (): void => {
+		clearTimeout(pushTimer);
+		pushTimer = setTimeout(() => {
+			pushTimer = undefined;
+			pushState();
+		}, 50);
+	};
+
+	/**
+	 * The layout editor's data: Comonad's blocks (their order, switch, editable prefix and generated
+	 * body) and every tool definition with its order/switch. Read on demand — it reads instruction
+	 * files and memory from disk — so the tab asks for it rather than waiting for a state push.
+	 *
+	 * Under ST the Comonad order and switches are the active preset's, mirrored read-only here; the
+	 * prefixes are still the kernel's and are used by the composed request.
 	 */
 	const promptsSlice = async (): Promise<Record<string, unknown>> => {
 		const session = ctx.sessions.active();
-		const visible = new Set(session ? ctx.tools.visible(session.policy).map((tool) => tool.name) : []);
-		const blocks = session ? await ctx.agent.promptBlocks(session) : [];
-		// A marker carries no text of its own: the assembler fills it while the turn is built, so the
-		// panel asks the tavern for the same values the assembler would use. What is left over is filled
-		// from the turn itself and is reported as such rather than as an empty prompt with no tokens.
-		const shown = session ? (tavern()?.displayPrompts(session.id, promptText(blocks)) ?? {}) : {};
-		return {
-			chat: session ? { title: session.title, mode: session.policy.workMode, approval: session.policy.approval } : null,
-			comonad: blocks.map((block) => ({ name: block.name, text: block.text, tokens: estimateTokens(block.text) })),
-			tools: ctx.tools.all().map((tool) => ({
+		// The pane answers "what would the next turn carry": the settings the chat's mode/approval
+		// pills just changed, merged exactly as `runTurn` merges them.
+		const policy = session ? { ...session.policy, ...ctx.agent.policyFor() } : undefined;
+		const effective = session && policy ? { ...session, policy } : undefined;
+		const visible = new Set(effective && policy ? ctx.tools.visible(policy).map((tool) => tool.name) : []);
+		const blocks = effective ? await ctx.agent.promptBlocks(effective) : [];
+		const byId = new Map(blocks.map((block) => [block.id, block]));
+		const layout = ctx.settings.get().prompts;
+		const takeover = tavern()?.enabled() === true;
+		let st: ReturnType<TavernApi['promptsFor']> = [];
+		if (takeover && session) {
+			try {
+				st = tavern()?.promptsFor(session.id) ?? [];
+			} catch {
+				st = [];
+			}
+		}
+		const stComonad = st.filter((prompt) => isComonadBlockId(prompt.identifier));
+		const stById = new Map(stComonad.map((prompt) => [prompt.identifier, prompt]));
+		const stToolsEnabled = takeover ? stById.get(COMONAD_BLOCK.tools)?.enabled !== false : true;
+		const toolsBlockEnabled = layout.find((entry) => entry.id === COMONAD_BLOCK.tools)?.enabled !== false;
+		const toolsGate = takeover ? stToolsEnabled : toolsBlockEnabled;
+
+		const comonadRow = (id: ComonadBlockId, enabled: boolean, order: number): Record<string, unknown> => {
+			const block = byId.get(id);
+			const setting = layout.find((entry) => entry.id === id);
+			return {
+				id,
+				name: block?.name ?? COMONAD_BLOCKS.find((entry) => entry.id === id)?.name ?? id,
+				prefix: setting?.prefix ?? DEFAULT_BLOCK_PREFIX[id],
+				defaultPrefix: DEFAULT_BLOCK_PREFIX[id],
+				body: block?.body ?? '',
+				text: block?.text ?? '',
+				tokens: block ? estimateTokens(block.text) : 0,
+				enabled,
+				order,
+				readOnlyOrder: takeover,
+			};
+		};
+		const comonad = takeover
+			? (() => {
+					// The tavern's completeOrder guarantees all nine; a broken old build may not, so the
+					// missing ones follow in canonical order rather than vanishing from the editor.
+					const ids: ComonadBlockId[] = stComonad.map((prompt) => prompt.identifier as ComonadBlockId);
+					for (const block of COMONAD_BLOCKS) {
+						if (!stById.has(block.id)) {
+							ids.push(block.id);
+						}
+					}
+					return ids.map((id, index) => comonadRow(id, stById.get(id)?.enabled ?? true, index));
+				})()
+			: layout.map((entry, index) => comonadRow(entry.id, entry.enabled, index));
+
+		const mode = policy ? (MODE_LABELS[policy.workMode] ?? policy.workMode).split(' — ')[0] : '';
+		const tools = ctx.tools.layout().map(({ tool, enabled }, order) => {
+			const policyOffered = visible.has(tool.name);
+			const offered = enabled && policyOffered && toolsGate;
+			const reason = !enabled
+				? 'switched off in Prompts'
+				: !toolsGate
+					? takeover
+						? 'ST Tools entry is off'
+						: 'the Tools block is off'
+					: policyOffered
+						? undefined
+						: !policy
+							? 'no active chat'
+							: !capabilityAllowed(tool.capability, policy.workMode)
+								? `not in ${mode} mode`
+								: tool.needsNetwork && !policy.network
+									? 'network is off'
+									: tool.needsWorkspace && !policy.workingDirectory.trim()
+										? 'no workspace'
+										: 'not offered';
+			return {
 				name: tool.name,
 				capability: tool.capability,
 				description: tool.description,
 				parameters: tool.parameters,
-				visible: visible.has(tool.name),
+				visible: offered,
+				reason,
+				enabled,
+				order,
 				// What travels with every request is the whole definition, parameter schema included — the
 				// panel counts the same thing the context budget does, not just the prose.
 				tokens: estimateTokens(JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters })),
-			})),
-			// Nothing sends these when the tavern row is off, so the tab shows no collection at all.
-			st: (tavern()?.promptsFor(session?.id) ?? []).map((prompt) => {
-				const text = shown[prompt.identifier];
-				const marker = prompt.marker === true;
-				return {
-					identifier: prompt.identifier,
-					name: prompt.name || prompt.identifier,
-					role: prompt.role,
-					content: text ?? '',
-					enabled: prompt.enabled,
-					marker,
-					inChat: Number(prompt.injection_position ?? 0) === INJECTION_POSITION.absolute,
-					depth: prompt.injection_depth,
-					// A marker with no text here is one only a turn can fill, and saying which is honest
-					// where reporting the empty slot as "0 tokens" was not.
-					source: marker && text === undefined ? (MARKER_SOURCE[prompt.identifier] ?? 'the turn being built') : undefined,
-					tokens: marker && text === undefined ? null : estimateTokens(text ?? ''),
-				};
-			}),
+			};
+		});
+		return {
+			chat:
+				session && policy
+					? {
+							title: session.title,
+							mode: MODE_LABELS[policy.workMode] ?? policy.workMode,
+							approval: APPROVAL_LABELS[policy.approval] ?? policy.approval,
+						}
+					: null,
+			takeover,
+			stToolsEnabled,
+			toolsBlockEnabled,
+			comonad,
+			tools,
+			defaults: {
+				comonad: defaultPromptLayout(),
+				tools: ctx.tools.all().map((tool) => ({ name: tool.name })),
+			},
 		};
 	};
 
@@ -367,10 +521,11 @@ export function settingsPanel(ctx: Context): void {
 			switch (message.type) {
 				case 'refresh':
 					// A refresh is the user asking the endpoints again, so skip the cached model lists.
-					await pushState(true);
+					pushState();
+					void refreshModels(true);
 					return;
 				case 'ready':
-					await pushState();
+					pushState();
 					return;
 				case 'validateGraph':
 					void panel.webview.postMessage({ type: 'graphInfo', ...inspectGraph(String(message.source ?? '')) });
@@ -406,6 +561,8 @@ export function settingsPanel(ctx: Context): void {
 						await pluginHost()?.set(String(message.id ?? ''), { disabled: Boolean(message.disabled) });
 					} else if (message.action === 'install') {
 						await installPlugin();
+					} else if (message.action === 'uninstall') {
+						await uninstallPlugin(String(message.id ?? ''));
 					}
 					break;
 				}
@@ -418,6 +575,32 @@ export function settingsPanel(ctx: Context): void {
 					void panel.webview.postMessage({ type: 'prompts', prompts: await promptsSlice() });
 					break;
 				}
+				case 'savePrompts': {
+					const incoming = parsePromptLayout(message.prompts);
+					// Under ST the rows mirror the preset's order and switches. Only the prefixes are the
+					// core layout's to change; saving the mirror as the fallback order would overwrite it.
+					const takeover = tavern()?.enabled() === true;
+					const prompts = takeover ? mergePromptPrefixes(ctx.settings.get().prompts, incoming) : incoming;
+					const nextTools = parseToolLayout(message.toolPrompts);
+					// A tool that is temporarily unregistered keeps its saved place and switch: the editor
+					// only knows the tools loaded right now, so anything it did not mention is carried over.
+					const seen = new Set(nextTools.map((entry) => entry.name));
+					for (const entry of ctx.settings.get().toolPrompts) {
+						if (!seen.has(entry.name)) {
+							nextTools.push(entry);
+							seen.add(entry.name);
+						}
+					}
+					await ctx.settings.update('prompts', prompts);
+					await ctx.settings.update('toolPrompts', nextTools);
+					// Not the generic `ok`: that also clears the form's dirty flag, which belongs to the
+					// other tabs and may hold edits this save does not write.
+					void panel.webview.postMessage({ type: 'prompts', prompts: await promptsSlice(), saved: true });
+					break;
+				}
+				case 'openTab':
+					open(String(message.tab ?? 'agent'));
+					return;
 				case 'pane': {
 					// A pane's message is its own: it is routed by id and answered with a note of its own.
 					const id = String(message.pane ?? '');
@@ -431,7 +614,7 @@ export function settingsPanel(ctx: Context): void {
 		} catch (error) {
 			void panel.webview.postMessage({ type: 'error', message: describe(error) });
 		}
-		await pushState();
+		schedulePush();
 	};
 
 	/** Reveal the panel, optionally on one of its tabs — `st` is where the content lives. */
@@ -442,7 +625,7 @@ export function settingsPanel(ctx: Context): void {
 			if (tab) {
 				void panel.webview.postMessage({ type: 'openTab', tab });
 			}
-			void pushState();
+			pushState();
 			return;
 		}
 		const extensionUri = ctx.host.extensionUri as vscode.Uri;
@@ -467,12 +650,12 @@ export function settingsPanel(ctx: Context): void {
 		});
 		panel.webview.html = settingsDocument(panel.webview, extensionUri, tab ?? 'agent', paneList());
 		panel.webview.onDidReceiveMessage((message: Record<string, unknown>) => void handle(message));
-		void pushState();
+		pushState();
 	};
 
-	ctx.on('settings/changed', () => void pushState());
-	ctx.on('tools/changed', () => void pushState());
-	ctx.on('plugins/changed', () => void pushState());
+	ctx.on('settings/changed', schedulePush);
+	ctx.on('tools/changed', schedulePush);
+	ctx.on('plugins/changed', schedulePush);
 
 	registerCommand(ctx, 'comonad.openSettings', () => open());
 	registerCommand(ctx, 'comonad.reloadMcp', async () => {
@@ -574,6 +757,35 @@ function escapeHtml(text: string): string {
 	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/** A 16px stroke icon: the sidebar draws these alone when it is collapsed to the icon rail. */
+const tabIcon = (body: string): string => `<svg viewBox="0 0 16 16" aria-hidden="true">${body}</svg>`;
+
+const TAB_ICONS = {
+	agent: tabIcon(
+		'<rect x="3" y="5" width="10" height="7" rx="2"/><path d="M8 2.3v2.7M5.7 8.1h.01M10.3 8.1h.01M6.2 11.9v1.6M9.8 11.9v1.6"/>',
+	),
+	graph: tabIcon(
+		'<circle cx="4" cy="4" r="1.5"/><circle cx="12" cy="5" r="1.5"/><circle cx="7" cy="12" r="1.5"/><path d="M5.4 4.4l5.1.5M4.8 5.4l1.6 5.1M10.9 6.3l-2.6 4.2"/>',
+	),
+	rules: tabIcon(
+		'<path d="M8 2l4.8 1.9v3.8c0 2.8-2 4.8-4.8 5.8-2.8-1-4.8-3-4.8-5.8V3.9z"/><path d="M5.9 7.9l1.4 1.4 2.8-2.8"/>',
+	),
+	mcp: tabIcon(
+		'<path d="M6 2.4v3M10 2.4v3"/><path d="M4.4 5.4h7.2v2.2a3.6 3.6 0 0 1-7.2 0z"/><path d="M8 11.2v2.4"/>',
+	),
+	tools: tabIcon(
+		'<path d="M10.7 2.7a3.1 3.1 0 0 0-3.9 3.9l-4 4a1.4 1.4 0 0 0 2 2l4-4a3.1 3.1 0 0 0 3.9-3.9L10.7 6 9.3 4.6z"/>',
+	),
+	prompts: tabIcon('<path d="M3 4h10M3 8h7M3 12h5"/><path d="M12.2 9.8l.5 1.2 1.3.5-1.3.5-.5 1.2-.5-1.2-1.3-.5 1.3-.5z"/>'),
+	inspect: tabIcon('<circle cx="7" cy="7" r="4"/><path d="M10 10l3.3 3.3"/><path d="M5.4 7h3.2M7 5.4v3.2"/>'),
+	plugins: tabIcon(
+		'<path d="M6.1 3.2a1.2 1.2 0 0 1 2.4 0V4h2.1v2.1h.8a1.2 1.2 0 0 1 0 2.4h-.8V12H8.5v-.8a1.2 1.2 0 0 0-2.4 0v.8H3V9.5h.8a1.2 1.2 0 0 0 0-2.4H3V4h3.1z"/>',
+	),
+} as const;
+
+const tabButton = (id: string, label: string, title: string, icon: string): string =>
+	`        <button class="tab" type="button" role="tab" data-tab="${escapeHtml(id)}" title="${escapeHtml(title)}"><span class="tab-icon">${icon}</span><span class="tab-label">${escapeHtml(label)}</span></button>`;
+
 export function settingsDocument(webview: vscode.Webview, extensionUri: vscode.Uri, tab: string, panes: readonly PaneSpec[]): string {
 	const nonce = randomBytes(16).toString('base64');
 	const uri = (file: string): string => String(webview.asWebviewUri(vscode.Uri.file(file)));
@@ -584,10 +796,9 @@ export function settingsDocument(webview: vscode.Webview, extensionUri: vscode.U
 	const paneStyles = panes.flatMap((pane) => pane.styles ?? []).map(uri);
 	const paneScripts = panes.flatMap((pane) => pane.scripts ?? []).map(uri);
 	const paneTabs = panes
-		.map((pane) => `      <button class="tab" type="button" role="tab" data-tab="${escapeHtml(pane.id)}" title="${escapeHtml(pane.title ?? pane.label)}">${escapeHtml(pane.label)}</button>`)
+		.map((pane) => tabButton(pane.id, pane.label, pane.title ?? pane.label, pane.icon ?? TAB_ICONS.plugins))
 		.join('\n');
-	// The pane sections sit after Graph, where a content tab has always been: the host's own tabs come
-	// first and a pane is a guest among them.
+	// A pane is a guest page: its section is the markup it brings, undressed by the host.
 	const paneSections = panes
 		.map((pane) => `  <section data-pane="${escapeHtml(pane.id)}" hidden>\n${pane.markup}  </section>`)
 		.join('\n');
@@ -601,54 +812,80 @@ export function settingsDocument(webview: vscode.Webview, extensionUri: vscode.U
 ${paneStyles.map((src) => `<link rel="stylesheet" href="${src}" />`).join('\n')}
 </head>
 <body>
-  <header id="bar">
-    <nav id="tabs" role="tablist" aria-label="Comonad settings">
-      <button class="tab" type="button" role="tab" data-tab="graph" title="Graph — the Mermaid agent loop">Graph</button>
-      <button class="tab" type="button" role="tab" data-tab="agent" title="Agent — preset, model, policy, workspace">Agent</button>
+  <aside id="side">
+    <input id="search" class="control" type="search" placeholder="Search settings" spellcheck="false" autocomplete="off" />
+    <nav id="tabs" role="tablist" aria-orientation="vertical" aria-label="Comonad settings">
+${tabButton('agent', 'Agent', 'Agent — model, policy, workspace', TAB_ICONS.agent)}
+${tabButton('graph', 'Graph', 'Graph — the Mermaid agent loop', TAB_ICONS.graph)}
 ${paneTabs}
-      <button class="tab" type="button" role="tab" data-tab="rules" title="Rules — allow, ask and deny rules for tool calls">Rules</button>
-      <button class="tab" type="button" role="tab" data-tab="mcp" title="MCP — servers and their status">MCP</button>
-      <button class="tab" type="button" role="tab" data-tab="tools" title="Tools — what a turn may run">Tools</button>
-      <button class="tab" type="button" role="tab" data-tab="inspect" title="Inspect — the tool policy flow and every prompt the model can be given">Inspect</button>
-      <button class="tab" type="button" role="tab" data-tab="plugins" title="Plugins — every row of the tree, and what became of it">Plugins</button>
+${tabButton('rules', 'Rules', 'Rules — allow, ask and deny rules for tool calls', TAB_ICONS.rules)}
+${tabButton('mcp', 'MCP', 'MCP — servers and their status', TAB_ICONS.mcp)}
+${tabButton('tools', 'Tools', 'Tools — what a turn may run', TAB_ICONS.tools)}
+${tabButton('prompts', 'Prompts', 'Prompts — Comonad blocks and tool definitions', TAB_ICONS.prompts)}
+${tabButton('inspect', 'Inspect', 'Inspect — the tool policy flow and plugin dependencies', TAB_ICONS.inspect)}
+${tabButton('plugins', 'Plugins', 'Plugins — every row of the tree, and what became of it', TAB_ICONS.plugins)}
     </nav>
-    <span class="grow"></span>
-    <button class="primary" id="save" type="button" title="Save — write these settings to this workspace">Save</button>
-    <button class="secondary" id="close" type="button" title="Close — unsaved edits are dropped">Close</button>
-  </header>
+    <div id="side-foot">
+      <div id="status"></div>
+      <div class="row">
+        <button class="primary" id="save" type="button" title="Save — write these settings to this workspace"><span class="btn-icon" aria-hidden="true">✓</span><span class="btn-label">Save</span></button>
+        <button class="secondary" id="close" type="button" title="Close — unsaved edits are dropped"><span class="btn-icon" aria-hidden="true">✕</span><span class="btn-label">Close</span></button>
+      </div>
+    </div>
+  </aside>
+  <div id="side-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the settings sidebar" tabindex="0"></div>
 
+  <main id="content">
   <section data-pane="agent">
-    <div class="grid">
-      <div class="field wide">
-        <label for="model">Model</label>
+    <h1 class="page-title">Agent</h1>
+    <h2 class="group-title">Model</h2>
+    <div class="group">
+      <div class="field">
+        <label for="model">Default model</label>
+        <p class="hint">What a new chat talks to. A profile is any OpenAI-compatible endpoint.</p>
         <div class="row">
           <select id="model" class="control" data-key="model"></select>
           <button class="secondary" id="model-refresh" type="button">Refresh</button>
           <button class="secondary" id="model-add" type="button">Add provider…</button>
         </div>
       </div>
+    </div>
+    <h2 class="group-title">Policy</h2>
+    <div class="group">
       <div class="field">
         <label for="mode">Work mode</label>
+        <p class="hint">What a turn may do at all — the capability set behind every tool call.</p>
         <select id="mode" class="control" data-key="mode"></select>
       </div>
       <div class="field">
         <label for="approval">Approval</label>
+        <p class="hint">How a tool call is gated before it runs, on top of the mode.</p>
         <select id="approval" class="control" data-key="approval"></select>
       </div>
+    </div>
+    <h2 class="group-title">Conversation</h2>
+    <div class="group">
       <div class="field">
         <label for="display">Display</label>
+        <p class="hint">How the context sent with a turn is shown in the chat.</p>
         <select id="display" class="control" data-key="displayForm"></select>
       </div>
       <div class="field">
         <label for="context">Context</label>
+        <p class="hint">What the model actually receives: rendered text, token counts or raw form.</p>
         <select id="context" class="control" data-key="contextForm"></select>
       </div>
-      <div class="field wide">
+      <div class="field">
         <label for="network">Network</label>
-        <label class="check"><input type="checkbox" id="network" data-key="network" /> Allow network tools, and network inside the shell sandbox</label>
+        <p class="hint">Network tools and network access inside the shell sandbox.</p>
+        <label class="check"><input type="checkbox" id="network" data-key="network" /></label>
       </div>
-      <div class="field wide">
+    </div>
+    <h2 class="group-title">Workspace</h2>
+    <div class="group">
+      <div class="field">
         <label for="wd">Working directory</label>
+        <p class="hint">Where the agent works. Empty uses the first workspace folder.</p>
         <div class="combo">
           <input id="wd" class="control" type="text" data-key="workingDirectory" spellcheck="false" autocomplete="off" placeholder="Empty uses the first workspace folder" />
           <div id="dirs" hidden></div>
@@ -656,147 +893,171 @@ ${paneTabs}
       </div>
       <div class="field">
         <label for="timeout">Command timeout</label>
-        <input id="timeout" class="control" type="number" min="1" data-key="commandTimeout" />
         <p class="hint">Seconds before a shell command is killed.</p>
+        <input id="timeout" class="control" type="number" min="1" data-key="commandTimeout" />
       </div>
       <div class="field">
         <label for="plans">Plan directory</label>
-        <input id="plans" class="control" type="text" data-key="planDirectory" spellcheck="false" placeholder=".comonad/plans" />
         <p class="hint">Workspace-relative folder for plan files.</p>
+        <input id="plans" class="control" type="text" data-key="planDirectory" spellcheck="false" placeholder=".comonad/plans" />
       </div>
-      <div class="field wide">
+    </div>
+    <h2 class="group-title">Safety</h2>
+    <div class="group">
+      <div class="field">
         <label for="deny">Deny read paths</label>
-        <textarea id="deny" class="control" data-key="denyReadPaths" spellcheck="false" rows="3"></textarea>
         <p class="hint">One workspace-relative path or basename per line — file and shell tools refuse to read or write them.</p>
+        <textarea id="deny" class="control" data-key="denyReadPaths" spellcheck="false" rows="3"></textarea>
       </div>
-      <div class="field wide">
-        <label>Restrict to workspace</label>
-        <label class="check"><input type="checkbox" id="confine-read" data-key="confineRead" /> Reads outside the working directory are refused</label>
-        <label class="check"><input type="checkbox" id="confine-write" data-key="confineWrite" /> Writes outside the working directory are refused</label>
-        <p class="hint">Applies to the file tools and to commands run in the shell sandbox. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm.</p>
+      <div class="field">
+        <label for="confine-read">Confine reads</label>
+        <p class="hint">Reads outside the working directory are refused.</p>
+        <label class="check"><input type="checkbox" id="confine-read" data-key="confineRead" /></label>
       </div>
+      <div class="field">
+        <label for="confine-write">Confine writes</label>
+        <p class="hint">Writes outside the working directory are refused.</p>
+        <label class="check"><input type="checkbox" id="confine-write" data-key="confineWrite" /></label>
+      </div>
+      <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm.</p>
     </div>
   </section>
 
   <section data-pane="graph" hidden>
-    <div id="graph-wrap">
-      <div class="field">
-        <label for="graph">Graph</label>
-        <textarea id="graph" class="control" data-key="graph" spellcheck="false"></textarea>
-        <div class="row">
-          <button class="secondary" id="graph-reset" type="button">Use default</button>
+    <h1 class="page-title">Graph</h1>
+    <h2 class="group-title">Agent loop</h2>
+    <div class="group">
+      <div id="graph-wrap">
+        <div class="field">
+          <label for="graph">Graph</label>
+          <p class="hint">The Mermaid source the turn walks — nodes, routes and soft routes.</p>
+          <textarea id="graph" class="control" data-key="graph" spellcheck="false"></textarea>
+          <div class="row">
+            <button class="secondary" id="graph-reset" type="button">Use default</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Preview</label>
+          <div id="preview" class="diagram"></div>
+          <p class="hint error" id="graph-error"></p>
+          <p class="hint" id="graph-nodes"></p>
+          <p class="hint" id="graph-routes"></p>
         </div>
       </div>
       <div class="field">
-        <label>Preview</label>
-        <div id="preview" class="diagram"></div>
-      </div>
-    </div>
-    <div class="grid" style="margin-top:14px">
-      <div class="field">
         <label for="steps">Max steps</label>
-        <input id="steps" class="control" type="number" min="1" data-key="maxSteps" />
         <p class="hint">Maximum graph steps per turn.</p>
+        <input id="steps" class="control" type="number" min="1" data-key="maxSteps" />
       </div>
     </div>
-    <p class="hint error" id="graph-error"></p>
-    <p class="hint" id="graph-nodes"></p>
-    <p class="hint" id="graph-routes"></p>
   </section>
 
 
 ${paneSections}
 
   <section data-pane="rules" hidden>
-    <div class="grid">
-      <div class="field wide">
+    <h1 class="page-title">Rules</h1>
+    <h2 class="group-title">Tool rules</h2>
+    <div class="group">
+      <div class="field">
         <label for="rules-deny">Deny</label>
-        <textarea id="rules-deny" class="control" data-key="permissions" spellcheck="false" rows="3" placeholder="run_shell(rm:*)"></textarea>
         <p class="hint">Rejected in every policy, before anything else — the deny rules win over the rest.</p>
+        <textarea id="rules-deny" class="control" data-key="permissions" spellcheck="false" rows="3" placeholder="run_shell(rm:*)"></textarea>
       </div>
-      <div class="field wide">
+      <div class="field">
         <label for="rules-ask">Ask</label>
-        <textarea id="rules-ask" class="control" data-key="permissions" spellcheck="false" rows="3" placeholder="run_shell(git push:*)"></textarea>
         <p class="hint">Always confirmed before they run, even under an accept policy.</p>
+        <textarea id="rules-ask" class="control" data-key="permissions" spellcheck="false" rows="3" placeholder="run_shell(git push:*)"></textarea>
       </div>
-      <div class="field wide">
+      <div class="field">
         <label for="rules-allow">Allow</label>
-        <textarea id="rules-allow" class="control" data-key="permissions" spellcheck="false" rows="3" placeholder="run_shell(npm run test:*)"></textarea>
         <p class="hint">Run without asking, even under Ask. One rule per line: <code>tool</code> or <code>tool(pattern)</code> — <code>run_shell(npm run test:*)</code>, <code>read_file(./.env)</code>, <code>fetch_url(domain:example.com)</code>. “Always allow” in the approval prompt appends here.</p>
+        <textarea id="rules-allow" class="control" data-key="permissions" spellcheck="false" rows="3" placeholder="run_shell(npm run test:*)"></textarea>
       </div>
     </div>
   </section>
 
-  <section data-pane="inspect" hidden>
-    <nav id="inspect-tabs" role="tablist" aria-label="Inspect">
-      <button class="subtab" type="button" role="tab" data-inspect="flow" title="Tool Policy Flow — how one tool call is gated">Tool Policy Flow (TPF)</button>
-      <button class="subtab" type="button" role="tab" data-inspect="prompts" title="Prompts — every prompt the model can be given">Prompts</button>
-      <button class="subtab" type="button" role="tab" data-inspect="plugins" title="Plugins — how the tree is wired: what each row provides, and what needs it">Plugins</button>
-    </nav>
-
-    <div data-inspect-pane="flow">
-      <div class="field wide">
-        <label>Tool Policy Flow</label>
-        <p class="hint">Every call walks the gates in order and leaves at the first one that stops it. The framed part is what you configure: the rules from the <strong>Rules</strong> tab, then the approval policy for the calls no rule matched.</p>
-        <ul class="legend" id="flow-legend"></ul>
-        <p class="hint">Red ends the call, amber asks you first, green runs without asking.</p>
-      </div>
-      <div id="flow" class="diagram"></div>
-    </div>
-
-    <div data-inspect-pane="prompts" hidden>
+  <section data-pane="prompts" hidden>
+    <h1 class="page-title">Prompts</h1>
+    <div class="group">
+      <p class="hint" id="prompts-note"></p>
       <div id="pr-wrap">
         <div class="field">
-          <label>Prompts</label>
-          <p class="hint">Every prompt the model can be given: Comonad's own blocks, each tool's definition, and the SillyTavern collection this chat would send. Pick one to read it.</p>
+          <label>Comonad blocks and tool definitions</label>
+          <p class="hint">Comonad's blocks carry the static prefix you can edit here; the dynamic content below it is generated every turn. Tools keep the definitions their plugins register — this page only orders and switches them. When ST takes over, the block order and switches mirror the active preset.</p>
+          <p class="hint" id="pr-chat"></p>
           <div id="pr-list"></div>
         </div>
         <div class="field">
           <label id="pr-title">Preview</label>
           <p class="hint" id="pr-meta"></p>
+          <div id="pr-editor"></div>
           <pre id="pr-view" class="pr-view"></pre>
         </div>
       </div>
       <div class="row">
+        <button class="primary" id="pr-save" type="button" title="Write this layout to settings">Save</button>
+        <button class="secondary" id="pr-reset" type="button" title="Reset prefixes and tool switches; block order returns to the shipped order when ST is off">Reset to defaults</button>
         <button class="secondary" id="pr-refresh" type="button" title="Read the prompts again">Refresh</button>
+      </div>
+    </div>
+  </section>
+
+  <section data-pane="inspect" hidden>
+    <h1 class="page-title">Inspect</h1>
+    <nav id="inspect-tabs" role="tablist" aria-label="Inspect">
+      <button class="subtab" type="button" role="tab" data-inspect="flow" title="Tool Policy Flow — how one tool call is gated">Tool Policy Flow (TPF)</button>
+      <button class="subtab" type="button" role="tab" data-inspect="plugins" title="Plugins — how the tree is wired: what each row provides, and what needs it">Plugins</button>
+    </nav>
+
+    <div data-inspect-pane="flow">
+      <div class="group">
+        <div class="field">
+          <label>Tool Policy Flow</label>
+          <p class="hint">Every call walks the gates in order and leaves at the first one that stops it. The framed part is what you configure: the rules from the <strong>Rules</strong> tab, then the approval policy for the calls no rule matched.</p>
+          <ul class="legend" id="flow-legend"></ul>
+          <p class="hint">Red ends the call, amber asks you first, green runs without asking.</p>
+        </div>
+        <div id="flow" class="diagram"></div>
       </div>
     </div>
 
     <div data-inspect-pane="plugins" hidden>
-      <div class="field wide">
-        <label>Plugins</label>
-        <p class="hint">
-          What the tree is wired with, row by row: what each one <strong>provides</strong> (a service other
-          rows can inject), what it <strong>needs</strong> (and which row provides that, or
-          <span class="mono">(built in)</span> for the services Comonad mounts before the tree —
-          <span class="mono">host</span>, <span class="mono">log</span> and
-          <span class="mono">settings</span>, which are not rows and have nothing to turn off), who needs
-          it, and its state. A service nobody provides is written <span class="mono">?name</span> — that is
-          what a row is waiting for. Pick a row to see the whole chain that goes down with it.
-        </p>
-      </div>
-      <div class="field wide">
-        <table id="pg-deps"></table>
-      </div>
-      <div class="field wide" id="pg-detail-wrap" hidden>
-        <label id="pg-detail-title">Dependency tree</label>
-        <pre id="pg-detail" class="pr-view"></pre>
+      <div class="group">
+        <div class="field">
+          <label>Plugins</label>
+          <p class="hint">
+            What the tree is wired with, row by row: what each one <strong>provides</strong> (a service other
+            rows can inject), what it <strong>needs</strong> (and which row provides that, or
+            <span class="mono">(built in)</span> for the services Comonad mounts before the tree —
+            <span class="mono">host</span>, <span class="mono">log</span> and
+            <span class="mono">settings</span>, which are not rows and have nothing to turn off), who needs
+            it, and its state. A service nobody provides is written <span class="mono">?name</span> — that is
+            what a row is waiting for. Pick a row to see the whole chain that goes down with it.
+          </p>
+          <table id="pg-deps"></table>
+        </div>
+        <div class="field" id="pg-detail-wrap" hidden>
+          <label id="pg-detail-title">Dependency tree</label>
+          <pre id="pg-detail" class="pr-view"></pre>
+        </div>
       </div>
     </div>
   </section>
 
   <section data-pane="mcp" hidden>
-    <div class="grid">
-      <div class="field wide">
+    <h1 class="page-title">MCP</h1>
+    <div class="group">
+      <div class="field">
         <label for="mcp">Servers</label>
-        <textarea id="mcp" class="control" spellcheck="false" style="min-height:160px"></textarea>
         <p class="hint">JSON object keyed by server name: { "name": { "command": "npx", "args": ["-y", "server"], "capability": "ro" } }</p>
+        <textarea id="mcp" class="control" spellcheck="false" style="min-height:160px"></textarea>
         <div class="row">
           <button class="secondary" id="mcp-save" type="button">Save and reload</button>
           <button class="secondary" id="mcp-reload" type="button">Reload</button>
         </div>
       </div>
-      <div class="field wide">
+      <div class="field">
         <label>Status</label>
         <table id="mcp-status"></table>
       </div>
@@ -804,8 +1065,9 @@ ${paneSections}
   </section>
 
   <section data-pane="plugins" hidden>
-    <div class="grid">
-      <div class="field wide">
+    <h1 class="page-title">Plugins</h1>
+    <div class="group">
+      <div class="field">
         <label>Rows</label>
         <p class="hint">
           Everything Comonad is made of, in load order. A row comes from the extension's own list,
@@ -826,16 +1088,16 @@ ${paneSections}
   </section>
 
   <section data-pane="tools" hidden>
-    <div class="grid">
-      <div class="field wide">
+    <h1 class="page-title">Tools</h1>
+    <div class="group">
+      <div class="field">
         <label>Tools</label>
         <p class="hint">Every registered tool with what it needs. The work mode and the approval policy decide which ones a turn may actually use.</p>
         <table id="tools"></table>
       </div>
     </div>
   </section>
-
-  <div id="status"></div>
+  </main>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script nonce="${nonce}" src="${script}" data-tab="${tab}"></script>
 ${paneScripts.map((src) => `<script nonce="${nonce}" src="${src}"></script>`).join('\n')}

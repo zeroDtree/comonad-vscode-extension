@@ -1,5 +1,6 @@
-import { estimateTokens } from '@comonad/lib/prompt';
-import { WI_LOGIC, WI_POSITION, WI_ROLE, WI_STRATEGY, worldEntry, type GenerationTrigger, type WiRole, type WorldBook, type WorldEntry, type WorldInfoSettings } from '@comonad/lib/tavern/types';
+import { COMONAD_BLOCK, DEFAULT_BLOCK_PREFIX } from '@comonad/lib/blocks';
+import { estimateTokens } from '@comonad/lib/tokens';
+import type { GenerationTrigger, WiLogic, WiPosition, WiRole, WiStrategy, WorldBook, WorldEntry, WorldInfoSettings } from './types';
 
 /**
  * The world-info engine: which entries a message activates, and where they go in the prompt.
@@ -10,6 +11,76 @@ import { WI_LOGIC, WI_POSITION, WI_ROLE, WI_STRATEGY, worldEntry, type Generatio
  * entry's logic, timed effects, recursion, groups, and a token budget as a percentage of the
  * context. Results come back bucketed by position so the assembler only has to place them.
  */
+
+/** Where an activated entry is injected, verbatim from SillyTavern's `world_info_position`. */
+export const WI_POSITION = {
+	before: 0,
+	after: 1,
+	/** Before the author's note. */
+	anTop: 2,
+	/** After the author's note. */
+	anBottom: 3,
+	atDepth: 4,
+	/** Before the dialogue examples. */
+	emTop: 5,
+	/** After the dialogue examples. */
+	emBottom: 6,
+	outlet: 7,
+} as const satisfies Record<string, WiPosition>;
+
+/** How secondary keys combine with the primary match, verbatim from `world_info_logic`. */
+export const WI_LOGIC = {
+	/** At least one secondary key matches. */
+	andAny: 0,
+	/** At least one secondary key does not match. */
+	notAll: 1,
+	/** No secondary key matches. */
+	notAny: 2,
+	/** Every secondary key matches. */
+	andAll: 3,
+} as const satisfies Record<string, WiLogic>;
+
+/** How character books and global books are interleaved, verbatim from `world_info_insertion_strategy`. */
+export const WI_STRATEGY = {
+	evenly: 0,
+	characterFirst: 1,
+	globalFirst: 2,
+} as const satisfies Record<string, WiStrategy>;
+
+export const WI_ROLE = {
+	system: 0,
+	user: 1,
+	assistant: 2,
+} as const satisfies Record<string, WiRole>;
+
+/** The defaults a fresh entry starts from, mirroring SillyTavern's entry template. */
+export const WI_ENTRY_DEFAULTS: Omit<WorldEntry, 'uid' | 'key' | 'content'> = {
+	keysecondary: [],
+	comment: '',
+	constant: false,
+	selective: true,
+	selectiveLogic: WI_LOGIC.andAny,
+	order: 100,
+	position: WI_POSITION.before,
+	disable: false,
+	ignoreBudget: false,
+	excludeRecursion: false,
+	preventRecursion: false,
+	delayUntilRecursion: 0,
+	probability: 100,
+	useProbability: true,
+	depth: 4,
+	group: '',
+	groupOverride: false,
+	groupWeight: 100,
+	vectorized: false,
+};
+
+/** A complete entry, filling every default. */
+export function worldEntry(patch: Partial<WorldEntry> & { uid: number | string; content: string }): WorldEntry {
+	const uid = typeof patch.uid === 'number' ? patch.uid : Number.parseInt(patch.uid, 10) || 0;
+	return { ...WI_ENTRY_DEFAULTS, key: [], ...patch, uid };
+}
 
 export type LoreBookKind = 'chat' | 'persona' | 'character' | 'global';
 
@@ -72,6 +143,8 @@ export interface LoreInput {
 	 */
 	external?: ReadonlySet<string>;
 	effects?: TimedEffects;
+	/** The counter the budget is kept in — the kernel's, threaded in by whoever composes the turn. */
+	count?: (text: string) => number;
 	/** Resolves macros in keys, fields and content before they are used. */
 	substitute?: (text: string) => string;
 	/** Resolves a regex script for activated content; the identity when absent. */
@@ -490,7 +563,7 @@ function scanBooks(sorted: readonly ScanEntry[], input: LoreInput, state: ScanSt
 				continue;
 			}
 			if (!entry.ignoreBudget) {
-				const tokens = estimateTokens(content);
+				const tokens = (input.count ?? estimateTokens)(content);
 				// The first entry is always allowed through; after that the budget wins.
 				if (state.budget - tokens < 0 && state.activated.size > 0) {
 					state.overflowed = true;
@@ -762,8 +835,8 @@ export function searchLore(
 	return hits.sort((left, right) => right.score - left.score || left.entry.uid - right.entry.uid).slice(0, Math.max(1, limit));
 }
 
-/** The one-line index of a book the model reads before it decides to look anything up. */
-export function loreIndex(books: readonly SearchableBook[]): string {
+/** The one-line index of a book, without the heading a prompt block adds above it. */
+export function loreLines(books: readonly SearchableBook[]): string {
 	const lines: string[] = [];
 	for (const book of books.slice(0, 20)) {
 		const summaries = Object.values(book.book.entries)
@@ -775,10 +848,17 @@ export function loreIndex(books: readonly SearchableBook[]): string {
 			lines.push(`- ${book.name}: ${summaries.join('; ')}`);
 		}
 	}
-	if (!lines.length) {
-		return '';
-	}
-	return `World books (look one up with the lore_lookup tool when the user mentions something here):\n${lines.join('\n')}`;
+	return lines.join('\n');
+}
+
+/** The one-line index of a book the model reads before it decides to look anything up. */
+export function loreIndex(
+	books: readonly SearchableBook[],
+	heading = DEFAULT_BLOCK_PREFIX[COMONAD_BLOCK.lore],
+): string {
+	const body = loreLines(books);
+	const head = heading.trim();
+	return head && body ? `${head}\n${body}` : head || body;
 }
 
 /**

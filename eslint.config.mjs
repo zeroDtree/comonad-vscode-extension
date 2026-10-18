@@ -2,7 +2,7 @@ import typescriptEslint from "typescript-eslint";
 
 export default [{
     // Build output is not source: the plugin packages have a `dist` of their own beside their sources.
-    ignores: ["**/dist/**", "out/**", "node_modules/**"],
+    ignores: ["**/dist/**", "out/**", "node_modules/**", "packages/comonad-plugin-math/resources/math.js"],
 }, {
     files: ["**/*.ts"],
 }, {

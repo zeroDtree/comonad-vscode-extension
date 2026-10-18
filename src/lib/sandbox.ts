@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { platform } from 'node:os';
@@ -32,11 +32,27 @@ export function isInside(root: string, target: string): boolean {
 
 export function isDeniedRead(workspace: string, target: string, patterns: readonly string[]): boolean {
 	const rel = relative(resolve(workspace), resolve(target)).replaceAll('\\', '/');
-	if (rel.startsWith('..') || isAbsolute(rel)) {
-		return false;
-	}
+	const inside = !rel.startsWith('..') && !isAbsolute(rel);
 	const name = target.replaceAll('\\', '/').split('/').pop() ?? '';
 	return patterns.some((pattern) => {
+		// An absolute pattern names a place on disk, not a path inside the workspace: it must apply
+		// even when the target itself is outside (the resolver reads outside when confinement allows it).
+		if (isAbsolute(pattern)) {
+			if (isInside(pattern, target)) {
+				return true;
+			}
+			// Temp directories are symlinked on macOS (`/var` → `/private/var`), and `guardPath`
+			// compares real paths. Match the pattern's real path as well, without failing on a
+			// pattern that does not exist.
+			try {
+				return isInside(realpathSync(pattern), target);
+			} catch {
+				return false;
+			}
+		}
+		if (!inside) {
+			return false;
+		}
 		if (pattern === '.env') {
 			return rel === '.env';
 		}

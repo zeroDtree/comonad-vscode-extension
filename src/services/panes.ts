@@ -1,5 +1,4 @@
 import { Service, type Context } from 'cordis';
-import type { Config } from './settings';
 
 /**
  * Panes: the settings panel's tabs, as something a plugin can contribute.
@@ -17,10 +16,12 @@ export interface PaneController {
 	/** Handles one message from the pane's client; the answer is shown as a note, when there is one. */
 	action(message: Record<string, unknown>): Promise<Record<string, unknown> | null | void>;
 	/**
-	 * What the pane owns of a save: the config keys it is responsible for, read out of the panel's
-	 * untrusted patch. Everything else in that patch is the host's, so a pane may only name its own.
+	 * What the pane owns of a save: the keys it is responsible for, read out of the panel's untrusted
+	 * patch (a pane reads its own current values for the keys it leaves out). Everything else in the
+	 * patch is the panel's, so a pane may only name its own — and its keys are its own business, which
+	 * is why none of them appear in the kernel's `Config`.
 	 */
-	patch?(patch: Record<string, unknown>, current: Config): Record<string, unknown>;
+	patch?(patch: Record<string, unknown>): Record<string, unknown>;
 }
 
 /** What the panel lends a pane: webview URIs for files outside the extension, and a refresh. */
@@ -37,6 +38,8 @@ export interface PaneSpec {
 	/** The tab's label and tooltip, as the panel writes them. */
 	label: string;
 	title?: string;
+	/** A 16px inline SVG for the tab, drawn with currentColor; a pane without one gets the plugin icon. */
+	icon?: string;
 	/** A command the panel registers to reveal this pane — `comonad.openContent`, say. */
 	command?: string;
 	/** The markup of the pane's `<section>`, as the panel writes it into the document. */

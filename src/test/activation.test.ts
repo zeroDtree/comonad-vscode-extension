@@ -12,6 +12,7 @@ suite('Comonad extension', () => {
 			'comonad.newSession',
 			'comonad.stop',
 			'comonad.openChat',
+			'comonad.referenceSelection',
 			'comonad.openSettings',
 			'comonad.pickPreset',
 			'comonad.toggleHistory',
@@ -27,11 +28,28 @@ suite('Comonad extension', () => {
 		for (const id of ['comonad.pickCharacter', 'comonad.pickPersona', 'comonad.reloadTavern']) {
 			assert.ok(!commands.includes(id), `${id} belongs to the tavern plugin, not the kernel`);
 		}
-		// So is the change journal: its review commands are declared in the manifest behind
-		// `enablement: comonad.checkpoints`, and nothing registers them until the row is installed.
-		// Exporting a chat is not the journal's: that one stays in the kernel and is there now.
-		for (const id of ['comonad.review', 'comonad.keepAll', 'comonad.undoAll', 'comonad.rewind']) {
-			assert.ok(!commands.includes(id), `${id} belongs to the change-journal plugin, not the kernel`);
+		// The change journal is a row of the shipped tree — on by default, and its review commands are
+		// there with it (the manifest's `enablement: comonad.checkpoints` hides them again when the row
+		// is turned off). Exporting a chat is not the journal's: that one is the sessions view's.
+		for (const id of [
+			'comonad.review',
+			'comonad.keepAll',
+			'comonad.undoAll',
+			'comonad.keepFile',
+			'comonad.undoFile',
+			'comonad.openChangeDiff',
+			'comonad.keepHunk',
+			'comonad.undoHunk',
+			'comonad.git.openDiff',
+			'comonad.git.openFile',
+			'comonad.git.stage',
+			'comonad.git.unstage',
+			'comonad.git.discard',
+			'comonad.git.stageAll',
+			'comonad.git.unstageAll',
+			'comonad.git.refresh',
+		]) {
+			assert.ok(commands.includes(id), `${id} comes with its row`);
 		}
 
 	});

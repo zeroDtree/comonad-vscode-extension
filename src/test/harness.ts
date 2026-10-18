@@ -8,14 +8,13 @@ import { logPlugin } from '../services/log';
 import { settingsPlugin } from '../services/settings';
 import { auditPlugin } from '../services/audit';
 import { sessionsPlugin } from '../services/sessions';
-import { journalPlugin } from 'comonad-plugin-checkpoints/services/journal';
+import { Checkpoints } from '../services/checkpoints';
 import { usagePlugin } from '../services/usage';
 import { tasksPlugin } from '../services/tasks';
 import { toolsPlugin } from '../services/tools';
 import { catalogPlugin } from '../services/catalog';
 import { commandsPlugin } from '../services/commands';
 import { tavernPlugin } from 'comonad-plugin-tavern/services/tavern';
-import { vectorsPlugin } from '../services/vectors';
 import { loreToolPlugin } from 'comonad-plugin-tavern/tools/tavern';
 import { llmPlugin } from '../services/llm';
 import { hooksPlugin } from '../services/hooks';
@@ -132,7 +131,8 @@ export async function createTestKernel(
 		'log',
 		'commands',
 		'agent',
-	].filter((name) => !skipped.has(name));
+		// `vectors` arrives with the tavern that mounts it, so it waits with it and is skipped with it.
+	].filter((name) => !skipped.has(name) && (name !== 'vectors' || !skipped.has('tavern')));
 	const fiber: Fiber & PromiseLike<Fiber> = ctx.plugin(function kernel(child: Context) {
 		child.provide('host', host);
 		child.plugin(logPlugin);
@@ -140,16 +140,16 @@ export async function createTestKernel(
 		child.plugin(auditPlugin);
 		child.plugin(sessionsPlugin);
 		if (!skipped.has('checkpoints')) {
-			child.plugin(journalPlugin);
+			child.plugin(Checkpoints);
 		}
 		child.plugin(usagePlugin);
 		child.plugin(tasksPlugin);
 		child.plugin(toolsPlugin);
 		child.plugin(catalogPlugin);
+		// The tavern brings its own vectors along: the vector side of world info is its business.
 		if (!skipped.has('tavern')) {
 			child.plugin(tavernPlugin);
 		}
-		child.plugin(vectorsPlugin);
 		child.plugin(commandsPlugin);
 		child.plugin(tokenizersPlugin);
 		if (!skipped.has('lore')) {

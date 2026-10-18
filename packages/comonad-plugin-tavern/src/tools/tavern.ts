@@ -1,7 +1,7 @@
 import type { Context, Plugin } from 'cordis';
 import { clip } from '@comonad/lib/util';
 import { searchLore, type LoreBook } from '../lib/lore';
-import type { WorldInfoSettings } from '@comonad/lib/tavern/types';
+import type { WorldInfoSettings } from '../lib/types';
 import type { ToolContext, ToolSpec } from '@comonad/lib/types';
 
 /**

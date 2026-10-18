@@ -835,7 +835,18 @@ window.comonadWorldInfo = function worldInfo(options) {
 		return [...$('wi-worlds').querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value);
 	}
 
+	/** The knobs and the pickers are redrawn only when what they show moves: a push that answers the
+	 *  book write must not rebuild what the user is clicking through. */
+	let globalShape = '';
+	let picksShape = '';
+	let sortShape = '';
+
 	function renderGlobal(wi, active) {
+		const shape = JSON.stringify([wi, active]);
+		if (shape === globalShape) {
+			return;
+		}
+		globalShape = shape;
 		for (const [id, value] of [
 			['wi-g-scan', wi.scanDepth],
 			['wi-g-budget', wi.budget],
@@ -884,10 +895,17 @@ window.comonadWorldInfo = function worldInfo(options) {
 		}
 	}
 
-	function renderPicks(catalog) {
+	function renderPicks(catalog, active) {
 		const books = catalog.lorebooks ?? [];
+		const shape = JSON.stringify([books.map((item) => [item.name]), book && book.name, active]);
+		if (shape === picksShape) {
+			return;
+		}
+		picksShape = shape;
 		const worlds = $('wi-worlds');
-		const picked = new Set(checkedWorlds());
+		// The setting is the truth, not whatever the checkboxes last drew: a book that entered the
+		// catalog while one of them was named in `tavernLorebooks` comes up ticked, not dropped.
+		const picked = new Set(active ?? []);
 		worlds.replaceChildren();
 		if (!books.length) {
 			const none = document.createElement('small');
@@ -924,6 +942,11 @@ window.comonadWorldInfo = function worldInfo(options) {
 
 	function renderSort(rules) {
 		const select = $('wi-sort');
+		const shape = JSON.stringify([rules, ui.sort, ui.query]);
+		if (shape === sortShape) {
+			return;
+		}
+		sortShape = shape;
 		select.replaceChildren();
 		if (ui.query) {
 			const found = document.createElement('option');
@@ -1102,7 +1125,7 @@ window.comonadWorldInfo = function worldInfo(options) {
 			open.clear();
 			ui.page = 1;
 		}
-		renderPicks(content.catalog || {});
+		renderPicks(content.catalog || {}, next.worlds || []);
 		renderGlobal(next.wi || {}, next.worlds || []);
 		renderSort(next.rules || []);
 		if (document.activeElement !== $('wi-search')) {

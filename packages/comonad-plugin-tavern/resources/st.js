@@ -84,6 +84,7 @@
 	}
 
 	function renderSettings(tavern, catalog) {
+		settingsDrawn = true;
 		const enabled = $('tavern-enabled');
 		if (enabled && document.activeElement !== enabled) {
 			enabled.checked = Boolean(tavern.enabled);
@@ -93,13 +94,13 @@
 		put($('tavern-note-depth'), String(tavern.noteDepth || 0));
 		fillCatalog($('tavern-character'), catalog.characters, tavern.character, 'No default character');
 		fillCatalog($('tavern-persona'), catalog.personas, tavern.persona, 'No persona');
-		fillCatalog($('tavern-preset'), catalog.presets, tavern.preset, 'The shipped prompts');
+		fillCatalog($('tavern-preset'), catalog.presets, tavern.preset, 'Default (built-in)');
 		put($('wi-format'), tavern.wiFormat || '');
 		put($('fmt-scenario'), tavern.scenarioFormat || '');
 		put($('fmt-personality'), tavern.personalityFormat || '');
 		const known = $('books-known');
 		if (known) {
-			known.textContent = 'Known books: ' + ((catalog.books || []).map((book) => book.name + ' (' + book.entries + ')').join(', ') || 'none found');
+			known.textContent = 'Known books: ' + ((catalog.lorebooks || []).map((book) => book.name + ' (' + book.entries + ')').join(', ') || 'none found');
 		}
 		const summary = $('catalog-summary');
 		if (summary) {
@@ -108,15 +109,22 @@
 				' character(s) · ' +
 				(catalog.personas || []).length +
 				' persona(s) · ' +
-				(catalog.books || []).length +
+				(catalog.lorebooks || []).length +
 				' book(s) · ' +
 				(catalog.presets || []).length +
 				' preset(s). Reload after adding files — **Comonad: Reload Characters, Books and Presets**.';
 		}
 	}
 
+	/** Whether the settings half has ever been drawn: before that its fields hold markup defaults,
+	 *  and handing those to Save would write them over the user's configuration. */
+	let settingsDrawn = false;
+
 	/** The keys this tab owns, as the panel's save merges them into the patch it sends back. */
 	function collectSettings() {
+		if (!settingsDrawn) {
+			return {};
+		}
 		return {
 			tavernEnabled: $('tavern-enabled').checked,
 			tavernCharacter: $('tavern-character').value,

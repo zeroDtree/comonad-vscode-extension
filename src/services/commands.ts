@@ -1,8 +1,7 @@
-import { readFile, stat } from 'node:fs/promises';
 import { Service, type Context } from 'cordis';
-import { guardPath, runCommand, shellArgv, type SandboxOptions } from '../lib/sandbox';
+import { runCommand, shellArgv, type SandboxOptions } from '../lib/sandbox';
 import type { SessionPolicy } from '../lib/types';
-import type { GenerationTrigger } from '../lib/tavern/types';
+import type { GenerationTrigger } from '../lib/generations';
 import type { CustomCommand } from './catalog';
 
 /** Slash commands: built-ins registered as plugins plus `.comonad/commands/*.md`. */
@@ -136,7 +135,11 @@ function stripSlash(prompt: string): string {
 	return prompt.trim().replace(/^\/[A-Za-z][\w-]*\s*/, '');
 }
 
-/** Expands `$ARGUMENTS`, `` !`shell` `` snippets and `@path` file includes. */
+/**
+ * Expands `$ARGUMENTS` and `` !`shell` `` snippets. `@` references are not expanded here: the chat
+ * surfaces resolve them from the effective prompt with the session policy (`ui/references`), so a
+ * command template and a typed prompt use the same richer grammar.
+ */
 async function expandCommand(command: CustomCommand, args: string, workspace: string, options: SandboxOptions): Promise<string> {
 	let output = command.template.replaceAll('$ARGUMENTS', args);
 	const shellPattern = /!`([^`]+)`/g;
@@ -155,27 +158,6 @@ async function expandCommand(command: CustomCommand, args: string, workspace: st
 			}
 		}
 		output = output.replace(match[0], replacement);
-	}
-	const filePattern = /@([A-Za-z0-9_./-]+)/g;
-	for (const match of [...output.matchAll(filePattern)]) {
-		if (!workspace) {
-			continue;
-		}
-		try {
-			const file = await guardPath(workspace, match[1]!, {
-				access: 'read',
-				confinement: options.confinement,
-				denyReadPaths: options.denyReadPaths,
-			});
-			const info = await stat(file);
-			if (!info.isFile() || info.size > 64 * 1024) {
-				continue;
-			}
-			const text = await readFile(file, 'utf8');
-			output = output.replace(match[0], `\n<file path="${match[1]}">\n${text}\n</file>\n`);
-		} catch {
-			continue;
-		}
 	}
 	return output;
 }

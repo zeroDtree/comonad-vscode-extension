@@ -44,8 +44,11 @@ body {
 	color: var(--vscode-foreground);
 	background: var(--vscode-editor-background);
 	margin: 0;
-	padding: 12px 20px 28px;
 	line-height: 1.45;
+	/* Cursor's settings shape: a sidebar of pages beside one scrolling content column. */
+	display: flex;
+	height: 100vh;
+	overflow: hidden;
 }
 
 .grow {
@@ -62,39 +65,131 @@ input.control,
 	height: var(--st-row);
 }
 
-/* ------------------------------------------------------------------ header */
+/* ------------------------------------------------------------------ sidebar */
 
-#bar {
+#side {
+	flex: none;
+	width: var(--side-width, 180px);
 	display: flex;
-	align-items: center;
-	gap: 8px;
-	margin-bottom: 16px;
-	position: sticky;
-	top: 0;
-	z-index: 5;
-	background: var(--vscode-editor-background);
-	padding: 2px 0 8px;
+	flex-direction: column;
+	gap: 2px;
+	padding: 14px 10px 12px;
+	overflow-y: auto;
+	box-sizing: border-box;
+}
+
+/* The drag handle between the sidebar and the page. Its width is also the visual divider. */
+#side-resizer {
+	flex: none;
+	width: 5px;
+	cursor: col-resize;
+	background: transparent;
+	border-left: 1px solid var(--st-border-soft);
+	margin-left: -1px;
+}
+
+#side-resizer:hover,
+#side-resizer:focus-visible,
+body.resizing #side-resizer {
+	background: var(--st-accent);
+	outline: none;
+}
+
+body.resizing {
+	cursor: col-resize;
+	user-select: none;
+}
+
+#search {
+	margin-bottom: 10px;
+}
+
+#search::-webkit-search-cancel-button {
+	opacity: 0.6;
 }
 
 #tabs {
 	display: flex;
+	flex-direction: column;
 	gap: 2px;
-	background: var(--st-surface-2);
-	border: 1px solid var(--st-border-soft);
-	border-radius: var(--st-radius);
-	padding: 2px;
 }
 
 .tab {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	background: transparent;
 	color: var(--st-muted);
 	border: 0;
 	border-radius: var(--st-radius-sm);
-	padding: 3px 12px;
+	padding: 5px 10px;
 	font: inherit;
 	font-size: 12.5px;
 	cursor: pointer;
 	white-space: nowrap;
+	text-align: left;
+}
+
+.tab-icon {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+}
+
+.tab-icon svg {
+	width: 16px;
+	height: 16px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.25;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.tab-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* The sidebar at its narrowest: an icon rail. Labels, search and the status line leave; the
+   save/close buttons become their glyphs. */
+#side.compact {
+	width: 52px;
+	padding: 14px 6px 12px;
+}
+
+#side.compact #search,
+#side.compact #status,
+#side.compact .tab-label,
+#side.compact .btn-label {
+	display: none;
+}
+
+#side.compact .tab {
+	justify-content: center;
+	gap: 0;
+	padding: 6px 0;
+}
+
+#side.compact #side-foot .row {
+	flex-direction: column;
+}
+
+#side.compact #side-foot .row > button {
+	flex: none;
+	width: 100%;
+	padding: 4px 0;
+}
+
+.btn-icon {
+	display: none;
+}
+
+#side.compact .btn-icon {
+	display: inline;
 }
 
 .tab:hover {
@@ -106,6 +201,164 @@ input.control,
 	background: var(--st-selected);
 	color: var(--vscode-foreground);
 	font-weight: 500;
+}
+
+#side-foot {
+	margin-top: auto;
+	padding-top: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+#side-foot .row {
+	display: flex;
+	gap: 6px;
+}
+
+#side-foot .row > button {
+	flex: 1;
+}
+
+/* ------------------------------------------------------------------ content */
+
+#content {
+	flex: 1;
+	min-width: 0;
+	overflow-y: auto;
+	padding: 22px 36px 48px;
+	box-sizing: border-box;
+}
+
+.page-title {
+	font-size: 21px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	margin: 0 0 18px;
+}
+
+/* A card of related settings, like a Cursor settings group: a title above, rows inside. */
+.group {
+	border: 1px solid var(--st-border-soft);
+	border-radius: 10px;
+	padding: 2px 18px;
+	margin: 0 0 22px;
+	max-width: 860px;
+}
+
+.group-title {
+	font-size: var(--st-text);
+	font-weight: 600;
+	text-transform: none;
+	letter-spacing: normal;
+	color: var(--vscode-foreground);
+	border: 0;
+	margin: 22px 0 8px;
+	padding: 0;
+}
+
+.group-title:first-child {
+	margin-top: 0;
+}
+
+.group-note {
+	margin: 12px 0 14px;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	line-height: 1.5;
+}
+
+.group-note code {
+	font-family: var(--st-mono);
+	font-size: 10.5px;
+	background: var(--st-surface-2);
+	border-radius: 3px;
+	padding: 0 3px;
+}
+
+/* One setting per row: bold title, its description, then the control — with a hairline between rows. */
+.group > .field {
+	padding: 14px 0;
+	border-bottom: 1px solid var(--st-border-soft);
+	gap: 4px;
+}
+
+.group > .field:last-of-type {
+	border-bottom: 0;
+}
+
+.group .field > label {
+	font-size: var(--st-text);
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.group select.control {
+	width: auto;
+	min-width: 150px;
+	max-width: 320px;
+}
+
+.group input.control {
+	width: 100%;
+	max-width: 480px;
+}
+
+.group input.control[type='number'] {
+	width: auto;
+	min-width: 96px;
+}
+
+.group textarea.control {
+	max-width: 100%;
+}
+
+.group .check {
+	/* The row's control: a switch, left-aligned under the description. */
+	padding: 2px 0 4px;
+}
+
+/* A switch, Cursor-style — scoped to the host's own rows so guest panes keep their checkboxes. */
+.group .check input[type='checkbox'] {
+	appearance: none;
+	-webkit-appearance: none;
+	width: 32px;
+	height: 18px;
+	border-radius: 9px;
+	border: 1px solid var(--st-border);
+	background: var(--st-surface-2);
+	position: relative;
+	cursor: pointer;
+	transition: background 0.12s ease, border-color 0.12s ease;
+	margin: 0;
+	flex: none;
+}
+
+.group .check input[type='checkbox']::after {
+	content: '';
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	background: var(--st-muted);
+	transition: transform 0.12s ease, background 0.12s ease;
+}
+
+.group .check input[type='checkbox']:checked {
+	background: var(--st-accent-bg);
+	border-color: var(--st-accent-bg);
+}
+
+.group .check input[type='checkbox']:checked::after {
+	transform: translateX(14px);
+	background: var(--st-accent-fg);
+}
+
+.group .check input[type='checkbox']:focus-visible {
+	outline: 1px solid var(--st-accent);
+	outline-offset: 1px;
 }
 
 /* The Inspect tab's own sub-tabs: the tool policy flow and the prompt list. `.subtab` itself comes from
@@ -571,7 +824,9 @@ button.icon.danger:hover {
 	flex-direction: column;
 	gap: 2px;
 	max-height: 62vh;
-	overflow: auto;
+	overflow-y: auto;
+	/* Long meta strings are ellipsized inside their row; the list itself never scrolls sideways. */
+	overflow-x: hidden;
 	border: 1px solid var(--st-border-soft);
 	border-radius: var(--st-radius-sm);
 	padding: 4px;
@@ -598,6 +853,10 @@ button.icon.danger:hover {
 	display: flex;
 	align-items: baseline;
 	gap: 8px;
+	/* A flex item's automatic minimum width would let a long note widen the row past the list. */
+	width: 100%;
+	min-width: 0;
+	box-sizing: border-box;
 	background: none;
 	border: 0;
 	border-radius: var(--st-radius-sm);
@@ -626,7 +885,13 @@ button.icon.danger:hover {
 }
 
 .pr-row .pr-note {
-	flex: none;
+	/* Content-sized when it fits, but capped and allowed to shrink: the name keeps its space. */
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 45%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 	font-size: var(--st-small);
 	color: var(--st-muted);
 }
@@ -646,6 +911,75 @@ button.icon.danger:hover {
 	line-height: 1.5;
 	white-space: pre-wrap;
 	word-break: break-word;
+}
+
+/* The Prompts tab's rows are editable cards, not the old read-only buttons: a switch, the name,
+   a note and the move buttons share the row, and the whole card is the drag target. */
+#pr-list .pr-item {
+	border: 1px solid transparent;
+	border-radius: var(--st-radius-sm);
+}
+
+#pr-list .pr-item.is-off .pr-row {
+	opacity: 0.55;
+}
+
+#pr-list .pr-item.is-dragging {
+	opacity: 0.4;
+}
+
+#pr-list .pr-item.is-drop-target {
+	border-color: var(--st-accent);
+	box-shadow: inset 0 2px 0 var(--st-accent);
+}
+
+#pr-list .pr-row {
+	cursor: default;
+}
+
+#pr-list .pr-item[draggable='true'] .pr-row {
+	cursor: grab;
+}
+
+#pr-list .pr-row .switch {
+	flex: 0 0 auto;
+}
+
+#pr-list .pr-controls {
+	display: flex;
+	flex: 0 0 auto;
+	gap: 2px;
+}
+
+#pr-editor label,
+#pr-editor .hint {
+	display: block;
+}
+
+#pr-editor textarea {
+	width: 100%;
+	box-sizing: border-box;
+	margin: 4px 0 6px;
+	font-family: var(--st-mono);
+	font-size: var(--st-small);
+}
+
+#prompts-note {
+	margin: 0 0 10px;
+}
+
+#prompts-note .secondary {
+	margin-left: 6px;
+}
+
+#pr-list .pr-row .pr-name {
+	background: none;
+	border: 0;
+	padding: 0;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
 }
 
 /* The flow tab's mode legend: `Name — calls it grants` per mode. */
@@ -731,6 +1065,11 @@ td.plugin-error {
 	white-space: nowrap;
 }
 
+/* The row's two actions — turn off, uninstall — read as a pair, not as one wide button. */
+#plugins td:last-child button + button {
+	margin-left: 4px;
+}
+
 td.num,
 th.num {
 	text-align: right;
@@ -740,8 +1079,8 @@ th.num {
 /* ------------------------------------------------------------------ status */
 
 #status {
-	min-height: 18px;
-	margin-top: 16px;
+	min-height: 16px;
+	margin: 0;
 	font-size: var(--st-small);
 	color: var(--st-muted);
 }

@@ -2,27 +2,25 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { copyFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
+import { COMONAD_BLOCK, DEFAULT_BLOCK_PREFIX, TOOL_DEPENDENT_BLOCKS, isComonadBlockId, type ComonadBlockId, type PromptBlock } from '@comonad/lib/blocks';
 import type { Message } from '@comonad/lib/types';
 import { cardId, cardToJson, cardToPng, isCardFile, isPng, loadCard } from '../lib/card';
-import { personaJson, slugId, worldInfoJson } from '../lib/authoring';
+import { PERSONA_POSITION, personaJson, slugId, worldInfoJson } from '../lib/authoring';
 import { connectionKeys, personaBackup, personaFrom, readPersonaBackup, type PersonaBackup, type PersonaRestore } from '../lib/personas';
-import { activateLore, loreIndex, toWorldBook, worldInfoToBook, type LoreBook, type LoreHit, type LoreResult, type TimedEffects } from '../lib/lore';
+import { activateLore, loreIndex, toWorldBook, worldInfoToBook, WI_ENTRY_DEFAULTS, WI_ROLE, type LoreBook, type LoreHit, type LoreResult, type TimedEffects } from '../lib/lore';
 import { substituteMacros, type MacroContext } from '../lib/macro';
-import { applyRegex, regexScriptsFrom } from '../lib/regex';
+import { applyRegex, REGEX_PLACEMENT, regexScriptsFrom } from '../lib/regex';
+import { vectorSettings, WI_SETTINGS_DEFAULTS, tavernSettings, type TavernSettings } from '../lib/settings';
+import { estimateTokens } from '@comonad/lib/tokens';
+import { Vectors } from './vectors';
 import { emptyStore, mergeStores, readStore, renameKey, storeJson, tagIdsOf, tagsOf, type Tag, type TagStore } from '../lib/tags';
 import { librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from '../lib/library';
 import { loadPreset, presetSamplers, presetToJson, type PresetSamplers } from '../lib/preset';
-import { applyCardOverrides, IDENTITY_PROMPT, promptCollection, withoutIdentityBlock, withoutRoleplayScaffolding, type ActivePrompt } from '../lib/prompts';
+import { applyCardOverrides, DEFAULT_PRESET_ID, TOOLS_PROMPT, promptCollection, withoutRoleplayScaffolding, type ActivePrompt } from '../lib/prompts';
 import { assemble, hasMarkerText, markerContent, previewPrompt, type AssembleBlocks } from '../lib/assemble';
 import {
-	PERSONA_POSITION,
-	REGEX_PLACEMENT,
-	WI_ENTRY_DEFAULTS,
-	WI_ROLE,
-	WI_SETTINGS_DEFAULTS,
 	type Character,
 	type Persona,
-	type PromptItem,
 	type PromptLibraryEntry,
 	type RegexScript,
 	type TavernPreset,
@@ -30,8 +28,7 @@ import {
 	type WiRole,
 	type WorldBook,
 	type WorldInfoSettings,
-} from '@comonad/lib/tavern/types';
-import type { Config } from '@comonad/services/settings';
+} from '../lib/types';
 
 /**
  * The tavern service: it owns the content (characters, their books, personas, presets), keeps the
@@ -54,11 +51,11 @@ export interface TavernBinding {
 }
 
 export interface ComposeInput {
-	/** Comonad's identity block, already built by the agent. */
-	identity: string;
+	/** Comonad's own blocks, already built for this turn. The preset decides where each is sent. */
+	blocks: readonly PromptBlock[];
 	/** The conversation in wire form, oldest first. */
 	history: Message[];
-	/** What the chat has selected. */
+	/** What the chat has selected. Anything it leaves out falls back to the configured defaults. */
 	binding: TavernBinding;
 	/** Newest first, as the world-info scan wants them. */
 	scan: Array<{ role: 'user' | 'assistant'; text: string }>;
@@ -66,12 +63,18 @@ export interface ComposeInput {
 	turn: number;
 	/** What started this generation: an entry may be tied to one of upstream's generation types. */
 	trigger?: GenerationTrigger;
-	/** Entries a vector search found, as `<book>.<uid>`, which the scan activates without their keys. */
-	external?: ReadonlySet<string>;
 	/** The model of the chat, for the `{{model}}` macro. */
 	model?: string;
 	/** Context the endpoint accepts, for the world-info budget. */
 	contextSize?: number;
+}
+
+/** An automation an activated entry named (upstream's *Automation ID*), ready for the caller to run. */
+export interface LoreAutomation {
+	id: string;
+	book: string;
+	uid: number;
+	comment: string;
 }
 
 export interface ComposeResult {
@@ -83,10 +86,16 @@ export interface ComposeResult {
 	/** Worlds-info positions that were filled, for the chat's readout. */
 	buckets: LoreResult;
 	effects: TimedEffects;
-	/** True when the chat has no tavern content at all: the caller keeps its own shape. */
-	inert: boolean;
+	/** True when this result replaces the agent's own `[system, …history]` shape. */
+	takeover: boolean;
+	/** Whether the preset's Tools entry is on, so the request may offer the policy's tools. */
+	toolsEnabled: boolean;
 	/** The presets's sampler settings, when a preset is selected. */
 	samplers: PresetSamplers;
+	/** The scan ran out of budget and dropped entries, and the settings say to say so. */
+	overflowAlert: boolean;
+	/** The automations the activated entries named, with the setting that allows them already applied. */
+	automations: LoreAutomation[];
 }
 
 interface LoadedBook {
@@ -103,20 +112,13 @@ export type ContentKind = 'characters' | 'lorebooks' | 'presets' | 'personas';
 
 const MAX_FILES = 500;
 
-/** The settings a change to which means the library on disk has to be read again. */
-const SOURCE_KEYS = ['tavernEnabled', 'tavernCharacter', 'tavernPersona', 'tavernLorebooks', 'tavernPreset'] as const;
-
-function sourceKeys(config: Config): string {
-	return JSON.stringify(SOURCE_KEYS.map((key) => config[key]));
-}
-
 /**
  * The seam between the agent and the tavern: the agent holds only this much of the service, so a
  * build without the tavern plugin still type-checks — `ctx.get('tavern')` answers undefined then.
  */
 export type TavernApi = Pick<
 	Tavern,
-	'compose' | 'continueNudge' | 'impersonationPrompt' | 'booksFor' | 'loreIndex' | 'promptsFor' | 'displayPrompts'
+	'enabled' | 'compose' | 'continueNudge' | 'impersonationPrompt' | 'booksFor' | 'loreIndex' | 'promptsFor' | 'displayPrompts'
 >;
 
 /** The picture formats upstream accepts for a persona's avatar; ours is the file beside the JSON. */
@@ -156,28 +158,70 @@ export class Tavern extends Service implements TavernApi {
 	 */
 	private reading: Promise<void> = Promise.resolve();
 
+	/**
+	 * What this service last wrote to each file, so the environment's file watcher can tell its own
+	 * echo from an outside edit: a save already puts the one file back into the catalog, and a
+	 * watcher re-reading the whole library for our own write is what made editing stutter.
+	 */
+	private readonly wrote = new Map<string, Buffer | null>();
+
 	constructor(ctx: Context) {
 		super(ctx, 'tavern');
+		// The vector side of world info lives here rather than in the kernel: the only thing it ever
+		// embeds is world-book entries, so it travels with the layer that owns them.
+		ctx.plugin(Vectors);
 		this.ready = this.reload();
-		// The panel writes these keys through `settings`, and a hand-edited file arrives here too: the
-		// library is read again whenever one of them moved, and only then.
-		this.sources = sourceKeys(this.ctx.settings.get());
-		this.ctx.on('settings/changed', () => {
-			const sources = sourceKeys(this.ctx.settings.get());
-			if (sources !== this.sources) {
-				this.sources = sources;
-				void this.reload();
-			}
-		});
 	}
 
-	/** The source keys as they were last read, so a change to any other setting is not a reload. */
-	private sources: string;
+	/** Remembers the bytes a write put in a file (`null` for a delete) — see `wrote`. */
+	private noteWrite(file: string, bytes: Buffer | string | null): void {
+		this.wrote.set(resolve(file), bytes === null ? null : Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, 'utf8'));
+		while (this.wrote.size > 256) {
+			const oldest = this.wrote.keys().next().value;
+			if (oldest === undefined) {
+				break;
+			}
+			this.wrote.delete(oldest);
+		}
+	}
+
+	/**
+	 * Whether the file watcher just saw this service's own write land: the file on disk holds exactly
+	 * what was written (or is gone, for a delete). Consumes the record, so the next change to the same
+	 * file is an outside edit again. Watcher-side tests ask this before reloading anything.
+	 */
+	async isOwnWrite(file: string): Promise<boolean> {
+		const mine = this.wrote.get(resolve(file));
+		if (mine === undefined) {
+			return false;
+		}
+		this.wrote.delete(resolve(file));
+		try {
+			return mine === null ? false : mine.equals(await readFile(file));
+		} catch {
+			return mine === null;
+		}
+	}
 
 	/** Re-reads every source, after the read before it has finished. */
 	reload(): Promise<void> {
 		const next = this.reading.then(() => this.read());
 		this.reading = next.catch(() => undefined);
+		return next;
+	}
+
+	/**
+	 * Runs one catalog change after every read and mutation before it. A save used to end in a full
+	 * `reload()`, which queued behind whatever read was already in flight; now that a save adopts just
+	 * its own file, the adopt joins the same queue — without it, the first read of the library could
+	 * land after a save and replace the catalog out from under it.
+	 */
+	private mutate<T>(work: () => Promise<T>): Promise<T> {
+		const next = this.reading.then(work);
+		this.reading = next.then(
+			() => undefined,
+			() => undefined,
+		);
 		return next;
 	}
 
@@ -191,7 +235,6 @@ export class Tavern extends Service implements TavernApi {
 		for (const root of this.roots()) {
 			await this.readLibrary(root, { characters, books, presets, personas });
 		}
-		await this.cleanIdentityBlocks(presets);
 		this.tags = await this.readTags();
 		this.promptLibrary = await this.loadPromptLibrary();
 		this.characters = uniqueBy(characters, (character) => character.id);
@@ -202,6 +245,58 @@ export class Tavern extends Service implements TavernApi {
 			`tavern: ${this.characters.length} character(s), ${this.books.length} lorebook(s), ${this.presets.length} preset(s), ${this.personas.length} persona(s), ${this.promptLibrary.length} prompt(s) in the library`,
 		);
 		this.ctx.emit('tavern/changed');
+	}
+
+	/**
+	 * Puts one just-written file back into the catalog — what a save needs and no more, instead of
+	 * re-reading the whole library. The entry is exactly what a full read would produce, because the
+	 * same readers run over the same file. A save writes where the item already lived, so the slot is
+	 * found by `previous` (the file it lived in — the only name a rename leaves behind) or by its key;
+	 * a key that is new to the catalog is added, and one that shadows a same-keyed item from a less
+	 * specific root takes that slot, exactly as a full read's shadowing would leave it.
+	 */
+	private slot<T extends { source?: string }>(list: T[], next: T, previous: string | undefined, key: (item: T) => string): void {
+		const wanted = key(next).toLowerCase();
+		const at = list.findIndex(
+			(item) =>
+				(previous !== undefined && item.source && resolve(item.source) === resolve(previous)) ||
+				key(item).toLowerCase() === wanted,
+		);
+		if (at >= 0) {
+			list[at] = next;
+		} else {
+			list.push(next);
+		}
+	}
+
+	private adoptCharacter(file: string, previous?: string): Promise<void> {
+		return this.mutate(async () => {
+			this.slot(this.characters, await loadCard(file), previous, (item) => item.id);
+		});
+	}
+
+	private adoptBook(file: string, previous?: string): Promise<void> {
+		return this.mutate(async () => {
+			const book = await readBookFile(file);
+			if (book) {
+				this.slot(this.books, { name: book.name, book, source: file, raw: book.raw }, previous, (item) => item.name);
+			}
+		});
+	}
+
+	private adoptPersona(file: string, previous?: string): Promise<void> {
+		return this.mutate(async () => {
+			const id = personaId(file);
+			const avatar = (await this.avatarsIn(dirname(file))).get(id);
+			const persona = readPersonaFile(JSON.parse(await readFile(file, 'utf8')) as unknown, id, file);
+			this.slot(this.personas, avatar ? { ...persona, avatar } : persona, previous, (item) => item.id);
+		});
+	}
+
+	private adoptPreset(file: string, previous?: string): Promise<void> {
+		return this.mutate(async () => {
+			this.slot(this.presets, { ...(await loadPreset(file)), source: file }, previous, (item) => item.id);
+		});
 	}
 
 	/**
@@ -246,8 +341,12 @@ export class Tavern extends Service implements TavernApi {
 	async saveTags(): Promise<void> {
 		const file = this.tagFile();
 		await mkdir(dirname(file), { recursive: true });
-		await writeFile(file, storeJson(this.tags), 'utf8');
-		this.tags = await this.readTags();
+		const text = storeJson(this.tags);
+		await writeFile(file, text, 'utf8');
+		this.noteWrite(file, text);
+		await this.mutate(async () => {
+			this.tags = await this.readTags();
+		});
 		this.ctx.emit('tavern/changed');
 	}
 
@@ -270,7 +369,9 @@ export class Tavern extends Service implements TavernApi {
 			const seeded = librarySeed();
 			try {
 				await mkdir(dirname(file), { recursive: true });
-				await writeFile(file, promptLibraryJson(seeded), 'utf8');
+				const text = promptLibraryJson(seeded);
+				await writeFile(file, text, 'utf8');
+				this.noteWrite(file, text);
 			} catch (error) {
 				this.ctx.log.message(`tavern: could not seed the prompt library: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -292,8 +393,12 @@ export class Tavern extends Service implements TavernApi {
 		const file = this.promptLibraryFile();
 		await mkdir(dirname(file), { recursive: true });
 		// The set of built-in entries is fixed: a save may edit them, never add or remove one.
-		await writeFile(file, promptLibraryJson(mergeBuiltIn(sanitisePromptLibrary(entries))), 'utf8');
-		this.promptLibrary = await this.loadPromptLibrary();
+		const text = promptLibraryJson(mergeBuiltIn(sanitisePromptLibrary(entries)));
+		await writeFile(file, text, 'utf8');
+		this.noteWrite(file, text);
+		await this.mutate(async () => {
+			this.promptLibrary = await this.loadPromptLibrary();
+		});
 		this.ctx.emit('tavern/changed');
 		return file;
 	}
@@ -349,7 +454,7 @@ export class Tavern extends Service implements TavernApi {
 				return linked;
 			}
 		}
-		return this.persona(this.ctx.settings.get().tavernPersona);
+		return this.persona(tavernSettings(this.ctx).tavernPersona);
 	}
 
 	/** Loose lookup for a name typed by hand: id or name, any case. */
@@ -397,10 +502,8 @@ export class Tavern extends Service implements TavernApi {
 	 */
 	promptsFor(sessionId?: string): ActivePrompt[] {
 		const session = sessionId ? this.ctx.sessions.get(sessionId) : this.ctx.sessions.active();
-		const config = this.ctx.settings.get();
-		const preset = this.preset(session?.preset ?? config.tavernPreset);
-		const character = this.character(session?.character ?? config.tavernCharacter);
-		return turnPrompts(preset, character);
+		const binding = this.withDefaults({ character: session?.character, preset: session?.preset });
+		return turnPrompts(this.preset(binding.preset), this.character(binding.character));
 	}
 
 	/**
@@ -411,25 +514,27 @@ export class Tavern extends Service implements TavernApi {
 	 *
 	 * The markers that only exist while a turn is built are deliberately absent — world info needs that
 	 * turn's activation scan, and the chat history *is* the conversation — so the panel can report them
-	 * as filled from the turn instead of as an empty prompt with no tokens. `identity` is the agent's
-	 * system prompt, which the caller owns: the tavern layer only ever sees it as a `compose` argument.
+	 * as filled from the turn instead of as an empty prompt with no tokens. Comonad's blocks are filled
+	 * from the caller's `blocks`, the same values `compose` receives.
 	 */
-	displayPrompts(sessionId: string | undefined, identity = ''): Record<string, string> {
+	displayPrompts(sessionId: string | undefined, blocks: readonly PromptBlock[] = []): Record<string, string> {
 		const session = sessionId ? this.ctx.sessions.get(sessionId) : this.ctx.sessions.active();
-		const config = this.ctx.settings.get();
-		const character = this.character(session?.character ?? config.tavernCharacter);
-		const persona = this.personaFor(session?.persona ?? config.tavernPersona, character);
+		const config = tavernSettings(this.ctx);
+		const binding = this.withDefaults({ character: session?.character, persona: session?.persona });
+		const character = this.character(binding.character);
+		const persona = this.personaFor(binding.persona, character);
 		// No composing turn here, so `{{model}}` and `{{input}}` stand empty rather than guessed at.
 		const macro = this.macroContext(undefined, character, persona);
-		const blocks: AssembleBlocks = {
+		const prompts = this.promptsFor(sessionId);
+		const assembleBlocks: AssembleBlocks = {
 			...cardBlocks(character, persona, config, (text) => substituteMacros(text, macro)),
-			identity,
+			comonad: this.comonadBlocks(blocks, prompts.some((prompt) => prompt.identifier === TOOLS_PROMPT && prompt.enabled)),
 		};
 		const options = { wiFormat: config.tavernWiFormat ?? '{0}' };
 		const out: Record<string, string> = {};
-		for (const prompt of this.promptsFor(sessionId)) {
+		for (const prompt of prompts) {
 			if (hasMarkerText(prompt.identifier)) {
-				const text = markerContent(prompt.identifier, blocks, options);
+				const text = markerContent(prompt.identifier, assembleBlocks, options);
 				if (text?.trim()) {
 					out[prompt.identifier] = text;
 				}
@@ -443,25 +548,38 @@ export class Tavern extends Service implements TavernApi {
 	}
 
 	/**
-	 * Saves a prompt collection as a preset in the native store — `.comonad/presets` in this
-	 * workspace, or the user folder when the window has no trusted folder.
+	 * The generated text of Comonad's blocks for one preset, as the preset editor shows it. It is the
+	 * same map `compose` builds: a block whose content depends on a tool is left empty when the Tools
+	 * entry is off, so the editor cannot show instructions the request would not carry.
 	 */
-	async savePreset(name: string, prompts: readonly ActivePrompt[], base?: TavernPreset): Promise<string> {
-		const id = slugId(name, 'preset');
-		// The base supplies the samplers and the unknown keys; the file is the one the *new* id owns,
-		// so "save as" never overwrites the preset it was copied from.
-		// Comonad's identity block is added at runtime, so it is never written into a preset file.
-		const stored = prompts.filter((prompt) => prompt.identifier !== IDENTITY_PROMPT);
-		const preset: TavernPreset = {
-			...(base ?? this.preset(id) ?? { id, name }),
-			id,
-			name: name.trim() || id,
-			prompts: stored.map((prompt) => prompt as unknown as PromptItem),
-			promptOrder: stored.map((prompt) => ({ identifier: prompt.identifier, enabled: prompt.enabled })),
-			raw: base?.raw ?? this.preset(id)?.raw ?? {},
-		};
-		await this.savePresetValue(preset, this.preset(id)?.source);
-		return id;
+	previewPrompts(preset: TavernPreset | undefined, blocks: readonly PromptBlock[]): Record<string, string> {
+		const prompts = promptCollection(preset);
+		const comonad = this.comonadBlocks(blocks, prompts.some((prompt) => prompt.identifier === TOOLS_PROMPT && prompt.enabled));
+		const out: Record<string, string> = {};
+		for (const prompt of prompts) {
+			if (!isComonadBlockId(prompt.identifier)) {
+				continue;
+			}
+			const text = comonad[prompt.identifier];
+			if (text?.trim()) {
+				out[prompt.identifier] = text;
+			}
+		}
+		return out;
+	}
+
+	/** The agent's named blocks as the assembler's map, with tool-dependent blocks removed when tools are off. */
+	private comonadBlocks(blocks: readonly PromptBlock[], toolsEnabled: boolean): Partial<Record<ComonadBlockId, string>> {
+		const comonad: Partial<Record<ComonadBlockId, string>> = {};
+		for (const block of blocks) {
+			comonad[block.id] = block.text;
+		}
+		if (!toolsEnabled) {
+			for (const id of TOOL_DEPENDENT_BLOCKS) {
+				comonad[id] = '';
+			}
+		}
+		return comonad;
 	}
 
 	/** Where a Comonad-owned preset goes: the project library when this window has one, else home. */
@@ -485,9 +603,13 @@ export class Tavern extends Service implements TavernApi {
 		await mkdir(dirname(file), { recursive: true });
 		if (extname(file).toLowerCase() === '.png') {
 			// A PNG card keeps its picture: only the `chara`/`ccv3` chunks are replaced.
-			await writeFile(file, cardToPng(image ?? (await readFile(file)), character));
+			const bytes = cardToPng(image ?? (await readFile(file)), character);
+			await writeFile(file, bytes);
+			this.noteWrite(file, bytes);
 		} else {
-			await writeFile(file, cardToJson(character), 'utf8');
+			const text = cardToJson(character);
+			await writeFile(file, text, 'utf8');
+			this.noteWrite(file, text);
 		}
 	}
 
@@ -496,7 +618,8 @@ export class Tavern extends Service implements TavernApi {
 		const managed = this.managedFile(character.source);
 		const file = managed ?? join(this.libraryPath('characters'), `${slugId(character.id, 'character')}.json`);
 		await this.writeCard(file, character);
-		await this.reload();
+		await this.adoptCharacter(file, managed);
+		this.ctx.emit('tavern/changed');
 		return file;
 	}
 
@@ -505,7 +628,7 @@ export class Tavern extends Service implements TavernApi {
 	 * that is given a picture is written as a PNG card beside it and its JSON is removed.
 	 */
 	async setCharacterAvatar(id: string, image: string): Promise<string> {
-		const character = this.character(id) ?? this.characters[0];
+		const character = this.character(id);
 		if (!character) {
 			throw new Error(`there is no character ${id}`);
 		}
@@ -519,8 +642,10 @@ export class Tavern extends Service implements TavernApi {
 		await this.writeCard(file, character, bytes);
 		if (managed && resolve(managed) !== resolve(file)) {
 			await rm(managed, { force: true });
+			this.noteWrite(managed, null);
 		}
-		await this.reload();
+		await this.adoptCharacter(file, managed);
+		this.ctx.emit('tavern/changed');
 		return file;
 	}
 
@@ -529,8 +654,11 @@ export class Tavern extends Service implements TavernApi {
 	 * card is linked to it. The embedded copy stays in the card, exactly as upstream leaves it.
 	 */
 	async importCardLore(id: string): Promise<{ name: string; entries: number }> {
-		const character = this.character(id) ?? this.characters[0];
-		if (!character?.book) {
+		const character = this.character(id);
+		if (!character) {
+			throw new Error(`there is no character ${id}`);
+		}
+		if (!character.book) {
 			throw new Error('this card carries no book of its own');
 		}
 		const name = (character.book.name ?? '').trim() || `${character.name}'s Lorebook`;
@@ -546,7 +674,7 @@ export class Tavern extends Service implements TavernApi {
 	 * connection, the default character of new chats, and every chat that had it open.
 	 */
 	async renameCharacter(id: string, name: string): Promise<string> {
-		const character = this.character(id) ?? this.characters[0];
+		const character = this.character(id);
 		if (!character) {
 			throw new Error(`there is no character ${id}`);
 		}
@@ -557,10 +685,17 @@ export class Tavern extends Service implements TavernApi {
 		const managed = this.managedFile(character.source);
 		const folder = managed ? dirname(managed) : this.libraryPath('characters');
 		const target = join(folder, `${slugId(wanted, 'character')}${managed ? extname(managed) : '.json'}`);
+		// A rename onto a file another card already owns would write over that card and delete this
+		// one; the name is refused instead, the same way a world-book rename is.
+		const taken = this.characters.find((other) => other.source && resolve(other.source) === resolve(target));
+		if ((managed && resolve(managed) !== resolve(target) && (await stat(target).then(() => true, () => false))) || (taken && taken.id !== character.id)) {
+			throw new Error(`another character is already stored as ${basename(target)}`);
+		}
 		const renamed = { ...character, name: wanted, source: managed ? target : character.source };
 		await this.writeCard(target, renamed);
 		if (managed && resolve(managed) !== resolve(target)) {
 			await rm(managed, { force: true });
+			this.noteWrite(managed, null);
 		}
 		const oldId = character.id;
 		const newId = cardId(target);
@@ -579,7 +714,7 @@ export class Tavern extends Service implements TavernApi {
 				),
 			});
 		}
-		if (this.ctx.settings.get().tavernCharacter === oldId) {
+		if (tavernSettings(this.ctx).tavernCharacter === oldId) {
 			await this.ctx.settings.update('tavernCharacter', newId);
 		}
 		for (const session of this.ctx.sessions.list()) {
@@ -605,14 +740,48 @@ export class Tavern extends Service implements TavernApi {
 		const renamed = managed && basename(managed, extname(managed)) !== slugId(wanted, 'book');
 		const target = renamed ? join(dirname(file), `${slugId(wanted, 'book')}.json`) : file;
 		await mkdir(dirname(target), { recursive: true });
-		// The file keeps every key it arrived with; the catalog is the fallback for an unsaved raw.
-		const original = raw ?? this.books.find((entry) => entry.name === book.name)?.raw ?? {};
-		await writeFile(target, worldInfoJson({ ...book, name: wanted }, original), 'utf8');
+		// The file keeps every key it arrived with. The catalog is the fallback for an unsaved raw —
+		// looked up by the file the book is coming *from*, since a rename has already changed its name.
+		const previous = this.books.find((entry) => (managed ? entry.source && resolve(entry.source) === resolve(managed) : entry.name === book.name));
+		const original = raw ?? previous?.raw ?? {};
+		const text = worldInfoJson({ ...book, name: wanted }, original);
+		await writeFile(target, text, 'utf8');
+		this.noteWrite(target, text);
 		if (renamed) {
 			await rm(file, { force: true });
+			this.noteWrite(file, null);
 		}
-		await this.reload();
+		await this.adoptBook(target, managed ?? undefined);
+		if (previous && previous.name.toLowerCase() !== wanted.toLowerCase()) {
+			await this.followBookRename(previous.name, wanted);
+		}
+		this.ctx.emit('tavern/changed');
 		return target;
+	}
+
+	/**
+	 * A renamed book is still the book the settings, the chats and the personas name: every
+	 * reference to the old name follows the rename, the same way a renamed card's do.
+	 */
+	private async followBookRename(from: string, to: string): Promise<void> {
+		const config = tavernSettings(this.ctx);
+		const active = config.tavernLorebooks ?? [];
+		if (active.some((name) => name.toLowerCase() === from.toLowerCase())) {
+			await this.ctx.settings.update('tavernLorebooks', active.map((name) => (name.toLowerCase() === from.toLowerCase() ? to : name)));
+		}
+		for (const session of this.ctx.sessions.list()) {
+			const books = session.lorebooks ?? [];
+			if (books.some((name) => name.toLowerCase() === from.toLowerCase())) {
+				session.lorebooks = books.map((name) => (name.toLowerCase() === from.toLowerCase() ? to : name));
+				this.ctx.sessions.save(session);
+				this.ctx.sessions.changed(session.id);
+			}
+		}
+		for (const persona of this.personas) {
+			if (persona.lorebook && persona.lorebook.toLowerCase() === from.toLowerCase()) {
+				await this.savePersona({ ...persona, lorebook: to });
+			}
+		}
 	}
 
 	async deleteBook(name: string): Promise<boolean> {
@@ -620,12 +789,22 @@ export class Tavern extends Service implements TavernApi {
 		return found ? this.removeFile('lorebooks', found) : false;
 	}
 
-	async savePersona(persona: Persona): Promise<string> {
+	/** Writes the persona file, with no catalog change of its own — `savePersona` is the public one. */
+	private async writePersona(persona: Persona): Promise<string> {
 		const managed = this.managedFile(persona.source);
 		const file = managed ?? join(this.libraryPath('personas'), `${slugId(persona.id, 'persona')}.json`);
 		await mkdir(dirname(file), { recursive: true });
-		await writeFile(file, personaJson(persona, persona.raw as Record<string, unknown>), 'utf8');
-		await this.reload();
+		const text = personaJson(persona, persona.raw as Record<string, unknown>);
+		await writeFile(file, text, 'utf8');
+		this.noteWrite(file, text);
+		return file;
+	}
+
+	async savePersona(persona: Persona): Promise<string> {
+		const managed = this.managedFile(persona.source);
+		const file = await this.writePersona(persona);
+		await this.adoptPersona(file, managed);
+		this.ctx.emit('tavern/changed');
 		return file;
 	}
 
@@ -636,11 +815,12 @@ export class Tavern extends Service implements TavernApi {
 			return false;
 		}
 		await rm(file, { force: true });
+		this.noteWrite(file, null);
 		// The picture is the persona's too: leaving it behind would name a file nobody owns.
 		await this.dropAvatar(dirname(file), basename(file, extname(file)));
 		// Upstream clears the default persona and any chat that locked it, so nothing names a ghost.
 		const gone = persona?.id ?? id;
-		if (this.ctx.settings.get().tavernPersona === gone) {
+		if (tavernSettings(this.ctx).tavernPersona === gone) {
 			await this.ctx.settings.update('tavernPersona', '');
 		}
 		for (const session of this.ctx.sessions.list()) {
@@ -664,14 +844,16 @@ export class Tavern extends Service implements TavernApi {
 		if (!persona) {
 			throw new Error(`there is no persona ${id}`);
 		}
-		const file = await this.savePersona(persona);
+		const file = await this.writePersona(persona);
 		const extension = AVATAR_EXTENSIONS.includes(extname(source).toLowerCase() as (typeof AVATAR_EXTENSIONS)[number])
 			? extname(source).toLowerCase()
 			: '.png';
 		const target = join(dirname(file), `${basename(file, extname(file))}${extension}`);
 		await this.dropAvatar(dirname(file), basename(file, extname(file)), target);
 		await copyFile(source, target);
-		await this.reload();
+		this.noteWrite(target, await readFile(target));
+		await this.adoptPersona(file, file);
+		this.ctx.emit('tavern/changed');
 		return target;
 	}
 
@@ -683,7 +865,8 @@ export class Tavern extends Service implements TavernApi {
 			return false;
 		}
 		const gone = await this.dropAvatar(dirname(file), basename(file, extname(file)));
-		await this.reload();
+		await this.adoptPersona(file, file);
+		this.ctx.emit('tavern/changed');
 		return gone;
 	}
 
@@ -701,6 +884,7 @@ export class Tavern extends Service implements TavernApi {
 				continue;
 			}
 			await rm(file, { force: true });
+			this.noteWrite(file, null);
 			gone = true;
 		}
 		return gone;
@@ -708,7 +892,7 @@ export class Tavern extends Service implements TavernApi {
 
 	/** Every persona as upstream's backup document, ready to be written to a file. */
 	exportPersonas(): PersonaBackup {
-		return personaBackup(this.personas, this.ctx.settings.get().tavernPersona);
+		return personaBackup(this.personas, tavernSettings(this.ctx).tavernPersona);
 	}
 
 	/**
@@ -726,7 +910,10 @@ export class Tavern extends Service implements TavernApi {
 			const id = slugId(persona.id, 'persona');
 			renames.set(persona.id, id);
 			const moved = { ...persona, id };
-			await writeFile(join(dir, `${id}.json`), personaJson(moved, moved.raw as Record<string, unknown>), 'utf8');
+			const file = join(dir, `${id}.json`);
+			const text = personaJson(moved, moved.raw as Record<string, unknown>);
+			await writeFile(file, text, 'utf8');
+			this.noteWrite(file, text);
 		}
 		const wanted = restore.defaultPersona ? renames.get(restore.defaultPersona) ?? restore.defaultPersona : '';
 		if (restore.personas.length) {
@@ -743,8 +930,11 @@ export class Tavern extends Service implements TavernApi {
 		const managed = this.managedFile(source ?? this.preset(preset.id)?.source ?? '');
 		const file = managed ?? join(this.libraryPath('presets'), `${slugId(preset.id, 'preset')}.json`);
 		await mkdir(dirname(file), { recursive: true });
-		await writeFile(file, presetToJson(preset), 'utf8');
-		await this.reload();
+		const text = presetToJson(preset);
+		await writeFile(file, text, 'utf8');
+		this.noteWrite(file, text);
+		await this.adoptPreset(file, managed);
+		this.ctx.emit('tavern/changed');
 		return file;
 	}
 
@@ -776,6 +966,7 @@ export class Tavern extends Service implements TavernApi {
 			return false;
 		}
 		await rm(file, { force: true });
+		this.noteWrite(file, null);
 		await this.reload();
 		// A delete that leaves the catalog unchanged means the file was not there to begin with.
 		return true;
@@ -783,7 +974,7 @@ export class Tavern extends Service implements TavernApi {
 
 	/** The world-info knobs, from the settings. */
 	wiSettings(): WorldInfoSettings {
-		const config = this.ctx.settings.get();
+		const config = tavernSettings(this.ctx);
 		return {
 			scanDepth: numberOr(config.wiScanDepth, WI_SETTINGS_DEFAULTS.scanDepth),
 			budget: numberOr(config.wiBudget, WI_SETTINGS_DEFAULTS.budget),
@@ -802,7 +993,7 @@ export class Tavern extends Service implements TavernApi {
 
 	/** The regex scripts the settings carry, plus the active character's own. */
 	scripts(character: Character | undefined): RegexScript[] {
-		return [...regexScriptsFrom(this.ctx.settings.get().tavernRegex), ...(character?.regex ?? [])];
+		return [...regexScriptsFrom(tavernSettings(this.ctx).tavernRegex), ...(character?.regex ?? [])];
 	}
 
 	/**
@@ -811,13 +1002,7 @@ export class Tavern extends Service implements TavernApi {
 	 */
 	booksFor(sessionId: string, only?: string): LoreBook[] {
 		const session = this.ctx.sessions.get(sessionId);
-		return this.booksForBinding(
-			{
-				character: session?.character ?? this.ctx.settings.get().tavernCharacter,
-				lorebooks: session?.lorebooks ?? this.ctx.settings.get().tavernLorebooks,
-			},
-			only,
-		);
+		return this.booksForBinding(this.withDefaults({ character: session?.character, lorebooks: session?.lorebooks }), only);
 	}
 
 	/**
@@ -836,9 +1021,20 @@ export class Tavern extends Service implements TavernApi {
 		return toWorldBook(character.book, character.name);
 	}
 
-	/** The index of the active books, so the model knows what it can look up. */
-	loreIndex(sessionId: string): string {
-		return loreIndex(this.booksFor(sessionId));
+	/** Whether the layer owns the prompt for the next turn. */
+	enabled(): boolean {
+		return tavernSettings(this.ctx).tavernEnabled;
+	}
+
+	/**
+	 * The index of the active books, so the model knows what it can look up. `heading` is the block's
+	 * editable prefix; passing an empty string returns the lines alone, for the agent to head itself.
+	 */
+	loreIndex(sessionId: string, heading = DEFAULT_BLOCK_PREFIX[COMONAD_BLOCK.lore]): string {
+		if (!tavernSettings(this.ctx).tavernEnabled) {
+			return '';
+		}
+		return loreIndex(this.booksFor(sessionId), heading);
 	}
 
 	/** The books one binding resolves to, before activation. */
@@ -864,16 +1060,88 @@ export class Tavern extends Service implements TavernApi {
 		return wanted ? books.filter((entry) => entry.name.toLowerCase() === wanted) : books;
 	}
 
+	/** The chat's binding with the configured defaults filled in for whatever it leaves unset. */
+	private withDefaults(binding: TavernBinding): Required<Pick<TavernBinding, 'character' | 'persona' | 'lorebooks' | 'preset'>> & TavernBinding {
+		const config = tavernSettings(this.ctx);
+		return {
+			...binding,
+			character: binding.character ?? config.tavernCharacter,
+			persona: binding.persona ?? config.tavernPersona,
+			lorebooks: binding.lorebooks ?? config.tavernLorebooks,
+			preset: binding.preset ?? config.tavernPreset,
+		};
+	}
+
 	/**
-	 * Composes one turn. With no character, book, persona or preset selected the result is inert and
-	 * the caller keeps its own message shape — that is what makes the port risk-free to ship.
+	 * The entries a vector search picks for this turn, as `<book>.<uid>`, which is the shape the scan's
+	 * buffer uses. Nothing here can fail the turn: with the vectors off, or an endpoint that will not
+	 * answer, the set is simply empty and the scan runs on keys alone.
 	 */
-	compose(input: ComposeInput): ComposeResult {
-		const config = this.ctx.settings.get();
-		const character = this.character(input.binding.character);
-		const persona = this.personaFor(input.binding.persona, character);
-		const preset = this.preset(input.binding.preset);
-		const wanted = input.binding.lorebooks ?? config.tavernLorebooks ?? [];
+	private async vectorHits(books: readonly LoreBook[], scan: readonly { role: 'user' | 'assistant'; text: string }[]): Promise<ReadonlySet<string> | undefined> {
+		const settings = vectorSettings(this.ctx);
+		// The vectors are this service's own child — reached with `get`, which a row may always use for
+		// the services beside it, rather than an inject this row would wait on itself to fill.
+		const vectors = this.ctx.get('vectors');
+		if (!settings.enabled || !vectors) {
+			return undefined;
+		}
+		const found = await vectors.activate({ books, messages: scan }, settings);
+		if (!found.size) {
+			return undefined;
+		}
+		const keys = new Set<string>();
+		for (const [book, uids] of found) {
+			for (const uid of uids) {
+				keys.add(`${book}.${uid}`);
+			}
+		}
+		return keys;
+	}
+
+	/** The automations the activated entries named, deduplicated — with the setting applied already. */
+	private automationsOf(activated: readonly LoreHit[], config: TavernSettings): LoreAutomation[] {
+		if (!config.wiAutomation) {
+			return [];
+		}
+		const seen = new Set<string>();
+		const automations: LoreAutomation[] = [];
+		for (const hit of activated) {
+			const id = (hit.entry.automationId ?? '').trim();
+			if (id && !seen.has(id)) {
+				seen.add(id);
+				automations.push({ id, book: hit.book, uid: hit.entry.uid, comment: (hit.entry.comment ?? '').trim() });
+			}
+		}
+		return automations;
+	}
+
+	/**
+	 * Composes one turn. When the layer is on it owns the whole request, even with nothing selected:
+	 * the shipped collection is the built-in Default. The vector side of the scan runs here as well:
+	 * an entry that says `vectorized` is found by meaning, and what it finds activates the scan as if
+	 * its keys had matched.
+	 */
+	async compose(input: ComposeInput): Promise<ComposeResult> {
+		const config = tavernSettings(this.ctx);
+		if (!config.tavernEnabled) {
+			return {
+				messages: [],
+				prompts: [],
+				activated: [],
+				buckets: { before: [], after: [], atDepth: [], anTop: [], anBottom: [], examplesBefore: [], examplesAfter: [], outlets: {}, activated: [], effects: {}, overflowed: false },
+				effects: {},
+				takeover: false,
+				toolsEnabled: true,
+				samplers: {},
+				overflowAlert: false,
+				automations: [],
+			};
+		}
+		const binding = this.withDefaults(input.binding);
+		const character = this.character(binding.character);
+		const persona = this.personaFor(binding.persona, character);
+		const preset = this.preset(binding.preset);
+		const wanted = binding.lorebooks ?? [];
 		const selected: LoadedBook[] = [];
 		const bound: LoadedBook[] = [];
 		for (const name of wanted) {
@@ -897,6 +1165,8 @@ export class Tavern extends Service implements TavernApi {
 			selected.push(personaBook);
 		}
 		const prompts = turnPrompts(preset, character, input.trigger);
+		// The single Tools entry is the turn's switch: off means the request carries no API tools at all.
+		const toolsEnabled = prompts.some((prompt) => prompt.identifier === TOOLS_PROMPT && prompt.enabled);
 		const scripts = this.scripts(character);
 		const macro = this.macroContext(input, character, persona);
 		// `{{outlet::Name}}` reads the outlets the scan collects, so both sides share one object: the
@@ -933,8 +1203,11 @@ export class Tavern extends Service implements TavernApi {
 			contextSize: input.contextSize && input.contextSize > 0 ? input.contextSize : (preset?.maxContext ?? 0),
 			turn: input.turn,
 			trigger: input.trigger ?? 'normal',
-			external: input.external,
-			effects: input.binding.effects,
+			external: await this.vectorHits(books, input.scan),
+			effects: binding.effects,
+			// The budget is counted in the kernel's tokens: this bundle's own copy of the estimator
+			// never sees the tokenizer that is loaded, only the service does.
+			count: (text: string) => this.ctx.get('tokenizers')?.count(text) ?? estimateTokens(text),
 			substitute,
 			transform: (content) => applyRegex(scripts, substitute(content), { placement: REGEX_PLACEMENT.worldInfo, isPrompt: true }),
 		});
@@ -942,11 +1215,11 @@ export class Tavern extends Service implements TavernApi {
 		// a prompt writes `{{outlet::Name}}`.
 		Object.assign(outlets, lore.outlets);
 
-		const note = this.authorNote(input.binding, lore, substitute, persona);
+		const note = this.authorNote(binding, lore, substitute, persona);
 		const atDepth = [...lore.atDepth];
 		// Upstream's continue nudge: the preset's own words, said right after the message being carried
 		// on from. The agent falls back to its own sentence when the preset has none.
-		const nudge = input.trigger === 'continue' ? this.continueNudge(input.binding, lastMessage(input.history)) : '';
+		const nudge = input.trigger === 'continue' ? this.continueNudge(binding, lastMessage(input.history)) : '';
 		if (nudge) {
 			atDepth.push({ depth: 0, role: WI_ROLE.system, content: substitute(nudge) });
 		}
@@ -966,7 +1239,7 @@ export class Tavern extends Service implements TavernApi {
 		}
 		const blocks: AssembleBlocks = {
 			...cardBlocks(character, persona, config, substitute),
-			identity: input.identity,
+			comonad: this.comonadBlocks(input.blocks, toolsEnabled),
 			worldInfoBefore: lore.before.join('\n'),
 			worldInfoAfter: lore.after.join('\n'),
 			examplesBefore: lore.examplesBefore,
@@ -978,15 +1251,25 @@ export class Tavern extends Service implements TavernApi {
 			sendIfEmpty: preset?.send_if_empty,
 		};
 		const messages = assemble(prompts, blocks, history, { wiFormat: config.tavernWiFormat ?? '{0}', substitute });
-		const inert = !character && !preset && !persona && !selected.length && !bound.length && !note.content;
-		return { messages, prompts, activated: lore.activated, buckets: lore, effects: lore.effects, inert, samplers: presetSamplers(preset) };
+		return {
+			messages,
+			prompts,
+			activated: lore.activated,
+			buckets: lore,
+			effects: lore.effects,
+			takeover: true,
+			toolsEnabled,
+			samplers: presetSamplers(preset),
+			overflowAlert: config.wiOverflowAlert && lore.overflowed,
+			automations: this.automationsOf(lore.activated, config),
+		};
 	}
 
 	/** The macro context one turn substitutes with. The compose input is absent when nothing is composing. */
 	private macroContext(input: ComposeInput | undefined, character: Character | undefined, persona: Persona | undefined): MacroContext {
 		return {
 			char: character?.name ?? 'Assistant',
-			user: persona?.name ?? this.ctx.settings.get().tavernUserName ?? 'User',
+			user: persona?.name ?? tavernSettings(this.ctx).tavernUserName ?? 'User',
 			persona: persona?.description,
 			description: character?.description,
 			personality: character?.personality,
@@ -1003,31 +1286,35 @@ export class Tavern extends Service implements TavernApi {
 
 	/**
 	 * Upstream's *continue nudge*: what a preset says when the model is asked to carry the last message
-	 * on. `{{lastChatMessage}}` is that message, exactly as upstream substitutes it.
+	 * on. `{{lastChatMessage}}` is that message, exactly as upstream substitutes it. A preset without
+	 * one answers `''`, and the agent says its own words instead.
 	 */
 	continueNudge(binding: TavernBinding, lastChatMessage = ''): string {
-		const template = (this.preset(binding.preset ?? '')?.continue_nudge_prompt ?? '').trim();
+		const resolved = this.withDefaults(binding);
+		const template = (this.preset(resolved.preset)?.continue_nudge_prompt ?? '').trim();
 		if (!template) {
 			return '';
 		}
-		const character = this.character(binding.character);
-		const persona = this.personaFor(binding.persona, character);
+		const character = this.character(resolved.character);
+		const persona = this.personaFor(resolved.persona, character);
 		const macro = this.macroContext(undefined, character, persona);
 		return substituteMacros(template, { ...macro, lastChatMessage }).trim();
 	}
 
 	/**
 	 * The preset's impersonation prompt, substituted: what SillyTavern sends when the model writes your
-	 * next message for you. Upstream replaces `{{user}}` with “You” here, and so does this.
+	 * next message for you. Upstream replaces `{{user}}` with “You” here, and so does this. With no
+	 * template in the preset, the plain request stands in — said in the user's own name.
 	 */
 	impersonationPrompt(binding: TavernBinding): string {
-		const template = (this.preset(binding.preset)?.impersonation_prompt ?? '').trim();
-		if (!template) {
-			return '';
-		}
-		const character = this.character(binding.character);
-		const persona = this.personaFor(binding.persona, character);
+		const resolved = this.withDefaults(binding);
+		const character = this.character(resolved.character);
+		const persona = this.personaFor(resolved.persona, character);
 		const macro = this.macroContext(undefined, character, persona);
+		const template = (this.preset(resolved.preset)?.impersonation_prompt ?? '').trim();
+		if (!template) {
+			return `Write the next message of this conversation as ${tavernSettings(this.ctx).tavernUserName || 'the user'}, in their voice, and nothing else.`;
+		}
 		return substituteMacros(template.replaceAll(/{{user}}/gi, 'You'), macro).trim();
 	}
 	/** The author's note: the configured text, the persona's own bottom/top placements, and the
@@ -1038,13 +1325,13 @@ export class Tavern extends Service implements TavernApi {
 		substitute: (text: string) => string,
 		persona: Persona | undefined,
 	): { content: string; depth: number; role: WiRole } {
-		const configured = (binding.authorNote ?? this.ctx.settings.get().tavernAuthorNote ?? '').trim();
+		const configured = (binding.authorNote ?? tavernSettings(this.ctx).tavernAuthorNote ?? '').trim();
 		const personaTop = persona?.position === PERSONA_POSITION.anTop ? persona.description : '';
 		const personaBottom = persona?.position === PERSONA_POSITION.anBottom ? persona.description : '';
 		const parts = [...lore.anTop, personaTop, configured, personaBottom, ...lore.anBottom].filter(Boolean);
 		return {
 			content: substitute(parts.join('\n')).trim(),
-			depth: numberOr(persona?.position === PERSONA_POSITION.atDepth ? undefined : this.ctx.settings.get().tavernNoteDepth, 4),
+			depth: numberOr(persona?.position === PERSONA_POSITION.atDepth ? undefined : tavernSettings(this.ctx).tavernNoteDepth, 4),
 			role: 0 as WiRole,
 		};
 	}
@@ -1059,36 +1346,6 @@ export class Tavern extends Service implements TavernApi {
 			return message;
 		}
 		return { ...message, content: applyRegex(scripts, message.content, { placement, isPrompt: true }) };
-	}
-
-	/**
-	 * A one-time cleanup: presets saved before the identity block stopped being written still carry it.
-	 * Each such file is rewritten without it, and a marker beside the library records that this ran, so
-	 * it never repeats. A file that cannot be read is logged and left alone.
-	 */
-	private async cleanIdentityBlocks(presets: TavernPreset[]): Promise<void> {
-		const marker = join(this.writeRoot(), '.identity-cleaned');
-		if (await stat(marker).then(() => true, () => false)) {
-			return;
-		}
-		let cleaned = 0;
-		for (const preset of presets) {
-			const clean = withoutIdentityBlock(preset);
-			if (clean === preset || !preset.source) {
-				continue;
-			}
-			try {
-				await writeFile(preset.source, presetToJson(clean), 'utf8');
-				cleaned += 1;
-			} catch (error) {
-				this.warn(preset.source, error);
-			}
-		}
-		await mkdir(dirname(marker), { recursive: true });
-		await writeFile(marker, `${new Date().toISOString()}\n`, 'utf8');
-		if (cleaned) {
-			this.ctx.log.message(`tavern: removed the identity block from ${cleaned} preset(s)`);
-		}
 	}
 
 	/** Reads one `.comonad` library root. */
@@ -1177,9 +1434,9 @@ export const tavernPlugin = Tavern;
 function cardBlocks(
 	character: Character | undefined,
 	persona: Persona | undefined,
-	config: Config,
+	config: TavernSettings,
 	substitute: (text: string) => string,
-): Omit<AssembleBlocks, 'identity'> {
+): Omit<AssembleBlocks, 'comonad'> {
 	return {
 		charDescription: character?.description,
 		// A configured format wraps the value; without one the card's own text is sent as it stands.
@@ -1202,7 +1459,9 @@ export function turnPrompts(
 	if (character) {
 		return applyCardOverrides(prompts, character);
 	}
-	return preset ? prompts : withoutRoleplayScaffolding(prompts);
+	// No character and no roleplay preset: the built-in Default (or its editable copy, which is the
+	// same collection) must not tell a coding chat to write someone else's next reply.
+	return preset && preset.id !== DEFAULT_PRESET_ID ? prompts : withoutRoleplayScaffolding(prompts);
 }
 
 /** Reads a world book file: the native shape, keeping the file for a lossless round trip. */
