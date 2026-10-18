@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
  * Embeddings: what a vector search needs, and the arithmetic it is made of.
  *

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
 import { formatResult, guardPath, resolveInside, runCommand } from '../lib/sandbox';

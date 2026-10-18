@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { COMONAD_BLOCK, COMONAD_BLOCKS, COMONAD_BLOCK_IDS, isComonadBlockId } from '@comonad/lib/blocks';
 import type { PromptItem, PromptOrderEntry, TavernPreset } from './types';
 

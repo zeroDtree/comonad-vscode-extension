@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { isComonadBlockId } from '@comonad/lib/blocks';
 import { DEFAULT_ORDER, ST_PROMPTS } from './prompts';
 import { normalisePrompt } from './preset';

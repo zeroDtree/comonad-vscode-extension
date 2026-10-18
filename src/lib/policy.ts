@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { Approval, Capability, Confinement, SessionPolicy, ToolCall, ToolSpec, WorkMode } from './types';
 
 /** Modes, capability gating, permission rules and the approval gate. Pure module. */

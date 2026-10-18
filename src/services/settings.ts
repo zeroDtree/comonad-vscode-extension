@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
 import { DEFAULT_GRAPH_SOURCE } from '../lib/mermaid';
 import { asApproval, asWorkMode, parseRules, type RuleSet } from '../lib/policy';

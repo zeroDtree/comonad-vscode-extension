@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { basename, extname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';

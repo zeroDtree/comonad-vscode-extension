@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { DEFAULT_ORDER, DEFAULT_PRESET_ID, ST_PROMPTS } from '../prompts';
 import type { PromptItem, PromptOrderEntry, TavernPreset } from '../types';
 import { blockToPrompt, PROMPT_BLOCKS } from './blocks';

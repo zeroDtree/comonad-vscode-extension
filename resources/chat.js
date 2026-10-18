@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Comonad chat panel — runs inside the VS Code webview, talks to the extension over postMessage.
 (function () {
 	'use strict';

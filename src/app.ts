@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { Context, Plugin } from 'cordis';
 import { host, type HostConfig } from './host';
 import { openaiPlugin } from './llm/openai';

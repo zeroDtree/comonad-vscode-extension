@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { randomBytes } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';

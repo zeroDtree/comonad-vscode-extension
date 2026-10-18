@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
  * Macro substitution, the SillyTavern way: `{{name}}` placeholders and the small set of function
  * macros that shipped presets, cards and world books actually use. Unknown macros are left exactly

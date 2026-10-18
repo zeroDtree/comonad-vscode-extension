@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import * as vscode from 'vscode';
 import type { Context, Plugin } from 'cordis';
 import { loreToolPlugin } from './tools/tavern';

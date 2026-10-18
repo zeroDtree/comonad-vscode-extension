@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { isComonadBlockId, type ComonadBlockId } from '@comonad/lib/blocks';
 import type { Message } from '@comonad/lib/types';
 import { parseExamples } from './macro';

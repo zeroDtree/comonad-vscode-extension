@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
  * Explicit @ references: the token grammar, its canonical formatter, and the ordering the mention
  * picker uses. Pure — no `vscode`, no `cordis`. Resolution lives in `ui/references`, which knows the

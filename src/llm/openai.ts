@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { Context } from 'cordis';
 import { listEndpointModels, openAiChat, type Completion } from '../lib/openai';
 import type { AdapterRequest, LlmAdapter } from '../services/llm';

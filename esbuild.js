@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 const esbuild = require("esbuild");
 const { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } = require("node:fs");
 const { dirname, join } = require("node:path");

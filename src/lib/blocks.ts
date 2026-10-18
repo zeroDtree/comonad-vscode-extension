@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
  * The stable names of Comonad's own prompt blocks. A preset orders and switches these like any other
  * entry, but their text is generated every turn, so the identifiers — not the text — are the contract

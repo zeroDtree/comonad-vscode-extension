@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { access, mkdir, readdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';

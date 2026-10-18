@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
 /* The math host wrappers. The core creates them; KaTeX supplies the inner markup. */
 
 .math-inline {

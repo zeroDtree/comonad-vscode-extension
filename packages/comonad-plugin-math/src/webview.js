@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import katex from 'katex';
 import { installCopyHandler } from './copy.js';
 

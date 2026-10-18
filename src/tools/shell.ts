@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { formatResult, runCommand, shellArgv, sandboxKind } from '../lib/sandbox';

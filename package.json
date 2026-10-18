@@ -4,6 +4,15 @@
   "description": "Local-first, auditable coding agent: graph-orchestrated tool loop, sandboxed shell, checkpoints, hooks, subagents and MCP.",
   "version": "0.2.0",
   "publisher": "comonad",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zeroDtree/comonad-vscode-extension.git"
+  },
+  "homepage": "https://github.com/zeroDtree/comonad-vscode-extension#readme",
+  "bugs": {
+    "url": "https://github.com/zeroDtree/comonad-vscode-extension/issues"
+  },
   "engines": {
     "vscode": "^1.137.0"
   },

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { Context } from 'cordis';
 import { appendMemory, memoryDir, readMemory } from '../lib/instructions';
 import { objectSchema } from '../lib/types';

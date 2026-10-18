@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /** Minimal YAML-frontmatter parser for skills, agents and custom commands. Pure module. */
 
 export interface Frontmatter {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { join } from 'node:path';
 import type { Context } from 'cordis';
 import type { PaneController, PaneHost, PaneSpec } from '@comonad/services/panes';

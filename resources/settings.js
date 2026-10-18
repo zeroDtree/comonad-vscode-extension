@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Comonad settings webview — tabs over the `comonad.*` config, saved with the header Save button.
 (function () {
 	'use strict';

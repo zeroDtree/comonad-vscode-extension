@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { normalisePrompt } from './preset';
 import { blockToPrompt, PROMPT_BLOCKS } from './templates/blocks';
 import type { PromptLibraryEntry } from './types';

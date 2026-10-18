@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import * as vscode from 'vscode';
 import { Context, type Fiber } from 'cordis';
 import * as comonad from './app';

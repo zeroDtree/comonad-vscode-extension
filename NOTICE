@@ -1,0 +1,39 @@
+Comonad Agent for VS Code
+Copyright (C) 2026 zengls
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, version 3 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>.
+
+Modified portions
+-----------------
+
+The following files contain code adapted from SillyTavern
+(https://github.com/SillyTavern/SillyTavern), which is licensed under
+AGPL-3.0. They were modified for Comonad on 2026-10-18:
+
+- packages/comonad-plugin-tavern/src/lib/regex.ts
+  Adapted from public/scripts/extensions/regex/engine.js and
+  public/scripts/utils.js.
+- packages/comonad-plugin-tavern/src/lib/personas.ts
+  Persona macro swapping adapted from public/scripts/personas.js.
+- packages/comonad-plugin-tavern/src/lib/search.ts
+  World-info search options and weights adapted from
+  public/scripts/power-user.js.
+- packages/comonad-plugin-tavern/src/lib/tags.ts
+  Tag data model constants adapted from public/scripts/tags.js.
+
+SillyTavern itself is not bundled, and its default content is not copied.
+
+The kernel (graph runtime, capability model, approval policies and checkpoint
+design) is carried over from the author's earlier Comonad project.
+
+Third-party components and their licenses are listed in
+THIRD_PARTY_NOTICES.md.

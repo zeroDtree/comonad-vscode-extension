@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { relative, sep } from 'node:path';
 import { stat } from 'node:fs/promises';
 import * as vscode from 'vscode';

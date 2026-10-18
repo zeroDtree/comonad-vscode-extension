@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { readdir, readFile, stat, writeFile, mkdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { dirname, join, relative } from 'node:path';

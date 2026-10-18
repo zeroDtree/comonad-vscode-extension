@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
 /* Comonad Personas — the ST tab's Persona Management page. Loaded by the settings panel, so every
    rule is scoped to `#pf-panel` and the shared styles (.control/.hint/button/.secondary) come from
    settings.css. Upstream's panel is two columns: the tiles on the left, the open persona on the

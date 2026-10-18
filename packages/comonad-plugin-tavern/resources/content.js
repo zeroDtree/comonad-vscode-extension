@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Comonad Content — the SillyTavern pane of the settings panel: the four kinds of content, in
 // Comonad's own library and in SillyTavern's file formats. The settings panel owns the webview API
 // and forwards this pane its state slice and its notes; the pane posts {type:'content', action}

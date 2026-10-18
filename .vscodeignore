@@ -7,6 +7,12 @@ node_modules/**
 !node_modules/gpt-tokenizer/**
 !node_modules/@agnai/web-tokenizers/**
 src/**
+packages/*/src/**
+pkgs/**
+.github/**
+.kilo/**
+.kilocode/**
+features.md
 .gitignore
 esbuild.js
 **/tsconfig.json

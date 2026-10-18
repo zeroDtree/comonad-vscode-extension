@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import Fuse, { type IFuseOptions } from 'fuse.js';
 import type { WorldEntry } from './types';
 

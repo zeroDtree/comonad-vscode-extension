@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { COMONAD_BLOCK, DEFAULT_BLOCK_PREFIX } from '@comonad/lib/blocks';
 import { estimateTokens } from '@comonad/lib/tokens';
 import type { GenerationTrigger, WiLogic, WiPosition, WiRole, WiStrategy, WorldBook, WorldEntry, WorldInfoSettings } from './types';

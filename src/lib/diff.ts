@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /** Parsing a `git diff` into per-file counts and hunks. Pure module: no `vscode`, no `cordis`. */
 
 export interface JournalHunk {

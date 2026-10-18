@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
 /* Comonad World Info — the world-book page of the ST tab, laid out the way SillyTavern's
    Worlds/Lorebooks panel is: the active worlds and the global activation knobs on top, then the book
    toolbar, then the entry list, where each row unfolds into its own editor. Everything is scoped to

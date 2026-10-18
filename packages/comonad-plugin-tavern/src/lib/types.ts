@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
  * SillyTavern-compatible content types. Field names mirror the on-disk formats exactly — v1/v2/v3
  * character cards, world books, OpenAI presets, personas, regex scripts — so a file written by one

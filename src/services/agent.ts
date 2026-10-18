@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { randomUUID } from 'node:crypto';
 import { relative, resolve, sep } from 'node:path';
 import { Service, type Context } from 'cordis';

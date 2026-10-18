@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /** Graph runtime: nodes, routes, soft routes, suspend/resume. Pure module. */
 
 export interface SoftChoice {

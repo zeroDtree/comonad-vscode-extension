@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
 import { runCommand, shellArgv, type SandboxOptions } from '../lib/sandbox';
 import type { SessionPolicy } from '../lib/types';

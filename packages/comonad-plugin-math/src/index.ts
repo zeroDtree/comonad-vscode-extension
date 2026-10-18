@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { join } from 'node:path';
 import type { Context, Plugin } from 'cordis';
 import type { ChatAssetSpec } from '@comonad/services/chat-assets';

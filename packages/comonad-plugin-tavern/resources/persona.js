@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Comonad Personas — the ST tab's Persona Management page, in SillyTavern's own layout and words:
 // the avatar tiles on the left with the create button, the search box, the sort select, pagination,
 // the grid toggle and the upload tile; the open persona on the right with its picture, name, title,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { Context, Plugin } from 'cordis';
 import { clip } from '@comonad/lib/util';
 import { searchLore, type LoreBook } from '../lib/lore';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { GraphError, type GraphsConfig, type NodeConfig } from './graph';
 
 /** Parses the Mermaid flowchart dialect used to describe the agent loop. Pure module. */

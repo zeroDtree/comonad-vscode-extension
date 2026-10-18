@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /** The **ST** tab's markup, exactly as the panel writes it into the settings document. */
 export const markup = `
   <div id="st-pane" data-view="content">

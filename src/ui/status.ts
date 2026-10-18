@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { APPROVAL_LABELS, MODE_LABELS, PRESET_LABELS, presetPolicy } from '../lib/policy';

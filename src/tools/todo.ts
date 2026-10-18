@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { formatTodos } from '../lib/util';
 import { objectSchema, type TodoItem } from '../lib/types';
 import { toolset } from '../services/tools';

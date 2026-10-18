@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context, type Plugin } from 'cordis';
 import { capabilityAllowed } from '../lib/policy';
 import { mergeToolLayout } from '../lib/prompt-layout';

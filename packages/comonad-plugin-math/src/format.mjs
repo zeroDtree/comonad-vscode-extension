@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
  * The source forms the copy handler writes back. Math always comes back as `$...$` / `$$...$$`,
  * never the `\(...\)` / `\[...\]` form a model may have used: the user asked for Markdown math.

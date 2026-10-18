@@ -6,6 +6,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **The project is now licensed under AGPL-3.0-only.** A few utility routines in the
+  tavern plugin are adapted from SillyTavern (AGPL-3.0); `NOTICE` records the files and
+  modifications, and `THIRD_PARTY_NOTICES.md` lists the bundled dependencies. The
+  packaged extension also stops shipping the development-only `pkgs/` reference tree.
+
 - **A first-class Prompts tab edits Comonad's blocks and tool list.** The read-only Prompts sub-tab
   moved out of Inspect into its own settings page. It lists only Comonad's nine prompt blocks and the
   registered tool definitions: blocks can be reordered, switched off, and their static prefix edited

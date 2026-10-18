@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Service, type Context } from 'cordis';

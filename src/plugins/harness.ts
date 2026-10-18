@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { mkdirSync, writeFileSync } from 'node:fs';
 import Module from 'node:module';
 import { join } from 'node:path';

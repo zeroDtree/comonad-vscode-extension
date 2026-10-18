@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
  * The generation types a chat can ask for. These are Comonad's own — `/continue`, `/swipe` and the
  * Send menu are built-in commands and real generations of the agent — and they share their names with

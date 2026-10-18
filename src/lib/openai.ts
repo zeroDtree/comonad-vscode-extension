@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { CompletionUsage, Message, ToolCall, ToolSpec } from './types';
 
 /** OpenAI-compatible chat completions over SSE, with tool-call delta assembly. Pure module. */

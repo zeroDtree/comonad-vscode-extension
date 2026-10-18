@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The **ST** tab's own client: the content editor and its sub-tabs, plus the settings half of the tab.
 // The host's settings client owns the webview channel and hands every pane its slice of each state
 // push, so this file registers here and posts through `window.comonadPanes`. The editor itself, the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { objectSchema, type ToolSpec } from '../lib/types';
 import { toolset } from '../services/tools';
 

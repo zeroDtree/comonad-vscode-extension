@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { ApprovalDecision, ApprovalRequest, ToolCall, TurnRef } from './lib/types';
 import type { PostToolDecision, PreToolDecision, ToolExecution, ToolOutcome } from './services/tools';
 

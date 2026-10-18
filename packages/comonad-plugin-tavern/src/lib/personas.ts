@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { PERSONA_DEPTH_DEFAULT, PERSONA_POSITION, readPersonaConnections } from './authoring';
 import type { Character, Persona, PersonaDescription } from './types';
 

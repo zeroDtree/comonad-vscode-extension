@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import hljs from 'highlight.js/lib/common';
 
 /**

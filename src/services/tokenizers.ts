@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
 import { encodingForModel, estimateMessages, estimateTokens, setEncoder, type TikEncoding } from '../lib/tokens';
 import { describe } from '../lib/util';

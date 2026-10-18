@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { basename, relative, sep } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';

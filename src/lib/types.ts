@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /** Domain types shared by the agent kernel. This module must not import `vscode` or `cordis`. */
 
 import type { SandboxOptions } from './sandbox';

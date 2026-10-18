@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { deflateSync } from 'node:zlib';
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';

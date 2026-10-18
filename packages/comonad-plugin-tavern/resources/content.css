@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
 /* Comonad Content — the ST tab's pane. Loaded by the settings panel, so every rule is scoped to
    `#st-pane`, the shared form styles (.grid/.field/.control/.hint/.check) come from settings.css,
    and the sizes and colours come from its tokens. Ids here are `st-*`; the settings document owns

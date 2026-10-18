@@ -4,9 +4,9 @@ A local-first, auditable coding agent inside VS Code. It runs a graph-orchestrat
 against the model you choose — DeepSeek by default, or any OpenAI-compatible endpoint — keeps every turn in a
 shadow-git checkpoint, and asks before anything leaves the sandbox.
 
-The kernel is a port of `pkgs/Comonad` (its graph runtime, capability model, approval policies and
-checkpoint design) with the interaction layer rebuilt on VS Code: Chat participant, language model
-API, diff editors, tasks and terminal sandbox.
+The kernel — graph runtime, capability model, approval policies and checkpoint design — comes from
+an earlier Comonad project; the interaction layer is rebuilt for VS Code: Chat participant, language
+model API, diff editors, tasks and terminal sandbox.
 
 The extension is built as a [Cordis](https://github.com/cordiverse/cordis) application: everything —
 kernel, tools, model adapters, UI — is a plugin on one context, capabilities are services
@@ -321,9 +321,10 @@ edit, duplicate and delete every kind, then use it in this chat or make it the d
   *outlet* is never injected where it sits: `{{outlet::Name}}` is how its text lands, and the outlet
   name is what ties the two together.
 
-Licensing note: Comonad's content layer is an independent re-implementation of the file formats and
-the prompt assembly. SillyTavern itself (AGPL-3.0) is not bundled, and its default content is never
-copied.
+Licensing note: Comonad's content layer re-implements SillyTavern's file formats and prompt assembly.
+A few small utility routines — regex substitution, persona macro swapping, world-info search weights
+and tag constants — are adapted from SillyTavern, which is AGPL-3.0; see [NOTICE](NOTICE) for the
+file-by-file record. SillyTavern itself is not bundled, and its default content is never copied.
 
 ## Chat commands
 
@@ -741,14 +742,16 @@ kernel), `fuse.js` (the world-book search, with upstream's own options and field
 `gpt-tokenizer` and `@agnai/web-tokenizers` (the tokenizer chain — the first is bundled, the second
 is kept as a real file because its wasm would bloat the bundle four megabytes).
 
-One package ships beside the bundle as a plugin: `packages/comonad-plugin-tavern` (the SillyTavern
-content layer, its vectors and its tokenizer files). It is built as its own bundle
+Two packages ship beside the bundle as plugins: `packages/comonad-plugin-tavern` (the SillyTavern
+content layer, its vectors and its tokenizer files) and `packages/comonad-plugin-math` (KaTeX, its
+stylesheet and its fonts). Each is built as its own bundle
 (`npm run build:plugins`, part of `npm run compile`, one bundle per folder that declares
-`comonad.plugin` in its `package.json`) and is not part of `dist/extension.js`, which is what makes it
-a plugin rather than a feature. It imports the host's shared vocabulary by name (`@comonad/*` — the
-content types, the prompt estimator, the command helper) and those imports are bundled into its own
-file, so an install is one folder. Its *settings* are its own too: the keys, the defaults and the
-typing live in the plugin (`lib/settings.ts`), read over the same store every setting uses.
+`comonad.plugin` in its `package.json`) and is not part of `dist/extension.js`, which is what makes
+them plugins rather than features. The tavern plugin imports the host's shared vocabulary by name
+(`@comonad/*` — the content types, the prompt estimator, the command helper) and those imports are
+bundled into its own file, so an install is one folder. Its *settings* are its own too: the keys, the
+defaults and the typing live in the plugin (`lib/settings.ts`), read over the same store every
+setting uses.
 
 The journal is the seam that shows what the other side of the line looks like: the agent, the chat
 panel and the review reach it through `ctx.get('checkpoints')`, so with its row off nothing is
@@ -759,3 +762,13 @@ repository.
 The test host runs against a home of Comonad's own — a temporary directory named by `COMONAD_HOME` — so
 the plugins installed in your real `~/.comonad`, and the rows you wrote for them, never change what a
 test sees.
+
+## License
+
+Comonad Agent for VS Code is licensed under the **GNU Affero General Public License, version 3**
+(`AGPL-3.0-only`). See [LICENSE](LICENSE) for the full text.
+
+The corresponding source for each published build is this repository at the matching version tag.
+Third-party components and their licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); the modifications relative to SillyTavern are
+recorded in [NOTICE](NOTICE).
