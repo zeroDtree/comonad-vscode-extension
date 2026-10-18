@@ -13,7 +13,6 @@ import {
 	type FileChange,
 	type JournalApi,
 	type JournalEntry,
-	type JournalFile,
 	type KeepHunkOptions,
 	type Overwrite,
 	type Pending,

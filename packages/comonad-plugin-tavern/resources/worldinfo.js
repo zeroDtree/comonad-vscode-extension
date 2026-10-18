@@ -90,9 +90,6 @@ window.comonadWorldInfo = function worldInfo(options) {
 	let wired = false;
 	let drag = null;
 
-	const esc = (value) =>
-		String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-
 	function status(text, isError) {
 		const node = $('wi-status');
 		if (!node) {
@@ -180,7 +177,6 @@ window.comonadWorldInfo = function worldInfo(options) {
 
 	const triValue = (value) => (value === null || value === undefined ? '' : String(value === true || value === 'true'));
 	const tri = (value) => (value === '' ? null : value === 'true');
-	const textOrNull = (value) => (String(value ?? '').trim() === '' ? null : String(value).trim());
 	const numberOrNull = (value) => (String(value ?? '').trim() === '' ? null : Number(value) || 0);
 	const numbers = (value) => (value === null || value === undefined ? '' : String(value));
 

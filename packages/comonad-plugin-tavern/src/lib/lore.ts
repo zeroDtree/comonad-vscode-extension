@@ -439,7 +439,7 @@ export function activateLore(input: LoreInput): LoreResult {
 		break;
 	}
 	const hits = [...state.activated.values()];
-	return { ...bucket(hits, input, state.overflowed), effects: prune(state.effects, input.turn) };
+	return { ...bucket(hits, state.overflowed), effects: prune(state.effects, input.turn) };
 }
 
 /** The pass loop: immediate activations, then recursion levels, until nothing new activates. */
@@ -546,7 +546,6 @@ function scanBooks(sorted: readonly ScanEntry[], input: LoreInput, state: ScanSt
 			return rightSticky - leftSticky || left.index - right.index;
 		});
 
-		let kept = 0;
 		let recursable = 0;
 		for (const scan of ordered) {
 			const entry = scan.entry;
@@ -586,7 +585,6 @@ function scanBooks(sorted: readonly ScanEntry[], input: LoreInput, state: ScanSt
 				state.text += `\n${content}`;
 				recursable += 1;
 			}
-			kept += 1;
 		}
 
 		if (!settings.recursive || recursable === 0) {
@@ -682,7 +680,7 @@ function prune(effects: TimedEffects, turn: number): TimedEffects {
 }
 
 /** Places the activated entries in the buckets the assembler fills the prompt from. */
-function bucket(hits: readonly Placed[], input: LoreInput, overflowed: boolean): Omit<LoreResult, 'effects'> {
+function bucket(hits: readonly Placed[], overflowed: boolean): Omit<LoreResult, 'effects'> {
 	const before: string[] = [];
 	const after: string[] = [];
 	const anTop: string[] = [];
@@ -754,19 +752,6 @@ function bucket(hits: readonly Placed[], input: LoreInput, overflowed: boolean):
 		activated: hits.map(({ book, entry, reason }) => ({ book, entry, reason })),
 		overflowed,
 	};
-}
-
-/** The keys an entry watches, for the index the model reads before calling `lore_lookup`. */
-export function entrySummary(entry: WorldEntry): string {
-	const comment = (entry.comment ?? '').trim();
-	const keys = primaryKeys(entry)
-		.map((key) => key.trim())
-		.filter(Boolean)
-		.join(', ');
-	if (comment && keys) {
-		return `${comment} (${keys})`;
-	}
-	return comment || keys || `entry ${entry.uid}`;
 }
 
 export interface LoreSearchHit {

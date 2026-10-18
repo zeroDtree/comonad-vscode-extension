@@ -68,10 +68,6 @@ function stringOr(value: unknown): string | undefined {
 	return typeof value === 'string' ? value : undefined;
 }
 
-function numberOr(value: unknown): number | undefined {
-	return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
 /** Reads one tag from a file, keeping every field we do not model. */
 function readTag(value: unknown): Tag | null {
 	if (!value || typeof value !== 'object') {

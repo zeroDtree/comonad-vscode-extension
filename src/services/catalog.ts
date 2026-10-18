@@ -137,12 +137,6 @@ export function skillLines(skills: Skill[]): string {
 	return skills.map((skill) => `- ${skill.name}: ${skill.description || 'no description'}`).join('\n');
 }
 
-export function skillIndex(skills: Skill[], heading = DEFAULT_BLOCK_PREFIX[COMONAD_BLOCK.skills]): string {
-	const body = skillLines(skills);
-	const head = heading.trim();
-	return head && body ? `${head}\n${body}` : head || body;
-}
-
 /** The subagent list itself, without the heading a prompt block adds above it. */
 export function agentLines(agents: AgentDefinition[]): string {
 	if (agents.length === 0) {

@@ -8,9 +8,7 @@ node_modules/**
 !node_modules/@agnai/web-tokenizers/**
 src/**
 .gitignore
-.yarnrc
 esbuild.js
-vsc-extension-quickstart.md
 **/tsconfig.json
 **/eslint.config.mjs
 **/*.map

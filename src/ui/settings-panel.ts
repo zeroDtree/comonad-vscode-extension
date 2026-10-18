@@ -13,7 +13,7 @@ import { type ContextForm } from '../lib/prompt';
 import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
-import { profileKeyEnvs, type Config, type Profile } from '../services/settings';
+import { profileKeyEnvs, type Profile } from '../services/settings';
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 

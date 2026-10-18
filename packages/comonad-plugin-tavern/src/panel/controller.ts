@@ -1,6 +1,6 @@
 import { basename, extname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import {

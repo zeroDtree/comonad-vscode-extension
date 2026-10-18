@@ -76,6 +76,3 @@ function dirname(file: string): string {
 	const cut = Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\'));
 	return cut > 0 ? file.slice(0, cut) : file;
 }
-
-/** The row: a service, like every other. */
-export const chatWebviewPlugin = ChatWebviewAssets;

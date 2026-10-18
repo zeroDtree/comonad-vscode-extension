@@ -234,8 +234,6 @@ export class Vectors extends Service {
 	}
 }
 
-export const vectorsPlugin = Vectors;
-
 function hashOf(text: string): string {
 	return createHash('sha1').update(text).digest('hex');
 }

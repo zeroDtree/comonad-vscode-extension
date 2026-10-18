@@ -41,7 +41,7 @@ import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { agentIndex, agentLines, allowedToolsFor, skillLines } from './catalog';
 import type { JournalApi } from '../lib/journal';
-import { DEFAULT_CONTEXT_WINDOW, type Config } from './settings';
+import { DEFAULT_CONTEXT_WINDOW } from './settings';
 import { canRewrite, isSummaryMessage, summaryMessage, threadTitle, type Session, type SessionSummary, type SwipeCarry } from './sessions';
 import type { ComposeResult, TavernApi } from 'comonad-plugin-tavern';
 

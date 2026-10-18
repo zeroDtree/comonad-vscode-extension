@@ -40,8 +40,6 @@ window.comonadPersonas = function personaPane(options) {
 	let state = null;
 	/** The open persona with this pane's edits applied; `null` when nothing is selected. */
 	let work = null;
-	/** The persona the host last sent, so an edit of ours is not thrown away by a re-render. */
-	let loadedId = null;
 	let dirty = false;
 	let saving = null;
 	let page = 0;
@@ -54,9 +52,6 @@ window.comonadPersonas = function personaPane(options) {
 	// Upstream keeps the two readings of the list — a column of small rows, and a wall of pictures — and
 	// starts on the first: a name is what you pick a persona by, and a picture is the persona itself.
 	let grid = remembered.pfGrid === true;
-
-	const esc = (value) =>
-		String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 	const status = (text, isError) => {
 		const node = $('st-status');

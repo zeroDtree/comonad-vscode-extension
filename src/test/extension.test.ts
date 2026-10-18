@@ -1,7 +1,7 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -38,8 +38,7 @@ import { CONFIG_KEYS, DEFAULT_CONTEXT_WINDOW, profileKeyEnvs } from '../services
 import { toolset } from '../services/tools';
 import { promptText } from '../services/agent';
 import { PLUGINS, ROWS } from '../app';
-import * as ComonadApp from '../app';
-import type { Plugins, PluginDependency, PluginState } from '../services/plugins';
+import type { Plugins, PluginState } from '../services/plugins';
 import { pluginNodeStatus, pluginTree, type PluginNode } from '../lib/plugins';
 import { slashCommands } from '../ui/slash';
 import { harnessAliases, harnessCompat } from '../plugins/harness';
@@ -50,13 +49,13 @@ import { readBookFile, turnPrompts } from 'comonad-plugin-tavern/services/tavern
 import { convertCharacterToPersona } from 'comonad-plugin-tavern/lib/personas';
 import { parseExamples, substituteMacros } from 'comonad-plugin-tavern/lib/macro';
 import { parsePreset, presetSamplers, presetToJson } from 'comonad-plugin-tavern/lib/preset';
-import { builtInBlocks, librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from 'comonad-plugin-tavern/lib/library';
+import { builtInBlocks, librarySeed, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from 'comonad-plugin-tavern/lib/library';
 import { PRESET_TEMPLATES } from 'comonad-plugin-tavern/lib/templates/presets';
 import { PROMPT_BLOCKS } from 'comonad-plugin-tavern/lib/templates/blocks';
 import { COMONAD_PROMPTS, CONTEXT_PROMPT, DEFAULT_ORDER, DEFAULT_PROMPTS, IDENTITY_PROMPT, ST_PROMPTS, TOOLS_PROMPT, completeOrder, movePrompt, promptCollection, setEnabled, shippedPrompt, triggersGeneration } from 'comonad-plugin-tavern/lib/prompts';
 import { COMONAD_BLOCK, type PromptBlock } from '../lib/blocks';
 import { applyPromptLayout, defaultPromptLayout, mergePromptPrefixes, mergeToolLayout, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
-import { activateLore, toWorldBook, worldInfoToBook, type LoreBook, type LoreInput } from 'comonad-plugin-tavern/lib/lore';
+import { activateLore, toWorldBook, type LoreBook, type LoreInput } from 'comonad-plugin-tavern/lib/lore';
 import type { TavernPreset } from 'comonad-plugin-tavern/lib/types';
 import { assemble, exampleMessages, injectAtDepth } from 'comonad-plugin-tavern/lib/assemble';
 import { applyRegex, makeScript } from 'comonad-plugin-tavern/lib/regex';
@@ -1736,14 +1735,6 @@ suite('Cordis kernel', () => {
 					super(ctx, 'ledger');
 				}
 			}
-			const plugins = () =>
-				(
-					[
-						['provider', true],
-						['dependent', true],
-						['independent', true],
-					] as const
-				).map(([id, expected]) => [id, kernel.ctx.plugins.state().find((row) => row.id === id)?.loaded === expected]);
 			await kernel.ctx.plugin(pluginHost, {
 				rows: [{ id: 'provider' }, { id: 'dependent' }, { id: 'independent' }],
 				plugins: {
@@ -4109,14 +4100,10 @@ suite('Tavern content', () => {
 		});
 
 		// Probability: `random() * 100 > probability` is a miss, and a miss is not retried.
-		let calls = 0;
 		const miss = activateLore(
 			lore({
 				books: [loreBookOf([{ uid: 0, key: ['salt'], content: 'Hit.', probability: 50 }])],
-				random: () => {
-					calls += 1;
-					return 0.99;
-				},
+				random: () => 0.99,
 			}),
 		);
 		assert.deepStrictEqual(miss.before, []);
@@ -6748,7 +6735,7 @@ suite('Per-file checkpoints', () => {
 			});
 			await kernel.ctx.plugin(fsTools);
 			const first = await kernel.ctx.agent.runTurn({ text: 'one', surface: 'test' });
-			const second = await kernel.ctx.agent.runTurn({ text: 'two', surface: 'test' });
+			await kernel.ctx.agent.runTurn({ text: 'two', surface: 'test' });
 
 			const id = first.sessionId;
 			const session = kernel.ctx.sessions.require(id);

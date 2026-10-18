@@ -131,7 +131,6 @@ export function runScript(script: RegexScript, text: string, context: RegexConte
 	if (!applies(script, context) || !text) {
 		return text;
 	}
-	const escape = context.substitute ? escapeForRegex : undefined;
 	let pattern = script.findRegex;
 	if (script.substituteRegex === SUBSTITUTE_REGEX.raw && context.substitute) {
 		pattern = context.substitute(pattern);

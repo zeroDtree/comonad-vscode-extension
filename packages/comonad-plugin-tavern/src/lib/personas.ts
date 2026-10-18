@@ -1,5 +1,5 @@
 import { PERSONA_DEPTH_DEFAULT, PERSONA_POSITION, readPersonaConnections } from './authoring';
-import type { Character, Persona, PersonaConnection, PersonaDescription } from './types';
+import type { Character, Persona, PersonaDescription } from './types';
 
 /**
  * Personas in SillyTavern's own shapes: one description block, the backup document that holds every

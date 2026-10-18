@@ -13,7 +13,7 @@ import { applyRegex, REGEX_PLACEMENT, regexScriptsFrom } from '../lib/regex';
 import { vectorSettings, WI_SETTINGS_DEFAULTS, tavernSettings, type TavernSettings } from '../lib/settings';
 import { estimateTokens } from '@comonad/lib/tokens';
 import { Vectors } from './vectors';
-import { emptyStore, mergeStores, readStore, renameKey, storeJson, tagIdsOf, tagsOf, type Tag, type TagStore } from '../lib/tags';
+import { emptyStore, mergeStores, readStore, renameKey, storeJson, tagIdsOf, type TagStore } from '../lib/tags';
 import { librarySeed, mergeBuiltIn, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from '../lib/library';
 import { loadPreset, presetSamplers, presetToJson, type PresetSamplers } from '../lib/preset';
 import { applyCardOverrides, DEFAULT_PRESET_ID, TOOLS_PROMPT, promptCollection, withoutRoleplayScaffolding, type ActivePrompt } from '../lib/prompts';
@@ -227,7 +227,6 @@ export class Tavern extends Service implements TavernApi {
 
 	/** One read of every source. A broken file is logged and skipped, never fatal. */
 	private async read(): Promise<void> {
-		const host = this.ctx.host;
 		const characters: Character[] = [];
 		const books: LoadedBook[] = [];
 		const presets: TavernPreset[] = [];
@@ -401,12 +400,6 @@ export class Tavern extends Service implements TavernApi {
 		});
 		this.ctx.emit('tavern/changed');
 		return file;
-	}
-
-	/** The tags a character carries, in the registry's order. */
-	tagsFor(id: string | undefined): Tag[] {
-		const character = this.character(id);
-		return character ? tagsOf(this.tags, character.id) : [];
 	}
 
 	/** The tag **ids** a character carries — what an entry’s character filter compares against. */
@@ -729,7 +722,7 @@ export class Tavern extends Service implements TavernApi {
 	}
 
 	async deleteCharacter(id: string): Promise<boolean> {
-		return this.removeFile('characters', this.character(id));
+		return this.removeFile(this.character(id));
 	}
 
 	/** Writes a world book in SillyTavern's own file shape, renaming the file with the book. */
@@ -786,7 +779,7 @@ export class Tavern extends Service implements TavernApi {
 
 	async deleteBook(name: string): Promise<boolean> {
 		const found = this.book(name);
-		return found ? this.removeFile('lorebooks', found) : false;
+		return found ? this.removeFile(found) : false;
 	}
 
 	/** Writes the persona file, with no catalog change of its own — `savePersona` is the public one. */
@@ -939,7 +932,7 @@ export class Tavern extends Service implements TavernApi {
 	}
 
 	async deletePreset(id: string): Promise<boolean> {
-		return this.removeFile('presets', this.preset(id));
+		return this.removeFile(this.preset(id));
 	}
 
 	/** The file an item is stored in, when it is one of ours; `undefined` for an unsaved item. */
@@ -960,7 +953,7 @@ export class Tavern extends Service implements TavernApi {
 	 * Deletes an item's file — only ever inside our own library, never a file the user pointed at
 	 * from somewhere else.
 	 */
-	private async removeFile(kind: ContentKind, item: { source?: string } | undefined): Promise<boolean> {
+	private async removeFile(item: { source?: string } | undefined): Promise<boolean> {
 		const file = this.managedFile(item?.source ?? '');
 		if (!file) {
 			return false;
