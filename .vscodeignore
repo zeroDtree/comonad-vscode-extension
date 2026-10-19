@@ -1,5 +1,6 @@
 .vscode/**
 .vscode-test/**
+.comonad/**
 out/**
 node_modules/**
 # The tokenizers stay external (see esbuild.js): rank tables and an inlined wasm blob are read from
