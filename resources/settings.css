@@ -362,14 +362,43 @@ body.resizing {
 	outline-offset: 1px;
 }
 
-/* The Inspect tab's own sub-tabs: the tool policy flow and the prompt list. `.subtab` itself comes from
-   the content pane's stylesheet, which this document also loads. */
+/* The Inspect tab's own sub-tabs: the tool policy flow and the prompt list. The same `.subtab` look
+   is used by panes that draw their own tab strip (the ST pane), so it lives in the document's own
+   stylesheet rather than in a pane's — a disabled plugin must not take the core UI's styling with it. */
 #inspect-tabs {
 	display: flex;
 	gap: 2px;
 	flex-wrap: wrap;
 	border-bottom: 1px solid var(--st-border);
 	margin-bottom: 10px;
+}
+
+.subtab {
+	background: transparent;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	padding: 5px 10px 6px;
+	margin-bottom: -1px;
+	font: inherit;
+	font-size: 12.5px;
+	white-space: nowrap;
+	color: var(--st-muted);
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.subtab:hover {
+	color: var(--vscode-foreground);
+	background: var(--st-hover);
+	border-radius: var(--st-radius-sm) var(--st-radius-sm) 0 0;
+}
+
+.subtab.is-on {
+	color: var(--vscode-foreground);
+	font-weight: 500;
+	border-bottom-color: var(--st-accent);
 }
 
 /* A button that reads as a link: the toolbar's quiet actions, and every row's own controls. */
@@ -1046,7 +1075,14 @@ td.mono {
 	cursor: pointer;
 }
 
-/* A service nobody provides: the missing end of the arrow a waiting row is looking at. */
+/* The service and provider columns are paired line by line: keep a long name from wrapping one
+   without the other and pushing the pairs out of step. */
+#pg-deps .pg-service,
+#pg-deps .pg-provider {
+	white-space: nowrap;
+}
+
+/* A service nobody provides: the missing end of the pair a waiting row is looking at. */
 .pg-missing {
 	color: var(--vscode-editorWarning-foreground, #c8a13a);
 }

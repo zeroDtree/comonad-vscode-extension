@@ -1943,8 +1943,14 @@ suite('Cordis kernel', () => {
 
 		const tree = pluginTree(nodes, 'tavern');
 		assert.match(tree, /^tavern — off — provides tavern/, 'the tree starts with the row itself');
-		assert.match(tree, /used by\n  └─ ui-tavern-commands/, 'then what stands on it');
-		assert.match(pluginTree(nodes, 'mine'), /waits for \?nobody-makes-this — nobody provides it/, 'and a service nothing provides is named as such');
+		assert.match(tree, /needed by\n  └─ ui-tavern-commands/, 'then what stands on it');
+		assert.match(
+			pluginTree(nodes, 'ui-tavern-commands'),
+			/tavern ← tavern \(off\)/,
+			'a require names the service, the row that provides it, and its state',
+		);
+		assert.match(pluginTree(nodes, 'mine'), /waits for nobody-makes-this — nobody provides it/, 'and a service nothing provides is named as such');
+		assert.match(pluginTree(nodes, 'mine'), /needed by\n  └─ \(none\)/, 'a row nothing depends on says so');
 		assert.ok(!pluginTree(nodes, 'mine').includes('requires'), 'a row that needs nothing has nothing to require');
 		assert.strictEqual(pluginTree(nodes, 'nope'), '', 'a row that is not there has no tree');
 
@@ -1957,7 +1963,7 @@ suite('Cordis kernel', () => {
 			],
 			'a',
 		);
-		assert.match(chain, /turning this row off also stops\n  └─ b, c/, 'the whole chain, not one hop');
+		assert.match(chain, /turning this plugin off also stops\n  └─ b, c/, 'the whole chain, not one hop');
 
 		// What the table colours: off, waiting on a service, failed on its own.
 		assert.strictEqual(pluginNodeStatus({ enabled: false, loaded: false }), 'off');

@@ -220,8 +220,8 @@ export function settingsPanel(ctx: Context): void {
 		const dir = host.installedDirOf(id);
 		const sure = await vscode.window.showWarningMessage(
 			dir
-				? `Uninstall "${id}"? Its row is removed from your cordis.yml, and ${dir} is deleted.`
-				: `Uninstall "${id}"? Its row is removed from your cordis.yml; the files it loads stay where they are.`,
+				? `Uninstall "${id}"? Its entry is removed from your cordis.yml, and ${dir} is deleted.`
+				: `Uninstall "${id}"? Its entry is removed from your cordis.yml; the files it loads stay where they are.`,
 			{ modal: true },
 			'Uninstall',
 		);
@@ -846,12 +846,12 @@ ${tabButton('mcp', 'MCP', 'MCP — servers and their status', TAB_ICONS.mcp)}
 ${tabButton('tools', 'Tools', 'Tools — what a turn may run', TAB_ICONS.tools)}
 ${tabButton('prompts', 'Prompts', 'Prompts — Comonad blocks and tool definitions', TAB_ICONS.prompts)}
 ${tabButton('inspect', 'Inspect', 'Inspect — the tool policy flow and plugin dependencies', TAB_ICONS.inspect)}
-${tabButton('plugins', 'Plugins', 'Plugins — every row of the tree, and what became of it', TAB_ICONS.plugins)}
+${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and what became of it', TAB_ICONS.plugins)}
     </nav>
     <div id="side-foot">
       <div id="status"></div>
       <div class="row">
-        <button class="primary" id="save" type="button" title="Save — write these settings to this workspace"><span class="btn-icon" aria-hidden="true">✓</span><span class="btn-label">Save</span></button>
+        <button class="primary" id="save" type="button" title="Save — write the draft tabs (Graph, Rules, ST) to this workspace"><span class="btn-icon" aria-hidden="true">✓</span><span class="btn-label">Save</span></button>
         <button class="secondary" id="close" type="button" title="Close — unsaved edits are dropped"><span class="btn-icon" aria-hidden="true">✕</span><span class="btn-label">Close</span></button>
       </div>
     </div>
@@ -1036,7 +1036,7 @@ ${paneSections}
     <h1 class="page-title">Inspect</h1>
     <nav id="inspect-tabs" role="tablist" aria-label="Inspect">
       <button class="subtab" type="button" role="tab" data-inspect="flow" title="Tool Policy Flow — how one tool call is gated">Tool Policy Flow (TPF)</button>
-      <button class="subtab" type="button" role="tab" data-inspect="plugins" title="Plugins — how the tree is wired: what each row provides, and what needs it">Plugins</button>
+      <button class="subtab" type="button" role="tab" data-inspect="plugins" title="Plugins — how the tree is wired: what each plugin provides, and what needs it">Plugins</button>
     </nav>
 
     <div data-inspect-pane="flow">
@@ -1056,13 +1056,13 @@ ${paneSections}
         <div class="field">
           <label>Plugins</label>
           <p class="hint">
-            What the tree is wired with, row by row: what each one <strong>provides</strong> (a service other
-            rows can inject), what it <strong>needs</strong> (and which row provides that, or
-            <span class="mono">(built in)</span> for the services Comonad mounts before the tree —
-            <span class="mono">host</span>, <span class="mono">log</span> and
-            <span class="mono">settings</span>, which are not rows and have nothing to turn off), who needs
-            it, and its state. A service nobody provides is written <span class="mono">?name</span> — that is
-            what a row is waiting for. Pick a row to see the whole chain that goes down with it.
+            What the tree is wired with, plugin by plugin: what each one <strong>provides</strong> (a
+            service other plugins can inject), the services it <strong>needs</strong>, who provides each —
+            a plugin id, <span class="mono">(built in)</span> for the services Comonad mounts before the
+            tree — <span class="mono">host</span>, <span class="mono">log</span> and
+            <span class="mono">settings</span>, which are not plugins and have nothing to turn off — or
+            <span class="mono">not provided</span> when nothing does, and its state. Pick a plugin to
+            see who depends on it and the whole chain that goes down with it.
           </p>
           <table id="pg-deps"></table>
         </div>
@@ -1097,17 +1097,17 @@ ${paneSections}
     <h1 class="page-title">Plugins</h1>
     <div class="group">
       <div class="field">
-        <label>Rows</label>
+        <label>Plugin list</label>
         <p class="hint">
-          Everything Comonad is made of, in load order. A row comes from the extension's own list,
+          Everything Comonad is made of, in load order. A plugin comes from the extension's own list,
           from <span class="mono" id="plugins-project"></span> (this workspace, when it is trusted) or
           from <span class="mono" id="plugins-user"></span> (yours, shared by every window). Turning a
-          row off writes into <span class="mono" id="plugins-writable"></span> and applies the list
+          plugin off writes into <span class="mono" id="plugins-writable"></span> and applies the list
           again — the same change you could make by hand, and the same place a plugin of your own is
           mounted from.
         </p>
         <div class="row">
-          <button class="secondary" id="plugins-install" type="button" title="Install — copy a plugin into your library and add its row">Install…</button>
+          <button class="secondary" id="plugins-install" type="button" title="Install — copy a plugin into your library and add its entry">Install…</button>
           <button class="secondary" id="plugins-reload" type="button">Apply the list again</button>
           <span class="hint" id="plugins-note"></span>
         </div>

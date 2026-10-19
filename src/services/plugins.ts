@@ -244,13 +244,13 @@ export function readRows(file: string): PluginRow[] {
 		return [];
 	}
 	if (!Array.isArray(parsed)) {
-		throw new Error(`${file}: a plugin list is a YAML sequence of rows`);
+		throw new Error(`${file}: a plugin list is a YAML sequence of plugins`);
 	}
 	return parsed.map((row, index) => {
 		const entry = (row ?? {}) as Record<string, unknown>;
 		const id = String(entry.id ?? '').trim();
 		if (!id) {
-			throw new Error(`${file}: row ${index + 1} has no id`);
+			throw new Error(`${file}: plugin ${index + 1} has no id`);
 		}
 		return {
 			id,

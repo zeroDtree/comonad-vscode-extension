@@ -32,14 +32,20 @@
 		node.textContent = text || '';
 		node.className = isError ? 'error' : '';
 	};
+	// Save owns the draft tabs only (Graph, Rules, ST): the Agent tab saves itself, and Prompts and
+	// MCP have their own buttons. With nothing pending it is disabled, so it never looks like a
+	// no-op command.
 	const markDirty = () => {
 		dirty = true;
 		$('save').classList.add('is-dirty');
+		$('save').disabled = false;
 	};
 	const clearDirty = () => {
 		dirty = false;
 		$('save').classList.remove('is-dirty');
+		$('save').disabled = true;
 	};
+	clearDirty();
 
 	// A pane is a tab a plugin added: its markup and its client files are part of this document, so this
 	// client owns the message channel for all of them. A pane's script registers here, is fed its own
@@ -637,13 +643,13 @@
 
 	/* ------------------------------------------------------ plugin dependency table */
 
-	/** What each row provides, what it needs and who needs it: the whole wiring, readable as a list. */
+	/** What each plugin provides, what it needs and who needs it: the whole wiring, readable as a list. */
 	function renderPluginDeps() {
 		const rows = (state.plugins && state.plugins.dependencies) || [];
 		const node = $('pg-deps');
 		node.innerHTML = '';
 		const head = document.createElement('tr');
-		for (const header of ['row', 'layer', 'provides', 'needs', 'needed by', 'state']) {
+		for (const header of ['plugin', 'layer', 'provides', 'service', 'provider', 'state']) {
 			const th = document.createElement('th');
 			th.textContent = header;
 			head.append(th);
@@ -653,7 +659,7 @@
 			const tr = document.createElement('tr');
 			tr.className = 'pg-row';
 			tr.dataset.id = row.id;
-			tr.title = 'Click for the whole chain that stops with this row';
+			tr.title = 'Click for the whole chain that stops with this plugin';
 			const name = document.createElement('td');
 			name.textContent = row.id;
 			name.className = 'mono';
@@ -665,22 +671,24 @@
 			provides.textContent = row.provides.join(', ');
 			provides.className = 'mono';
 			tr.append(provides);
-			const needs = document.createElement('td');
-			needs.className = 'mono';
+			// The service and its provider are two aligned lines per requirement: a reader can see at
+			// a glance which plugin each service comes from — or that nothing provides it.
+			const service = document.createElement('td');
+			service.className = 'mono pg-service';
+			const provider = document.createElement('td');
+			provider.className = 'mono pg-provider';
 			for (const require of row.requires) {
-				const line = document.createElement('div');
-				// A service Comonad mounts before the tree is not a hole in it; one nothing provides is.
-				line.textContent = require.provider ? `${require.name} ← ${require.provider}` : require.external ? `${require.name} (built in)` : `?${require.name}`;
+				const needed = document.createElement('div');
+				needed.textContent = require.name;
+				service.append(needed);
+				const from = document.createElement('div');
+				from.textContent = require.provider ?? (require.external ? '(built in)' : 'not provided');
 				if (!require.provider && !require.external) {
-					line.className = 'pg-missing';
+					from.className = 'pg-missing';
 				}
-				needs.append(line);
+				provider.append(from);
 			}
-			tr.append(needs);
-			const usedBy = document.createElement('td');
-			usedBy.textContent = row.usedBy.join(', ');
-			usedBy.className = 'mono';
-			tr.append(usedBy);
+			tr.append(service, provider);
 			const status = document.createElement('td');
 			status.textContent = row.loaded ? 'loaded' : row.enabled ? (row.error || '').startsWith('pending') ? 'waiting' : 'failed' : 'off';
 			if (row.error) {
@@ -782,10 +790,11 @@
 	}
 
 	/**
-	 * The plugin list: what each row is, where it came from, and whether it is loaded. A row that is
-	 * enabled can be turned off here — the host writes that into the workspace's `cordis.yml` and applies
-	 * the list again, so the change is the same one you would make by hand, and it survives a reload.
-	 * A row that is not built in can also be uninstalled: its row goes and its installed folder with it.
+	 * The plugin list: what each plugin is, where it came from, and whether it is loaded. A plugin
+	 * that is enabled can be turned off here — the host writes that into the workspace's `cordis.yml`
+	 * and applies the list again, so the change is the same one you would make by hand, and it
+	 * survives a reload. A plugin that is not built in can also be uninstalled: its entry goes and
+	 * its installed folder with it.
 	 */
 	function renderPlugins() {
 		const plugins = state.plugins || { rows: [], project: '', user: '', writable: '', trusted: true };
@@ -795,11 +804,11 @@
 		$('plugins-reload').disabled = !plugins.project && !plugins.user;
 		$('plugins-note').textContent = plugins.trusted
 			? ''
-			: 'This workspace is not trusted, so its own list is not read and a row can only be toggled in yours.';
+			: 'This workspace is not trusted, so its own list is not read and a plugin can only be toggled in yours.';
 		const node = $('plugins');
 		node.innerHTML = '';
 		const head = document.createElement('tr');
-		for (const header of ['row', 'from', 'resolves to', 'state', '']) {
+		for (const header of ['plugin', 'from', 'resolves to', 'state', '']) {
 			const th = document.createElement('th');
 			th.textContent = header;
 			head.append(th);
@@ -832,19 +841,20 @@
 			button.type = 'button';
 			button.textContent = row.enabled ? 'Disable' : 'Enable';
 			button.disabled = !plugins.writable;
-			button.title = row.enabled ? 'Turn this row off' : 'Turn this row on';
+			button.title = row.enabled ? 'Turn this plugin off' : 'Turn this plugin on';
 			button.addEventListener('click', () => post({ type: 'plugins', action: 'toggle', id: row.id, disabled: row.enabled }));
 			actions.append(button);
-			// A built-in row ships with Comonad and cannot be uninstalled, only turned off; anything
-			// else is something the user put there — an installed copy in the library, or a row of
-			// their own — and can be taken away again (the host asks before it deletes anything).
+			// A built-in plugin ships with Comonad and cannot be uninstalled, only turned off;
+			// anything else is something the user put there — an installed copy in the library, or a
+			// plugin of their own — and can be taken away again (the host asks before it deletes
+			// anything).
 			if (row.target !== 'built-in') {
 				const remove = document.createElement('button');
 				remove.className = 'secondary';
 				remove.type = 'button';
 				remove.textContent = 'Uninstall';
 				remove.disabled = !plugins.writable;
-				remove.title = 'Remove this row — and the copy in your library, when there is one';
+				remove.title = 'Remove this plugin — and the copy in your library, when there is one';
 				remove.addEventListener('click', () => post({ type: 'plugins', action: 'uninstall', id: row.id }));
 				actions.append(remove);
 			}

@@ -220,7 +220,7 @@ flowchart LR
 
 - [x] **插件面板（Settings → Plugins）**：按加载顺序列出每一行的来源（扩展自带 / 本工作区 `cordis.yml` / 用户 `~/.comonad/cordis.yml`）、解析目标与状态（`loaded` / `off` / `not loaded` + 悬停显示原因，例如 `pending: waiting for tools`）；`Disable`/`Enable` 在受信任的工作区写入工作区列表、否则写入用户列表，随后**只重新应用这一行**（不等价于整棵树重载 —— 面板自己就是这棵树的一行，整树重载会在点击过程中把它拆掉，表现成「点了没反应」）；被它 inject 的行会随之失活并在悬停里说明在等谁（`pending: waiting for tavern`），它回来时这些行也跟着回来；表里的状态直接从 live fiber 读取而不是装载时的快照。手工保存 `cordis.yml` 会立即整表应用（宿主能分辨哪些改动是自己写的）。`Apply the list again` 手动整表重载。关掉 `tavern` 行后 ST 标签消失，从这个面板重新 Enable 即可恢复。
 
-- [x] **依赖表（Settings → Inspect → Plugins）**：逐行列出 provides / needs（含提供者；Comonad 在树之前挂载的 `host`/`log`/`settings` 标 `(built in)` —— 它们不是行、无法关闭；无人提供的写 `?name`）/ needed by / layer / state（`loaded`/`off`/`waiting`/`failed`，原因在悬停里）；点任意一行输出该行的**依赖树**（它站在什么上、关掉它会连带停掉哪一整条链）。数据直接读 live fiber（含经插件内部嵌套提供的服务），行在 `app.ts` 里声明所属层。**（图已按需求去掉，只留表格。）**
+- [x] **依赖表（Settings → Inspect → Plugins）**：逐个插件列出 provides / service / provider（提供者是插件 id；Comonad 在树之前挂载的 `host`/`log`/`settings` 标 `(built in)` —— 它们不是插件、无法关闭；无人提供的标 `not provided`）/ layer / state（`loaded`/`off`/`waiting`/`failed`，原因在悬停里）；点任意一个插件输出它的**依赖树**（它依赖什么、谁依赖它、关掉它会连带停掉哪一整条链）。数据直接读 live fiber（含经插件内部嵌套提供的服务），插件在 `app.ts` 里声明所属层。**（图已按需求去掉，只留表格。）**
 
 **P2**
 - [ ] Plugins / Marketplace：打包分发 skills / commands / subagents / hooks / MCP 配置

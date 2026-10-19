@@ -53,16 +53,16 @@ export function pluginTree(nodes: readonly PluginNode[], id: string): string {
 		lines.push('requires');
 		for (const require of requires) {
 			const provider = by.get(require.provider!);
-			lines.push(`  └─ ${require.provider} (${provider?.status ?? 'off'}) — ${require.name}`);
+			lines.push(`  └─ ${require.name} ← ${require.provider} (${provider?.status ?? 'off'})`);
 		}
 	}
 	for (const require of node.requires.filter((entry) => !entry.provider && !entry.external)) {
-		lines.push(`waits for ?${require.name} — nobody provides it`);
+		lines.push(`waits for ${require.name} — nobody provides it`);
 	}
-	if (node.usedBy.length) {
-		lines.push('used by');
-		lines.push(`  └─ ${node.usedBy.join(', ')}`);
-	}
+	// The table leaves "who needs this row" to the drill-down, so say it for every row — including
+	// the rows nothing depends on.
+	lines.push('needed by');
+	lines.push(node.usedBy.length ? `  └─ ${node.usedBy.join(', ')}` : '  └─ (none)');
 	// The transitive closure: rows that only need this one through another row still stop with it.
 	const stops: string[] = [];
 	const seen = new Set([id]);
@@ -79,7 +79,7 @@ export function pluginTree(nodes: readonly PluginNode[], id: string): string {
 		}
 	}
 	if (stops.length > node.usedBy.length) {
-		lines.push('turning this row off also stops');
+		lines.push('turning this plugin off also stops');
 		lines.push(`  └─ ${stops.join(', ')}`);
 	}
 	return lines.join('\n');

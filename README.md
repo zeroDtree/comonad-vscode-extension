@@ -621,13 +621,13 @@ CommonJS or ESM; `require('cordis')` and `import { Service } from 'cordis'` both
 
 ### Seeing the tree: Inspect → Plugins
 
-**Settings → Inspect → Plugins** lists what the tree is wired with, row by row: what each row **provides**
-(a service another row can inject), what it **needs** — with the row that provides each, or `(built in)`
-for the three services Comonad mounts *before* the tree (`host`, `log`, `settings`: not rows, and not
-switchable) — who needs it, its layer, and its state (`loaded`, `off`,
-`waiting` or `failed` with the reason on hover). A service nobody provides is written `?name`: that is what
-a row is waiting for. Clicking a row prints its **dependency tree** — what it stands on, and the whole
-chain that goes down with it when the row is turned off, which is what a toggle is really asking.
+**Settings → Inspect → Plugins** lists what the tree is wired with, plugin by plugin: what each plugin
+**provides** (a service another plugin can inject), the services it **needs** — in a service column and
+a provider column: the providing plugin, or `(built in)` for the three services Comonad mounts *before*
+the tree (`host`, `log`, `settings`: not plugins, and not switchable), or `not provided` when nothing
+does — its layer, and its state (`loaded`, `off`, `waiting` or `failed` with the reason on hover).
+Clicking a plugin prints its **dependency tree** — what it stands on, who needs it, and the whole chain
+that goes down with it when the plugin is turned off, which is what a toggle is really asking.
 
 ### DeepSeek Harness plugins
 
