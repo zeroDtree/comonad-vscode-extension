@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { accessSync, constants, existsSync, realpathSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { platform } from 'node:os';
+import { homedir, platform } from 'node:os';
 import type { Confinement } from './types';
 
 /** Path guards, OS sandboxing and process helpers. Pure module (Node only, no vscode). */
@@ -161,12 +161,26 @@ export interface RunResult {
 export type SandboxKind = 'macos' | 'bwrap' | 'none';
 
 /**
+ * The path a sandbox should mount. bwrap cannot create a mount point below a symlinked path
+ * component (`Can't mkdir …: No such file or directory`), and seatbelt profiles the real path the
+ * kernel checks, so both builders take the canonical spelling. A missing path stays as given: the
+ * sandbox will report its own failure rather than a fabricated one.
+ */
+function canonicalPath(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
+}
+
+/**
  * An executable on PATH, with the system folders as a fallback: an extension host launched by a
  * window manager can carry a PATH that misses `/usr/bin`, and a sandbox that exists must not look
  * absent because of it. The scan is cheap and deliberately uncached — a stale cache would be worse.
  */
-function findExecutable(name: string): string | undefined {
-	for (const dir of [...(process.env.PATH ?? '').split(delimiter), '/usr/bin', '/usr/local/bin', '/opt/homebrew/bin']) {
+function findExecutable(name: string, path = process.env.PATH): string | undefined {
+	for (const dir of [...(path ?? '').split(delimiter), '/usr/bin', '/usr/local/bin', '/opt/homebrew/bin']) {
 		if (!dir) {
 			continue;
 		}
@@ -198,7 +212,12 @@ export function shellArgv(command: string): string[] {
 	return ['/bin/sh', '-c', command];
 }
 
-const SENSITIVE_ENV = /(api[_-]?key|secret|token|password|passwd|credential|auth)/i;
+/**
+ * Secret-shaped names, not values: the test is the variable's role, not the word "auth" inside
+ * `GIT_AUTHOR_NAME` or `SSH_AUTH_SOCK`, which a sandboxed git still needs.
+ */
+const SENSITIVE_ENV =
+	/(?:^|_)(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS?|AUTH[_-]?(?:TOKEN|KEY|SECRET))(?:_|$)/i;
 
 /** Copy of the environment without secret-shaped variables (API keys, tokens, passwords). */
 export function sanitizedEnv(): NodeJS.ProcessEnv {
@@ -211,15 +230,150 @@ export function sanitizedEnv(): NodeJS.ProcessEnv {
 	return env;
 }
 
+const LOGIN_START = '<<<COMONAD_PATH_START>>>';
+const LOGIN_END = '<<<COMONAD_PATH_END>>>';
+const LOGIN_TIMEOUT_MS = 4_000;
+const LOGIN_RETRY_MS = 30_000;
+
+/**
+ * The argv that asks a login shell for its PATH. `-lic` reads the rc files an interactive login
+ * shell reads — where users put `PATH` — and the sentinels let banners and prompts be ignored.
+ * The extension host is not started by that shell (Remote-SSH, a window manager), so its own PATH
+ * is the wrong answer for the user's commands.
+ */
+export function loginShellArgv(
+	shell = process.env.SHELL || (platform() === 'darwin' ? '/bin/zsh' : '/bin/bash'),
+	flags = '-lic',
+): string[] | null {
+	if (platform() === 'win32' || !shell || !isAbsolute(shell)) {
+		return null;
+	}
+	const script = `printf '%s' '${LOGIN_START}'; printenv PATH; printf '%s' '${LOGIN_END}'`;
+	return [shell, flags, script];
+}
+
+/** The PATH between the last pair of sentinels; banners before and after it are ignored. */
+export function parseLoginPath(output: string): string | undefined {
+	const end = output.lastIndexOf(LOGIN_END);
+	if (end < 0) {
+		return undefined;
+	}
+	const start = output.lastIndexOf(LOGIN_START, end);
+	const value = start < 0 ? '' : output.slice(start + LOGIN_START.length, end).trim();
+	return value.includes('/') ? value : undefined;
+}
+
+/** The user's own entries first, then anything only the extension host had — order preserved. */
+export function mergePath(login: string | undefined, base: string | undefined): string | undefined {
+	const seen = new Set<string>();
+	const parts: string[] = [];
+	for (const value of [login, base]) {
+		for (const entry of (value ?? '').split(delimiter)) {
+			if (entry && !seen.has(entry)) {
+				seen.add(entry);
+				parts.push(entry);
+			}
+		}
+	}
+	return parts.length ? parts.join(delimiter) : undefined;
+}
+
+let resolvedLoginPath: string | undefined;
+let loginWarm: Promise<string | undefined> | undefined;
+let loginFailedAt = 0;
+
+/** The login shell's PATH once resolved; `undefined` until then or when the shell could not answer. */
+export function loginPathNow(): string | undefined {
+	return resolvedLoginPath;
+}
+
+/** One probe: the PATH it read, and whether a second flag spelling is worth trying. */
+interface LoginProbe {
+	path?: string;
+	retry: boolean;
+}
+
+async function readLoginPath(flags: string): Promise<LoginProbe> {
+	const argv = loginShellArgv(undefined, flags);
+	if (!argv) {
+		return { retry: false };
+	}
+	try {
+		const result = await runProcess(argv, homedir(), LOGIN_TIMEOUT_MS);
+		// A shell that ran but printed no path may not accept the flag spelling; one that hung is
+		// not asked again — the retry would spend another timeout on the same broken rc.
+		return { path: parseLoginPath(result.stdout), retry: !result.timedOut };
+	} catch {
+		return { retry: false };
+	}
+}
+
+/**
+ * Resolves the login shell's PATH once. A failure is not sticky forever: a broken rc fixed during
+ * the session gets another chance after the cooldown. It never rejects — a command runs with the
+ * inherited PATH rather than fail because the user's shell was slow.
+ */
+export function warmLoginPath(): Promise<string | undefined> {
+	if (resolvedLoginPath) {
+		return Promise.resolve(resolvedLoginPath);
+	}
+	if (loginWarm) {
+		return loginWarm;
+	}
+	if (loginFailedAt && Date.now() - loginFailedAt < LOGIN_RETRY_MS) {
+		return Promise.resolve(undefined);
+	}
+	loginWarm = (async () => {
+		try {
+			const first = await readLoginPath('-lic');
+			const found = first.path ?? (first.retry ? (await readLoginPath('-lc')).path : undefined);
+			if (!found) {
+				loginFailedAt = Date.now();
+				return undefined;
+			}
+			resolvedLoginPath = found;
+			loginFailedAt = 0;
+			return found;
+		} finally {
+			loginWarm = undefined;
+		}
+	})();
+	return loginWarm;
+}
+
+/** The PATH a child should search: the login shell's, then whatever the host added. */
+function effectivePath(): string {
+	return mergePath(loginPathNow(), process.env.PATH) ?? process.env.PATH ?? '';
+}
+
 /** `.git` is never writable by agent tools, even inside the workspace. */
 export function isProtectedPath(workspace: string, target: string): boolean {
 	const rel = relative(resolve(workspace), resolve(target)).replaceAll('\\', '/');
 	return rel === '.git' || rel.startsWith('.git/');
 }
 
-/** The environment a sandboxed child gets: secrets stripped, unless the user turned that off. */
-function sandboxEnv(options: SandboxOptions): NodeJS.ProcessEnv | undefined {
-	return options.filterEnv === false ? undefined : sanitizedEnv();
+/**
+ * The environment a sandboxed child gets: secrets stripped unless the user turned that off, the
+ * login shell's PATH in front of the host's, and TMPDIR pinned to the private /tmp bwrap mounts.
+ * `undefined` keeps Node's inherit-everything behaviour when there is nothing to adjust.
+ */
+export function sandboxEnv(
+	options: SandboxOptions,
+	kind: SandboxKind = sandboxKind(),
+	loginPath: string | undefined = loginPathNow(),
+): NodeJS.ProcessEnv | undefined {
+	const wantsTmp = kind === 'bwrap' && options.mode !== 'direct';
+	if (options.filterEnv === false && !loginPath && !wantsTmp) {
+		return undefined;
+	}
+	const env = options.filterEnv === false ? { ...process.env } : sanitizedEnv();
+	if (loginPath) {
+		env.PATH = mergePath(loginPath, env.PATH);
+	}
+	if (wantsTmp) {
+		env.TMPDIR = '/tmp';
+	}
+	return env;
 }
 
 /** The argv that runs `argv` under the OS sandbox, or `null` when there is none to apply. */
@@ -239,9 +393,19 @@ function sandboxArgv(argv: string[], cwd: string, options: SandboxOptions): stri
 	return null;
 }
 
+/** A bare command name searches the same PATH the child gets, not the host's alone. */
+function executable(file: string, env: NodeJS.ProcessEnv | undefined): string {
+	if (platform() === 'win32' || file.includes('/')) {
+		return file;
+	}
+	return findExecutable(file, env?.PATH ?? process.env.PATH) ?? file;
+}
+
 export async function runCommand(argv: string[], cwd: string, options: SandboxOptions): Promise<RunResult> {
+	await warmLoginPath();
+	const env = sandboxEnv(options);
 	const sandboxed = sandboxArgv(argv, cwd, options) ?? argv;
-	return runProcess(sandboxed, cwd, options.timeoutMs, sandboxEnv(options));
+	return runProcess(sandboxed, cwd, options.timeoutMs, env);
 }
 
 /**
@@ -249,13 +413,14 @@ export async function runCommand(argv: string[], cwd: string, options: SandboxOp
  * output as it arrives instead of waiting for it to exit.
  */
 export function spawnSandboxed(argv: string[], cwd: string, options: SandboxOptions): ChildProcess {
+	const env = sandboxEnv(options);
 	const sandboxed = sandboxArgv(argv, cwd, options) ?? argv;
-	return spawn(sandboxed[0]!, sandboxed.slice(1), { cwd, env: sandboxEnv(options), stdio: ['ignore', 'pipe', 'pipe'] });
+	return spawn(executable(sandboxed[0]!, env), sandboxed.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 export function runProcess(argv: string[], cwd: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<RunResult> {
 	return new Promise((resolvePromise, reject) => {
-		const child = spawn(argv[0]!, argv.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+		const child = spawn(executable(argv[0]!, env), argv.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
 		let stdout = '';
 		let stderr = '';
 		let timedOut = false;
@@ -316,28 +481,38 @@ function quote(path: string): string {
 }
 
 export function buildSbpl(workspace: string, options: SandboxOptions): string {
+	const root = canonicalPath(workspace);
 	const lines = ['(version 1)', '(allow default)'];
-	if (!options.writable) {
+	// SBPL is last-match-wins: an allow for the workspace does not close writes outside it, so the
+	// deny has to come first. Without it, confineWrite did nothing on macOS.
+	if (!options.writable || options.confinement.write) {
 		lines.push('(deny file-write*)');
-	} else if (options.confinement.write) {
-		lines.push(`(allow file-write* (subpath "${quote(workspace)}"))`);
+	}
+	if (options.writable && options.confinement.write) {
+		lines.push(`(allow file-write* (subpath "${quote(root)}"))`);
 	}
 	lines.push('(allow file-write* (literal "/dev/null"))');
 	if (options.confinement.read) {
 		// Reads start closed, so the boundary is the allow-list below rather than a deny-list.
 		lines.push('(deny file-read*)');
 	}
-	lines.push(`(allow file-read* (subpath "${quote(workspace)}"))`);
+	lines.push(`(allow file-read* (subpath "${quote(root)}"))`);
 	for (const denyPath of options.denyReadPaths) {
 		if (denyPath && denyPath.includes('/')) {
-			lines.push(`(deny file-read* (subpath "${quote(denyPath)}"))`);
-			lines.push(`(deny file-write* (subpath "${quote(denyPath)}"))`);
+			const denied = canonicalPath(denyPath);
+			lines.push(`(deny file-read* (subpath "${quote(denied)}"))`);
+			lines.push(`(deny file-write* (subpath "${quote(denied)}"))`);
 		}
 	}
 	for (const prefix of [...SYSTEM_READ_PREFIXES, process.execPath.replace(/\/[^/]+$/, '')]) {
 		if (prefix) {
 			lines.push(`(allow file-read* (subpath "${quote(prefix)}"))`);
 		}
+	}
+	// The shell still has to be able to read the binaries it runs: the login PATH can point at
+	// directories the system prefixes above do not cover.
+	for (const entry of effectivePath().split(delimiter).filter(Boolean)) {
+		lines.push(`(allow file-read* (subpath "${quote(entry)}"))`);
 	}
 	if (options.network) {
 		lines.push('(allow network*)');
@@ -352,6 +527,9 @@ export function buildSbpl(workspace: string, options: SandboxOptions): string {
 const SYSTEM_BIND_PREFIXES = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/opt', '/System', '/opt/homebrew'];
 
 export function bwrapArguments(bwrap: string, command: string[], cwd: string, options: SandboxOptions): string[] {
+	const root = canonicalPath(cwd);
+	const tmpRoot = canonicalPath('/tmp');
+	const openWrite = options.writable && !options.confinement.write;
 	const args = [bwrap, '--die-with-parent'];
 	if (!options.network) {
 		args.push('--unshare-net');
@@ -359,7 +537,6 @@ export function bwrapArguments(bwrap: string, command: string[], cwd: string, op
 	// The base view goes on first: a later mount wins over an earlier one for the same destination,
 	// so everything below it — the special mounts and the workspace — is what the shell actually sees.
 	const openRead = !options.confinement.read;
-	const openWrite = !options.confinement.write && options.writable;
 	if (openWrite) {
 		args.push('--bind', '/', '/');
 	} else if (openRead) {
@@ -370,19 +547,27 @@ export function bwrapArguments(bwrap: string, command: string[], cwd: string, op
 				args.push('--ro-bind', prefix, prefix);
 			}
 		}
-		for (const entry of (process.env.PATH ?? '').split(':').filter(Boolean)) {
+		for (const entry of effectivePath().split(delimiter).filter(Boolean)) {
 			if (existsSync(entry)) {
 				args.push('--ro-bind', entry, entry);
 			}
 		}
 	}
-	args.push('--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp');
-	args.push(options.writable ? '--bind' : '--ro-bind', cwd, cwd);
+	args.push('--proc', '/proc', '--dev', '/dev');
+	// A private /tmp, never the host's: writable only when writes are open, otherwise remounted
+	// read-only after the workspace bind, so a workspace under /tmp keeps its own writable mount.
+	if (root !== tmpRoot) {
+		args.push('--tmpfs', '/tmp');
+	}
+	args.push(options.writable ? '--bind' : '--ro-bind', root, root);
 	for (const denyPath of options.denyReadPaths) {
 		if (existsSync(denyPath)) {
-			args.push('--ro-bind', '/dev/null', denyPath);
+			args.push('--ro-bind', '/dev/null', canonicalPath(denyPath));
 		}
 	}
-	args.push('--chdir', cwd, '--', ...command);
+	if (root !== tmpRoot && !openWrite) {
+		args.push('--remount-ro', '/tmp');
+	}
+	args.push('--chdir', root, '--', ...command);
 	return args;
 }

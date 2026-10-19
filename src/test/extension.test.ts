@@ -2,7 +2,7 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -24,7 +24,7 @@ import {
 } from '../lib/prompt';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, ModelRequestError, toOpenAiMessages } from '../lib/openai';
 import { MAX_IMAGE_BYTES, asImagePart, estimateImageTokens, sniffImage } from '../lib/images';
-import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, PathEscapeError, resolveInside, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
+import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, loginShellArgv, mergePath, parseLoginPath, PathEscapeError, resolveInside, sandboxEnv, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
 import { applyHunk, diffLines, editForHunk, revertHunk } from '../lib/line-diff';
 import { listEndpointModels, openAiChat } from '../lib/openai';
@@ -37,12 +37,13 @@ import { ChangedOutsideError, DirtyEditorError } from '../lib/journal';
 import { Checkpoints, checkpointsPlugin } from '../services/checkpoints';
 import { parseDiffs } from '../lib/diff';
 import { fsTools } from '../tools/fs';
+import { vscodeTools } from '../tools/vscode';
 import { agentTools } from '../tools/misc';
 import { hostStorage, type Host } from '../services/host';
 import { Context, Service, type Plugin } from 'cordis';
 import { markForRestore, rebaseMarks, isSummaryMessage, SessionStore, unusedChat, type Mark } from '../services/sessions';
 import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
-import { CONFIG_KEYS, DEFAULT_CONTEXT_WINDOW, profileKeyEnvs } from '../services/settings';
+import { AGENT_KEYS, CONFIG_KEYS, DEFAULT_CONTEXT_WINDOW, normalizeAgentPatch, profileKeyEnvs } from '../services/settings';
 import { toolset } from '../services/tools';
 import { promptText } from '../services/agent';
 import { PLUGINS, ROWS } from '../app';
@@ -490,6 +491,9 @@ suite('Comonad domain', () => {
 
 			const writes = buildSbpl('/ws', { ...base, confinement: { read: false, write: true } });
 			assert.ok(writes.includes('(allow file-write* (subpath "/ws"))'));
+			// SBPL is last-match-wins, so the allow alone confines nothing: the deny must come first.
+			assert.ok(writes.includes('(deny file-write*)'));
+			assert.ok(writes.indexOf('(deny file-write*)') < writes.indexOf('(allow file-write* (subpath "/ws"))'));
 			assert.ok(!writes.includes('(deny file-read*)'));
 
 			const both = buildSbpl('/ws', { ...base, confinement: { read: true, write: true } });
@@ -507,18 +511,157 @@ suite('Comonad domain', () => {
 			assert.ok(!confined.includes('--ro-bind / /'));
 			assert.ok(confined.includes('--ro-bind /usr /usr'));
 			assert.ok(confined.includes('--bind /ws /ws'));
+			// Writes confined: /tmp is private and read-only, remounted only after the workspace bind.
+			assert.ok(confined.includes('--tmpfs /tmp'));
+			assert.ok(confined.includes('--remount-ro /tmp'));
+			assert.ok(confined.indexOf('--bind /ws /ws') < confined.indexOf('--remount-ro /tmp'));
 
 			const reads = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, confinement: { read: false, write: true } }).join(' ');
 			assert.ok(reads.includes('--ro-bind / /'));
 			assert.ok(reads.includes('--bind /ws /ws'));
+			assert.ok(reads.includes('--remount-ro /tmp'));
 
 			const open = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, confinement: { read: false, write: false } }).join(' ');
 			assert.ok(open.includes('--bind / /'));
+			// Writes open: /tmp is a private, writable tmpfs.
+			assert.ok(open.includes('--tmpfs /tmp'));
+			assert.ok(!open.includes('--remount-ro /tmp'));
 
 			const readonly = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, writable: false }).join(' ');
 			assert.ok(readonly.includes('--ro-bind /ws /ws'));
 			assert.ok(!readonly.includes('--bind /ws /ws'));
+			assert.ok(readonly.includes('--remount-ro /tmp'));
+
+			// A workspace at /tmp is supplied by its own bind; a tmpfs would shadow (or a remount
+			// would undo) that bind.
+			const atTmp = bwrapArguments('bwrap', ['ls'], '/tmp', base).join(' ');
+			assert.ok(!atTmp.includes('--tmpfs /tmp'));
+			assert.ok(!atTmp.includes('--remount-ro /tmp'));
 		});
+
+		test('the sandbox mounts the real workspace path, not a symlink', () => {
+			const base: SandboxOptions = { writable: true, confinement: { read: false, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+			const root = mkdtempSync(join(tmpdir(), 'comonad-link-'));
+			try {
+				const real = join(root, 'real');
+				mkdirSync(real);
+				const link = join(root, 'link');
+				symlinkSync(real, link);
+				const canonical = realpathSync(real);
+				// bwrap cannot create a mount point below a symlinked component; give it the real path.
+				const bwrap = bwrapArguments('bwrap', ['ls'], link, base).join(' ');
+				assert.ok(bwrap.includes(`--bind ${canonical} ${canonical}`), 'bwrap gets the canonical path');
+				assert.ok(bwrap.includes(`--chdir ${canonical}`), 'and runs there');
+				assert.ok(!bwrap.includes(link), 'the symlink never reaches bwrap');
+				// Seatbelt checks the path the kernel resolves, so the profile names it too.
+				assert.ok(buildSbpl(link, base).includes(`(subpath "${canonical}")`), 'seatbelt profiles the real path');
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+	});
+
+	test('the login-shell PATH is read between sentinels and merged without duplicates', () => {
+		assert.strictEqual(
+			parseLoginPath('a banner\n<<<COMONAD_PATH_START>>>/opt/bin:/usr/bin\n<<<COMONAD_PATH_END>>>\nnoise'),
+			'/opt/bin:/usr/bin',
+		);
+		assert.strictEqual(parseLoginPath('no markers here'), undefined);
+		assert.strictEqual(parseLoginPath('<<<COMONAD_PATH_START>>><<<COMONAD_PATH_END>>>'), undefined);
+		assert.strictEqual(mergePath('/opt/bin:/usr/bin:/opt/bin', '/usr/bin:/bin'), '/opt/bin:/usr/bin:/bin');
+		assert.strictEqual(mergePath(undefined, undefined), undefined);
+		if (process.platform !== 'win32') {
+			const argv = loginShellArgv('/bin/zsh');
+			assert.ok(argv);
+			assert.strictEqual(argv[0], '/bin/zsh');
+			assert.strictEqual(argv[1], '-lic');
+			assert.ok(argv[2]?.includes('printenv PATH'));
+			assert.strictEqual(loginShellArgv('/bin/zsh', '-lc')?.[1], '-lc');
+		}
+	});
+
+	test('the sandbox environment pins TMPDIR for bwrap and merges the login PATH', () => {
+		const base: SandboxOptions = { writable: true, confinement: { read: false, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+		const env = sandboxEnv(base, 'bwrap', '/login/bin:/usr/bin');
+		assert.strictEqual(env?.TMPDIR, '/tmp');
+		assert.ok(env?.PATH?.startsWith('/login/bin:/usr/bin'), env?.PATH);
+		const mac = sandboxEnv(base, 'macos', '/login/bin');
+		assert.strictEqual(mac?.TMPDIR, process.env.TMPDIR, 'macOS keeps the host temp directory');
+		const direct = sandboxEnv({ ...base, mode: 'direct' }, 'bwrap', '/login/bin');
+		assert.strictEqual(direct?.TMPDIR, process.env.TMPDIR, 'a direct command is not inside bwrap');
+		assert.strictEqual(sandboxEnv({ ...base, filterEnv: false }, 'macos', undefined), undefined, 'inheriting is preserved');
+	});
+
+	test('an agent-tab patch writes only the keys it carries', () => {
+		const current = {
+			model: 'auto',
+			mode: 'sw' as const,
+			approval: 'manual' as const,
+			displayForm: 'rendered' as const,
+			contextForm: 'rendered' as const,
+			network: false,
+			workingDirectory: '/ws',
+			commandTimeout: 60,
+			planDirectory: '',
+			denyReadPaths: ['.env'],
+			confineRead: false,
+			confineWrite: true,
+			allowUnsandboxedShell: false,
+		};
+		assert.deepStrictEqual(normalizeAgentPatch({ confineWrite: false }, current), { confineWrite: false });
+		assert.deepStrictEqual(
+			normalizeAgentPatch(
+				{ workingDirectory: '  /next  ', commandTimeout: '45', denyReadPaths: 'a\n b ', mode: 'nonsense', network: true },
+				current,
+			),
+			{ workingDirectory: '/next', commandTimeout: 45, denyReadPaths: ['a', 'b'], mode: 'sw', network: true },
+		);
+		assert.deepStrictEqual(
+			[...AGENT_KEYS],
+			[
+				'model',
+				'mode',
+				'approval',
+				'displayForm',
+				'contextForm',
+				'network',
+				'workingDirectory',
+				'commandTimeout',
+				'planDirectory',
+				'denyReadPaths',
+				'confineRead',
+				'confineWrite',
+				'allowUnsandboxedShell',
+			],
+		);
+	});
+
+	test('a path escape from apply_edits is an error, not a success', async () => {
+		const kernel = await createTestKernel({ config: { confineWrite: true } });
+		try {
+			await kernel.ctx.plugin(vscodeTools);
+			const outcome = await kernel.ctx.tools.invoke(call('apply_edits', { path: '../escape.txt', edits: [] }), directToolContext(kernel));
+			assert.strictEqual(outcome.isError, true);
+			assert.match(outcome.content, /escapes the workspace/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('apply_patch reports a missing old text as an error', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(fsTools);
+			writeFileSync(join(kernel.host.workspace(), 'patch.txt'), 'content\n');
+			const outcome = await kernel.ctx.tools.invoke(
+				call('apply_patch', { path: 'patch.txt', old: 'missing', new: 'replacement' }),
+				directToolContext(kernel),
+			);
+			assert.strictEqual(outcome.isError, true);
+			assert.match(outcome.content, /old text was not found/);
+		} finally {
+			await kernel.dispose();
+		}
 	});
 
 	test('unified diff parsing yields hunks', () => {
@@ -701,18 +844,37 @@ suite('Comonad domain', () => {
 	});
 
 	test('sensitive environment variables are filtered', () => {
+		const prior = { ssh: process.env.SSH_AUTH_SOCK, author: process.env.GIT_AUTHOR_NAME };
 		process.env.COMONAD_TEST_API_KEY = 'sk-x';
 		process.env.COMONAD_TEST_TOKEN = 't';
+		process.env.COMONAD_TEST_SECRET = 's';
 		process.env.COMONAD_TEST_PLAIN = 'visible';
+		process.env.SSH_AUTH_SOCK = '/tmp/agent.sock';
+		process.env.GIT_AUTHOR_NAME = 'A User';
 		try {
 			const env = sanitizedEnv();
 			assert.ok(!('COMONAD_TEST_API_KEY' in env));
 			assert.ok(!('COMONAD_TEST_TOKEN' in env));
+			assert.ok(!('COMONAD_TEST_SECRET' in env));
 			assert.strictEqual(env.COMONAD_TEST_PLAIN, 'visible');
+			// "auth" inside a name is not a secret: git and ssh need both of these.
+			assert.strictEqual(env.SSH_AUTH_SOCK, '/tmp/agent.sock');
+			assert.strictEqual(env.GIT_AUTHOR_NAME, 'A User');
 		} finally {
 			delete process.env.COMONAD_TEST_API_KEY;
 			delete process.env.COMONAD_TEST_TOKEN;
+			delete process.env.COMONAD_TEST_SECRET;
 			delete process.env.COMONAD_TEST_PLAIN;
+			if (prior.ssh === undefined) {
+				delete process.env.SSH_AUTH_SOCK;
+			} else {
+				process.env.SSH_AUTH_SOCK = prior.ssh;
+			}
+			if (prior.author === undefined) {
+				delete process.env.GIT_AUTHOR_NAME;
+			} else {
+				process.env.GIT_AUTHOR_NAME = prior.author;
+			}
 		}
 	});
 
@@ -4893,7 +5055,7 @@ suite('Tavern content', () => {
 				ask: async () => [],
 				todos: () => [],
 				tasks: {
-					start: () => ({ id: 't', command: '', cwd: '', startedAt: 0, output: '', exitCode: null }),
+					start: async () => ({ id: 't', command: '', cwd: '', startedAt: 0, output: '', exitCode: null }),
 					read: () => '',
 					stop: () => false,
 					list: () => [],
@@ -7728,7 +7890,7 @@ function directToolContext(kernel: Awaited<ReturnType<typeof createTestKernel>>)
 		ask: async () => [],
 		todos: () => [],
 		tasks: {
-			start: () => ({ id: 't', command: '', cwd: '', startedAt: 0, output: '', exitCode: null }),
+			start: async () => ({ id: 't', command: '', cwd: '', startedAt: 0, output: '', exitCode: null }),
 			read: () => '',
 			stop: () => false,
 			list: () => [],

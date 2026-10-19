@@ -133,7 +133,7 @@ export interface BackgroundTask {
 }
 
 export interface TaskApi {
-	start(command: string, cwd: string, options: SandboxOptions): BackgroundTask;
+	start(command: string, cwd: string, options: SandboxOptions): Promise<BackgroundTask>;
 	read(id: string, tail?: number): string;
 	stop(id: string): boolean;
 	list(): BackgroundTask[];

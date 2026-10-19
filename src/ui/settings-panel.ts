@@ -15,7 +15,7 @@ import { type ContextForm } from '../lib/prompt';
 import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
-import { profileKeyEnvs, type Profile } from '../services/settings';
+import { asList, normalizeAgentPatch, profileKeyEnvs, type Profile } from '../services/settings';
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
@@ -35,6 +35,8 @@ const CONTEXT_LABELS: Record<ContextForm, string> = {
 
 export function settingsPanel(ctx: Context): void {
 	let panel: vscode.WebviewPanel | null = null;
+	// One message at a time: a live Agent save and a Save click must not interleave their writes.
+	let queue: Promise<void> = Promise.resolve();
 	// The plugin list is the host's own service, and the host is what mounts this row: it is read when
 	// the tab is drawn rather than captured here, because at this moment it does not exist yet.
 	const pluginHost = () => ctx.get('plugins');
@@ -149,14 +151,6 @@ export function settingsPanel(ctx: Context): void {
 		}
 	};
 
-	const asList = (value: unknown): string[] =>
-		Array.isArray(value)
-			? value.map((item) => String(item).trim()).filter(Boolean)
-			: String(value ?? '')
-					.split('\n')
-					.map((line) => line.trim())
-					.filter(Boolean);
-
 	/** The rule lists from the Rules tab, rejecting anything `parseRule` cannot read. */
 	const ruleList = (value: unknown, key: string): string[] => {
 		const rules = asList(value);
@@ -238,46 +232,51 @@ export function settingsPanel(ctx: Context): void {
 		void vscode.window.showInformationMessage(`Comonad: ${id} is uninstalled.`);
 	};
 
-	/** What the panes own of a save: every controller is asked for the keys it is responsible for. */
+	/**
+	 * What the panes own of a save: every controller is asked for the keys it is responsible for,
+	 * and only the keys this patch actually carries are kept. The controller fills the rest from the
+	 * current settings, but writing those back would persist defaults on every unrelated save.
+	 */
 	const panePatch = (patch: Record<string, unknown>): Record<string, unknown> => {
 		const owned: Record<string, unknown> = {};
 		for (const controller of controllers.values()) {
-			Object.assign(owned, controller.patch?.(patch) ?? {});
+			for (const [key, value] of Object.entries(controller.patch?.(patch) ?? {})) {
+				if (Object.hasOwn(patch, key)) {
+					owned[key] = value;
+				}
+			}
 		}
 		return owned;
 	};
 
-	/** Writes what the panel sent, validating the graph first. */
+	/**
+	 * Writes what the panel sent. Only keys the patch actually carries are touched: the Agent tab
+	 * sends one control at a time, the Save button sends the draft tabs, and neither may write a
+	 * stale value for something it does not own. The graph is validated only when it is in the
+	 * patch, so a live safety toggle cannot fail on an unfinished Graph draft.
+	 */
 	const apply = async (patch: Record<string, unknown>): Promise<void> => {
 		const current = ctx.settings.get();
-		const graph = String(patch.graph ?? current.graph).trim();
-		const info = inspectGraph(graph);
-		if (info.error) {
-			throw new Error(`graph: ${info.error}`);
+		const next: Record<string, unknown> = { ...normalizeAgentPatch(patch, current) };
+		if (Object.hasOwn(patch, 'graph')) {
+			const graph = String(patch.graph ?? '').trim();
+			const info = inspectGraph(graph);
+			if (info.error) {
+				throw new Error(`graph: ${info.error}`);
+			}
+			next.graph = graph === DEFAULT_GRAPH_SOURCE.trim() ? '' : graph;
 		}
-		const next: Record<string, unknown> = {
-			mode: patch.mode ?? current.mode,
-			approval: patch.approval ?? current.approval,
-			network: Boolean(patch.network),
-			workingDirectory: String(patch.workingDirectory ?? '').trim(),
-			commandTimeout: Math.max(1, Number(patch.commandTimeout) || current.commandTimeout),
-			planDirectory: String(patch.planDirectory ?? '').trim(),
-			denyReadPaths: asList(patch.denyReadPaths),
-			confineRead: Boolean(patch.confineRead),
-			confineWrite: Boolean(patch.confineWrite),
-			allowUnsandboxedShell: Boolean(patch.allowUnsandboxedShell),
-			maxSteps: Math.max(1, Number(patch.maxSteps) || current.maxSteps),
-			displayForm: patch.displayForm ?? current.displayForm,
-			contextForm: patch.contextForm ?? current.contextForm,
-			model: String(patch.model ?? current.model),
-			graph: graph === DEFAULT_GRAPH_SOURCE.trim() ? '' : graph,
-			permissions: {
+		if (Object.hasOwn(patch, 'maxSteps')) {
+			next.maxSteps = Math.max(1, Number(patch.maxSteps) || current.maxSteps);
+		}
+		if (Object.hasOwn(patch, 'allow') || Object.hasOwn(patch, 'ask') || Object.hasOwn(patch, 'deny')) {
+			next.permissions = {
 				allow: ruleList(patch.allow ?? current.permissions.allow, 'allow'),
 				ask: ruleList(patch.ask ?? current.permissions.ask, 'ask'),
 				deny: ruleList(patch.deny ?? current.permissions.deny, 'deny'),
-			},
-			...panePatch(patch),
-		};
+			};
+		}
+		Object.assign(next, panePatch(patch));
 		// Pane keys live outside the kernel's `Config`, so what is compared against is the raw store
 		// under the defaulted view: a kernel key reads exactly as it always did, and a pane's own key
 		// against the value the host reports for it.
@@ -545,6 +544,11 @@ export function settingsPanel(ctx: Context): void {
 					await apply((message.config ?? {}) as Record<string, unknown>);
 					void panel.webview.postMessage({ type: 'ok', message: 'Saved.' });
 					break;
+				case 'saveAgent':
+					// No `ok`: that reply clears the Save button's dirty ring, which belongs to the
+					// draft tabs. The state push after the write redraws the Agent controls.
+					await apply((message.config ?? {}) as Record<string, unknown>);
+					break;
 				case 'configureModel':
 					await vscode.commands.executeCommand('comonad.configureModel');
 					break;
@@ -654,7 +658,9 @@ export function settingsPanel(ctx: Context): void {
 			panel = null;
 		});
 		panel.webview.html = settingsDocument(panel.webview, extensionUri, tab ?? 'agent', paneList());
-		panel.webview.onDidReceiveMessage((message: Record<string, unknown>) => void handle(message));
+		panel.webview.onDidReceiveMessage((message: Record<string, unknown>) => {
+			queue = queue.then(() => handle(message));
+		});
 		pushState();
 	};
 
@@ -941,7 +947,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every row of the tree, and what b
         <p class="hint">When no sandbox is available, shell commands run unconfined without the extra confirmation. Tools named <code>*_unsandboxed</code> still ask.</p>
         <label class="check"><input type="checkbox" id="allow-unsandboxed" data-key="allowUnsandboxedShell" /></label>
       </div>
-      <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm.</p>
+      <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
       <p class="group-note" id="environment-note"></p>
     </div>
   </section>

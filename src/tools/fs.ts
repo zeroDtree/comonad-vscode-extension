@@ -213,7 +213,7 @@ export const fsTools = toolset([
 			const target = await writable(ctx, path);
 			const text = await readFile(target, 'utf8');
 			if (!text.includes(old)) {
-				return `Error: the old text was not found in ${path}`;
+				throw new Error(`the old text was not found in ${path}`);
 			}
 			const write = () => writeFile(target, text.replace(old, replacement));
 			if (ctx.edit) {

@@ -6,6 +6,16 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **The workspace boundary is now what the panel says it is.** The settings panel's Agent tab saves
+  every control immediately (the other tabs keep their Save button), so a safety toggle can no longer
+  display a value the agent is not using. macOS write confinement now emits the missing
+  `(deny file-write*)` — it previously allowed writes anywhere — and a write-confined or read-only
+  bwrap shell gets an empty, read-only private `/tmp` instead of a writable one. `apply_edits`
+  refusals and a missing `apply_patch` match are reported as tool errors rather than successful
+  calls, sensitive-environment filtering no longer strips `SSH_AUTH_SOCK` or `GIT_AUTHOR_*`, and
+  shell commands resolve the login shell's `PATH`, so `git`, `rg` and pytest are found on Remote-SSH
+  hosts.
+
 - **Remote SSH, WSL and Dev Containers are first-class.** The extension now declares
   `extensionKind: ["workspace"]`, so the agent, its file and shell tools, MCP servers, hooks and
   checkpoints run on the remote where the workspace is. API keys stay in VS Code's client-side

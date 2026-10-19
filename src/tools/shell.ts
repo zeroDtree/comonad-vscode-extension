@@ -119,7 +119,7 @@ export const shellTools = toolset([
 		parameters: objectSchema({ command: { type: 'string' } }, ['command']),
 		async execute(args, ctx) {
 			const { command } = args as { command: string };
-			const task = ctx.tasks.start(command, ctx.policy.workingDirectory, shellOptions(ctx, true));
+			const task = await ctx.tasks.start(command, ctx.policy.workingDirectory, shellOptions(ctx, true));
 			return `started task ${task.id}: ${command}`;
 		},
 	},

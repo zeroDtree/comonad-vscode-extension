@@ -223,6 +223,91 @@ export const CONFIG_KEYS = [
 	'toolPrompts',
 ] as const satisfies readonly (keyof Config)[];
 
+/** The Agent tab's keys: the settings a turn's policy is built from. */
+export const AGENT_KEYS = [
+	'model',
+	'mode',
+	'approval',
+	'displayForm',
+	'contextForm',
+	'network',
+	'workingDirectory',
+	'commandTimeout',
+	'planDirectory',
+	'denyReadPaths',
+	'confineRead',
+	'confineWrite',
+	'allowUnsandboxedShell',
+] as const satisfies readonly (keyof Config)[];
+
+/** A textarea (one entry per line) or an array, trimmed and without blanks. */
+export function asList(value: unknown): string[] {
+	return Array.isArray(value)
+		? value.map((item) => String(item).trim()).filter(Boolean)
+		: String(value ?? '')
+				.split('\n')
+				.map((line) => line.trim())
+				.filter(Boolean);
+}
+
+/**
+ * The Agent tab's share of a settings patch. Only the keys the patch actually carries are returned:
+ * a partial patch must never turn an absent `network` into `false`. This is what lets the webview
+ * save a single control and leaves every other setting exactly as it was.
+ */
+export type AgentConfig = Pick<Config, (typeof AGENT_KEYS)[number]>;
+
+export function normalizeAgentPatch(patch: Record<string, unknown>, current: AgentConfig): Partial<Config> {
+	const next: Partial<Config> = {};
+	const has = (key: keyof Config): boolean => Object.hasOwn(patch, key);
+	const form = (key: 'displayForm' | 'contextForm'): ContextForm => {
+		const value = patch[key];
+		return typeof value === 'string' && (CONTEXT_FORMS as readonly string[]).includes(value)
+			? (value as ContextForm)
+			: current[key];
+	};
+	if (has('model')) {
+		next.model = typeof patch.model === 'string' ? patch.model : current.model;
+	}
+	if (has('mode')) {
+		next.mode = asWorkMode(patch.mode, current.mode);
+	}
+	if (has('approval')) {
+		next.approval = asApproval(patch.approval, current.approval);
+	}
+	if (has('displayForm')) {
+		next.displayForm = form('displayForm');
+	}
+	if (has('contextForm')) {
+		next.contextForm = form('contextForm');
+	}
+	if (has('network')) {
+		next.network = Boolean(patch.network);
+	}
+	if (has('workingDirectory')) {
+		next.workingDirectory = String(patch.workingDirectory ?? '').trim();
+	}
+	if (has('commandTimeout')) {
+		next.commandTimeout = Math.max(1, Number(patch.commandTimeout) || current.commandTimeout);
+	}
+	if (has('planDirectory')) {
+		next.planDirectory = String(patch.planDirectory ?? '').trim();
+	}
+	if (has('denyReadPaths')) {
+		next.denyReadPaths = asList(patch.denyReadPaths);
+	}
+	if (has('confineRead')) {
+		next.confineRead = Boolean(patch.confineRead);
+	}
+	if (has('confineWrite')) {
+		next.confineWrite = Boolean(patch.confineWrite);
+	}
+	if (has('allowUnsandboxedShell')) {
+		next.allowUnsandboxedShell = Boolean(patch.allowUnsandboxedShell);
+	}
+	return next;
+}
+
 declare module 'cordis' {
 	interface Context {
 		settings: Settings;

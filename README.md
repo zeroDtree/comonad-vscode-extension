@@ -421,7 +421,11 @@ directory, and **`comonad.confineRead`** (off by default) does the same for read
 file tools and to the shell sandbox, so a path the model names and a path a command touches meet the
 same rule; turning read confinement on also hides files like `~/.gitconfig` and `~/.npmrc` from `git`
 and `npm`. The file tools resolve symlinks before checking containment, so a link inside the workspace
-cannot reach outside it. Network is off by default, and `.env` files are denied to both reading and
+cannot reach outside it. A write-confined or read-only shell gets a private, empty, read-only `/tmp`,
+so builds that need host temp space run with write confinement off. The settings panel's **Agent** tab
+saves each control as it changes; because a running turn keeps the policy it started with, a change
+takes effect from the next message. Shell commands and tasks search the login shell's `PATH` as well
+as the extension host's. Network is off by default, and `.env` files are denied to both reading and
 writing. Commands shaped like `rm -rf`, `sudo`, `curl | sh`, `git push --force` and friends always
 prompt, even under accept policies. Secrets (API keys, tokens, passwords) are stripped from the
 environment of commands and tasks unless `comonad.filterSensitiveEnv` is disabled, and `.git` is

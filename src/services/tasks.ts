@@ -2,7 +2,7 @@
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Service, type Context } from 'cordis';
-import { shellArgv, spawnSandboxed, type SandboxOptions } from '../lib/sandbox';
+import { shellArgv, spawnSandboxed, warmLoginPath, type SandboxOptions } from '../lib/sandbox';
 import type { BackgroundTask, TaskApi } from '../lib/types';
 
 const MAX_OUTPUT = 400_000;
@@ -28,7 +28,8 @@ export class Tasks extends Service implements TaskApi {
 		ctx.effect(() => () => this.killAll());
 	}
 
-	start(command: string, cwd: string, options: SandboxOptions): BackgroundTask {
+	async start(command: string, cwd: string, options: SandboxOptions): Promise<BackgroundTask> {
+		await warmLoginPath();
 		const id = randomUUID().slice(0, 8);
 		const task: BackgroundTask = { id, command, cwd, startedAt: Date.now(), output: '', exitCode: null };
 		const child = spawnSandboxed(shellArgv(command), cwd, options);

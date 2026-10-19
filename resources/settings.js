@@ -331,7 +331,8 @@
 		}
 	}
 
-	function renderForm() {
+	/** The Agent tab is live: it saves itself, so it is redrawn on every state push. */
+	function renderAgentForm() {
 		const config = state.config;
 		fillSelect($('mode'), state.labels.modes, config.mode);
 		fillSelect($('approval'), state.labels.approvals, config.approval);
@@ -359,34 +360,26 @@
 			const sandbox = environment.sandbox === 'none' ? 'no OS sandbox' : `sandbox: ${environment.sandbox}`;
 			note.textContent = `${where} · ${sandbox}${environment.sandbox === 'none' ? ' — shell commands ask before running unless allowed above.' : ''}`;
 		}
+	}
+
+	/** The tabs the Save button owns: a state push leaves them alone while the form is dirty. */
+	function renderDraftForm() {
+		const config = state.config;
 		put($('steps'), String(config.maxSteps));
 		const rules = config.permissions || {};
 		put($('rules-allow'), (rules.allow || []).join('\n'));
 		put($('rules-ask'), (rules.ask || []).join('\n'));
 		put($('rules-deny'), (rules.deny || []).join('\n'));
 		put($('graph'), config.graph);
-		clearDirty();
 	}
 
 	/** One rule (or path) per line. */
 	const lines = (node) => node.value.split('\n').map((line) => line.trim()).filter(Boolean);
 
-	function collect() {
+	/** What the Save button owns: the draft tabs. The Agent tab saves itself. */
+	function collectDraft() {
 		const config = {
-			mode: $('mode').value,
-			approval: $('approval').value,
-			network: $('network').checked,
-			workingDirectory: $('wd').value.trim(),
-			commandTimeout: Number($('timeout').value) || 0,
-			planDirectory: $('plans').value.trim(),
-			denyReadPaths: lines($('deny')),
-			confineRead: $('confine-read').checked,
-			confineWrite: $('confine-write').checked,
-			allowUnsandboxedShell: $('allow-unsandboxed').checked,
 			maxSteps: Number($('steps').value) || 0,
-			displayForm: $('display').value,
-			contextForm: $('context').value,
-			model: $('model').value,
 			graph: $('graph').value,
 			allow: lines($('rules-allow')),
 			ask: lines($('rules-ask')),
@@ -401,16 +394,32 @@
 		return config;
 	}
 
+	/** The Agent tab's live save: one control, one key, no draft. */
+	function saveAgent(key, value) {
+		post({ type: 'saveAgent', config: { [key]: value } });
+	}
+
 	for (const node of document.querySelectorAll('[data-key]')) {
-		const changed = () => {
+		const live = node.closest('section[data-pane="agent"]') !== null;
+		const draft = () => {
 			markDirty();
 			if (node.dataset.key === 'graph') {
 				scheduleValidate();
 				schedulePreview();
 			}
 		};
-		node.addEventListener('input', changed);
-		node.addEventListener('change', changed);
+		node.addEventListener('input', () => {
+			if (!live) {
+				draft();
+			}
+		});
+		node.addEventListener('change', () => {
+			if (live) {
+				saveAgent(node.dataset.key, node.type === 'checkbox' ? node.checked : node.value);
+			} else {
+				draft();
+			}
+		});
 	}
 
 	$('model-refresh').addEventListener('click', () => post({ type: 'refresh' }));
@@ -431,7 +440,7 @@
 	});
 
 	function save() {
-		const payload = { type: 'save', config: collect() };
+		const payload = { type: 'save', config: collectDraft() };
 		const mcp = $('mcp').value;
 		if (mcp !== mcpSeen) {
 			try {
@@ -521,7 +530,7 @@
 			dirsEl.append(
 				entry(item.name, item.path, () => {
 					wdInput.value = item.path;
-					markDirty();
+					saveAgent('workingDirectory', item.path);
 					askDirs(item.path);
 				}),
 			);
@@ -539,7 +548,7 @@
 		use.textContent = 'Use this directory';
 		use.addEventListener('click', () => {
 			wdInput.value = dirs.path || wdInput.value;
-			markDirty();
+			saveAgent('workingDirectory', wdInput.value);
 			closeDirs();
 		});
 		dirsEl.append(use);
@@ -1213,21 +1222,20 @@
 		if (!state) {
 			return;
 		}
+		// The draft tabs keep the user's edits; while clean, their widgets stay in step with the
+		// state even when another tab is showing — Save reads them without redrawing first.
+		if (!dirty || !ready) {
+			renderDraftForm();
+		}
 		switch (activeTab) {
 			case 'agent':
-				// A form the user is in the middle of keeps its edits; the next push after the save
-				// is the one that redraws it.
-				if (!dirty || !ready) {
-					renderForm();
-				}
+				// Live controls are always safe to redraw: a focused field is left alone by put().
+				renderAgentForm();
 				break;
 			case 'graph':
 				renderGraphInfo();
 				break;
 			case 'rules':
-				if (!dirty || !ready) {
-					renderForm();
-				}
 				break;
 			case 'mcp':
 			case 'tools':

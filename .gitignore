@@ -10,3 +10,4 @@ packages/comonad-plugin-math/resources/math.js
 packages/comonad-plugin-math/resources/math.js.map
 packages/comonad-plugin-math/resources/katex.min.css
 packages/comonad-plugin-math/resources/fonts/
+.comonad/

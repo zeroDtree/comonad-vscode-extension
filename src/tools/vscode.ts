@@ -126,26 +126,23 @@ export const vscodeTools = toolset([
 				path: string;
 				edits: { startLine: number; startColumn: number; endLine: number; endColumn: number; text: string; old?: string }[];
 			};
-			let target: string;
-			try {
-				target = await guardPath(ctx.policy.workingDirectory, path, {
-					access: 'write',
-					confinement: ctx.policy.confinement,
-					denyReadPaths: ctx.policy.denyReadPaths,
-				});
-			} catch (error) {
-				return `Error: ${error instanceof Error ? error.message : String(error)}`;
-			}
+			// Throwing is how a tool reports failure: dispatch marks a thrown error `isError`, while a
+			// returned "Error: …" string is a successful call with unfortunate text.
+			const target = await guardPath(ctx.policy.workingDirectory, path, {
+				access: 'write',
+				confinement: ctx.policy.confinement,
+				denyReadPaths: ctx.policy.denyReadPaths,
+			});
 			const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
 			// Unsaved text is the user's, not the agent's: refuse rather than save it to disk.
 			if (document.isDirty) {
-				return `Error: ${path} has unsaved changes in the editor — save it first, then retry`;
+				throw new Error(`${path} has unsaved changes in the editor — save it first, then retry`);
 			}
 			const edit = new vscode.WorkspaceEdit();
 			for (const change of edits) {
 				const range = new vscode.Range(change.startLine - 1, change.startColumn - 1, change.endLine - 1, change.endColumn - 1);
 				if (change.old !== undefined && document.getText(range) !== change.old) {
-					return `Error: expected text does not match ${path} at line ${change.startLine}`;
+					throw new Error(`expected text does not match ${path} at line ${change.startLine}`);
 				}
 				edit.replace(document.uri, range, change.text);
 			}
@@ -159,14 +156,10 @@ export const vscodeTools = toolset([
 				// The edit is applied in the buffer; save it so the disk and the journal agree.
 				await document.save();
 			};
-			try {
-				if (ctx.edit) {
-					await ctx.edit(target, write);
-				} else {
-					await write();
-				}
-			} catch (error) {
-				return `Error: ${error instanceof Error ? error.message : String(error)}`;
+			if (ctx.edit) {
+				await ctx.edit(target, write);
+			} else {
+				await write();
 			}
 			return `applied ${edits.length} edit(s) to ${path}`;
 		},
