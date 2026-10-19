@@ -465,7 +465,9 @@ export function chatPanel(ctx: Context): void {
 				type: 'approval',
 				id,
 				reason: request.reason,
-				calls: request.calls.map((call) => ({ name: call.name, args: preview(call.arguments, 300) })),
+				// The approval is a decision about the whole call, so the prompt keeps the argument
+				// that matters (a shell command, a path) in full; 8k is a display bound, not a summary.
+				calls: request.calls.map((call) => ({ name: call.name, args: preview(call.arguments, 8_000) })),
 			});
 		});
 	});

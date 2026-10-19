@@ -427,7 +427,11 @@ saves each control as it changes; because a running turn keeps the policy it sta
 takes effect from the next message. Shell commands and tasks search the login shell's `PATH` as well
 as the extension host's. Network is off by default, and `.env` files are denied to both reading and
 writing. Commands shaped like `rm -rf`, `sudo`, `curl | sh`, `git push --force` and friends always
-prompt, even under accept policies. Secrets (API keys, tokens, passwords) are stripped from the
+prompt, even under accept policies. Cleaning up its own work is the exception: a literal,
+non-recursive `rm` whose every target is inside the workspace and recorded as created by this session
+— file-tool writes, plus `touch`, `>`/`>>` and `tee` from its shell commands, verified by a
+before/after check — runs without that prompt. Recursive deletes, globs, variables, symlinked parents
+that resolve outside the workspace, and anything the scanner cannot prove still prompt. Secrets (API keys, tokens, passwords) are stripped from the
 environment of commands and tasks unless `comonad.filterSensitiveEnv` is disabled, and `.git` is
 never writable by file tools. When no OS sandbox is available — Windows, or a Linux/macOS host
 without `bwrap`/`sandbox-exec` — every shell call asks for confirmation even under an accept policy.

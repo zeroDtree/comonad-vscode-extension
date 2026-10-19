@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
 import { asImagePart } from '../lib/images';
 import { WORKSPACE_BOUNDARY, asApproval, asWorkMode } from '../lib/policy';
@@ -113,6 +113,13 @@ export interface Session {
 	turnIndex: number;
 	cursor: Cursor | null;
 	marks: Mark[];
+	/**
+	 * Workspace-relative forward-slash paths this chat created: file-tool writes and conservatively
+	 * parsed shell creations. Bound to `createdRoot`; a different workspace discards them.
+	 */
+	created?: string[];
+	/** The resolved workspace `created` paths are relative to. */
+	createdRoot?: string;
 	usage: SessionUsage;
 	/**
 	 * The prompt size the provider reported for the last request, in tokens. It is the only exact
@@ -153,6 +160,38 @@ export function safeId(id: string): string {
 		throw new Error(`invalid session id: ${id}`);
 	}
 	return id;
+}
+
+/** Provenance is an approval shortcut, not a record: bound it so a long session stays a JSON file. */
+export const MAX_CREATED_PATHS = 4096;
+export const MAX_CREATED_PATH_LENGTH = 4096;
+
+/** Normalise one untrusted created path; `undefined` when it must not be trusted. */
+export function createdPath(value: unknown): string | undefined {
+	if (typeof value !== 'string') {
+		return undefined;
+	}
+	const path = value.replaceAll('\\', '/').replace(/^\.\//, '');
+	if (!path || path.length > MAX_CREATED_PATH_LENGTH || path.startsWith('/') || path.includes('\0')) {
+		return undefined;
+	}
+	const parts = path.split('/');
+	if (parts.some((part) => part === '' || part === '.' || part === '..')) {
+		return undefined;
+	}
+	return path;
+}
+
+/** The provenance the gate may use for this workspace: empty when the root does not match. */
+export function createdInWorkspace(session: Session, workspace: string): ReadonlySet<string> {
+	if (!workspace.trim() || session.createdRoot !== resolve(workspace)) {
+		return new Set();
+	}
+	return new Set(session.created ?? []);
+}
+
+function uniqueCreated(paths: string[]): string[] {
+	return [...new Set(paths)];
 }
 
 const UNTITLED = 'New session';
@@ -248,6 +287,7 @@ export class SessionStore {
 			turnIndex: 0,
 			cursor: null,
 			marks: [],
+			created: [],
 			usage: emptyUsage(),
 		};
 	}
@@ -310,6 +350,9 @@ export class SessionStore {
 			updatedAt: now,
 			cursor: null,
 			marks: [],
+			// A fork is a new chat: the files its parent created are not its own to delete unreviewed.
+			created: [],
+			createdRoot: undefined,
 			usage: emptyUsage(),
 		};
 		this.save(session);
@@ -358,6 +401,12 @@ export class SessionStore {
 			cursor: session.cursor ?? null,
 			// Marks from the shadow-snapshot era have no journal to restore to, so they are dropped.
 			marks: (session.marks ?? []).filter((mark) => typeof mark.entryCount === 'number'),
+			created: uniqueCreated(
+				(Array.isArray(session.created) ? session.created : [])
+					.map(createdPath)
+					.filter((path): path is string => path !== undefined),
+			).slice(-MAX_CREATED_PATHS),
+			createdRoot: typeof session.createdRoot === 'string' ? session.createdRoot : undefined,
 			usage: session.usage ?? emptyUsage(),
 			instructions: session.instructions ?? [],
 		};

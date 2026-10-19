@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { mkdir, open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
 import { MAX_IMAGE_BYTES, looksLikeImagePath, sniffImage } from '../lib/images';
@@ -189,6 +189,14 @@ export const fsTools = toolset([
 		async execute(args, ctx) {
 			const { path, content } = args as { path: string; content: string };
 			const target = await writable(ctx, path);
+			// A file that did not exist before this write is the session's own: the gate may later let
+			// it be removed without asking. Any error other than ENOENT means "assume it existed".
+			let existed = true;
+			try {
+				await lstat(target);
+			} catch (error) {
+				existed = (error as NodeJS.ErrnoException).code !== 'ENOENT';
+			}
 			const write = async () => {
 				await mkdir(dirname(target), { recursive: true });
 				await writeFile(target, content);
@@ -197,6 +205,9 @@ export const fsTools = toolset([
 				await ctx.edit(target, write);
 			} else {
 				await write();
+			}
+			if (!existed) {
+				ctx.noteCreated?.(target);
 			}
 			return `wrote ${path} (${content.length} chars)`;
 		},

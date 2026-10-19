@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { randomUUID } from 'node:crypto';
-import { relative, resolve, sep } from 'node:path';
+import { lstatSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { Service, type Context } from 'cordis';
 import type { TurnRef } from '../lib/types';
 import {
@@ -29,7 +30,8 @@ import {
 import { instructionBody, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, type Completion } from '../lib/openai';
-import { gateCalls, MODE_LABELS, suggestAllowRule } from '../lib/policy';
+import { callTarget, gateCalls, MODE_LABELS, suggestAllowRule } from '../lib/policy';
+import { creationTargets, rmTargets } from '../lib/shell';
 import {
 	COMONAD_BLOCK,
 	COMONAD_BLOCKS,
@@ -59,7 +61,18 @@ import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/uti
 import { agentIndex, agentLines, allowedToolsFor, skillLines } from './catalog';
 import type { JournalApi } from '../lib/journal';
 import { DEFAULT_CONTEXT_WINDOW } from './settings';
-import { canRewrite, isSummaryMessage, summaryMessage, threadTitle, type Session, type SessionSummary, type SwipeCarry } from './sessions';
+import {
+	canRewrite,
+	createdInWorkspace,
+	createdPath,
+	isSummaryMessage,
+	MAX_CREATED_PATHS,
+	summaryMessage,
+	threadTitle,
+	type Session,
+	type SessionSummary,
+	type SwipeCarry,
+} from './sessions';
 import type { ComposeResult, TavernApi } from 'comonad-plugin-tavern';
 
 /** Room held back for the summary a compaction adds, so the fit it plans survives its own output. */
@@ -223,6 +236,8 @@ export class Agent extends Service {
 	private readonly imagesOff = new Map<string, string>();
 	/** The live Session object per running turn; usage is mutated here and saved by finish(). */
 	private readonly live = new Map<string, Session>();
+	/** `${sessionId}\0${root}` already merged from the journal in this process. */
+	private readonly createdBackfilled = new Set<string>();
 	private readonly todoLists = new Map<string, TodoItem[]>();
 	private readonly pending = new Map<string, string[]>();
 	private readonly greeted = new Set<string>();
@@ -967,6 +982,7 @@ export class Agent extends Service {
 		signal?.addEventListener('abort', link, { once: true });
 		this.stops.set(session.id, abort);
 		this.live.set(session.id, session);
+		await this.backfillCreated(session, state.policy.workingDirectory);
 		let cursor = resume;
 		let stopRetried = false;
 		this.ctx.emit('agent/turn-start', state.ref, state.transcript[state.transcript.length - 1]?.content ?? '');
@@ -1288,9 +1304,47 @@ export class Agent extends Service {
 				state.gateReason = `tool ${off.name} is switched off in Prompts`;
 				return 'reject';
 			}
+			const workspace = state.policy.workingDirectory;
+			const created = new Set(this.createdInSession(state));
+			if (process.platform !== 'win32' && workspace.trim()) {
+				// A command that creates and removes the same literal path is safe when the path is
+				// absent now: the creation form will make it, and rm cannot delete a user's file.
+				for (const call of state.toolCalls) {
+					const tool = this.ctx.tools.get(call.name);
+					if (!tool || (tool.capability !== 'shell_ro' && tool.capability !== 'shell_rw')) {
+						continue;
+					}
+					const command = callTarget(call, tool);
+					const creates = new Set(creationTargets(command, workspace));
+					if (!creates.size) {
+						continue;
+					}
+					for (const target of rmTargets(command, workspace)) {
+						if (!creates.has(target)) {
+							continue;
+						}
+						let exists = true;
+						try {
+							lstatSync(target);
+						} catch (error) {
+							exists = (error as NodeJS.ErrnoException).code !== 'ENOENT';
+						}
+						if (exists) {
+							continue;
+						}
+						const clean = createdPath(relative(resolve(workspace), target).split(sep).join('/'));
+						if (clean) {
+							created.add(clean);
+						}
+					}
+				}
+			}
 			const gate = gateCalls(state.toolCalls, (name) => this.ctx.tools.get(name), state.policy, this.ctx.settings.rules(), {
 				sandbox: this.ctx.host.sandboxKind(),
 				allowUnsandboxedShell: this.ctx.settings.get().allowUnsandboxedShell,
+				created: process.platform === 'win32' ? undefined : created,
+				deletionStaysInside:
+					process.platform === 'win32' ? undefined : (target) => insideRealWorkspace(workspace, target),
 			});
 			state.gateReason = gate.reason;
 			if (gate.decision === 'allow') {
@@ -1359,6 +1413,8 @@ export class Agent extends Service {
 			spawnAgent: (request) => this.spawnAgent(state, request),
 			sensitiveEnv: this.ctx.settings.get().filterSensitiveEnv,
 			edit: (path, write) => this.journalEdit(state, path, write),
+			noteCreated: (path) => this.noteCreated(state, path),
+			noteDeleted: (path) => this.noteDeleted(state, path),
 		};
 	}
 
@@ -1409,6 +1465,94 @@ export class Agent extends Service {
 			// The write already happened; a failure to record it is said, not thrown back over it.
 			this.ctx.log.message(`journal: the write landed but was not recorded (${describe(error)})`);
 		}
+	}
+
+	/**
+	 * Merges the journal's creations into the session once per session and workspace. The journal is
+	 * read even when new writes are paused: its entries record what earlier file tools created, and
+	 * the gate may use them to let the agent remove its own files without an approval.
+	 */
+	private async backfillCreated(session: Session, workspace: string): Promise<void> {
+		if (!workspace.trim()) {
+			return;
+		}
+		const root = resolve(workspace);
+		const key = `${session.id}\0${root}`;
+		if (session.createdRoot !== root) {
+			session.created = [];
+			session.createdRoot = root;
+			this.createdBackfilled.delete(key);
+		}
+		if (this.createdBackfilled.has(key)) {
+			return;
+		}
+		const journal = this.ctx.get('checkpoints') as JournalApi | undefined;
+		if (journal) {
+			try {
+				const created = new Set(session.created ?? []);
+				for (const entry of await journal.entries(workspace, session.id)) {
+					if (entry.before !== null) {
+						continue;
+					}
+					const path = createdPath(entry.path);
+					if (path) {
+						created.add(path);
+					}
+				}
+				session.created = [...created].slice(-MAX_CREATED_PATHS);
+				this.ctx.sessions.save(session);
+			} catch (error) {
+				this.ctx.log.message(`created: journal backfill failed (${describe(error)})`);
+				return;
+			}
+		}
+		this.createdBackfilled.add(key);
+	}
+
+	/** The provenance the gate may use, bound to the workspace it was recorded under. */
+	private createdInSession(state: RunState): ReadonlySet<string> {
+		const session = this.live.get(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		return session ? createdInWorkspace(session, state.policy.workingDirectory) : new Set();
+	}
+
+	private noteCreated(state: RunState, path: string): void {
+		const session = this.live.get(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const workspace = state.policy.workingDirectory;
+		if (!session || !workspace.trim()) {
+			return;
+		}
+		const root = resolve(workspace);
+		if (session.createdRoot !== root) {
+			session.created = [];
+			session.createdRoot = root;
+		}
+		const clean = createdPath(relative(root, resolve(path)).split(sep).join('/'));
+		if (!clean) {
+			return;
+		}
+		const created = new Set(session.created ?? []);
+		if (created.has(clean)) {
+			return;
+		}
+		created.add(clean);
+		session.created = [...created].slice(-MAX_CREATED_PATHS);
+	}
+
+	private noteDeleted(state: RunState, path: string): void {
+		const session = this.live.get(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const workspace = state.policy.workingDirectory;
+		if (!session || !workspace.trim()) {
+			return;
+		}
+		const root = resolve(workspace);
+		if (session.createdRoot !== root) {
+			return;
+		}
+		const clean = createdPath(relative(root, resolve(path)).split(sep).join('/'));
+		if (!clean) {
+			return;
+		}
+		session.created = (session.created ?? []).filter((entry) => entry !== clean && !entry.startsWith(`${clean}/`));
 	}
 
 	private async spawnAgent(parent: RunState, request: AgentSpawnRequest): Promise<string> {
@@ -1704,6 +1848,21 @@ function isInside(workspace: string, path: string): boolean {
 	const target = resolve(path);
 	const rel = relative(root, target);
 	return rel !== '' && !rel.startsWith('..') && !rel.startsWith(sep);
+}
+
+/**
+ * Whether deleting `target` provably stays inside the workspace. The parent is resolved, because
+ * `rm link/file` follows the link; the target itself is not, because rm unlinks a symlink itself.
+ */
+function insideRealWorkspace(workspace: string, target: string): boolean {
+	try {
+		const root = realpathSync(workspace);
+		const parent = realpathSync(dirname(target));
+		const rel = relative(root, parent);
+		return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+	} catch {
+		return false;
+	}
 }
 
 function parseArguments(text: string): unknown {

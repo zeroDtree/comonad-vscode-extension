@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { SandboxKind } from './sandbox';
+import { RM_PATTERN, deletionTargetsAreOwned } from './shell';
 import type { Approval, Capability, Confinement, SessionPolicy, ToolCall, ToolSpec, WorkMode } from './types';
 
 /** Modes, capability gating, permission rules and the approval gate. Pure module. */
@@ -195,12 +196,17 @@ export function globToRegExp(pattern: string): RegExp {
 }
 
 /**
- * The host the gate runs on. This is an environment fact, not session policy: it is read afresh
- * every turn, so a resumed session and a subagent see the machine they are actually on.
+ * What the gate is told about the host and the session: the sandbox it will run on, the setting that
+ * opts out of the no-sandbox prompt, and — when known — the files this session created plus a
+ * symlink-aware containment check for deletions. All of it is read afresh every turn.
  */
 export interface GateEnvironment {
 	sandbox: SandboxKind;
 	allowUnsandboxedShell: boolean;
+	/** Workspace-relative paths this session created; absent disables the rm exemption. */
+	created?: ReadonlySet<string>;
+	/** Symlink-aware containment for a deletion target; production always supplies one. */
+	deletionStaysInside?: (absoluteTarget: string) => boolean;
 }
 
 export interface GateResult {
@@ -248,7 +254,13 @@ export function gateCalls(
 		const shell = tool.capability === 'shell_ro' || tool.capability === 'shell_rw';
 		const unconfined = !env.allowUnsandboxedShell && env.sandbox === 'none' && shell;
 		const outside = tool.name.endsWith('_unsandboxed');
-		const dangerous = isDangerous(call, tool);
+		const dangerous = isDangerous(
+			call,
+			tool,
+			env.created
+				? { workspace: policy.workingDirectory, created: env.created, inside: env.deletionStaysInside }
+				: undefined,
+		);
 		if (rules.ask.some((rule) => ruleMatches(rule, call, tool))) {
 			confirm ||= `ask rule matches ${call.name}`;
 			escalated ||= unconfined || outside || dangerous;
@@ -402,7 +414,6 @@ export function gateFlow(): string {
 }
 
 const DANGEROUS_PATTERNS: RegExp[] = [
-	/\brm\s+(-[a-z-]*[rf][a-z-]*\s+)+\S/i,
 	/\bsudo\b|\bdoas\b/,
 	/\bchmod\s+(-R\s+)?(777|a\+rwx)\b/i,
 	/\b(curl|wget)\b[^\n|]*\|\s*(ba|z|da|k)?sh\b/i,
@@ -415,12 +426,23 @@ const DANGEROUS_PATTERNS: RegExp[] = [
 	/\bdiskutil\b[^\n]*\berase\b/i,
 ];
 
+export interface DeletionContext {
+	workspace: string;
+	created: ReadonlySet<string>;
+	inside?: (absoluteTarget: string) => boolean;
+}
+
 /** Flags shell commands that deserve an explicit prompt even when the policy auto-approves. */
-export function isDangerous(call: ToolCall, tool: ToolSpec | undefined): boolean {
+export function isDangerous(call: ToolCall, tool: ToolSpec | undefined, deletion?: DeletionContext): boolean {
 	if (tool?.capability !== 'shell_ro' && tool?.capability !== 'shell_rw') {
 		return false;
 	}
 	const command = callTarget(call, tool);
+	// An rm the session can prove is deleting its own files is not a reason to stop. Everything the
+	// scanner cannot prove stays dangerous.
+	if (RM_PATTERN.test(command) && !(deletion && deletionTargetsAreOwned(command, deletion.workspace, deletion.created, deletion.inside))) {
+		return true;
+	}
 	return DANGEROUS_PATTERNS.some((pattern) => pattern.test(command));
 }
 

@@ -862,18 +862,26 @@ details.thinking summary::before {
 
 .msg.approval ul.calls li {
 	display: flex;
+	align-items: flex-start;
 	gap: 8px;
 	padding: 3px 0;
 	border-bottom: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
 }
 
+/* The whole command, not one clipped line: the prompt is the place to read it before allowing it. */
+.msg.approval ul.calls li b {
+	flex: none;
+}
+
 .msg.approval ul.calls li span {
+	flex: 1;
+	min-width: 0;
 	opacity: 0.75;
 	font-family: var(--vscode-editor-font-family, monospace);
 	font-size: 11px;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	user-select: text;
 }
 
 .msg.approval .actions {

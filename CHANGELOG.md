@@ -6,6 +6,14 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **Cleaning up its own scratch files no longer asks.** The dangerous-command prompt now exempts a
+  literal, non-recursive `rm` when every target is inside the workspace and was created by this
+  session: file-tool writes and provable shell creations (`touch`, `>`/`>>`, `tee`, checked before and
+  after the command). Recursive deletes, globs, variables, symlinked parents that resolve outside the
+  workspace, and any command the POSIX-sh scanner cannot prove still prompt. Provenance lives on the
+  session (bounded), is backfilled from the checkpoint journal, is reset when the workspace changes,
+  and is not inherited by a fork.
+
 - **The workspace boundary is now what the panel says it is.** The settings panel's Agent tab saves
   every control immediately (the other tabs keep their Save button), so a safety toggle can no longer
   display a value the agent is not using. macOS write confinement now emits the missing

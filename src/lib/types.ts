@@ -171,6 +171,10 @@ export interface ToolContext {
 	 * tool writes through this, so the per-file checkpoints see each change the agent makes.
 	 */
 	edit?(path: string, write: () => Promise<void>): Promise<void>;
+	/** Note that this session created the absolute workspace file `path`. */
+	noteCreated?(path: string): void;
+	/** Note that `path` no longer exists, dropping it and its descendants from provenance. */
+	noteDeleted?(path: string): void;
 }
 
 export interface JsonSchema {

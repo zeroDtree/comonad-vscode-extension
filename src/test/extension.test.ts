@@ -4,13 +4,13 @@ import * as vscode from 'vscode';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { isLoopbackBase } from '../lib/endpoint';
 import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule, WORKSPACE_BOUNDARY, type GateEnvironment } from '../lib/policy';
-import { sandboxStatus } from '../tools/shell';
+import { sandboxStatus, shellTools } from '../tools/shell';
 import type { SandboxKind } from '../lib/sandbox';
 import {
 	applyContextForm,
@@ -41,7 +41,17 @@ import { vscodeTools } from '../tools/vscode';
 import { agentTools } from '../tools/misc';
 import { hostStorage, type Host } from '../services/host';
 import { Context, Service, type Plugin } from 'cordis';
-import { markForRestore, rebaseMarks, isSummaryMessage, SessionStore, unusedChat, type Mark } from '../services/sessions';
+import {
+	createdInWorkspace,
+	createdPath,
+	isSummaryMessage,
+	markForRestore,
+	rebaseMarks,
+	SessionStore,
+	unusedChat,
+	type Mark,
+} from '../services/sessions';
+import { creationTargets, deletionTargetsAreOwned, rmInvocations } from '../lib/shell';
 import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
 import { AGENT_KEYS, CONFIG_KEYS, DEFAULT_CONTEXT_WINDOW, normalizeAgentPatch, profileKeyEnvs } from '../services/settings';
 import { toolset } from '../services/tools';
@@ -136,7 +146,12 @@ const unsandboxedTool: ToolSpec = { ...readTool, name: 'run_shell_unsandboxed', 
 const lookup = (name: string): ToolSpec | undefined =>
 	[readTool, writeTool, shellTool, readonlyShellTool, unsandboxedTool].find((tool) => tool.name === name);
 
-const gateEnv = (sandbox: SandboxKind = 'bwrap', allowUnsandboxedShell = false): GateEnvironment => ({ sandbox, allowUnsandboxedShell });
+const gateEnv = (
+	sandbox: SandboxKind = 'bwrap',
+	allowUnsandboxedShell = false,
+	created?: ReadonlySet<string>,
+	deletionStaysInside?: (target: string) => boolean,
+): GateEnvironment => ({ sandbox, allowUnsandboxedShell, created, deletionStaysInside });
 
 const policy = (patch: Partial<SessionPolicy> = {}): SessionPolicy => ({
 	workMode: 'sw',
@@ -770,6 +785,300 @@ suite('Comonad domain', () => {
 		assert.ok(isDangerous(call('run_shell', { command: 'git reset --hard HEAD~1' }), shellTool));
 		assert.ok(!isDangerous(call('run_shell', { command: 'npm run build' }), shellTool));
 		assert.ok(!isDangerous(call('write_file', { path: 'a.ts' }), writeTool));
+	});
+
+	test('an rm that only removes files this session created is not dangerous', () => {
+		const created = new Set(['a.txt', 'sub/b.txt']);
+		const deletion = { workspace: '/ws', created };
+		assert.ok(!isDangerous(call('run_shell', { command: 'rm -f a.txt' }), shellTool, deletion));
+		assert.ok(!isDangerous(call('run_shell', { command: 'rm --force a.txt' }), shellTool, deletion));
+		assert.ok(!isDangerous(call('run_shell', { command: 'rm -f ./a.txt' }), shellTool, deletion));
+		assert.ok(!isDangerous(call('run_shell', { command: 'rm -f sub/../a.txt' }), shellTool, deletion));
+		assert.ok(!isDangerous(call('run_shell', { command: 'cd sub && rm -f b.txt' }), shellTool, deletion));
+		assert.ok(!isDangerous(call('run_shell', { command: 'echo x; rm -f a.txt' }), shellTool, deletion));
+		// Anything the scanner cannot prove stays dangerous, and other patterns still fire.
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -f b.txt' }), shellTool, deletion));
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -rf a.txt' }), shellTool, deletion));
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -f a.txt b.txt' }), shellTool, deletion));
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -f ../a.txt' }), shellTool, deletion));
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -f *.txt' }), shellTool, deletion));
+		assert.ok(isDangerous(call('run_shell', { command: "sh -c 'rm -rf /' ; rm -f a.txt" }), shellTool, deletion));
+		assert.ok(isDangerous(call('run_shell', { command: 'echo rm -f a.txt; rm -f a.txt' }), shellTool, deletion));
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -f a.txt; sudo true' }), shellTool, deletion));
+		// A cwd change we do not model must not let a later target resolve against the wrong base.
+		for (const command of [
+			'if true; then cd sub; fi; rm -f a.txt',
+			"eval 'cd sub'; rm -f a.txt",
+			'pushd sub && rm -f a.txt',
+			'builtin cd sub && rm -f a.txt',
+			'command rm -f a.txt',
+			'time cd sub; rm -f a.txt',
+		]) {
+			assert.ok(isDangerous(call('run_shell', { command }), shellTool, deletion), command);
+		}
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -f a.txt' }), shellTool), 'no provenance keeps the old behaviour');
+		// The real-path check is part of ownership, not an optional hint.
+		assert.ok(deletionTargetsAreOwned('rm -f a.txt', '/ws', created));
+		assert.ok(deletionTargetsAreOwned('rm -f a.txt', '/ws', created, () => true));
+		assert.ok(!deletionTargetsAreOwned('rm -f a.txt', '/ws', created, () => false));
+		assert.ok(!deletionTargetsAreOwned('rm -f a.txt', '', created));
+	});
+
+	test('the shell scanner names only provable creation targets', () => {
+		const ws = '/ws';
+		assert.deepStrictEqual(creationTargets('touch a b', ws), ['/ws/a', '/ws/b']);
+		assert.deepStrictEqual(creationTargets("touch 'a b'", ws), ['/ws/a b']);
+		assert.deepStrictEqual(creationTargets('echo hi > out', ws), ['/ws/out']);
+		assert.deepStrictEqual(creationTargets('echo hi >> out 2>err', ws), ['/ws/out', '/ws/err']);
+		assert.deepStrictEqual(creationTargets('cat x | tee -a log', ws), ['/ws/log']);
+		assert.deepStrictEqual(creationTargets('cd sub && touch a', ws), ['/ws/sub/a']);
+		for (const command of [
+			'touch -c a',
+			'touch $FILE',
+			'touch *.txt',
+			'touch ~/a',
+			'FOO=1 touch a',
+			"sh -c 'touch a'",
+			'touch /tmp/a',
+			'echo x > /dev/null',
+			'cat <<EOF > a',
+		]) {
+			assert.deepStrictEqual(creationTargets(command, ws), [], command);
+		}
+		assert.deepStrictEqual(
+			rmInvocations('rm -f a; rm -rf b')?.map((invocation) => [invocation.recursive, invocation.operands]),
+			[
+				[false, ['a']],
+				[true, ['b']],
+			],
+		);
+		assert.deepStrictEqual(rmInvocations('sudo rm -f a'), [], 'rm must be in command position');
+		assert.strictEqual(rmInvocations('rm -f $A'), undefined, 'a non-literal operand is ambiguous');
+
+		// The compound probe that prompted this feature: quotes, redirections, fd duplication,
+		// pipelines, &&/|| and a touch+rm of the same path in one command.
+		const probe = [
+			"rm -f .comonad/_perm_probe.txt; echo '--- read outside:';",
+			'ls /etc/hostname >/dev/null 2>&1 && echo OK_read_etc;',
+			'ls /data/zengls188_data/crossdocked | head -3;',
+			"echo '--- write via data symlink:'; touch data/_probe 2>&1 && echo OK_data || echo FAIL_data;",
+			"echo '--- .git writable:'; touch .git/_probe && echo OK_git && rm -f .git/_probe;",
+			"echo '--- net:'; curl -sS -m 5 -o /dev/null -w '%{http_code}\\n' https://example.com 2>&1",
+		].join(' ');
+		const probeCreated = new Set(['.comonad/_perm_probe.txt', '.git/_probe']);
+		assert.ok(deletionTargetsAreOwned(probe, '/ws', probeCreated), probe);
+		assert.deepStrictEqual(creationTargets(probe, '/ws').sort(), ['/ws/.git/_probe', '/ws/data/_probe']);
+		assert.ok(!deletionTargetsAreOwned(probe, '/ws', new Set(['.comonad/_perm_probe.txt'])), 'every rm target must be owned');
+	});
+
+	test('the gate allows an owned rm under accept-all', () => {
+		const rules = { allow: [], ask: [], deny: [] };
+		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
+		const created = new Set(['a.txt']);
+		assert.strictEqual(
+			gateCalls([call('run_shell', { command: 'rm -f a.txt' })], lookup, accepted, rules, gateEnv('bwrap', false, created)).decision,
+			'allow',
+		);
+		const unowned = gateCalls([call('run_shell', { command: 'rm -f b.txt' })], lookup, accepted, rules, gateEnv('bwrap', false, created));
+		assert.strictEqual(unowned.decision, 'confirm');
+		assert.strictEqual(unowned.escalated, true);
+		assert.match(unowned.reason, /dangerous/);
+		// An ask rule still asks; an owned rm no longer makes that confirmation escalated.
+		const asked = gateCalls(
+			[call('run_shell', { command: 'rm -f a.txt' })],
+			lookup,
+			accepted,
+			parseRules({ ask: ['run_shell'] }),
+			gateEnv('bwrap', false, created),
+		);
+		assert.strictEqual(asked.decision, 'confirm');
+		assert.strictEqual(asked.escalated, undefined);
+	});
+
+	test('created paths are sanitized, persisted, and bound to their workspace', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'comonad-created-'));
+		try {
+			const store = new SessionStore(dir);
+			const session = store.build(policy());
+			session.created = ['a.txt', 'a.txt', 'a/b.txt'];
+			session.createdRoot = resolve('/ws');
+			store.save(session);
+			const loaded = store.get(session.id);
+			assert.ok(loaded);
+			assert.deepStrictEqual(loaded.created, ['a.txt', 'a/b.txt']);
+			assert.strictEqual(loaded.createdRoot, resolve('/ws'));
+			assert.deepStrictEqual([...createdInWorkspace(loaded, '/ws')], ['a.txt', 'a/b.txt']);
+			assert.strictEqual(createdInWorkspace(loaded, '/other').size, 0);
+			const fork = store.copy(loaded);
+			assert.deepStrictEqual(fork.created, []);
+			assert.strictEqual(fork.createdRoot, undefined);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+		assert.strictEqual(createdPath('a\\b'), 'a/b');
+		assert.strictEqual(createdPath('./a'), 'a');
+		for (const bad of ['', '/a', '../a', 'a/../b', 'a//b', 'a\0b', 42 as unknown]) {
+			assert.strictEqual(createdPath(bad), undefined, String(bad));
+		}
+	});
+
+	test('write_file notes only the files it creates', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(fsTools);
+			const spec = kernel.ctx.tools.get('write_file');
+			assert.ok(spec);
+			const workspace = kernel.host.workspace();
+			const noted: string[] = [];
+			writeFileSync(join(workspace, 'existing.txt'), 'old');
+			const context = { ...directToolContext(kernel), noteCreated: (path: string) => noted.push(path) };
+			await spec.execute({ path: 'new.txt', content: 'new' }, context);
+			await spec.execute({ path: 'existing.txt', content: 'old' }, context);
+			assert.deepStrictEqual(noted, [join(workspace, 'new.txt')]);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('run_shell notes files its command creates and proves removals', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(shellTools);
+			const spec = kernel.ctx.tools.get('run_shell');
+			assert.ok(spec);
+			const workspace = kernel.host.workspace();
+			const noted: string[] = [];
+			const removed: string[] = [];
+			const context = {
+				...directToolContext(kernel),
+				noteCreated: (path: string) => noted.push(path),
+				noteDeleted: (path: string) => removed.push(path),
+			};
+			const made = await spec.execute({ command: 'touch made.txt && echo hi > out.txt' }, context);
+			assert.match(String(made), /exit_code: 0/, String(made));
+			assert.deepStrictEqual(noted.map((path) => basename(path)).sort(), ['made.txt', 'out.txt']);
+			writeFileSync(join(workspace, 'user.txt'), 'x');
+			await spec.execute({ command: 'rm -f made.txt user.txt' }, context);
+			assert.deepStrictEqual(removed.map((path) => basename(path)).sort(), ['made.txt', 'user.txt']);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a later turn removes a file an earlier turn created without asking', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept', checkpoints: false } });
+		try {
+			await kernel.ctx.plugin(fsTools);
+			let ran = 0;
+			kernel.ctx.tools.register({
+				name: 'run_shell',
+				description: 'test shell',
+				capability: 'shell_rw',
+				needsNetwork: false,
+				needsWorkspace: true,
+				parameters: objectSchema({ command: { type: 'string' } }, ['command']),
+				execute: async () => {
+					ran += 1;
+					return 'ok';
+				},
+			});
+			let calls = 0;
+			kernel.ctx.llm.use({
+				name: 'created-delete',
+				async chat(request) {
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'tool') {
+						return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					calls += 1;
+					const toolCall: ToolCall =
+						calls === 1
+							? { id: 'w', name: 'write_file', arguments: JSON.stringify({ path: 'made.txt', content: 'probe' }) }
+							: { id: 'r', name: 'run_shell', arguments: JSON.stringify({ command: 'rm -f made.txt' }) };
+					return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+				},
+			});
+			const workspace = kernel.host.workspace();
+			await kernel.ctx.agent.runTurn({ text: 'make it', surface: 'test' });
+			assert.ok(existsSync(join(workspace, 'made.txt')), 'the first turn wrote the file');
+			await kernel.ctx.agent.runTurn({ text: 'clean it', surface: 'test' });
+			assert.strictEqual(ran, 1, 'the owned rm reached the tool without an approval');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a command that creates and removes the same new path needs no approval', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept', checkpoints: false } });
+		try {
+			let ran = 0;
+			kernel.ctx.tools.register({
+				name: 'run_shell',
+				description: 'test shell',
+				capability: 'shell_rw',
+				needsNetwork: false,
+				needsWorkspace: true,
+				parameters: objectSchema({ command: { type: 'string' } }, ['command']),
+				execute: async () => {
+					ran += 1;
+					return 'ok';
+				},
+			});
+			kernel.ctx.llm.use({
+				name: 'same-command',
+				async chat(request) {
+					if (request.messages[request.messages.length - 1]?.role === 'tool') {
+						return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					const toolCall: ToolCall = {
+						id: 'r',
+						name: 'run_shell',
+						arguments: JSON.stringify({ command: 'touch probe.txt && rm -f probe.txt' }),
+					};
+					return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.agent.runTurn({ text: 'probe and clean', surface: 'test' });
+			assert.strictEqual(ran, 1, 'the same-command create+delete reached the tool');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the journal backfills provenance for a file written before the session tracked it', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept', checkpoints: true } });
+		try {
+			let ran = 0;
+			kernel.ctx.tools.register({
+				name: 'run_shell',
+				description: 'test shell',
+				capability: 'shell_rw',
+				needsNetwork: false,
+				needsWorkspace: true,
+				parameters: objectSchema({ command: { type: 'string' } }, ['command']),
+				execute: async () => {
+					ran += 1;
+					return 'ok';
+				},
+			});
+			kernel.ctx.llm.use({
+				name: 'backfill',
+				async chat(request) {
+					if (request.messages[request.messages.length - 1]?.role === 'tool') {
+						return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					const toolCall: ToolCall = { id: 'r', name: 'run_shell', arguments: JSON.stringify({ command: 'rm -f legacy.txt' }) };
+					return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+				},
+			});
+			const workspace = kernel.host.workspace();
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			await kernel.ctx.checkpoints.record(workspace, session.id, 0, 'legacy.txt', null, '0000000000000000000000000000000000000000');
+			await kernel.ctx.agent.runTurn({ text: 'remove it', surface: 'test' });
+			assert.strictEqual(ran, 1, 'the journal restored the created path');
+		} finally {
+			await kernel.dispose();
+		}
 	});
 
 	test('dangerous commands and unsandboxed escalation always confirm', () => {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { guardPath, PathEscapeError } from '../lib/sandbox';
 import { objectSchema, type ToolContext } from '../lib/types';
@@ -65,6 +65,12 @@ export const planTools = toolset([
 		async execute(args, ctx) {
 			const { name, content } = args as { name: string; content: string };
 			const target = await planPath(ctx, name, 'write');
+			let existed = true;
+			try {
+				await lstat(target);
+			} catch (error) {
+				existed = (error as NodeJS.ErrnoException).code !== 'ENOENT';
+			}
 			const write = async () => {
 				await mkdir(dirname(target), { recursive: true });
 				await writeFile(target, content);
@@ -73,6 +79,9 @@ export const planTools = toolset([
 				await ctx.edit(target, write);
 			} else {
 				await write();
+			}
+			if (!existed) {
+				ctx.noteCreated?.(target);
 			}
 			return `wrote plan ${name}`;
 		},

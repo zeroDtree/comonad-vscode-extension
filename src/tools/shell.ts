@@ -1,14 +1,54 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { existsSync, readdirSync, statSync } from 'node:fs';
+import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { formatResult, runCommand, shellArgv, sandboxKind, type SandboxKind } from '../lib/sandbox';
+import { creationTargets, rmTargets } from '../lib/shell';
 import { objectSchema, type Confinement, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
 
 /** Shell tools with OS sandboxing (sandbox-exec on macOS, bwrap on Linux). */
 
+type Presence = 'present' | 'absent' | 'unknown';
+
+/** Only ENOENT proves a path absent; a permission error must not become provenance. */
+async function presence(path: string): Promise<Presence> {
+	try {
+		await lstat(path);
+		return 'present';
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'unknown';
+	}
+}
+
+async function createdFile(path: string): Promise<boolean> {
+	try {
+		return !(await lstat(path)).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 async function run(ctx: ToolContext, command: string, writable: boolean): Promise<string> {
-	const result = await runCommand(shellArgv(command), ctx.policy.workingDirectory, shellOptions(ctx, writable));
+	const workspace = ctx.policy.workingDirectory;
+	const track = process.platform !== 'win32' && Boolean(workspace.trim());
+	const creates = track ? creationTargets(command, workspace) : [];
+	const removals = track ? rmTargets(command, workspace) : [];
+	const before = await Promise.all(creates.map(presence));
+	const result = await runCommand(shellArgv(command), workspace, shellOptions(ctx, writable));
+	for (let index = 0; index < creates.length; index += 1) {
+		const path = creates[index]!;
+		if (before[index] === 'absent' && (await createdFile(path))) {
+			ctx.noteCreated?.(path);
+		}
+	}
+	// A parsed rm that actually removed the path makes its provenance stale: a later user file at
+	// the same path must not inherit the exemption.
+	for (const path of removals) {
+		if ((await presence(path)) === 'absent') {
+			ctx.noteDeleted?.(path);
+		}
+	}
 	return formatResult(result);
 }
 
