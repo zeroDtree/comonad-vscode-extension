@@ -9,6 +9,7 @@ import { join } from 'node:path';
 export interface HostStorage {
 	root: string;
 	sessions: string;
+	attachments: string;
 	checkpoints: string;
 	memory: string;
 	audit: string;
@@ -43,6 +44,7 @@ export function hostStorage(root: string): HostStorage {
 	return {
 		root,
 		sessions: join(root, 'sessions'),
+		attachments: join(root, 'attachments'),
 		checkpoints: join(root, 'checkpoints'),
 		memory: join(root, 'memory'),
 		audit: join(root, 'audit'),

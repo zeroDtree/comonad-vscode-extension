@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import type { ApprovalDecision, ApprovalRequest, ToolCall, TurnRef } from './lib/types';
+import type { ApprovalDecision, ApprovalRequest, ImagePart, ToolCall, TurnRef } from './lib/types';
 import type { PostToolDecision, PreToolDecision, ToolExecution, ToolOutcome } from './services/tools';
 
 /**
@@ -14,7 +14,7 @@ declare module 'cordis' {
 		'agent/reasoning'(ref: TurnRef, text: string): void;
 		'agent/tool-delta'(ref: TurnRef, call: ToolCall): void;
 		'agent/tool-start'(ref: TurnRef, call: ToolCall): void;
-		'agent/tool-result'(ref: TurnRef, call: ToolCall, output: string): void;
+		'agent/tool-result'(ref: TurnRef, call: ToolCall, output: string, images?: ImagePart[]): void;
 		'agent/notice'(ref: TurnRef, text: string): void;
 		'agent/turn-end'(ref: TurnRef): void;
 		/** Waterfall: surfaces answer for their own `surface` id and delegate the rest. */

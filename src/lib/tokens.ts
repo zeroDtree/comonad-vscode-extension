@@ -15,6 +15,9 @@
  * Pure module: no `vscode`, no `cordis`.
  */
 
+import { estimateImages } from './images';
+import type { ImagePart } from './types';
+
 /** Upstream's `BYTES_PER_TOKEN`, used by its `guesstimate` fallback. */
 export const BYTES_PER_TOKEN = 3.35;
 /** Upstream's `tokensPerMessage` (3; an older GPT-3.5 framing used 4, which nothing sends anymore). */
@@ -81,11 +84,14 @@ export function estimateTokens(text: string): number {
 }
 
 /** A message list counted the way upstream's `countTokensOpenAI(…, full)` does. */
-export function estimateMessages(messages: readonly { content?: string; toolCalls?: unknown }[]): number {
+export function estimateMessages(
+	messages: readonly { content?: string; toolCalls?: unknown; images?: readonly ImagePart[] }[],
+): number {
 	let total = 0;
 	for (const message of messages) {
 		total += TOKENS_PER_MESSAGE;
 		total += countRaw(message.content ?? '');
+		total += estimateImages(message.images);
 		if (message.toolCalls !== undefined) {
 			total += countRaw(JSON.stringify(message.toolCalls));
 		}

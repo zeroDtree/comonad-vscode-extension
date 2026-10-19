@@ -2,7 +2,7 @@
 import { Service, type Context, type Plugin } from 'cordis';
 import { capabilityAllowed } from '../lib/policy';
 import { mergeToolLayout } from '../lib/prompt-layout';
-import { hasWorkspace, type SessionPolicy, type ToolCall, type ToolContext, type ToolSpec } from '../lib/types';
+import { hasWorkspace, type SessionPolicy, type ToolCall, type ToolContext, type ToolImage, type ToolSpec } from '../lib/types';
 
 export interface ToolFilter {
 	allow?: string[];
@@ -26,10 +26,11 @@ export interface ToolExecution {
 	signal: AbortSignal;
 }
 
-/** A settled call: what the model is told, and whether it was a failure. */
+/** A settled call: what the model is told, whether it was a failure, and any images it carries. */
 export interface ToolOutcome {
 	content: string;
 	isError: boolean;
+	images?: ToolImage[];
 }
 
 /** Model-facing text: Comonad speaks strings, the harness speaks content blocks; both are read. */
@@ -136,29 +137,29 @@ export class Tools extends Service {
 			});
 	}
 
-	async invoke(call: ToolCall, ctx: ToolContext): Promise<string> {
+	async invoke(call: ToolCall, ctx: ToolContext): Promise<ToolOutcome> {
 		const tool = this.get(call.name);
 		if (!tool) {
-			return `Error: unknown tool ${call.name}`;
+			return { content: `Error: unknown tool ${call.name}`, isError: true };
 		}
 		if (!this.isEnabled(call.name)) {
-			return `Error: tool ${call.name} is switched off in Prompts`;
+			return { content: `Error: tool ${call.name} is switched off in Prompts`, isError: true };
 		}
 		if (!capabilityAllowed(tool.capability, ctx.policy.workMode)) {
-			return `Error: tool ${call.name} is not allowed in mode ${ctx.policy.workMode}`;
+			return { content: `Error: tool ${call.name} is not allowed in mode ${ctx.policy.workMode}`, isError: true };
 		}
 		if (tool.needsNetwork && !ctx.policy.network) {
-			return 'Error: network is disabled for this session';
+			return { content: 'Error: network is disabled for this session', isError: true };
 		}
 		if (tool.needsWorkspace && !hasWorkspace(ctx.policy)) {
-			return 'Error: this session has no working directory';
+			return { content: 'Error: this session has no working directory', isError: true };
 		}
 		let args: unknown = {};
 		if (call.arguments.trim()) {
 			try {
 				args = JSON.parse(call.arguments) as unknown;
 			} catch {
-				return `Error: arguments for ${call.name} are not valid JSON`;
+				return { content: `Error: arguments for ${call.name} are not valid JSON`, isError: true };
 			}
 		}
 		// The policy pipeline, named and shaped as the harness names and shapes it: a plugin may
@@ -185,14 +186,20 @@ export class Tools extends Service {
 		const outcome = await this.ctx.waterfall('tools/execute', exec, () => this.dispatch(tool, exec, args, ctx));
 		const post = await this.ctx.waterfall('tools/post-execute', exec, outcome, () => ({ kind: 'accept' }) as PostToolDecision);
 		if (post.kind === 'block') {
+			// A result a hook blocked is an error the model must read, not a picture it should look at.
 			outcome.content = `Error: ${contentText(post.feedback)}`;
 			outcome.isError = true;
+			outcome.images = undefined;
 		} else if (post.content !== undefined) {
+			// Hooks reshape text only; the images a tool returned are still the tool's answer.
 			outcome.content = contentText(post.content);
 		}
 		this.ctx.emit('tools/result', exec, outcome);
 		const text = outcome.content;
-		return text.length > 60_000 ? `${text.slice(0, 60_000)}\n[...truncated, ${text.length} chars]` : text;
+		return {
+			...outcome,
+			content: text.length > 60_000 ? `${text.slice(0, 60_000)}\n[...truncated, ${text.length} chars]` : text,
+		};
 	}
 
 	/** One dispatch: the tool body, and the failure that stands in for a thrown one. */
@@ -201,7 +208,9 @@ export class Tools extends Service {
 			// The context carries this execution's signal: a `tools/execute` wrapper that replaced it is
 			// the one the tool honours.
 			const output = await tool.execute(args, { ...ctx, signal: exec.signal });
-			return { content: output, isError: false };
+			return typeof output === 'string'
+				? { content: output, isError: false }
+				: { content: output.content, isError: false, images: output.images };
 		} catch (error) {
 			return { content: `Error: ${error instanceof Error ? error.message : String(error)}`, isError: true };
 		}
@@ -211,9 +220,10 @@ export class Tools extends Service {
 	 * A refusal the pipeline made: the model is told why, because the model is the one who has to try
 	 * something else, and observers see it settle like any other call.
 	 */
-	private refuse(exec: ToolExecution, reason: string): string {
-		this.ctx.emit('tools/result', exec, { content: `Error: ${reason}`, isError: true });
-		return `Error: ${reason}`;
+	private refuse(exec: ToolExecution, reason: string): ToolOutcome {
+		const outcome: ToolOutcome = { content: `Error: ${reason}`, isError: true };
+		this.ctx.emit('tools/result', exec, outcome);
+		return outcome;
 	}
 }
 

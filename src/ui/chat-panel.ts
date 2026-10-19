@@ -4,11 +4,12 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES } from '../lib/images';
 import { APPROVAL_LABELS, MODE_LABELS } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { turnsOf, type Step, type Turn } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
-import type { Approval, ApprovalDecision, ReasoningEffort, WorkMode } from '../lib/types';
+import type { Approval, ApprovalDecision, ImagePart, ReasoningEffort, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
 import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
 import { formatReference } from '../lib/references';
@@ -64,7 +65,7 @@ export function chatPanel(ctx: Context): void {
 	const extensionUri = ctx.host.extensionUri as vscode.Uri;
 	const clients = new Set<vscode.Webview>();
 	const readyClients = new Set<vscode.Webview>();
-	const attachments = new Map<vscode.Webview, vscode.Disposable>();
+	const listeners = new Map<vscode.Webview, vscode.Disposable>();
 	let view: vscode.WebviewView | null = null;
 	let panel: vscode.WebviewPanel | null = null;
 	let running = false;
@@ -120,7 +121,7 @@ export function chatPanel(ctx: Context): void {
 
 	const attach = (webview: vscode.Webview): void => {
 		clients.add(webview);
-		attachments.set(
+		listeners.set(
 			webview,
 			webview.onDidReceiveMessage((message: Record<string, unknown>) => void handle(message, webview)),
 		);
@@ -132,8 +133,8 @@ export function chatPanel(ctx: Context): void {
 		readyClients.delete(webview);
 		focusedClients.delete(webview);
 		syncFocus();
-		attachments.get(webview)?.dispose();
-		attachments.delete(webview);
+		listeners.get(webview)?.dispose();
+		listeners.delete(webview);
 		if (!clients.size) {
 			for (const resolve of approvals.values()) {
 				resolve('deny');
@@ -209,6 +210,7 @@ export function chatPanel(ctx: Context): void {
 		args: step.args === undefined ? undefined : clip(step.args, 2_000),
 		command: shellCommand(step.name, step.args),
 		result: step.result === undefined ? undefined : clip(step.result, 30_000),
+		images: ctx.attachments.publicParts(step.images),
 		status: step.status,
 		ms: step.ms,
 		at: step.at,
@@ -234,6 +236,7 @@ export function chatPanel(ctx: Context): void {
 			.map((turn) => ({
 				index: turn.index,
 				prompt: turn.prompt,
+				promptImages: ctx.attachments.publicParts(turn.promptImages),
 				greeting: turn.greeting,
 				// The reply variants and which one is showing: the webview draws `‹ n/m ›` from these.
 				swipes: turn.swipes,
@@ -420,9 +423,9 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'tool-start', id: call.id, name: call.name, args: clip(call.arguments, 1_500), command: shellCommand(call.name, call.arguments) });
 		}
 	});
-	ctx.on('agent/tool-result', (ref, call, output) => {
+	ctx.on('agent/tool-result', (ref, call, output, images) => {
 		if (ref.surface === SURFACE) {
-			post({ type: 'tool-result', id: call.id, output: clip(output, 30_000) });
+			post({ type: 'tool-result', id: call.id, output: clip(output, 30_000), images: ctx.attachments.publicParts(images) });
 		}
 	});
 	ctx.on('agent/notice', (ref, text) => {
@@ -464,9 +467,58 @@ export function chatPanel(ctx: Context): void {
 		});
 	});
 
-	const send = async (text: string): Promise<void> => {
+	/**
+	 * Turns the composer's data URLs into stored references. The webview is not trusted: the bytes are
+	 * sniffed again by the store, and the types, count and sizes are checked here.
+	 */
+	const ingestImages = async (value: unknown): Promise<{ images: ImagePart[]; problem?: string }> => {
+		if (!Array.isArray(value) || value.length === 0) {
+			return { images: [] };
+		}
+		const images: ImagePart[] = [];
+		const problems: string[] = [];
+		let total = 0;
+		for (const entry of value.slice(0, MAX_IMAGES_PER_MESSAGE)) {
+			const image = entry as { data?: unknown; name?: unknown };
+			const dataUrl = typeof image.data === 'string' ? image.data : '';
+			const match = /^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
+			if (!match) {
+				problems.push('an attachment was not a supported image');
+				continue;
+			}
+			const base64 = match[2]!.replace(/\s+/g, '');
+			if (base64.length > Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 64) {
+				problems.push('an image is over the 4 MiB limit');
+				continue;
+			}
+			const data = Buffer.from(base64, 'base64');
+			if (total + data.byteLength > MAX_TOTAL_IMAGE_BYTES) {
+				problems.push('the images together are over the 12 MiB limit');
+				break;
+			}
+			try {
+				images.push(await ctx.attachments.put(data, typeof image.name === 'string' ? image.name : undefined));
+				total += data.byteLength;
+			} catch (error) {
+				problems.push(describe(error));
+			}
+		}
+		if (value.length > MAX_IMAGES_PER_MESSAGE) {
+			problems.push(`only ${MAX_IMAGES_PER_MESSAGE} images are sent at a time`);
+		}
+		return { images, problem: problems.length ? `Image(s) skipped: ${problems.join('; ')}.` : undefined };
+	};
+
+	const send = async (text: string, incoming?: unknown, source?: vscode.Webview): Promise<void> => {
+		if (running) {
+			return;
+		}
 		const input = text.trim();
-		if (!input || running) {
+		const { images, problem } = await ingestImages(incoming);
+		if (problem) {
+			post({ type: 'notice', text: problem }, source);
+		}
+		if (!input && !images.length) {
 			return;
 		}
 		running = true;
@@ -475,7 +527,7 @@ export function chatPanel(ctx: Context): void {
 		let handledByCommand = false;
 		let rewrite = false;
 		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
-		post({ type: 'turn-start', text: input });
+		post({ type: 'turn-start', text: input, images: ctx.attachments.publicParts(images) });
 		try {
 			// A command answers through the surface, and a redraw — `/compact` replaces the transcript —
 			// would wipe an answer that was already on screen. The answers are held back until the
@@ -505,6 +557,9 @@ export function chatPanel(ctx: Context): void {
 				if (handled.result && !streamed) {
 					post({ type: 'command', text: handled.result });
 				}
+				if (images.length) {
+					post({ type: 'notice', text: 'Commands do not use images; the attachment(s) were not sent.' }, source);
+				}
 				return;
 			}
 			// A command that hands the turn over (`/plan`, `/review`) says what it printed first, and then
@@ -512,6 +567,7 @@ export function chatPanel(ctx: Context): void {
 			flush();
 			const result = await ctx.agent.runTurn({
 				text: handled.text ?? input,
+				images,
 				sessionId: ctx.sessions.active()?.id,
 				policy: handled.policy,
 				trigger: handled.trigger,
@@ -571,7 +627,15 @@ export function chatPanel(ctx: Context): void {
 		const continues = trigger === 'continue' ? last?.index : undefined;
 		// An impersonation is not a turn of its own either: it is written into the composer, the way
 		// upstream's own button does, so the webview streams it there instead of into the chat.
-		post({ type: 'turn-start', text, replaces, continues, draft: trigger === 'impersonate' });
+		post({
+			type: 'turn-start',
+			text,
+			replaces,
+			continues,
+			draft: trigger === 'impersonate',
+			// A swipe or a regenerate replaces the reply in place; the prompt's pictures stay with it.
+			images: ctx.attachments.publicParts(replaces !== undefined ? last?.promptImages : undefined),
+		});
 		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
 		try {
 			const result = await ctx.agent.runTurn({
@@ -719,7 +783,12 @@ export function chatPanel(ctx: Context): void {
 					// The webview is about to draw the cut. The panel already holds this much of the
 					// transcript, so the `sessions/changed` this rewrite emits cannot repaint the live turn.
 					published = { id: live.id, length: promptAt };
-					post({ type: 'turn-start', text: input, replacesFrom: turnIndex });
+					post({
+						type: 'turn-start',
+						text: input,
+						replacesFrom: turnIndex,
+						images: ctx.attachments.publicParts(turn.promptImages),
+					});
 					started = true;
 					return true;
 				},
@@ -790,8 +859,13 @@ export function chatPanel(ctx: Context): void {
 					syncFocus();
 					break;
 				case 'send':
-					await send(String(message.text ?? ''));
+					await send(String(message.text ?? ''), message.images, source);
 					break;
+				case 'attachment': {
+					const id = String(message.id ?? '');
+					post({ type: 'attachment', id, url: ctx.attachments.dataUrlById(id) ?? null }, source);
+					break;
+				}
 				case 'stop':
 					stopped = true;
 					ctx.agent.stop();
@@ -1135,7 +1209,7 @@ export function chatPanel(ctx: Context): void {
 	// The title-bar icons are commands; the chat list itself lives in the webview.
 	registerCommand(ctx, 'comonad.toggleHistory', () => post({ type: 'toggleHistory' }));
 }
-chatPanel.inject = ['sessions', 'agent', 'settings', 'llm', 'usage', 'commands', 'log', 'host'];
+chatPanel.inject = ['sessions', 'agent', 'attachments', 'settings', 'llm', 'usage', 'commands', 'log', 'host'];
 
 function splitChoices(labels: Record<string, string>): { id: string; label: string; description: string }[] {
 	return Object.entries(labels).map(([id, label]) => {
@@ -1204,7 +1278,8 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 		<div id="changes-list"></div>
 	</div>
 	<div id="editor">
-		<textarea id="input" rows="3" placeholder="Ask Comonad…  Enter to send · Shift+Enter for a new line · @ to reference code · /help for commands"></textarea>
+		<div id="composer-images" class="composer-images" hidden></div>
+		<textarea id="input" rows="3" placeholder="Ask Comonad…  Enter to send · Shift+Enter for a new line · @ to reference code · paste or drop images · /help for commands"></textarea>
 		<div id="mention" class="mention-menu" role="listbox" aria-label="Reference a workspace item" hidden>
 			<div id="mention-head" class="mention-head" hidden></div>
 			<div id="mention-list"></div>

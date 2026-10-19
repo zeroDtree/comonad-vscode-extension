@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { readdir, readFile, stat, writeFile, mkdir } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
+import { MAX_IMAGE_BYTES, looksLikeImagePath, sniffImage } from '../lib/images';
 import { guardPath, isDeniedRead } from '../lib/sandbox';
 import { objectSchema, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
@@ -24,6 +25,18 @@ function writable(ctx: ToolContext, path: string): Promise<string> {
 		confinement: ctx.policy.confinement,
 		denyReadPaths: ctx.policy.denyReadPaths,
 	});
+}
+
+/** The first bytes of a file, for sniffing a type without loading a large body. */
+async function readHead(path: string, size: number): Promise<Buffer> {
+	const handle = await open(path, 'r');
+	try {
+		const head = Buffer.alloc(size);
+		const { bytesRead } = await handle.read(head, 0, size, 0);
+		return head.subarray(0, bytesRead);
+	} finally {
+		await handle.close();
+	}
 }
 
 async function walk(dir: string, visit: (file: string) => Promise<void>): Promise<void> {
@@ -67,21 +80,46 @@ export const fsTools = toolset([
 	},
 	{
 		name: 'read_file',
-		description: 'Read a UTF-8 text file inside the workspace. Optionally start at a line and limit the number of lines.',
+		description:
+			'Read a workspace file. Text is returned as UTF-8; PNG, JPEG, GIF and WebP images are attached to the model as image content. Optionally start at a line and limit the number of lines for text files.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
 		parameters: objectSchema(
 			{
 				path: { type: 'string' },
-				startLine: { type: 'number', description: '1-based first line.' },
-				lines: { type: 'number', description: 'How many lines to read.' },
+				startLine: { type: 'number', description: '1-based first line. Text files only.' },
+				lines: { type: 'number', description: 'How many lines to read. Text files only.' },
 			},
 			['path'],
 		),
 		async execute(args, ctx) {
 			const { path, startLine, lines } = args as { path: string; startLine?: number; lines?: number };
-			const text = await readFile(await readable(ctx, path), 'utf8');
+			const target = await readable(ctx, path);
+			const info = await stat(target);
+			// A huge binary is not loaded just to learn it is an image; a header is enough.
+			if (info.size > MAX_IMAGE_BYTES) {
+				const probe = sniffImage(await readHead(target, 64 * 1024));
+				if (probe) {
+					return `Error: image ${path} (${probe.mime}, ${probe.width}x${probe.height}, ${info.size} bytes) is too large to attach (limit ${MAX_IMAGE_BYTES} bytes).`;
+				}
+			}
+			const bytes = await readFile(target);
+			const image = sniffImage(bytes);
+			if (image) {
+				const ignored =
+					startLine === undefined && lines === undefined
+						? ''
+						: ' startLine/lines were ignored; they apply to text files.';
+				return {
+					content: `Read image ${path} (${image.mime}, ${image.width}x${image.height}, ${bytes.byteLength} bytes).${ignored}`,
+					images: [{ data: bytes, mime: image.mime, name: basename(path) }],
+				};
+			}
+			if (looksLikeImagePath(path)) {
+				return `Error: ${path} has an image extension but is not a valid PNG, JPEG, GIF or WebP image.`;
+			}
+			const text = bytes.toString('utf8');
 			if (startLine === undefined && lines === undefined) {
 				return text.length > 30_000 ? `${text.slice(0, 30_000)}\n[...truncated, ${text.length} chars]` : text;
 			}

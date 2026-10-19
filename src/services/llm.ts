@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { createHash } from 'node:crypto';
 import { Service, type Context } from 'cordis';
 import type { Completion } from '../lib/openai';
 import type { CompletionUsage, Message, ToolCall, ToolSpec } from '../lib/types';
@@ -95,10 +96,11 @@ interface ModelCache {
 }
 
 export class Llm extends Service {
-	static inject = ['settings', 'host', 'log'];
+	static inject = ['settings', 'host', 'log', 'attachments'];
 
 	private readonly adapters = new Map<string, LlmAdapter>();
 	private readonly modelCache = new Map<string, ModelCache>();
+	private readonly keyLogged = new Set<string>();
 
 	constructor(ctx: Context) {
 		super(ctx, 'llm');
@@ -127,12 +129,14 @@ export class Llm extends Service {
 	): Promise<Completion> {
 		const { adapter, profile, model } = this.resolve(policyModel);
 		const key = await this.resolveKey(profile);
+		// Every adapter receives the same fully resolved shape; the transcript itself never holds base64.
+		const resolved = this.ctx.attachments.resolveMessages(messages);
 		this.ctx.log.message(`model ${profile.id} → ${model || '(default)'}`);
 		return adapter.chat({
 			profile,
 			key,
 			model,
-			messages,
+			messages: resolved,
 			tools,
 			signal,
 			sink,
@@ -297,15 +301,28 @@ export class Llm extends Service {
 	async resolveKey(profile: Profile): Promise<string> {
 		const stored = await this.ctx.host.secret(secretKey(profile.id));
 		if (stored) {
+			this.noteKey(profile, 'stored', stored);
 			return stored;
 		}
 		for (const name of profileKeyEnvs(profile)) {
 			const value = this.ctx.host.env(name);
 			if (value) {
+				this.noteKey(profile, `env ${name}`, value);
 				return value;
 			}
 		}
+		this.noteKey(profile, 'none');
 		return '';
+	}
+
+	/** One line per profile saying where its key came from, and a fingerprint to tell keys apart. */
+	private noteKey(profile: Profile, source: string, key?: string): void {
+		if (this.keyLogged.has(profile.id)) {
+			return;
+		}
+		this.keyLogged.add(profile.id);
+		const fingerprint = key ? ` sha256:${createHash('sha256').update(key).digest('hex').slice(0, 10)}` : '';
+		this.ctx.log.message(`key ${profile.id}: ${source}${fingerprint}`);
 	}
 
 	private resolve(policyModel: string): { adapter: LlmAdapter; profile: Profile; model: string } {

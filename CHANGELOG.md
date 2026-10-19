@@ -6,6 +6,18 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **Images are part of the conversation.** `read_file` reads PNG, JPEG, WebP and GIF files and sends
+  them to the model as image content, and the chat composer accepts images pasted or dropped into it
+  (six per message, 4 MiB each, 12 MiB in total). Tool cards and prompt bubbles show thumbnails in
+  both live and replayed turns. Bytes live in a content-addressed store under the extension's global
+  storage, so a session file keeps only the reference; requests resolve it to a data URL at the model
+  boundary, and the webview loads each image on demand. Pasted pictures larger than 1568px are
+  downscaled and re-encoded before upload. Images count toward the context budget and older
+  tool-result pictures are elided first; a model that refuses images is remembered for that chat,
+  and a connection reset during an image request is retried once before the request is resent as
+  text. The `read_file` tool description and the tool-result API now allow a structured
+  `{ content, images }` answer (bare strings still work).
+
 - **The project is now licensed under AGPL-3.0-only.** A few utility routines in the
   tavern plugin are adapted from SillyTavern (AGPL-3.0); `NOTICE` records the files and
   modifications, and `THIRD_PARTY_NOTICES.md` lists the bundled dependencies. The

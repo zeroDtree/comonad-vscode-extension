@@ -66,7 +66,7 @@ flowchart LR
 **P1**
 - [ ] 内联入口：编辑器右键 / Code Action「Ask Comonad」「Fix with Comonad」、Inline Chat 集成
 - [x] Display / Context 双形态（Comonad）：每轮回复与历史回传都可选 `Rendered`（渲染体）/ `Token`（仅 assistant 文本）/ `Raw`（完整记录）——回复 tab 切换显示，输入区 Context pill 控制回传
-- [ ] 多模态输入：粘贴/拖拽截图与图片
+- [x] 多模态输入：粘贴/拖拽截图与图片（输入框最多 6 张、单张 4 MiB、合计 12 MiB；`read_file` 同样可读 PNG/JPEG/WebP/GIF）
 - [ ] 分支会话：从某条消息 Fork/Branch，与 checkpoint 对齐
 - [ ] 后台任务面板：并行会话/子代理的进度、日志、终止
 - [ ] 桌面通知：完成、需审批、后台命令结束（可配置）
@@ -121,7 +121,7 @@ flowchart LR
 - [ ] Ask-User-Question 工具：结构化多选题并渲染为 Chat 选项
 - [ ] Todo 工具：任务列表创建/更新/完成，UI 进度展示
 - [ ] Agent 工具：派生子代理（类型、后台、模型覆写），结果回传
-- [ ] 工具输出整形：截断与分页、大文件提示、diff/图片内嵌、错误规范化
+- [ ] 工具输出整形：截断与分页、大文件提示、diff 内嵌、错误规范化（图片已内嵌：工具读到的图片随结果发给模型，卡片显示缩略图）
 - [ ] 自定义工具 API：其他扩展注册工具（schema + handler + 能力标注），纳入同一门控
 
 **P2**

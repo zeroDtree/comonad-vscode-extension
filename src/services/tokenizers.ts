@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
 import { encodingForModel, estimateMessages, estimateTokens, setEncoder, type TikEncoding } from '../lib/tokens';
+import type { ImagePart } from '../lib/types';
 import { describe } from '../lib/util';
 import { webTokenizers } from './web-tokenizers';
 
@@ -93,7 +94,7 @@ export class Tokenizers extends Service {
 	}
 
 	/** The same for a message list, framed the way upstream's `countTokensOpenAI(…, full)` does. */
-	countMessages(messages: readonly { content?: string; toolCalls?: unknown }[]): number {
+	countMessages(messages: readonly { content?: string; toolCalls?: unknown; images?: readonly ImagePart[] }[]): number {
 		return estimateMessages(messages);
 	}
 

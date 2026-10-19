@@ -7,6 +7,7 @@
 	const $ = (id) => document.getElementById(id);
 	const messagesEl = $('messages');
 	const input = $('input');
+	const composerImagesEl = $('composer-images');
 	const mentionEl = $('mention');
 	const mentionHead = $('mention-head');
 	const mentionList = $('mention-list');
@@ -1016,6 +1017,76 @@
 		}
 	}
 
+	/* ------------------------------------------------------------------ images */
+
+	// The host sends image metadata, never the bytes: each id is fetched once and shared by every
+	// thumbnail that names it, so a chat with several open panels does not broadcast megabytes.
+	const attachmentUrls = new Map();
+	const pendingAttachments = new Set();
+	const ATTACHMENT_CACHE_LIMIT = 24;
+
+	function requestAttachment(id) {
+		if (!id || attachmentUrls.has(id) || pendingAttachments.has(id)) {
+			return;
+		}
+		pendingAttachments.add(id);
+		vscode.postMessage({ type: 'attachment', id });
+	}
+
+	function imageThumb(part) {
+		const img = document.createElement('img');
+		img.className = 'thumb';
+		img.dataset.attachmentId = part.id;
+		img.alt = part.name || 'image';
+		img.title = [part.name, part.mime, part.width && part.height ? part.width + '×' + part.height : '']
+			.filter(Boolean)
+			.join(' · ');
+		const url = attachmentUrls.get(part.id);
+		if (url) {
+			img.src = url;
+		} else {
+			requestAttachment(part.id);
+		}
+		return img;
+	}
+
+	function imageThumbs(parts) {
+		if (!Array.isArray(parts) || !parts.length) {
+			return null;
+		}
+		const box = document.createElement('div');
+		box.className = 'thumbs';
+		for (const part of parts) {
+			box.appendChild(imageThumb(part));
+		}
+		return box;
+	}
+
+	/** One attachment's bytes, for every thumbnail that is already waiting on it. */
+	function attachmentReply(message) {
+		const id = String(message.id || '');
+		pendingAttachments.delete(id);
+		const url = typeof message.url === 'string' ? message.url : '';
+		if (url) {
+			attachmentUrls.set(id, url);
+			if (attachmentUrls.size > ATTACHMENT_CACHE_LIMIT) {
+				const oldest = attachmentUrls.keys().next().value;
+				if (oldest !== undefined) {
+					attachmentUrls.delete(oldest);
+				}
+			}
+		}
+		for (const img of document.querySelectorAll('img.thumb[data-attachment-id="' + CSS.escape(id) + '"]')) {
+			if (url) {
+				img.src = url;
+			} else {
+				img.classList.add('missing');
+				img.alt = 'image unavailable';
+				img.title = 'image unavailable';
+			}
+		}
+	}
+
 	function toolCard(step) {
 		const card = document.createElement('div');
 		const failed = step.status === 'error' || /^Error:/.test(step.result || '');
@@ -1037,6 +1108,11 @@
 			(command ? codeBlock('bash', command) : '') +
 			'<pre class="out"></pre>';
 		card.querySelector('.out').textContent = step.result || '';
+		// A picture is the answer itself, so it sits above the text and stays visible while collapsed.
+		const thumbs = imageThumbs(step.images);
+		if (thumbs) {
+			card.insertBefore(thumbs, card.querySelector('.out'));
+		}
 		// Folded by default whatever the size: the head already says which call it was, whether it
 		// worked, what it ran and how long it took. A click shows the command and the output.
 		step._card = card;
@@ -1242,6 +1318,10 @@
 		prompt.className = 'msg user';
 		prompt.innerHTML = '<div class="bubble">' + renderPromptHtml(turn.prompt) + '</div>';
 		turn._bubble = prompt.querySelector('.bubble');
+		const promptThumbs = imageThumbs(turn.promptImages);
+		if (promptThumbs) {
+			turn._bubble.appendChild(promptThumbs);
+		}
 		if (!turn.command) {
 			const actions = [{ key: 'copy', icon: 'copy', tip: 'Copy message', run: (button) => copyAction(button, turn.prompt) }];
 			if (!turn.greeting && turn.prompt) {
@@ -1252,9 +1332,10 @@
 		if (turn.greeting) {
 			// A character's opening line has no prompt behind it: the bubble would be empty.
 			root.classList.add('greeting');
-		} else if (turn.prompt) {
+		} else if (turn.prompt || (turn.promptImages && turn.promptImages.length)) {
 			// A continuation, an impersonation and a quiet turn have no prompt of their own either —
-			// the host sends them with no text, and an empty bubble is not a message.
+			// the host sends them with no text, and an empty bubble is not a message. An image-only
+			// prompt is a message even though its text is empty.
 			root.appendChild(prompt);
 		}
 
@@ -1404,7 +1485,9 @@
 		const suspended = Boolean(state && state.suspended);
 		for (const button of messagesEl.querySelectorAll('.msg.user .act[data-act="edit"]')) {
 			const turn = button.closest('.turn')?._turn;
-			button.hidden = running || suspended || !turn || Boolean(turn.greeting) || Boolean(turn.command) || !turn.prompt;
+			// An image-only prompt has no text but is still a prompt that can be run again.
+		const prompted = Boolean(turn && (turn.prompt || (turn.promptImages && turn.promptImages.length)));
+		button.hidden = running || suspended || !turn || Boolean(turn.greeting) || Boolean(turn.command) || !prompted;
 		}
 	}
 
@@ -1488,6 +1571,7 @@
 			index: from !== undefined && Number.isFinite(from) ? from : last ? last.index + 1 : 0,
 			// A swipe or a regenerate re-runs the same prompt, and the host sends no text with it.
 			prompt: message.text || replacing?.prompt || '',
+			promptImages: message.images || replacing?.promptImages || [],
 			steps: [],
 			at: 0,
 			startedAt: Date.now(),
@@ -1620,6 +1704,7 @@
 			return;
 		}
 		step.result = message.output || '';
+		step.images = Array.isArray(message.images) ? message.images : [];
 		step.status = /^Error:/.test(step.result) ? 'error' : 'ok';
 		freeze(step);
 		// Redraw the card in place: `toolCard` stores the new element on the step, so the old one has
@@ -2124,6 +2209,9 @@
 			case 'tool-result':
 				toolResult(message);
 				break;
+			case 'attachment':
+				attachmentReply(message);
+				break;
 			case 'approval':
 				approval(message);
 				break;
@@ -2433,17 +2521,150 @@
 		input.scrollTop = input.scrollHeight;
 	}
 
-	/* ------------------------------------------------------------------ outbound actions */
+	/* ------------------------------------------------------------------ composer images */
 
-	function submit() {
-		const text = input.value.trim();
-		if (!text || running) {
+	// The composer holds the pictures locally as data URLs, shows them as chips, and sends them once.
+	// The host stores the bytes and returns ids; the transcript then loads them back on demand.
+	const MAX_COMPOSER_IMAGES = 6;
+	const MAX_COMPOSER_BYTES = 4 * 1024 * 1024;
+	const composerImages = [];
+	const pendingReads = new Set();
+
+	function renderComposerImages() {
+		composerImagesEl.innerHTML = '';
+		composerImagesEl.hidden = composerImages.length === 0;
+		composerImages.forEach((image, index) => {
+			const chip = document.createElement('div');
+			chip.className = 'composer-image';
+			const img = document.createElement('img');
+			img.src = image.dataUrl;
+			img.alt = image.name || 'image';
+			img.title = image.name || 'image';
+			const remove = document.createElement('button');
+			remove.type = 'button';
+			remove.className = 'composer-image-remove';
+			remove.textContent = '×';
+			remove.title = 'Remove this image';
+			remove.addEventListener('click', () => {
+				composerImages.splice(index, 1);
+				renderComposerImages();
+				input.focus();
+			});
+			chip.append(img, remove);
+			composerImagesEl.appendChild(chip);
+		});
+	}
+
+	function isImageFile(file) {
+		if (!file) {
+			return false;
+		}
+		const type = String(file.type || '').toLowerCase();
+		const name = String(file.name || '');
+		return /^image\/(png|jpeg|jpg|gif|webp)$/.test(type) || (!type && /\.(png|jpe?g|gif|webp)$/i.test(name));
+	}
+
+	const MAX_COMPOSER_SIDE = 1568;
+	const MAX_COMPOSER_EDIT_BYTES = 1.5 * 1024 * 1024;
+
+	function readDataUrl(file) {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => (typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('empty read')));
+			reader.onerror = () => reject(reader.error ?? new Error('read failed'));
+			reader.readAsDataURL(file);
+		});
+	}
+
+	/** A screenshot larger than the useful side is re-encoded once here, before it reaches the model. */
+	function downscaled(dataUrl) {
+		return new Promise((resolve) => {
+			const image = new Image();
+			image.onload = () => {
+				const longest = Math.max(image.width, image.height);
+				if ((longest <= MAX_COMPOSER_SIDE && dataUrl.length <= MAX_COMPOSER_EDIT_BYTES) || !longest) {
+					resolve(dataUrl);
+					return;
+				}
+				const scale = Math.min(1, MAX_COMPOSER_SIDE / longest);
+				const width = Math.max(1, Math.round(image.width * scale));
+				const height = Math.max(1, Math.round(image.height * scale));
+				const canvas = document.createElement('canvas');
+				canvas.width = width;
+				canvas.height = height;
+				const context = canvas.getContext('2d');
+				if (!context) {
+					resolve(dataUrl);
+					return;
+				}
+				context.imageSmoothingQuality = 'high';
+				context.drawImage(image, 0, 0, width, height);
+				// WebP keeps screenshot text crisp at a fraction of PNG's size; Chromium always has it.
+				const webp = canvas.toDataURL('image/webp', 0.92);
+				resolve(webp.startsWith('data:image/webp') ? webp : canvas.toDataURL('image/jpeg', 0.9));
+			};
+			image.onerror = () => resolve(dataUrl);
+			image.src = dataUrl;
+		});
+	}
+
+	function addImageFile(file) {
+		if (!isImageFile(file)) {
 			return;
 		}
-		closeMention();
-		input.value = '';
-		vscode.postMessage({ type: 'send', text });
-		input.focus();
+		if (composerImages.length >= MAX_COMPOSER_IMAGES) {
+			addNotice('Only ' + MAX_COMPOSER_IMAGES + ' images can be attached to one message.');
+			return;
+		}
+		if (file.size > MAX_COMPOSER_BYTES) {
+			addNotice('An image is over the 4 MiB limit and was not attached.');
+			return;
+		}
+		const read = (async () => {
+			try {
+				const dataUrl = await readDataUrl(file);
+				const prepared = await downscaled(dataUrl);
+				const name =
+					prepared === dataUrl
+						? file.name || 'image'
+						: 'image.' + (prepared.startsWith('data:image/webp') ? 'webp' : 'jpg');
+				composerImages.push({ name, dataUrl: prepared });
+				renderComposerImages();
+			} catch {
+				addNotice('An image could not be read.');
+			}
+		})();
+		pendingReads.add(read);
+		read.finally(() => pendingReads.delete(read));
+	}
+
+	/* ------------------------------------------------------------------ outbound actions */
+
+	let submitting = false;
+	async function submit() {
+		if (running || submitting) {
+			return;
+		}
+		submitting = true;
+		try {
+			// A read still in flight is part of what is being sent.
+			if (pendingReads.size) {
+				await Promise.all([...pendingReads]);
+			}
+			const text = input.value.trim();
+			if (!text && !composerImages.length) {
+				return;
+			}
+			closeMention();
+			const images = composerImages.map((image) => ({ name: image.name, data: image.dataUrl }));
+			input.value = '';
+			composerImages.length = 0;
+			renderComposerImages();
+			vscode.postMessage({ type: 'send', text, images });
+			input.focus();
+		} finally {
+			submitting = false;
+		}
 	}
 
 	/** Runs one of the generation types. `Normal` is Send; `Quiet` uses what is in the box. */
@@ -2495,6 +2716,45 @@
 			}
 			event.preventDefault();
 			submit();
+		}
+	});
+	// Paste and drop are image input only when they carry a picture; ordinary text paste stays native.
+	input.addEventListener('paste', (event) => {
+		const files = [];
+		for (const item of event.clipboardData?.items ?? []) {
+			if (item.kind !== 'file') {
+				continue;
+			}
+			const file = item.getAsFile();
+			if (file && isImageFile(file)) {
+				files.push(file);
+			}
+		}
+		if (!files.length) {
+			return;
+		}
+		event.preventDefault();
+		for (const file of files) {
+			addImageFile(file);
+		}
+	});
+	const editorEl = $('editor');
+	editorEl.addEventListener('dragover', (event) => {
+		const types = Array.from(event.dataTransfer?.types ?? []);
+		if (!types.includes('Files')) {
+			return;
+		}
+		event.preventDefault();
+		event.dataTransfer.dropEffect = 'copy';
+	});
+	editorEl.addEventListener('drop', (event) => {
+		const files = Array.from(event.dataTransfer?.files ?? []).filter(isImageFile);
+		if (!files.length) {
+			return;
+		}
+		event.preventDefault();
+		for (const file of files) {
+			addImageFile(file);
 		}
 	});
 	input.addEventListener('input', (event) => {

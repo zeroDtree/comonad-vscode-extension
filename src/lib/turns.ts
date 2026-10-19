@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import type { Message } from './types';
+import type { ImagePart, Message } from './types';
 
 /**
  * The transcript is a wire format (one message per model step); the UI's unit is a **turn**: one
@@ -18,6 +18,8 @@ export interface Step {
 	name?: string;
 	args?: string;
 	result?: string;
+	/** Images a tool read for this step. */
+	images?: ImagePart[];
 	status?: StepStatus;
 	/** How long this step took, when the transcript can tell: the model round trip, or the call. */
 	ms?: number;
@@ -30,6 +32,8 @@ export interface Turn {
 	steps: Step[];
 	/** Index of the user message that opened this turn. Absent for a greeting. */
 	promptAt?: number;
+	/** Images the prompt carried. */
+	promptImages?: ImagePart[];
 	/** Transcript length once this turn is complete: the only safe place to fork or truncate. */
 	at: number;
 	startedAt?: number;
@@ -65,10 +69,10 @@ function duration(from: number | undefined, to: number | undefined): number | un
 
 /** Turns of a transcript, oldest first. `first` numbers the first one (turns already dropped). */
 export function turnsOf(transcript: Message[], first = 0): Turn[] {
-	const results = new Map<string, { content: string; at?: number }>();
+	const results = new Map<string, { content: string; at?: number; images?: ImagePart[] }>();
 	for (const message of transcript) {
 		if (message.role === 'tool' && message.toolCallId) {
-			results.set(message.toolCallId, { content: message.content, at: message.at });
+			results.set(message.toolCallId, { content: message.content, at: message.at, images: message.images });
 		}
 	}
 	const turns: Turn[] = [];
@@ -78,7 +82,15 @@ export function turnsOf(transcript: Message[], first = 0): Turn[] {
 			if (current) {
 				current.at = index;
 			}
-			current = { index: first + turns.length, prompt: message.content, promptAt: index, steps: [], at: index + 1, startedAt: message.at };
+			current = {
+				index: first + turns.length,
+				prompt: message.content,
+				promptAt: index,
+				promptImages: message.images,
+				steps: [],
+				at: index + 1,
+				startedAt: message.at,
+			};
 			turns.push(current);
 			return;
 		}
@@ -118,6 +130,7 @@ export function turnsOf(transcript: Message[], first = 0): Turn[] {
 					name: call.name,
 					args: call.arguments,
 					result: output?.content,
+					images: output?.images,
 					status: statusOf(output?.content),
 					ms: duration(message.at, output?.at),
 					at: message.at,

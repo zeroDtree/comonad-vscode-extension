@@ -2,7 +2,7 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,16 +12,20 @@ import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MO
 import {
 	applyContextForm,
 	DEFAULT_OUTPUT_RESERVE,
+	dropPromptImages,
 	elideToolResults,
+	hasImages,
 	planCompaction,
 	resolveBudget,
+	stripImages,
 } from '../lib/prompt';
-import { isContextOverflow, ModelRequestError } from '../lib/openai';
+import { isContextOverflow, isImageUnsupported, isTransportFailure, ModelRequestError, toOpenAiMessages } from '../lib/openai';
+import { MAX_IMAGE_BYTES, asImagePart, estimateImageTokens, sniffImage } from '../lib/images';
 import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, PathEscapeError, resolveInside, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
 import { applyHunk, diffLines, editForHunk, revertHunk } from '../lib/line-diff';
 import { listEndpointModels, openAiChat } from '../lib/openai';
-import type { ApprovalRequest, Message, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
+import type { ApprovalRequest, ImagePart, Message, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
 import { findSymbolRange, formatReference, parseReferences, rankPaths } from '../lib/references';
@@ -1470,11 +1474,11 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(kernel.ctx.sessions.get('main')?.transcript.length, 6, 'the source chat is untouched');
 
 			// Regenerate: the last prompt comes back and its output is gone.
-			assert.strictEqual(kernel.ctx.sessions.replayLast('main'), 'two');
+			assert.strictEqual(kernel.ctx.sessions.replayLast('main').text, 'two');
 			assert.deepStrictEqual(kernel.ctx.sessions.get('main')?.transcript.map((message) => message.content), ['one', '', 'body', 'a1']);
 			// An empty chat has nothing to re-run, and says so instead of throwing.
 			kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'empty');
-			assert.strictEqual(kernel.ctx.sessions.replayLast('empty'), '');
+			assert.strictEqual(kernel.ctx.sessions.replayLast('empty').text, '');
 
 			// The fork the panel offers is per turn: from the middle turn of three, the copy stops where
 			// that turn ended and the turns after it stay behind.
@@ -4707,7 +4711,7 @@ suite('Tavern content', () => {
 			// The opening line is content: the chat is filed, so a reload finds it again.
 			assert.strictEqual(unusedChat(kernel.ctx.sessions.require('greet')), false);
 			assert.deepStrictEqual(kernel.ctx.sessions.list().map((entry) => entry.id), ['greet']);
-			assert.strictEqual(kernel.ctx.sessions.replayLast('greet'), '', 'there is no prompt to run again');
+			assert.strictEqual(kernel.ctx.sessions.replayLast('greet').text, '', 'there is no prompt to run again');
 
 			// A chat that already said something is never rewritten.
 			session.transcript.push({ role: 'user', content: 'hello', at: 2 });
@@ -4774,17 +4778,18 @@ suite('Tavern content', () => {
 				},
 				spawnAgent: async () => '',
 			};
-			const hit = await tool.execute({ query: 'salt' }, context);
+			const text = (value: string | { content: string }): string => (typeof value === 'string' ? value : value.content);
+			const hit = text(await tool.execute({ query: 'salt' }, context));
 			assert.ok(hit.includes('The flats drink sound.'), hit);
 			assert.ok(hit.includes('### The flats — Salt (matched key)'), hit);
 			assert.ok(hit.includes('keys: salt'), hit);
 			// The card's own book is searchable too, beside the library book the chat selected.
-			const card = await tool.execute({ query: 'atlas' }, context);
+			const card = text(await tool.execute({ query: 'atlas' }, context));
 			assert.ok(card.includes('### Her atlas — Kestrel (card)'), card);
 			assert.ok(card.includes('Her atlas is water-stained.'), card);
-			assert.ok(!(await tool.execute({ query: 'east' }, context)).includes('They came from the east.'), 'a disabled entry is not returned');
-			assert.ok((await tool.execute({ query: 'zzz' }, context)).startsWith('No entry in'), 'a miss says so');
-			assert.ok((await tool.execute({ query: 'x', book: 'Nope' }, context)).startsWith('Error: no world book named'), 'an unknown book is an error');
+			assert.ok(!text(await tool.execute({ query: 'east' }, context)).includes('They came from the east.'), 'a disabled entry is not returned');
+			assert.ok(text(await tool.execute({ query: 'zzz' }, context)).startsWith('No entry in'), 'a miss says so');
+			assert.ok(text(await tool.execute({ query: 'x', book: 'Nope' }, context)).startsWith('Error: no world book named'), 'an unknown book is an error');
 			assert.strictEqual(await tool.execute({}, context), 'Error: lore_lookup needs a query.');
 			// It is a read-only capability: offered in the read modes, never in a tool-less chat.
 			assert.ok(kernel.ctx.tools.visible(policy({ workMode: 'ro' })).some((spec) => spec.name === 'lore_lookup'));
@@ -7527,5 +7532,343 @@ suite('Markdown math plugin', () => {
 		assert.ok(chat.includes('highlightCode') && chat.includes('window.hljs'));
 		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
 		assert.ok(css.includes('.hljs-keyword') && css.includes('.hljs-string'));
+	});
+});
+
+/* ------------------------------------------------------------------ images */
+
+/** A PNG whose IHDR carries real dimensions; `barePng` writes the signature and chunks only. */
+function pngOf(width: number, height: number): Buffer {
+	const png = barePng();
+	png.writeUInt32BE(width, 16);
+	png.writeUInt32BE(height, 20);
+	return png;
+}
+
+function gifOf(width: number, height: number): Buffer {
+	const gif = Buffer.alloc(10);
+	gif.write('GIF89a', 0, 'latin1');
+	gif.writeUInt16LE(width, 6);
+	gif.writeUInt16LE(height, 8);
+	return gif;
+}
+
+function jpegOf(width: number, height: number): Buffer {
+	return Buffer.from([
+		0xff, 0xd8, // SOI
+		0xff, 0xc0, 0x00, 0x11, 0x08, // SOF0, length, precision
+		(height >> 8) & 0xff, height & 0xff,
+		(width >> 8) & 0xff, width & 0xff,
+		0x03, // a component count, enough to make the header non-empty
+	]);
+}
+
+function webpOf(width: number, height: number): Buffer {
+	const webp = Buffer.alloc(30);
+	webp.write('RIFF', 0, 'latin1');
+	webp.write('WEBP', 8, 'latin1');
+	webp.write('VP8X', 12, 'latin1');
+	const w = width - 1;
+	const h = height - 1;
+	webp[24] = w & 0xff;
+	webp[25] = (w >> 8) & 0xff;
+	webp[26] = (w >> 16) & 0xff;
+	webp[27] = h & 0xff;
+	webp[28] = (h >> 8) & 0xff;
+	webp[29] = (h >> 16) & 0xff;
+	return webp;
+}
+
+function imagePart(letter: string, width = 1024, height = 1024): ImagePart {
+	return { id: letter.repeat(64).slice(0, 64) + '.png', mime: 'image/png', width, height };
+}
+
+/** Run a read-capability tool without a whole turn. */
+function directToolContext(kernel: Awaited<ReturnType<typeof createTestKernel>>) {
+	return {
+		sessionId: 'images',
+		workspace: kernel.host.workspace(),
+		policy: kernel.ctx.agent.policyFor(),
+		signal: new AbortController().signal,
+		log: () => undefined,
+		ask: async () => [],
+		todos: () => [],
+		tasks: {
+			start: () => ({ id: 't', command: '', cwd: '', startedAt: 0, output: '', exitCode: null }),
+			read: () => '',
+			stop: () => false,
+			list: () => [],
+		},
+		spawnAgent: async () => '',
+	};
+}
+
+suite('Images', () => {
+	test('the four accepted formats are sniffed from their headers', () => {
+		assert.deepStrictEqual(sniffImage(pngOf(3, 2)), { mime: 'image/png', width: 3, height: 2 });
+		assert.deepStrictEqual(sniffImage(gifOf(7, 5)), { mime: 'image/gif', width: 7, height: 5 });
+		assert.deepStrictEqual(sniffImage(jpegOf(640, 480)), { mime: 'image/jpeg', width: 640, height: 480 });
+		assert.deepStrictEqual(sniffImage(webpOf(800, 600)), { mime: 'image/webp', width: 800, height: 600 });
+		assert.strictEqual(sniffImage(Buffer.from('plain text')), undefined);
+		assert.strictEqual(sniffImage(Buffer.from([0x89, 0x50, 0x4e, 0x47])), undefined, 'a signature alone is not an image');
+		assert.strictEqual(sniffImage(Buffer.alloc(0)), undefined);
+	});
+
+	test('image tokens follow the high-detail tiling estimate', () => {
+		assert.strictEqual(estimateImageTokens({ width: 1024, height: 1024 }), 85 + 170 * 4);
+		assert.strictEqual(estimateImageTokens({ width: 4000, height: 2000 }), 1_105);
+		assert.strictEqual(estimateImageTokens({}), 1_105);
+		assert.strictEqual(estimateImageTokens({ width: 0, height: 100 }), 1_105);
+	});
+
+	test('a stored id decides the type and malformed references are dropped', () => {
+		const part = asImagePart({ id: 'a'.repeat(64) + '.png', mime: 'image/gif', width: 10, height: 20, name: 'x.png', dataUrl: 'nope' });
+		assert.strictEqual(part?.mime, 'image/png', 'the id wins over the claimed type');
+		assert.strictEqual(part?.dataUrl, undefined, 'a persisted part never carries bytes');
+		assert.strictEqual(part?.name, 'x.png');
+		assert.strictEqual(asImagePart({ id: '../x.png' }), undefined);
+		assert.strictEqual(asImagePart({ id: 'A'.repeat(64) + '.png' }), undefined);
+		assert.strictEqual(asImagePart(null), undefined);
+	});
+
+	test('the attachment store round-trips, dedupes and refuses bad input', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const bytes = pngOf(3, 2);
+			const first = await kernel.ctx.attachments.put(bytes, '/tmp/pic.png');
+			assert.match(first.id, /^[a-f0-9]{64}\.png$/);
+			assert.strictEqual(first.mime, 'image/png');
+			assert.deepStrictEqual([first.width, first.height], [3, 2]);
+			assert.strictEqual(first.name, 'pic.png');
+			const same = await kernel.ctx.attachments.put(bytes, 'other.png');
+			assert.strictEqual(same.id, first.id, 'the same bytes are one file');
+			assert.ok(kernel.ctx.attachments.read(first.id)?.data.equals(bytes));
+			assert.ok(kernel.ctx.attachments.dataUrl(first)?.startsWith('data:image/png;base64,'));
+
+			const [resolved] = kernel.ctx.attachments.resolveMessages([{ role: 'user', content: '', images: [first] }]);
+			assert.ok(resolved?.images?.[0]?.dataUrl?.startsWith('data:image/png;base64,'));
+			assert.strictEqual(first.dataUrl, undefined, 'the transcript copy is not mutated');
+			assert.strictEqual(kernel.ctx.attachments.publicParts([{ ...first, dataUrl: 'data:x' }])?.[0]?.dataUrl, undefined);
+
+			assert.strictEqual(kernel.ctx.attachments.read('../pic.png'), undefined);
+			assert.strictEqual(kernel.ctx.attachments.read('a'.repeat(64) + '.png'), undefined);
+			await assert.rejects(() => kernel.ctx.attachments.put(Buffer.from('not an image')));
+			await assert.rejects(() => kernel.ctx.attachments.put(Buffer.concat([bytes, Buffer.alloc(MAX_IMAGE_BYTES)])));
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a sweep removes only unreferenced files', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const kept = await kernel.ctx.attachments.put(pngOf(3, 2));
+			const orphan = await kernel.ctx.attachments.put(pngOf(4, 2));
+			// The age floor exists so a file written this millisecond is never mistaken for an orphan.
+			const old = new Date(Date.now() - 60_000);
+			utimesSync(join(kernel.host.storage.attachments, orphan.id), old, old);
+			assert.strictEqual(kernel.ctx.attachments.sweep(new Set([kept.id]), 0), 1);
+			assert.ok(kernel.ctx.attachments.read(kept.id));
+			assert.strictEqual(kernel.ctx.attachments.read(orphan.id), undefined);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('images count toward the budget and old tool pictures are elided first', () => {
+		const user: Message = { role: 'user', content: 'look', images: [imagePart('a')] };
+		const first: Message = { role: 'tool', toolCallId: '1', content: 'first', images: [imagePart('b')] };
+		const second: Message = { role: 'tool', toolCallId: '2', content: 'second', images: [imagePart('c')] };
+		const before = estimateMessages([user, first, second]);
+		assert.ok(before > estimateMessages([user, first, second].map((message) => ({ ...message, images: undefined }))));
+		const elided = elideToolResults([user, first, second], 1);
+		assert.ok(elided.changed);
+		assert.strictEqual(elided.messages[0]!.images?.length, 1, 'a prompt keeps its picture');
+		assert.strictEqual(elided.messages[1]!.images, undefined);
+		assert.strictEqual(elided.messages[2]!.images, undefined);
+		assert.ok(hasImages([user]));
+		assert.strictEqual(applyContextForm([user], 'token')[0]!.images?.length, 1, 'the token form keeps prompt images');
+
+		const stripped = stripImages([{ role: 'user', content: '', images: [imagePart('d')] }]);
+		assert.strictEqual(stripped[0]!.images, undefined);
+		assert.ok(stripped[0]!.content.startsWith('[image omitted'));
+		const dropped = dropPromptImages([user, { role: 'user', content: 'next' }], true);
+		assert.strictEqual(dropped.changed, true);
+		assert.strictEqual(dropped.messages[0]!.images, undefined);
+		assert.strictEqual(dropped.messages[0]!.content, 'look');
+	});
+
+	test('the wire puts images on content parts and tool pictures after the tool run', () => {
+		const dataUrl = 'data:image/png;base64,AAAA';
+		const user: Message = { role: 'user', content: 'look', images: [{ ...imagePart('a'), dataUrl }] };
+		const assistant: Message = {
+			role: 'assistant',
+			content: '',
+			toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{}' }],
+		};
+		const tool: Message = {
+			role: 'tool',
+			toolCallId: 'c1',
+			content: 'Read image',
+			images: [{ ...imagePart('b'), dataUrl, name: 'a.png' }],
+		};
+		const wire = toOpenAiMessages([user, assistant, tool]);
+		assert.deepStrictEqual(wire.map((message) => message.role), ['user', 'assistant', 'tool', 'user']);
+		const parts = wire[0]!.content as { type: string; text?: string; image_url?: { url: string; detail: string } }[];
+		assert.strictEqual(parts[0]!.type, 'text');
+		assert.strictEqual(parts[1]!.type, 'image_url');
+		assert.strictEqual(parts[1]!.image_url?.detail, 'high');
+		assert.strictEqual(wire[2]!.tool_call_id, 'c1', 'the tool call is still paired with its result');
+		const trailing = wire[3]!.content as { type: string; image_url?: { url: string } }[];
+		assert.ok(trailing.some((part) => part.type === 'image_url' && part.image_url?.url === dataUrl));
+		assert.strictEqual(toOpenAiMessages([{ role: 'user', content: 'hi' }])[0]!.content, 'hi', 'plain text is still a string');
+	});
+
+	test('an image refusal is told apart from a context refusal and a reset', () => {
+		assert.ok(isImageUnsupported(new ModelRequestError(400, 'image input is not supported by this model')));
+		assert.ok(isImageUnsupported(new ModelRequestError(422, 'vision is not enabled')));
+		assert.ok(!isImageUnsupported(new ModelRequestError(400, 'maximum context length exceeded')));
+		assert.ok(!isImageUnsupported(new ModelRequestError(413, 'request too large')));
+		assert.ok(isTransportFailure(new TypeError('terminated')));
+		assert.ok(isTransportFailure(Object.assign(new TypeError('fetch failed'), { cause: new Error('other side closed') })));
+		assert.ok(!isTransportFailure(new ModelRequestError(500, 'boom')));
+	});
+
+	test('read_file attaches an image and leaves text behavior alone', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(fsTools);
+			const workspace = kernel.host.workspace();
+			writeFileSync(join(workspace, 'pic.png'), pngOf(3, 2));
+			writeFileSync(join(workspace, 'note.txt'), 'hello\nworld\n');
+			writeFileSync(join(workspace, 'broken.png'), 'not an image');
+			const tool = kernel.ctx.tools.get('read_file')!;
+			const context = directToolContext(kernel);
+			const image = await tool.execute({ path: 'pic.png', startLine: 1 }, context);
+			assert.ok(typeof image !== 'string', 'an image is a structured result');
+			assert.ok(image.content.includes('image/png') && image.content.includes('3x2'));
+			assert.strictEqual(image.images?.[0]?.mime, 'image/png');
+			assert.ok(Buffer.from(image.images![0]!.data).equals(pngOf(3, 2)));
+			assert.strictEqual(await tool.execute({ path: 'note.txt' }, context), 'hello\nworld\n');
+			const broken = await tool.execute({ path: 'broken.png' }, context);
+			assert.ok(typeof broken === 'string' && broken.startsWith('Error:'), 'a fake image says so');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the agent stores a tool image, resolves it for the request and keeps only metadata', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(fsTools);
+			writeFileSync(join(kernel.host.workspace(), 'pic.png'), pngOf(3, 2));
+			let calls = 0;
+			let second: Message[] = [];
+			kernel.ctx.llm.use({
+				name: 'images',
+				async chat(request) {
+					calls += 1;
+					if (calls === 1) {
+						const call: ToolCall = { id: 'c1', name: 'read_file', arguments: JSON.stringify({ path: 'pic.png' }) };
+						return { message: { role: 'assistant', content: '', toolCalls: [call] }, toolCalls: [call], usage: { input: 1, output: 1 } };
+					}
+					second = request.messages;
+					return { message: { role: 'assistant', content: 'saw it' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const seen: ImagePart[][] = [];
+			kernel.ctx.on('agent/tool-result', (_ref, _call, _output, images) => seen.push(images ?? []));
+			const result = await kernel.ctx.agent.runTurn({ text: 'look', surface: 'test' });
+			assert.strictEqual(result.text, 'saw it');
+			const session = kernel.ctx.sessions.require(result.sessionId);
+			const tool = session.transcript.find((message) => message.role === 'tool');
+			assert.ok(tool?.images?.[0]?.id, 'the transcript keeps a reference');
+			assert.strictEqual(tool?.images?.[0]?.dataUrl, undefined, 'the transcript keeps no bytes');
+			assert.strictEqual(seen[0]?.length, 1, 'the event carries the reference');
+			const sentTool = second.find((message) => message.role === 'tool');
+			assert.ok(sentTool?.images?.[0]?.dataUrl?.startsWith('data:image/png;base64,'), 'the request resolves the bytes');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an image-only prompt runs, replays and degrades when the model refuses images', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const image = await kernel.ctx.attachments.put(pngOf(3, 2), 'shot.png');
+			let calls = 0;
+			let first: Message[] = [];
+			kernel.ctx.llm.use({
+				name: 'vision',
+				async chat(request) {
+					calls += 1;
+					if (calls === 1) {
+						first = request.messages;
+						throw new ModelRequestError(400, 'image input is not supported');
+					}
+					assert.ok(request.messages.every((message) => !message.images?.length), 'the retry is text only');
+					return { message: { role: 'assistant', content: 'text only' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const result = await kernel.ctx.agent.runTurn({ text: '', images: [image], surface: 'test' });
+			assert.strictEqual(result.text, 'text only');
+			assert.strictEqual(calls, 2, 'one refusal, one text retry');
+			const carrying = first.filter((message) => message.images?.length);
+			assert.strictEqual(carrying.length, 1, 'the composed request carries the prompt image once');
+			assert.strictEqual(carrying[0]!.role, 'user', 'and only on a user message');
+			const session = kernel.ctx.sessions.require(result.sessionId);
+			assert.strictEqual(session.title, 'Image prompt');
+			const prompt = session.transcript.find((message) => message.role === 'user');
+			assert.strictEqual(prompt?.content, '');
+			assert.strictEqual(prompt?.images?.[0]?.id, image.id, 'the transcript keeps the picture');
+
+			// A regenerate takes the prompt back with its picture.
+			const replayed = kernel.ctx.sessions.replayLast(session.id);
+			assert.strictEqual(replayed.text, '');
+			assert.strictEqual(replayed.images?.[0]?.id, image.id);
+			session.transcript = [{ role: 'user', content: '', images: [image] }];
+			kernel.ctx.sessions.save(session);
+			assert.ok(kernel.ctx.sessions.replayLast(session.id).images?.length, 'a second look still finds it');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a transport reset retries the image request once, then falls back to text', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const image = await kernel.ctx.attachments.put(pngOf(3, 2), 'shot.png');
+			let calls = 0;
+			const sawImages: boolean[] = [];
+			kernel.ctx.llm.use({
+				name: 'reset',
+				async chat(request) {
+					calls += 1;
+					sawImages.push(hasImages(request.messages));
+					if (calls <= 2) {
+						throw new TypeError('terminated');
+					}
+					return { message: { role: 'assistant', content: 'text only' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const result = await kernel.ctx.agent.runTurn({ text: '', images: [image], surface: 'test' });
+			assert.strictEqual(result.text, 'text only');
+			assert.strictEqual(calls, 3, 'the picture was tried twice, then the text was sent');
+			assert.deepStrictEqual(sawImages, [true, true, false]);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the webview carries the image seams', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		for (const needle of ["addEventListener('paste'", "addEventListener('drop'", 'data-attachment-id', "type: 'attachment'", 'imageThumbs', 'composerImages']) {
+			assert.ok(js.includes(needle), needle);
+		}
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.ok(css.includes('.thumbs') && css.includes('.composer-images'));
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.ok(panel.includes('id="composer-images"'));
 	});
 });

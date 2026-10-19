@@ -6,6 +6,7 @@ import { reactions } from './plugins/reactions';
 import { harnessCompat } from './plugins/harness';
 import { agentPlugin } from './services/agent';
 import { approvalPlugin } from './services/approval';
+import { attachmentsPlugin } from './services/attachments';
 import { auditPlugin } from './services/audit';
 import { catalogPlugin } from './services/catalog';
 import { checkpointsPlugin } from './services/checkpoints';
@@ -67,6 +68,7 @@ export const PLUGINS: Record<string, Plugin> = {
 	harness: harnessCompat,
 	audit: auditPlugin,
 	sessions: sessionsPlugin,
+	attachments: attachmentsPlugin,
 	checkpoints: checkpointsPlugin,
 	usage: usagePlugin,
 	tasks: tasksPlugin,
@@ -116,6 +118,9 @@ export const ROWS: PluginRow[] = [
 	// Kernel services.
 	{ id: 'audit', group: 'kernel' },
 	{ id: 'sessions', group: 'kernel' },
+	// Image bytes live outside the session JSON; the store is what both the read tool and the composer
+	// hand their pictures to.
+	{ id: 'attachments', group: 'kernel' },
 	// The change journal: on by default, because an irreversible write is a worse default than a
 	// shadow repository. One row for the journal and its review surface — off, and a write is just
 	// a write again.

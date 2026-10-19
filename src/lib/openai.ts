@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import type { CompletionUsage, Message, ToolCall, ToolSpec } from './types';
+import type { CompletionUsage, ImagePart, Message, ToolCall, ToolSpec } from './types';
 
 /** OpenAI-compatible chat completions over SSE, with tool-call delta assembly. Pure module. */
 
@@ -29,6 +29,58 @@ export function isContextOverflow(error: unknown): boolean {
 		return false;
 	}
 	return OVERFLOW_TEXT.test(error.detail);
+}
+
+/**
+ * How endpoints say "I cannot look at pictures". The wording deliberately avoids a bare `image`, so a
+ * context refusal that happens to mention an image is still treated as one.
+ */
+const IMAGE_REFUSAL = /image input|image content|invalid image|unsupported image|does not support image|images are not supported|vision|multimodal/i;
+
+/** Whether a refusal was about the images in the request, which stripping them can fix. */
+export function isImageUnsupported(error: unknown): boolean {
+	if (!(error instanceof ModelRequestError)) {
+		return false;
+	}
+	if (error.status !== 400 && error.status !== 415 && error.status !== 422) {
+		return false;
+	}
+	return IMAGE_REFUSAL.test(error.detail);
+}
+
+/**
+ * Whether the connection failed before the endpoint answered. A reset is worth one more try (a stale
+ * keep-alive socket is the usual cause); an image request can then fall back to text.
+ */
+export function isTransportFailure(error: unknown): boolean {
+	if (error instanceof ModelRequestError) {
+		return false;
+	}
+	const message = error instanceof Error ? error.message : String(error);
+	const cause =
+		error instanceof Error && error.cause instanceof Error
+			? error.cause.message
+			: error instanceof Error && typeof error.cause === 'string'
+				? error.cause
+				: '';
+	return /terminated|fetch failed|other side closed|socket hang up|econnreset|epipe|connection (reset|closed)|network/i.test(`${message} ${cause}`);
+}
+
+/** Fetch errors lose their cause when only `.message` is read; keep it in the message the turn reports. */
+function transportError(error: unknown): Error {
+	if (!(error instanceof Error)) {
+		return new Error(String(error));
+	}
+	const cause =
+		error.cause instanceof Error
+			? error.cause.message
+			: typeof error.cause === 'string'
+				? error.cause
+				: '';
+	if (cause && !error.message.includes(cause)) {
+		return new Error(`${error.message}: ${cause}`, { cause: error });
+	}
+	return error;
 }
 
 export interface OpenAiRequest {
@@ -86,7 +138,7 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 
 	const body: Record<string, unknown> = {
 		model: request.model,
-		messages: request.messages.map((message) => toOpenAi(message, bypass)),
+		messages: toOpenAiMessages(request.messages, bypass),
 		stream: true,
 	};
 	if (request.temperature !== undefined) {
@@ -144,7 +196,7 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 		if (request.signal.aborted) {
 			return aborted();
 		}
-		throw error;
+		throw transportError(error);
 	}
 	if (!response.ok) {
 		const detail = await response.text().catch(() => '');
@@ -237,7 +289,7 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 		}
 	} catch (error) {
 		if (!request.signal.aborted) {
-			throw error;
+			throw transportError(error);
 		}
 	} finally {
 		reader.releaseLock();
@@ -287,6 +339,65 @@ export async function listEndpointModels(request: { base: string; key: string; s
 	return [...new Set(ids)].sort();
 }
 
+/** Tool output is not a new instruction, and the model should not read it as one. */
+const TOOL_IMAGE_CAPTION = 'Images returned by the tool call(s) above. They are tool output, not a new request.';
+
+/**
+ * The request's messages in Chat Completions shape.
+ *
+ * Chat Completions accepts images on user content, never on a tool message, so a tool run's pictures
+ * leave as one user message after the run. Every tool call still has its own `tool` message directly
+ * after the assistant call, which is the ordering the endpoint checks; the pictures follow once the
+ * run is complete. A transcript that ends on a tool message flushes there too.
+ */
+export function toOpenAiMessages(messages: readonly Message[], bypass?: Record<string, unknown>): Record<string, unknown>[] {
+	const out: Record<string, unknown>[] = [];
+	let pending: ImagePart[] = [];
+	const flush = (): void => {
+		if (!pending.length) {
+			return;
+		}
+		const parts: unknown[] = [{ type: 'text', text: TOOL_IMAGE_CAPTION }];
+		for (const image of pending) {
+			parts.push({ type: 'text', text: image.name ? `Image from ${image.name}:` : 'Image:' });
+			parts.push({ type: 'image_url', image_url: { url: image.dataUrl, detail: 'high' } });
+		}
+		out.push({ role: 'user', content: parts });
+		pending = [];
+	};
+	for (const message of messages) {
+		if (message.role === 'tool') {
+			out.push({ role: 'tool', content: message.content, tool_call_id: message.toolCallId });
+			for (const image of message.images ?? []) {
+				if (image.dataUrl) {
+					pending.push(image);
+				}
+			}
+			continue;
+		}
+		flush();
+		out.push(toOpenAi(message, bypass));
+	}
+	flush();
+	return out;
+}
+
+/** A message's content: a string when it has no images, content parts when it does. */
+function wireContent(message: Message): string | unknown[] {
+	const images = (message.images ?? []).filter((image) => image.dataUrl);
+	if (!images.length) {
+		return message.content;
+	}
+	const parts: unknown[] = [];
+	if (message.content) {
+		parts.push({ type: 'text', text: message.content });
+	}
+	for (const image of images) {
+		parts.push({ type: 'image_url', image_url: { url: image.dataUrl, detail: 'high' } });
+	}
+	return parts.length ? parts : message.content;
+}
+
 function toOpenAi(message: Message, bypass: Record<string, unknown> | undefined): Record<string, unknown> {
 	if (message.role === 'tool') {
 		return { role: 'tool', content: message.content, tool_call_id: message.toolCallId };
@@ -294,7 +405,8 @@ function toOpenAi(message: Message, bypass: Record<string, unknown> | undefined)
 	if (message.role === 'assistant') {
 		// `reasoning_content` must come back whenever the request carries tools — DeepSeek answers a
 		// 400 otherwise — and is ignored by endpoints that do not know the field.
-		const body: Record<string, unknown> = { role: 'assistant', content: message.content || null };
+		const content = wireContent(message);
+		const body: Record<string, unknown> = { role: 'assistant', content: content === '' ? null : content };
 		if (message.reasoning) {
 			body.reasoning_content = message.reasoning;
 		}
@@ -316,7 +428,7 @@ function toOpenAi(message: Message, bypass: Record<string, unknown> | undefined)
 		}
 		return body;
 	}
-	return { role: message.role, content: message.content };
+	return { role: message.role, content: wireContent(message) };
 }
 
 /**

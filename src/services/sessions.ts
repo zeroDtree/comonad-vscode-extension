@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Service, type Context } from 'cordis';
+import { asImagePart } from '../lib/images';
 import { WORKSPACE_BOUNDARY, asApproval, asWorkMode } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { turnsOf } from '../lib/turns';
-import type { Message, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
+import type { ImagePart, Message, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
 
 /** Session persistence and the active-session pointer. One JSON document per chat. */
 
@@ -344,7 +345,15 @@ export class SessionStore {
 				workMode: asWorkMode(session.policy?.workMode),
 				approval: asApproval(session.policy?.approval),
 			},
-			transcript: session.transcript ?? [],
+			// Image references are checked too: a hand-edited id must never become a path, and a media
+			// type is derived from the id rather than trusted.
+			transcript: (session.transcript ?? []).map((message) => {
+				if (!message.images?.length) {
+					return message;
+				}
+				const images = message.images.map(asImagePart).filter((image): image is ImagePart => image !== undefined);
+				return { ...message, images: images.length ? images : undefined };
+			}),
 			turnIndex: session.turnIndex ?? 0,
 			cursor: session.cursor ?? null,
 			// Marks from the shadow-snapshot era have no journal to restore to, so they are dropped.
@@ -383,6 +392,7 @@ export class Sessions extends Service {
 			const dropped = this._store.prune();
 			if (dropped) {
 				this.ctx.log.message(`sessions: dropped ${dropped} unused chat(s)`);
+				this.sweepAttachments();
 			}
 			const renamed = this._store.tidyForkTitles();
 			if (renamed) {
@@ -520,7 +530,32 @@ export class Sessions extends Service {
 		if (this._activeId === id) {
 			this._activeId = null;
 		}
+		this.sweepAttachments();
 		this.changed(id);
+	}
+
+	/** Every attachment id a stored chat mentions, including the state of a suspended turn. */
+	attachmentIds(): Set<string> {
+		const ids = new Set<string>();
+		const collect = (messages: readonly Message[] | undefined): void => {
+			for (const message of messages ?? []) {
+				for (const image of message.images ?? []) {
+					ids.add(image.id);
+				}
+			}
+		};
+		for (const session of this.list()) {
+			collect(session.transcript);
+			const state = session.cursor?.state as { messages?: Message[]; transcript?: Message[] } | undefined;
+			collect(state?.messages);
+			collect(state?.transcript);
+		}
+		return ids;
+	}
+
+	/** Drops attachment files no stored chat mentions any more; the store keeps a grace period. */
+	private sweepAttachments(): void {
+		this.ctx.get('attachments')?.sweep(this.attachmentIds());
 	}
 
 	/** Truncates a fork at a turn boundary: the copy has no marks of its own. */
@@ -566,24 +601,26 @@ export class Sessions extends Service {
 
 	/**
 	 * Drops the last user turn (its message and everything the model answered with) and returns the
-	 * prompt, so the surface can run it again. Returns '' when there is nothing to re-run.
+	 * prompt, images included, so the surface can run it again. An empty text is not an empty prompt:
+	 * an image-only message is still something to replay.
 	 */
-	replayLast(id: string): string {
+	replayLast(id: string): { text: string; images?: ImagePart[] } {
 		const session = this.require(id);
 		if (session.cursor) {
-			return '';
+			return { text: '' };
 		}
 		let at = session.transcript.length - 1;
 		while (at >= 0 && session.transcript[at]!.role !== 'user') {
 			at -= 1;
 		}
 		if (at < 0) {
-			return '';
+			return { text: '' };
 		}
-		const text = session.transcript[at]!.content;
+		const message = session.transcript[at]!;
+		const replay = { text: message.content, images: message.images } as { text: string; images?: ImagePart[] };
 		session.transcript = session.transcript.slice(0, at);
 		this.save(session);
-		return text;
+		return replay;
 	}
 
 	/**

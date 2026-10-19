@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { estimateImages } from './images';
 import { countRaw, estimateMessages } from './tokens';
 import type { Message } from './types';
 
@@ -18,7 +19,9 @@ export function applyContextForm(transcript: Message[], form: ContextForm, toolL
 		// turn back whenever a request carries tools, and the agent loop always sends tools.
 		return transcript
 			.filter((message) => message.role === 'user' || message.role === 'assistant')
-			.map((message) => ({ role: message.role, content: message.content, reasoning: message.reasoning }) as Message);
+			// A prompt's images are part of the prompt, not tool traffic: an image-only message must not
+			// become an empty one just because this form drops everything else.
+			.map((message) => ({ role: message.role, content: message.content, reasoning: message.reasoning, images: message.images }) as Message);
 	}
 	if (form === 'raw') {
 		return transcript.map((message) => ({ ...message }));
@@ -91,6 +94,17 @@ export function elideToolResults(messages: Message[], limit: number): { messages
 	const out = messages.map((message) => ({ ...message }));
 	let total = estimateMessages(out);
 	let changed = false;
+	// Images cost more than any text an old tool result can give back, so they go first. Prompts are
+	// untouched here: what the user attached is not a tool result.
+	for (let index = 0; index < out.length && total > limit; index += 1) {
+		const message = out[index]!;
+		if (message.role !== 'tool' || !message.images?.length) {
+			continue;
+		}
+		total -= estimateImages(message.images);
+		out[index] = { ...message, images: undefined };
+		changed = true;
+	}
 	for (let index = 0; index < out.length && total > limit; index += 1) {
 		const message = out[index]!;
 		if (message.role !== 'tool') {
@@ -114,6 +128,49 @@ export function elideToolResults(messages: Message[], limit: number): { messages
 			changed = true;
 		}
 	}
+	return { messages: out, changed };
+}
+
+/** Whether any message carries an image. */
+export function hasImages(messages: readonly Message[]): boolean {
+	return messages.some((message) => Boolean(message.images?.length));
+}
+
+/**
+ * The same messages without images, for a model that refused them. A message that was only an image
+ * keeps a line saying what was left out, so the request never contains an empty prompt.
+ */
+export function stripImages(messages: readonly Message[], fallback = '[image omitted: this model does not accept images]'): Message[] {
+	return messages.map((message) =>
+		message.images?.length
+			? { ...message, images: undefined, content: message.content || fallback }
+			: message,
+	);
+}
+
+/**
+ * The last resort for a request that still does not fit after tool output has been elided: drop images
+ * from older prompts, keeping the newest prompt intact while `keepLastUser` is set. An image-only
+ * message keeps a marker so its turn does not turn into an empty user message.
+ */
+export function dropPromptImages(messages: Message[], keepLastUser = true): { messages: Message[]; changed: boolean } {
+	let lastUser = -1;
+	if (keepLastUser) {
+		for (let index = messages.length - 1; index >= 0; index -= 1) {
+			if (messages[index]!.role === 'user') {
+				lastUser = index;
+				break;
+			}
+		}
+	}
+	let changed = false;
+	const out = messages.map((message, index) => {
+		if (message.role !== 'user' || !message.images?.length || index === lastUser) {
+			return message;
+		}
+		changed = true;
+		return { ...message, images: undefined, content: message.content || '[image omitted to fit the model’s window]' };
+	});
 	return { messages: out, changed };
 }
 

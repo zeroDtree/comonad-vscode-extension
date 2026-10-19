@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { sniffImage } from '../lib/images';
 import { clip, describe, preview } from '../lib/util';
 import type { ApprovalDecision } from '../lib/types';
 import { resolveReferences, scopeOf } from './references';
@@ -21,7 +22,12 @@ export function participant(ctx: Context): void {
 			} else if (reference.value instanceof vscode.Uri) {
 				try {
 					const bytes = await vscode.workspace.fs.readFile(reference.value);
-					pieces.push(`File ${reference.value.fsPath}:\n${Buffer.from(bytes).toString('utf8').slice(0, 20_000)}`);
+					const image = sniffImage(bytes);
+					pieces.push(
+						image
+							? `File ${reference.value.fsPath} is a ${image.mime} image; use read_file to view it.`
+							: `File ${reference.value.fsPath}:\n${Buffer.from(bytes).toString('utf8').slice(0, 20_000)}`,
+					);
 				} catch {
 					// ignore unreadable references
 				}

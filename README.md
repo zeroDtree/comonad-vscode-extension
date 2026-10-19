@@ -664,6 +664,13 @@ Every tool declares a capability, whether it needs network, and whether it needs
 registry filters by all three before the model ever sees it. Read and write paths go through the same
 workspace guard, and every shell — foreground or background — runs under the OS sandbox.
 
+`read_file` also reads PNG, JPEG, WebP and GIF images and hands them to the model as image content
+(up to 4 MiB each). The chat composer accepts images pasted or dropped into it — up to six per
+message, 4 MiB each and 12 MiB in total; larger pictures are downscaled to 1568px before upload —
+and tool results and prompts show thumbnails in the transcript. Image bytes live in a content-addressed store under the extension's global storage; the
+session file keeps only the reference. A model that refuses images is remembered for that chat, and
+the request is resent as text.
+
 ## Architecture
 
 The whole extension is one Cordis plugin tree, assembled in `src/app.ts` and mounted from

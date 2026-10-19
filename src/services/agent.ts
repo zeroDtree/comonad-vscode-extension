@@ -6,11 +6,15 @@ import type { TurnRef } from '../lib/types';
 import {
 	DEFAULT_OUTPUT_RESERVE,
 	applyContextForm,
+	dropPromptImages,
 	elideToolResults,
+	hasImages,
 	planCompaction,
 	resolveBudget,
+	stripImages,
 	type Budget,
 } from '../lib/prompt';
+import { MAX_IMAGES_PER_MESSAGE, estimateImages } from '../lib/images';
 import { estimateMessages, estimateTokens } from '../lib/tokens';
 import {
 	compileGraphs,
@@ -24,7 +28,7 @@ import {
 } from '../lib/graph';
 import { instructionBody, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
-import { isContextOverflow, type Completion } from '../lib/openai';
+import { isContextOverflow, isImageUnsupported, isTransportFailure, type Completion } from '../lib/openai';
 import { gateCalls, MODE_LABELS, suggestAllowRule } from '../lib/policy';
 import {
 	COMONAD_BLOCK,
@@ -36,8 +40,20 @@ import {
 	type PromptBlock,
 } from '../lib/blocks';
 import { applyPromptLayout } from '../lib/prompt-layout';
-import type { AgentSpawnRequest, Capability, Message, SessionPolicy, TodoItem, ToolCall, ToolContext, ToolSpec } from '../lib/types';
+import type {
+	AgentSpawnRequest,
+	Capability,
+	ImagePart,
+	Message,
+	SessionPolicy,
+	TodoItem,
+	ToolCall,
+	ToolContext,
+	ToolImage,
+	ToolSpec,
+} from '../lib/types';
 import type { GenerationTrigger } from '../lib/generations';
+import type { ToolOutcome } from './tools';
 import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { agentIndex, agentLines, allowedToolsFor, skillLines } from './catalog';
@@ -56,6 +72,13 @@ const SUMMARY_SOURCE_LIMIT = 120_000;
 function continuationIndex(transcript: readonly Message[]): number | undefined {
 	const at = lastReplyIndex(transcript);
 	return at >= 0 && at === transcript.length - 1 ? at : undefined;
+}
+
+/** What an audit record may say about images: type, shape and id, never the bytes. */
+function imageNotes(images?: readonly ImagePart[]): string[] | undefined {
+	return images?.length
+		? images.map((image) => `${image.mime} ${image.width ?? '?'}x${image.height ?? '?'} ${image.id}`)
+		: undefined;
 }
 
 /** The record a fold leaves: the summary, then whatever stood after the stretch it folded. */
@@ -81,6 +104,8 @@ interface FoldResult {
 export interface TurnInput {
 	/** The prompt. Empty for a continue, a swipe or a regenerate, which re-run what is already there. */
 	text: string;
+	/** Images to send with this prompt; already stored, so only their metadata travels. */
+	images?: ImagePart[];
 	sessionId?: string;
 	systemContext?: string;
 	policy?: Partial<SessionPolicy>;
@@ -117,6 +142,8 @@ interface RunState {
 	ref: TurnRef;
 	sessionId: string;
 	policy: SessionPolicy;
+	/** The model this turn already had to send without images (a reset, not a capability verdict). */
+	imagesOff?: string;
 	transcript: Message[];
 	messages: Message[];
 	toolCalls: ToolCall[];
@@ -189,9 +216,11 @@ declare module 'cordis' {
  * `ctx.agent.runTurn()` and watch `agent/*` events.
  */
 export class Agent extends Service {
-	static inject = ['host', 'settings', 'sessions', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
+	static inject = ['host', 'settings', 'sessions', 'attachments', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
 
 	private readonly stops = new Map<string, AbortController>();
+	/** Session → the model that refused images there. A different model gets to try them again. */
+	private readonly imagesOff = new Map<string, string>();
 	/** The live Session object per running turn; usage is mutated here and saved by finish(). */
 	private readonly live = new Map<string, Session>();
 	private readonly todoLists = new Map<string, TodoItem[]>();
@@ -256,17 +285,20 @@ export class Agent extends Service {
 		// dropped here, and the variants it had are handed to `finish` so none of them is lost. The
 		// session is read *after* the replay, which rewrites the stored transcript.
 		let swipes: SwipeCarry | undefined;
+		let images = input.images;
 		if (trigger === 'swipe' || trigger === 'regenerate') {
 			const target = input.sessionId ?? this.ctx.sessions.active()?.id ?? '';
 			swipes = target ? this.ctx.sessions.swipeCarry(target) : undefined;
-			const replayed = target ? this.ctx.sessions.replayLast(target) : '';
-			if (!replayed) {
+			const replayed = target ? this.ctx.sessions.replayLast(target) : { text: '' };
+			if (!replayed.text && !replayed.images?.length) {
 				return { sessionId: target, text: 'There is nothing to generate again yet.' };
 			}
-			text = replayed;
+			text = replayed.text;
+			// A replayed prompt brings its pictures back; an explicit new set wins.
+			images = input.images?.length ? input.images : replayed.images;
 		}
 		const session = input.sessionId ? (this.ctx.sessions.get(input.sessionId) ?? this.ctx.sessions.ensureActive(this.policyFor())) : this.ctx.sessions.ensureActive(this.policyFor());
-		if (!text && trigger !== 'continue' && trigger !== 'impersonate') {
+		if (!text && !images?.length && trigger !== 'continue' && trigger !== 'impersonate') {
 			return { sessionId: session.id, text: '' };
 		}
 		// A continuation is written into the reply it carries on, so there has to be one: in a chat
@@ -294,8 +326,8 @@ export class Agent extends Service {
 				`model profile "${session.policy.model}" is gone — using ${this.ctx.llm.describe('auto')}. Pick one from the model menu.`,
 			);
 		}
-		if (session.title === 'New session' && text) {
-			session.title = threadTitle(text);
+		if (session.title === 'New session' && (text || images?.length)) {
+			session.title = text ? threadTitle(text) : 'Image prompt';
 		}
 		const config = this.ctx.settings.get();
 		const contexts: string[] = [];
@@ -316,6 +348,11 @@ export class Agent extends Service {
 		if (input.rewriteAt !== undefined) {
 			if (input.prepareRewrite && !(await input.prepareRewrite(session))) {
 				return { sessionId: session.id, text: '' };
+			}
+			// The edited prompt replaces the old one text for text; its pictures stay unless the editor
+			// supplied a new set. Read them before the cut removes the message.
+			if (!input.images?.length) {
+				images = session.transcript[input.rewriteAt]?.images;
 			}
 			const problem = this.ctx.sessions.rewriteAt(session, input.rewriteAt);
 			if (problem) {
@@ -347,7 +384,7 @@ export class Agent extends Service {
 		// a compaction in the middle of this turn cannot make it look like a later message.
 		const askedAt = Date.now();
 		const seed = (): Message[] =>
-			prompted ? [...session.transcript, { role: 'user', content: text, at: askedAt } as Message] : [...session.transcript];
+			prompted ? [...session.transcript, { role: 'user', content: text, images, at: askedAt } as Message] : [...session.transcript];
 		let seeded = seed();
 		// A continue grows the last reply, and only when nothing comes after it. A turn that was
 		// stopped, is waiting on a tool call, or failed leaves the transcript ending in something else
@@ -468,7 +505,7 @@ export class Agent extends Service {
 		};
 		session.transcript = seeded;
 		this.ctx.sessions.save(session);
-		this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000) });
+		this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000), images: imageNotes(images) });
 		return this.execute(session, state, input.signal);
 	}
 
@@ -669,35 +706,78 @@ export class Agent extends Service {
 		session: Session | undefined,
 		live: boolean,
 	): Promise<{ completion: Completion; messages: Message[] }> {
+		// Whether this attempt already reached the screen. A failure after tokens were streamed must not
+		// retry: the reader would see the answer twice.
+		let streamed = false;
 		const call = (messages: Message[]): Promise<Completion> =>
 			this.ctx.llm.chat(
 				state.policy.model,
 				messages,
 				tools,
 				{
-					onToken: (text) => this.ctx.emit('agent/token', state.ref, text),
-					onReasoning: (text) => this.ctx.emit('agent/reasoning', state.ref, text),
-					onToolDelta: (call) => this.ctx.emit('agent/tool-delta', state.ref, call),
+					onToken: (text) => {
+						streamed = true;
+						this.ctx.emit('agent/token', state.ref, text);
+					},
+					onReasoning: (text) => {
+						streamed = true;
+						this.ctx.emit('agent/reasoning', state.ref, text);
+					},
+					onToolDelta: (call) => {
+						streamed = true;
+						this.ctx.emit('agent/tool-delta', state.ref, call);
+					},
 				},
 				signal,
 				{ reasoningEffort: session?.reasoningEffort, ...state.samplers },
 			);
-		let messages = state.messages;
+		const attempt = (messages: Message[]): Promise<Completion> => {
+			streamed = false;
+			return call(messages);
+		};
+		// A model that once refused images never sees another one this session; the transcript keeps
+		// them, so switching to a vision model later can still show them. A transport reset only turns
+		// images off for this turn: the next turn gets to try again.
+		const refusedModel = this.imagesOff.get(state.sessionId);
+		const off = refusedModel === state.policy.model || state.imagesOff === state.policy.model;
+		let messages = off ? stripImages(state.messages) : state.messages;
 		let completion: Completion;
 		try {
-			completion = await call(messages);
+			completion = await attempt(messages);
 		} catch (error) {
-			if (!isContextOverflow(error)) {
+			if (isImageUnsupported(error) && hasImages(messages) && !off) {
+				this.imagesOff.set(state.sessionId, state.policy.model);
+				state.imagesOff = state.policy.model;
+				this.notice(state.ref, 'The selected model does not accept images; resending this request as text.');
+				messages = stripImages(state.messages);
+				completion = await attempt(messages);
+			} else if (isTransportFailure(error) && !streamed && hasImages(messages) && !off) {
+				// The usual cause is a stale keep-alive socket; one repeat can succeed. If it does not,
+				// the endpoint cannot take the picture and the text is still worth answering.
+				this.notice(state.ref, `The connection ended while sending images (${describe(error)}); retrying once.`);
+				try {
+					completion = await attempt(messages);
+				} catch (again) {
+					if (!isTransportFailure(again)) {
+						throw again;
+					}
+					state.imagesOff = state.policy.model;
+					this.notice(state.ref, 'Images could not be sent to this endpoint; resending the request as text.');
+					messages = stripImages(state.messages);
+					completion = await attempt(messages);
+				}
+			} else if (!isContextOverflow(error)) {
 				throw error;
+			} else {
+				// The estimate said it fit and the endpoint disagreed. Trust the endpoint: shrink hard, retry once.
+				this.notice(state.ref, 'The model refused the request as too long; shrinking it and trying again.');
+				const shrunk = await this.emergencyFit(state, session);
+				if (!shrunk) {
+					throw error;
+				}
+				messages = shrunk;
+				completion = await attempt(messages);
 			}
-			// The estimate said it fit and the endpoint disagreed. Trust the endpoint: shrink hard, retry once.
-			this.notice(state.ref, 'The model refused the request as too long; shrinking it and trying again.');
-			const shrunk = await this.emergencyFit(state, session);
-			if (!shrunk) {
-				throw error;
-			}
-			messages = shrunk;
-			completion = await call(messages);
 		}
 		if (completion.usage && session) {
 			session.usage.inputTokens += completion.usage.input;
@@ -724,7 +804,11 @@ export class Agent extends Service {
 	 */
 	private async emergencyFit(state: RunState, session: Session | undefined): Promise<Message[] | null> {
 		const system = state.messages.filter((message) => message.role === 'system');
-		const body = elideToolResults(state.messages, 0).messages.filter((message) => message.role !== 'system');
+		// Tool output goes to its markers first; older prompts' pictures go next, keeping the newest
+		// prompt intact so the question being answered still has what it was asked about.
+		const elided = elideToolResults(state.messages, 0).messages;
+		const dropped = dropPromptImages(elided, true);
+		const body = (dropped.changed ? dropped.messages : elided).filter((message) => message.role !== 'system');
 		if (!session || !state.foldable) {
 			return estimateMessages(body) < estimateMessages(state.messages) ? [...system, ...body] : null;
 		}
@@ -838,7 +922,9 @@ export class Agent extends Service {
 		}
 		const config = this.ctx.settings.get();
 		const sum = (role: Message['role']) =>
-			session.transcript.filter((message) => message.role === role).reduce((total, message) => total + estimateTokens(message.content), 0);
+			session.transcript
+				.filter((message) => message.role === role)
+				.reduce((total, message) => total + estimateTokens(message.content) + estimateImages(message.images), 0);
 		const user = sum('user');
 		const assistant = sum('assistant');
 		const tool = sum('tool');
@@ -1121,24 +1207,45 @@ export class Agent extends Service {
 					args = JSON.stringify(pre.updatedInput);
 				}
 				this.ctx.emit('agent/tool-start', state.ref, { ...call, arguments: args });
-				let output: string;
+				let outcome: ToolOutcome;
 				if (pre.blocked) {
-					output = `Error: blocked by hook: ${pre.reason ?? 'no reason given'}`;
+					outcome = { content: `Error: blocked by hook: ${pre.reason ?? 'no reason given'}`, isError: true };
 				} else {
-					output = await this.ctx.tools.invoke({ ...call, arguments: args }, this.toolContext(state, runtime.signal));
-					const post = await this.ctx.hooks.fire(output.startsWith('Error:') ? 'PostToolUseFailure' : 'PostToolUse', call.name, {
+					outcome = await this.ctx.tools.invoke({ ...call, arguments: args }, this.toolContext(state, runtime.signal));
+					const failed = outcome.isError || outcome.content.startsWith('Error:');
+					const post = await this.ctx.hooks.fire(failed ? 'PostToolUseFailure' : 'PostToolUse', call.name, {
 						session_id: state.sessionId,
 						tool_name: call.name,
 						tool_input: parseArguments(args),
-						tool_response: output,
+						tool_response: outcome.content,
 					});
 					if (post.contexts.length) {
-						output = `${output}\n\n[hook] ${post.contexts.join('\n[hook] ')}`;
+						outcome = { ...outcome, content: `${outcome.content}\n\n[hook] ${post.contexts.join('\n[hook] ')}` };
+					}
+					// A failed call is text the model has to read, not a picture it should look at.
+					if (failed) {
+						outcome = { ...outcome, images: undefined };
 					}
 				}
-				this.ctx.emit('agent/tool-result', state.ref, { ...call, arguments: args }, output);
-				this.ctx.audit.write(state.sessionId, { kind: 'tool', tool: call.name, arguments: clip(args, 500), output: clip(output, 500) });
-					results[index] = { role: 'tool', toolCallId: call.id, content: output, at: Date.now() };
+				// The bytes become a stored reference before the message is written; the transcript never
+				// carries base64, and the model still sees the picture on the next step.
+				const images = await this.rememberImages(state, call, outcome.images);
+				if (outcome.images?.length && !images?.length) {
+					const why =
+						this.imagesOff.get(state.sessionId) === state.policy.model || state.imagesOff === state.policy.model
+							? 'this model does not accept images'
+							: 'the image could not be attached';
+					outcome = { ...outcome, content: `${outcome.content}\n\n[image output omitted: ${why}]` };
+				}
+				this.ctx.emit('agent/tool-result', state.ref, { ...call, arguments: args }, outcome.content, images);
+				this.ctx.audit.write(state.sessionId, {
+					kind: 'tool',
+					tool: call.name,
+					arguments: clip(args, 500),
+					output: clip(outcome.content, 500),
+					images: imageNotes(images),
+				});
+				results[index] = { role: 'tool', toolCallId: call.id, content: outcome.content, images, at: Date.now() };
 			};
 			// Read-only calls run in small parallel batches; writes, tasks and questions stay ordered.
 			const parallel: number[] = [];
@@ -1199,6 +1306,33 @@ export class Agent extends Service {
 		routes.set('agent.after-confirm', (state) => (state.confirmed ? 'tools' : 'reject'));
 
 		return { nodes, routes };
+	}
+
+	/**
+	 * Stores what a tool handed back and returns the references the message keeps. A model that already
+	 * refused images gets none; a store failure is reported and the tool text stands on its own.
+	 */
+	private async rememberImages(state: RunState, call: ToolCall, images?: ToolImage[]): Promise<ImagePart[] | undefined> {
+		if (!images?.length || this.imagesOff.get(state.sessionId) === state.policy.model || state.imagesOff === state.policy.model) {
+			return undefined;
+		}
+		const parts: ImagePart[] = [];
+		let dropped = 0;
+		for (const image of images.slice(0, MAX_IMAGES_PER_MESSAGE)) {
+			try {
+				parts.push(await this.ctx.attachments.put(image.data, image.name));
+			} catch (error) {
+				dropped += 1;
+				this.ctx.log.message(`dropped image from ${call.name}: ${describe(error)}`);
+			}
+		}
+		if (images.length > MAX_IMAGES_PER_MESSAGE) {
+			dropped += images.length - MAX_IMAGES_PER_MESSAGE;
+		}
+		if (dropped) {
+			this.notice(state.ref, `Dropped ${dropped} image(s) from ${call.name}: they could not be attached or exceeded limits.`);
+		}
+		return parts.length ? parts : undefined;
 	}
 
 	private toolContext(state: RunState, signal: AbortSignal): ToolContext {

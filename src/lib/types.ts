@@ -27,9 +27,41 @@ export interface ToolCall {
 	extraContent?: Record<string, unknown>;
 }
 
+/** The image formats the readers and the OpenAI-compatible wire understand. */
+export type ImageMime = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+
+/**
+ * An image attached to a message. The bytes live in the content-addressed attachment store, named
+ * `<sha256>.<ext>`; only that metadata is persisted. `dataUrl` is filled on a request copy and never
+ * written down.
+ */
+export interface ImagePart {
+	id: string;
+	mime: ImageMime;
+	name?: string;
+	width?: number;
+	height?: number;
+	dataUrl?: string;
+}
+
+/** Raw bytes a tool hands back; the attachment store sniffs the real type. */
+export interface ToolImage {
+	data: Uint8Array;
+	mime: ImageMime;
+	name?: string;
+}
+
+/** A tool's non-text result. A bare string is still a complete answer. */
+export interface ToolResult {
+	content: string;
+	images?: ToolImage[];
+}
+
 export interface Message {
 	role: 'system' | 'user' | 'assistant' | 'tool';
 	content: string;
+	/** Images the message carries: a prompt's attachments, or what a tool read. */
+	images?: ImagePart[];
 	reasoning?: string;
 	toolCalls?: ToolCall[];
 	toolCallId?: string;
@@ -155,7 +187,7 @@ export interface ToolSpec {
 	capability: Capability;
 	needsNetwork: boolean;
 	needsWorkspace: boolean;
-	execute(args: unknown, ctx: ToolContext): Promise<string>;
+	execute(args: unknown, ctx: ToolContext): Promise<string | ToolResult>;
 }
 
 export function objectSchema(properties: Record<string, unknown>, required: string[] = []): JsonSchema {
