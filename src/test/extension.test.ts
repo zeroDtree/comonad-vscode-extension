@@ -8,7 +8,10 @@ import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
-import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule, WORKSPACE_BOUNDARY } from '../lib/policy';
+import { isLoopbackBase } from '../lib/endpoint';
+import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule, WORKSPACE_BOUNDARY, type GateEnvironment } from '../lib/policy';
+import { sandboxStatus } from '../tools/shell';
+import type { SandboxKind } from '../lib/sandbox';
 import {
 	applyContextForm,
 	DEFAULT_OUTPUT_RESERVE,
@@ -125,9 +128,14 @@ const writeTool: ToolSpec = { ...readTool, name: 'write_file', capability: 'rw' 
 
 const shellTool: ToolSpec = { ...readTool, name: 'run_shell', capability: 'shell_rw' };
 
+const readonlyShellTool: ToolSpec = { ...readTool, name: 'run_shell_readonly', capability: 'shell_ro' };
+
 const unsandboxedTool: ToolSpec = { ...readTool, name: 'run_shell_unsandboxed', capability: 'shell_rw' };
 
-const lookup = (name: string): ToolSpec | undefined => [readTool, writeTool, shellTool, unsandboxedTool].find((tool) => tool.name === name);
+const lookup = (name: string): ToolSpec | undefined =>
+	[readTool, writeTool, shellTool, readonlyShellTool, unsandboxedTool].find((tool) => tool.name === name);
+
+const gateEnv = (sandbox: SandboxKind = 'bwrap', allowUnsandboxedShell = false): GateEnvironment => ({ sandbox, allowUnsandboxedShell });
 
 const policy = (patch: Partial<SessionPolicy> = {}): SessionPolicy => ({
 	workMode: 'sw',
@@ -219,43 +227,43 @@ suite('Comonad domain', () => {
 	});
 
 	test('manual approval confirms and universal reject rejects', () => {
-		const manual = gateCalls([call('read_file', { path: 'a.ts' })], lookup, policy(), { allow: [], ask: [], deny: [] });
+		const manual = gateCalls([call('read_file', { path: 'a.ts' })], lookup, policy(), { allow: [], ask: [], deny: [] }, gateEnv());
 		assert.strictEqual(manual.decision, 'confirm');
 		const rejected = gateCalls([call('read_file', { path: 'a.ts' })], lookup, policy({ approval: 'universal_reject' }), {
 			allow: [],
 			ask: [],
 			deny: [],
-		});
+		}, gateEnv());
 		assert.strictEqual(rejected.decision, 'reject');
 	});
 
 	test('whitelist accepts reads and asks for writes', () => {
 		const rules = { allow: [], ask: [], deny: [] };
-		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, policy({ approval: 'whitelist_accept' }), rules).decision, 'allow');
-		assert.strictEqual(gateCalls([call('write_file', { path: 'a.ts' })], lookup, policy({ approval: 'whitelist_accept' }), rules).decision, 'confirm');
+		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, policy({ approval: 'whitelist_accept' }), rules, gateEnv()).decision, 'allow');
+		assert.strictEqual(gateCalls([call('write_file', { path: 'a.ts' })], lookup, policy({ approval: 'whitelist_accept' }), rules, gateEnv()).decision, 'confirm');
 	});
 
 	test('the whitelist is the allow list, not a read/write split', () => {
 		const rules = parseRules({ allow: ['write_file(a.ts)'] });
 		const whitelist = policy({ approval: 'whitelist_accept' });
-		assert.strictEqual(gateCalls([call('write_file', { path: 'a.ts' })], lookup, whitelist, rules).decision, 'allow');
-		assert.strictEqual(gateCalls([call('write_file', { path: 'b.ts' })], lookup, whitelist, rules).decision, 'confirm');
+		assert.strictEqual(gateCalls([call('write_file', { path: 'a.ts' })], lookup, whitelist, rules, gateEnv()).decision, 'allow');
+		assert.strictEqual(gateCalls([call('write_file', { path: 'b.ts' })], lookup, whitelist, rules, gateEnv()).decision, 'confirm');
 	});
 
 	test('the blacklist starts with the write-capable tools', () => {
 		const empty = { allow: [], ask: [], deny: [] };
 		const blacklist = policy({ approval: 'blacklist_reject' });
-		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, blacklist, empty).decision, 'allow');
-		assert.strictEqual(gateCalls([call('write_file', { path: 'a.ts' })], lookup, blacklist, empty).decision, 'reject');
-		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls' })], lookup, blacklist, empty).decision, 'reject');
+		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, blacklist, empty, gateEnv()).decision, 'allow');
+		assert.strictEqual(gateCalls([call('write_file', { path: 'a.ts' })], lookup, blacklist, empty, gateEnv()).decision, 'reject');
+		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls' })], lookup, blacklist, empty, gateEnv()).decision, 'reject');
 		// A `permissions.deny` rule adds to the blacklist and rejects in every policy.
 		const rules = parseRules({ deny: ['read_file(secret.ts)'] });
-		assert.strictEqual(gateCalls([call('read_file', { path: 'secret.ts' })], lookup, blacklist, rules).decision, 'reject');
-		assert.strictEqual(gateCalls([call('read_file', { path: 'secret.ts' })], lookup, policy({ approval: 'universal_accept' }), rules).decision, 'reject');
+		assert.strictEqual(gateCalls([call('read_file', { path: 'secret.ts' })], lookup, blacklist, rules, gateEnv()).decision, 'reject');
+		assert.strictEqual(gateCalls([call('read_file', { path: 'secret.ts' })], lookup, policy({ approval: 'universal_accept' }), rules, gateEnv()).decision, 'reject');
 	});
 
 	test('mode capabilities gate tools', () => {
-		const rejected = gateCalls([call('write_file', { path: 'a.ts' })], lookup, policy({ workMode: 'ro' }), { allow: [], ask: [], deny: [] });
+		const rejected = gateCalls([call('write_file', { path: 'a.ts' })], lookup, policy({ workMode: 'ro' }), { allow: [], ask: [], deny: [] }, gateEnv());
 		assert.strictEqual(rejected.decision, 'reject');
 		assert.match(rejected.reason, /not allowed in mode ro/);
 	});
@@ -276,14 +284,14 @@ suite('Comonad domain', () => {
 
 	test('deny rules win over accept policies', () => {
 		const rules = parseRules({ deny: ['run_shell(rm:*)'] });
-		const result = gateCalls([call('run_shell', { command: 'rm -rf build' })], lookup, policy({ approval: 'universal_accept', workMode: 'aw' }), rules);
+		const result = gateCalls([call('run_shell', { command: 'rm -rf build' })], lookup, policy({ approval: 'universal_accept', workMode: 'aw' }), rules, gateEnv());
 		assert.strictEqual(result.decision, 'reject');
 	});
 
 	test('allow rules satisfy manual approval when they match', () => {
 		const rules = parseRules({ allow: ['read_file(./src/**)'] });
-		assert.strictEqual(gateCalls([call('read_file', { path: 'src/a.ts' })], lookup, policy(), rules).decision, 'allow');
-		assert.strictEqual(gateCalls([call('read_file', { path: 'docs/a.md' })], lookup, policy(), rules).decision, 'confirm');
+		assert.strictEqual(gateCalls([call('read_file', { path: 'src/a.ts' })], lookup, policy(), rules, gateEnv()).decision, 'allow');
+		assert.strictEqual(gateCalls([call('read_file', { path: 'docs/a.md' })], lookup, policy(), rules, gateEnv()).decision, 'confirm');
 	});
 
 	test('rule syntax matches commands, paths and domains', () => {
@@ -624,13 +632,72 @@ suite('Comonad domain', () => {
 	test('dangerous commands and unsandboxed escalation always confirm', () => {
 		const rules = { allow: [], ask: [], deny: [] };
 		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
-		assert.strictEqual(gateCalls([call('run_shell', { command: 'npm test' })], lookup, accepted, rules).decision, 'allow');
-		const dangerous = gateCalls([call('run_shell', { command: 'rm -rf build' })], lookup, accepted, rules);
+		assert.strictEqual(gateCalls([call('run_shell', { command: 'npm test' })], lookup, accepted, rules, gateEnv()).decision, 'allow');
+		const dangerous = gateCalls([call('run_shell', { command: 'rm -rf build' })], lookup, accepted, rules, gateEnv());
 		assert.strictEqual(dangerous.decision, 'confirm');
 		assert.match(dangerous.reason, /dangerous/);
-		const escalated = gateCalls([call('run_shell_unsandboxed', { command: 'ls' })], lookup, accepted, rules);
+		const escalated = gateCalls([call('run_shell_unsandboxed', { command: 'ls' })], lookup, accepted, rules, gateEnv());
 		assert.strictEqual(escalated.decision, 'confirm');
 		assert.match(escalated.reason, /outside the OS sandbox/);
+	});
+
+	test('no OS sandbox escalates every shell call, and the setting opts out', () => {
+		const rules = { allow: [], ask: [], deny: [] };
+		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
+		for (const name of ['run_shell', 'run_shell_readonly', 'run_shell_unsandboxed']) {
+			const result = gateCalls([call(name, { command: 'ls' })], lookup, accepted, rules, gateEnv('none'));
+			assert.strictEqual(result.decision, 'confirm', name);
+			assert.match(result.reason, /no OS sandbox/, name);
+			assert.strictEqual(result.escalated, true, name);
+		}
+		// Only shell capabilities escalate; a read keeps the policy's decision.
+		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, accepted, rules, gateEnv('none')).decision, 'allow');
+		// The explicit opt-out restores the quiet path, and a sandboxed host was never affected.
+		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls' })], lookup, accepted, rules, gateEnv('none', true)).decision, 'allow');
+		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls' })], lookup, accepted, rules, gateEnv('bwrap')).decision, 'allow');
+		// An ask rule still asks, and the no-sandbox escalation rides along so a subagent cannot
+		// answer it by delegation.
+		const asked = gateCalls([call('run_shell', { command: 'ls' })], lookup, accepted, parseRules({ ask: ['run_shell'] }), gateEnv('none'));
+		assert.strictEqual(asked.decision, 'confirm');
+		assert.strictEqual(asked.escalated, true);
+	});
+
+	test('an explicit allow rule is consent even without a sandbox', () => {
+		const rules = parseRules({ allow: ['run_shell(ls:*)'] });
+		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
+		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls -la' })], lookup, accepted, rules, gateEnv('none')).decision, 'allow');
+	});
+
+	test('reject all settles before rules and escalations', () => {
+		const rejected = policy({ approval: 'universal_reject', workMode: 'aw' });
+		const rules = parseRules({ allow: ['read_file(a.ts)'] });
+		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, rejected, rules, gateEnv()).decision, 'reject');
+		assert.strictEqual(
+			gateCalls([call('run_shell', { command: 'sudo rm -rf /' })], lookup, rejected, { allow: [], ask: [], deny: [] }, gateEnv()).decision,
+			'reject',
+		);
+	});
+
+	test('ordinary confirmations are not escalated', () => {
+		const result = gateCalls([call('write_file', { path: 'a.ts' })], lookup, policy(), { allow: [], ask: [], deny: [] }, gateEnv());
+		assert.strictEqual(result.decision, 'confirm');
+		assert.strictEqual(result.escalated, undefined);
+	});
+
+	test('loopback model endpoints are recognized', () => {
+		for (const base of ['http://localhost:11434/v1', 'https://127.0.0.1:8443', 'http://[::1]:8080', 'foo.localhost', 'localhost:8080']) {
+			assert.ok(isLoopbackBase(base), base);
+		}
+		for (const base of ['https://api.deepseek.com', 'http://0.0.0.0:11434', 'http://192.168.1.2:8080', '', undefined, 'not a url ://']) {
+			assert.ok(!isLoopbackBase(base), String(base));
+		}
+	});
+
+	test('sandboxStatus names the engine and boundary', () => {
+		assert.match(sandboxStatus({ read: false, write: true }, 'bwrap'), /sandbox: bwrap/);
+		assert.match(sandboxStatus({ read: false, write: true }, 'macos'), /sandbox: sandbox-exec/);
+		assert.match(sandboxStatus({ read: true, write: true }, 'none'), /no OS sandbox available/);
+		assert.match(sandboxStatus({ read: true, write: false }, 'bwrap'), /reads/);
 	});
 
 	test('sensitive environment variables are filtered', () => {
@@ -1221,8 +1288,15 @@ suite('Comonad domain', () => {
 
 	test('every setting the manifest declares is one the code actually reads', () => {
 		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+			extensionKind?: string[];
+			capabilities?: { virtualWorkspaces?: boolean; untrustedWorkspaces?: { supported?: string } };
 			contributes: { configuration: { properties: Record<string, unknown> } };
 		};
+		// The agent runs where the workspace is, exactly like Cursor's server and Copilot's
+		// workspace extension; credentials stay in client-side SecretStorage.
+		assert.deepStrictEqual(manifest.extensionKind, ['workspace'], 'the agent runs with the workspace');
+		assert.strictEqual(manifest.capabilities?.virtualWorkspaces, false, 'node:fs needs a real file system');
+		assert.strictEqual(manifest.capabilities?.untrustedWorkspaces?.supported, 'limited', 'project plugins and hooks need trust');
 		const declared = new Set(Object.keys(manifest.contributes.configuration.properties).map((key) => key.replace(/^comonad\./, '')));
 		// The kernel reads its own keys; the tavern layer's keys are its own list, in its own package.
 		const read = new Set<string>([...CONFIG_KEYS, ...TAVERN_SETTING_KEYS]);
@@ -2588,14 +2662,16 @@ suite('Cordis kernel', () => {
 	test('every gate in the flow diagram owns its outcome', () => {
 		const flow = gateFlow();
 		assert.match(flow, /^flowchart TD\n/);
-		for (const gate of ['work mode set', 'network ok', 'workspace ok', 'deny rule', 'ask rule', 'allow rule', 'dangerous', 'no rule matched']) {
+		for (const gate of ['work mode set', 'network ok', 'workspace ok', 'deny rule', 'ask rule', 'allow rule', 'no OS sandbox', 'dangerous', 'no rule matched']) {
 			assert.ok(flow.includes(gate), `flow covers ${gate}`);
 		}
 		assert.ok(flow.includes('in the whitelist?') && flow.includes('in the blacklist?'), 'flow covers both rule lists');
-		// Every approval policy is a node of its own, named after the setting value.
-		for (const policy of Object.keys(APPROVAL_LABELS)) {
+		// Every approval policy is a node of its own, named after the setting value. Reject-all is
+		// settled before the rules, so it is the question rather than one of the policy branches.
+		for (const policy of Object.keys(APPROVAL_LABELS).filter((policy) => policy !== 'universal_reject')) {
 			assert.ok(flow.includes(`["${policy}"]`), `flow has a ${policy} policy node`);
 		}
+		assert.ok(flow.includes('approval policy universal_reject?'), 'flow settles reject-all first');
 		// `call` and `end` are mermaid keywords: the source must not use them as node ids.
 		assert.ok(!/^\s*call[\s[(]/.test(flow) && !/^\s*end\[/m.test(flow), 'flow avoids mermaid keywords');
 
@@ -2610,13 +2686,13 @@ suite('Cordis kernel', () => {
 		for (const gate of ['deny rule matches?', 'ask rule matches?', 'allow rule matches?']) {
 			assert.ok(rules.includes(gate), `the rules frame holds ${gate}`);
 		}
-		// The policy frame holds the policy question and the five policy nodes; their consequences
-		// (the list questions and every outcome) flow out below it.
+		// The policy frame holds the policy question and the four remaining policy nodes; their
+		// consequences (the list questions and every outcome) flow out below it.
 		assert.ok(policy.includes('no rule matched'), 'the policy frame holds the policy question');
-		for (const id of ['policyManual', 'policyReject', 'policyAccept', 'policyWhitelist', 'policyBlacklist']) {
+		for (const id of ['policyManual', 'policyAccept', 'policyWhitelist', 'policyBlacklist']) {
 			assert.ok(policy.includes(`    ${id}["`), `the policy frame holds ${id}`);
 		}
-		assert.strictEqual((policy.match(/^    approval --> /gm) ?? []).length, 5, 'the policy question offers five policies');
+		assert.strictEqual((policy.match(/^    approval --> /gm) ?? []).length, 4, 'the policy question offers four policies');
 		assert.ok(!policy.includes('in the whitelist?') && !policy.includes('in the blacklist?'), 'the list questions sit outside the frame');
 		assert.ok(!policy.includes('deny rule'), 'the rules frame does not hold the policy gates');
 		// The safety escalation sits between the two frames: it is neither a rule nor a policy.
@@ -2726,8 +2802,8 @@ suite('Cordis kernel', () => {
 			assert.deepStrictEqual(rules.deny.map((rule) => rule.pattern), ['./.env']);
 			// And they gate a call: the deny rule wins even under an accept-all policy.
 			const accepted = policy({ approval: 'universal_accept', workMode: 'aw', network: true });
-			assert.strictEqual(gateCalls([call('read_file', { path: './.env' })], lookup, accepted, rules).decision, 'reject');
-			assert.strictEqual(gateCalls([call('run_shell', { command: 'npm run test:unit' })], lookup, accepted, rules).decision, 'allow');
+			assert.strictEqual(gateCalls([call('read_file', { path: './.env' })], lookup, accepted, rules, gateEnv()).decision, 'reject');
+			assert.strictEqual(gateCalls([call('run_shell', { command: 'npm run test:unit' })], lookup, accepted, rules, gateEnv()).decision, 'allow');
 		} finally {
 			await kernel.dispose();
 		}
@@ -3514,6 +3590,52 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(requests.length, 2);
 			assert.strictEqual(toolStarts, 1);
 			assert.strictEqual(allowed.text, 'executed ok');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a host without an OS sandbox asks before a shell tool even under accept-all', async () => {
+		const kernel = await createTestKernel({ config: { approval: 'universal_accept', mode: 'aw' } });
+		try {
+			kernel.host.sandboxValue = 'none';
+			let calls = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					calls += 1;
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						const toolCall: ToolCall = { id: `c${calls}`, name: 'probe_shell', arguments: '{}' };
+						return { message: { role: 'assistant', content: 'working', toolCalls: [toolCall] }, toolCalls: [toolCall] };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [] };
+				},
+			});
+			await kernel.ctx.plugin(
+				toolset([
+					{
+						name: 'probe_shell',
+						description: '',
+						parameters: objectSchema({}),
+						capability: 'shell_ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						execute: async () => 'ran',
+					},
+				]),
+			);
+			const requests: ApprovalRequest[] = [];
+			kernel.ctx.on('approval/request', (request, next) => {
+				if (request.surface !== 'test') {
+					return next();
+				}
+				requests.push(request);
+				return 'deny';
+			});
+			await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			assert.strictEqual(requests.length, 1, 'the unconfined shell call waited for the user');
+			assert.match(requests[0]!.reason, /no OS sandbox/);
 		} finally {
 			await kernel.dispose();
 		}
@@ -6345,6 +6467,8 @@ async function harness(): Promise<Harness> {
 		secret: async () => undefined,
 		setSecret: async () => undefined,
 		env: () => undefined,
+		remoteName: () => undefined,
+		sandboxKind: () => 'bwrap' as const,
 		ask: async () => [],
 		notify: () => undefined,
 	} as unknown as Host;
@@ -7376,6 +7500,16 @@ suite('Explicit references', () => {
 		assert.ok(panel.includes('id="mention"'), 'the picker is in the document');
 		assert.ok(css.includes('.mention-menu') && css.includes('.ref-token'));
 		assert.ok(js.includes('mentionQuery') && js.includes('mentionResults') && js.includes('compositionstart'));
+	});
+
+	test('the chat carries the remote and no-sandbox state', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.css'), 'utf8');
+		const js = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.js'), 'utf8');
+		assert.ok(panel.includes('id="environment"'), 'the chip is in the document');
+		assert.ok(panel.includes('sandbox: ctx.host.sandboxKind()'), 'the state carries the sandbox kind');
+		assert.ok(js.includes("state.sandbox === 'none'") && js.includes('remote · no sandbox'), 'the guest renders it');
+		assert.ok(css.includes('#environment'), 'and it is styled');
 	});
 });
 

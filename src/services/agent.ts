@@ -1288,13 +1288,18 @@ export class Agent extends Service {
 				state.gateReason = `tool ${off.name} is switched off in Prompts`;
 				return 'reject';
 			}
-			const gate = gateCalls(state.toolCalls, (name) => this.ctx.tools.get(name), state.policy, this.ctx.settings.rules());
+			const gate = gateCalls(state.toolCalls, (name) => this.ctx.tools.get(name), state.policy, this.ctx.settings.rules(), {
+				sandbox: this.ctx.host.sandboxKind(),
+				allowUnsandboxedShell: this.ctx.settings.get().allowUnsandboxedShell,
+			});
 			state.gateReason = gate.reason;
 			if (gate.decision === 'allow') {
 				return 'tools';
 			}
-			// A subagent runs inside a pre-approved, filtered tool set: confirmations are resolved by delegation.
-			if (gate.decision === 'confirm' && state.filter) {
+			// A subagent runs inside a pre-approved, filtered tool set: ordinary confirmations are
+			// resolved by delegation. An escalated one — no sandbox, unsandboxed tool, dangerous
+			// command — needs the user, so it falls through to the surface.
+			if (gate.decision === 'confirm' && state.filter && !gate.escalated) {
 				return 'tools';
 			}
 			if (gate.decision === 'reject') {

@@ -351,6 +351,14 @@
 		put($('deny'), (config.denyReadPaths || []).join('\n'));
 		checked('confine-read', config.confineRead);
 		checked('confine-write', config.confineWrite);
+		checked('allow-unsandboxed', config.allowUnsandboxedShell);
+		const environment = state.environment || {};
+		const note = $('environment-note');
+		if (note) {
+			const where = environment.remote ? `Remote window (${environment.remote})` : 'Local window';
+			const sandbox = environment.sandbox === 'none' ? 'no OS sandbox' : `sandbox: ${environment.sandbox}`;
+			note.textContent = `${where} · ${sandbox}${environment.sandbox === 'none' ? ' — shell commands ask before running unless allowed above.' : ''}`;
+		}
 		put($('steps'), String(config.maxSteps));
 		const rules = config.permissions || {};
 		put($('rules-allow'), (rules.allow || []).join('\n'));
@@ -374,6 +382,7 @@
 			denyReadPaths: lines($('deny')),
 			confineRead: $('confine-read').checked,
 			confineWrite: $('confine-write').checked,
+			allowUnsandboxedShell: $('allow-unsandboxed').checked,
 			maxSteps: Number($('steps').value) || 0,
 			displayForm: $('display').value,
 			contextForm: $('context').value,

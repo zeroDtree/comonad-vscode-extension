@@ -1395,7 +1395,8 @@ footer {
 	margin-top: 8px;
 }
 
-#network {
+#network,
+#environment {
 	padding: 2px 9px;
 	border-radius: 10px;
 	font-size: 11px;
@@ -1408,6 +1409,12 @@ footer {
 	opacity: 1;
 	border-color: var(--vscode-focusBorder, rgba(128, 128, 128, 0.6));
 	background: var(--vscode-inputOption-activeBackground, rgba(128, 128, 128, 0.18));
+}
+
+#environment {
+	color: var(--vscode-editorWarning-foreground, #d5a33a);
+	border-color: var(--vscode-editorWarning-foreground, #d5a33a);
+	opacity: 1;
 }
 
 #controls button {

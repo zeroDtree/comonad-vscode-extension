@@ -170,6 +170,8 @@ export interface Config {
 	budgetUsd: number;
 	filterSensitiveEnv: boolean;
 	allowFullAccess: boolean;
+	/** Let shell tools run without the extra confirmation when no OS sandbox is available. */
+	allowUnsandboxedShell: boolean;
 	/** A SillyTavern folder whose `src/tokenizers` holds the tokenizer files it ships itself. */
 	tokenizerDir: string;
 	/** Show the agent's changes inline in the editor, with Keep/Undo on each block and each file. */
@@ -214,6 +216,7 @@ export const CONFIG_KEYS = [
 	'budgetUsd',
 	'filterSensitiveEnv',
 	'allowFullAccess',
+	'allowUnsandboxedShell',
 	'tokenizerDir',
 	'inlineDiff',
 	'prompts',
@@ -300,6 +303,7 @@ export class Settings extends Service {
 			budgetUsd: count('budgetUsd', 0, 0),
 			filterSensitiveEnv: flag('filterSensitiveEnv', true),
 			allowFullAccess: flag('allowFullAccess', true),
+			allowUnsandboxedShell: flag('allowUnsandboxedShell', false),
 			tokenizerDir: typeof raw.tokenizerDir === 'string' ? raw.tokenizerDir : '',
 			inlineDiff: flag('inlineDiff', true),
 			// Both are untrusted arrays: a webview save, a hand-edited settings file or a value from an

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { join } from 'node:path';
+import type { SandboxKind } from '../lib/sandbox';
 
 /**
  * The Host contract: everything the kernel needs from its embedding environment,
@@ -28,8 +29,15 @@ export interface Host {
 	update(key: string, value: unknown): Promise<void>;
 	secret(id: string): Promise<string | undefined>;
 	setSecret(id: string, value: string): Promise<void>;
-	/** A variable of the extension host process, so a provider key can come from the environment. */
+	/**
+	 * A variable of the extension host process, so a provider key can come from the environment. In
+	 * a remote window that is the *remote* environment; `secret()` stays on the client.
+	 */
 	env(name: string): string | undefined;
+	/** The remote kind (`ssh-remote`, `wsl`, `dev-container`, …), or undefined in a local window. */
+	remoteName(): string | undefined;
+	/** The OS sandbox shell tools can actually use on this host. */
+	sandboxKind(): SandboxKind;
 	ask(question: string, options?: string[], multi?: boolean): Promise<string[]>;
 	notify(message: string): void;
 }

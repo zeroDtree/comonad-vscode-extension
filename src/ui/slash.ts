@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { isLoopbackBase } from '../lib/endpoint';
 import { APPROVAL_LABELS, MODE_CAPS, MODE_LABELS } from '../lib/policy';
 import type { CommandSpec } from '../services/commands';
 import { formatUsage } from '../services/usage';
@@ -196,22 +197,35 @@ export function slashCommands(ctx: Context): void {
 	register('quiet', 'Generate a reply without adding it to the transcript', (args) => ({ done: false, text: args, trigger: 'quiet' }));
 
 }
-slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage'];
+slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage', 'host'];
 
 async function statusText(ctx: Context): Promise<string> {
 	const config = ctx.settings.get();
 	const session = ctx.sessions.active();
 	const visible = ctx.tools.visible(ctx.agent.policyFor());
+	const remote = ctx.host.remoteName();
+	const sandbox = ctx.host.sandboxKind();
 	const lines = [
 		'**Comonad status**',
 		'',
 		`- Model: ${ctx.llm.describe(config.model)}`,
 		`- Mode: ${config.mode} · approval: ${config.approval} · network: ${config.network ? 'on' : 'off'}`,
+		`- Host: ${remote ? `remote (${remote})` : 'local'} · ${sandboxStatus({ read: config.confineRead, write: config.confineWrite }, sandbox)}`,
 		`- Workspace: ${config.workingDirectory || '(none)'}`,
 		`- Tools available now: ${visible.length}`,
-		`- ${sandboxStatus({ read: config.confineRead, write: config.confineWrite })}`,
 		`- Today: ${formatUsage(ctx.usage.today())}`,
 	];
+	if (sandbox === 'none') {
+		lines.push(
+			config.allowUnsandboxedShell
+				? '- No OS sandbox: shell calls run unconfined (`comonad.allowUnsandboxedShell` is on).'
+				: '- No OS sandbox: shell calls require approval (`comonad.allowUnsandboxedShell` skips it).',
+		);
+	}
+	const loopback = remote ? config.profiles.filter((profile) => isLoopbackBase(profile.base)).map((profile) => profile.id) : [];
+	if (loopback.length) {
+		lines.push(`- Loopback endpoint(s) ${loopback.join(', ')} resolve on the remote machine, not yours.`);
+	}
 	if (session) {
 		lines.push(`- Session: ${session.title} (${session.id.slice(0, 8)}…) · ${session.turnIndex} turns · ${session.transcript.length} messages`);
 		if (session.cursor) {

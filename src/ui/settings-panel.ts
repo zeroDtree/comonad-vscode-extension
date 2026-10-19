@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { COMONAD_BLOCK, COMONAD_BLOCKS, DEFAULT_BLOCK_PREFIX, isComonadBlockId, type ComonadBlockId } from '../lib/blocks';
+import { isLoopbackBase } from '../lib/endpoint';
 import { defaultPromptLayout, mergePromptPrefixes, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
 import { compileGraphs } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
@@ -264,6 +265,7 @@ export function settingsPanel(ctx: Context): void {
 			denyReadPaths: asList(patch.denyReadPaths),
 			confineRead: Boolean(patch.confineRead),
 			confineWrite: Boolean(patch.confineWrite),
+			allowUnsandboxedShell: Boolean(patch.allowUnsandboxedShell),
 			maxSteps: Math.max(1, Number(patch.maxSteps) || current.maxSteps),
 			displayForm: patch.displayForm ?? current.displayForm,
 			contextForm: patch.contextForm ?? current.contextForm,
@@ -341,6 +343,7 @@ export function settingsPanel(ctx: Context): void {
 				denyReadPaths: config.denyReadPaths,
 				confineRead: config.confineRead,
 				confineWrite: config.confineWrite,
+				allowUnsandboxedShell: config.allowUnsandboxedShell,
 				maxSteps: config.maxSteps,
 				displayForm: config.displayForm,
 				contextForm: config.contextForm,
@@ -376,6 +379,7 @@ export function settingsPanel(ctx: Context): void {
 			defaultGraph: DEFAULT_GRAPH_SOURCE,
 			workspace: config.workingDirectory,
 			home: ctx.settings.home(),
+			environment: { remote: ctx.host.remoteName() ?? '', sandbox: ctx.host.sandboxKind() },
 		});
 		void refreshModels();
 	};
@@ -705,6 +709,16 @@ export async function configureModel(ctx: Context): Promise<void> {
 	if (!base) {
 		return;
 	}
+	const remote = ctx.host.remoteName();
+	if (remote && isLoopbackBase(base)) {
+		const go = await vscode.window.showWarningMessage(
+			`Comonad runs on the remote (${remote}). ${base} is a loopback address there: it reaches the remote machine, not your local one.`,
+			'Continue anyway',
+		);
+		if (go !== 'Continue anyway') {
+			return;
+		}
+	}
 	// The key lookup is data on the profile: the environment variables named here are tried in order
 	// before the OS keychain, and nothing in the code has to know the provider.
 	const keyEnvAnswer = await vscode.window.showInputBox({
@@ -720,7 +734,9 @@ export async function configureModel(ctx: Context): Promise<void> {
 		.map((name) => name.trim())
 		.filter(Boolean);
 	const key = await vscode.window.showInputBox({
-		prompt: keyEnv.length ? `API key — stored in the OS keychain; leave empty to read ${keyEnv.join(' or ')}` : 'API key (stored in the OS keychain)',
+		prompt: keyEnv.length
+			? `API key — stored by VS Code on your local machine; leave empty to read ${keyEnv.join(' or ')} from the ${remote ? 'remote ' : ''}environment`
+			: 'API key — stored by VS Code on your local machine',
 		password: true,
 		ignoreFocusOut: true,
 	});
@@ -920,7 +936,13 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every row of the tree, and what b
         <p class="hint">Writes outside the working directory are refused.</p>
         <label class="check"><input type="checkbox" id="confine-write" data-key="confineWrite" /></label>
       </div>
+      <div class="field">
+        <label for="allow-unsandboxed">Allow shell without an OS sandbox</label>
+        <p class="hint">When no sandbox is available, shell commands run unconfined without the extra confirmation. Tools named <code>*_unsandboxed</code> still ask.</p>
+        <label class="check"><input type="checkbox" id="allow-unsandboxed" data-key="allowUnsandboxedShell" /></label>
+      </div>
       <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm.</p>
+      <p class="group-note" id="environment-note"></p>
     </div>
   </section>
 

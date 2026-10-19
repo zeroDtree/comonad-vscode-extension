@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import type { SandboxKind } from './sandbox';
 import type { Approval, Capability, Confinement, SessionPolicy, ToolCall, ToolSpec, WorkMode } from './types';
 
 /** Modes, capability gating, permission rules and the approval gate. Pure module. */
@@ -193,9 +194,20 @@ export function globToRegExp(pattern: string): RegExp {
 	return new RegExp(`^${out}$`);
 }
 
+/**
+ * The host the gate runs on. This is an environment fact, not session policy: it is read afresh
+ * every turn, so a resumed session and a subagent see the machine they are actually on.
+ */
+export interface GateEnvironment {
+	sandbox: SandboxKind;
+	allowUnsandboxedShell: boolean;
+}
+
 export interface GateResult {
 	decision: 'allow' | 'confirm' | 'reject';
 	reason: string;
+	/** A confirmation a subagent's delegated approval must not answer. */
+	escalated?: boolean;
 }
 
 export function gateCalls(
@@ -203,8 +215,10 @@ export function gateCalls(
 	lookup: (name: string) => ToolSpec | undefined,
 	policy: SessionPolicy,
 	rules: RuleSet,
+	env: GateEnvironment,
 ): GateResult {
 	let confirm = '';
+	let escalated = false;
 	for (const call of calls) {
 		const tool = lookup(call.name);
 		if (!tool) {
@@ -219,31 +233,49 @@ export function gateCalls(
 		if (tool.needsWorkspace && !policy.workingDirectory.trim()) {
 			return { decision: 'reject', reason: `tool ${call.name} needs a working directory` };
 		}
+		// "Reject all" means every call, so it is settled before rules and escalations can turn one
+		// into an approval prompt.
+		if (policy.approval === 'universal_reject') {
+			return { decision: 'reject', reason: 'approval policy rejects all calls' };
+		}
 		const denied = rules.deny.find((rule) => ruleMatches(rule, call, tool));
 		if (denied) {
 			return { decision: 'reject', reason: `deny rule ${ruleText(denied)} blocks ${call.name}` };
 		}
+		// What would make this call unsafe to answer by delegation, whichever confirmation it ends
+		// up with: no sandbox for a shell command, a tool that names itself unsandboxed, or a
+		// dangerous command. An explicit allow rule — including "Always allow" — remains consent.
+		const shell = tool.capability === 'shell_ro' || tool.capability === 'shell_rw';
+		const unconfined = !env.allowUnsandboxedShell && env.sandbox === 'none' && shell;
+		const outside = tool.name.endsWith('_unsandboxed');
+		const dangerous = isDangerous(call, tool);
 		if (rules.ask.some((rule) => ruleMatches(rule, call, tool))) {
 			confirm ||= `ask rule matches ${call.name}`;
+			escalated ||= unconfined || outside || dangerous;
 			continue;
 		}
 		if (rules.allow.some((rule) => ruleMatches(rule, call, tool))) {
 			continue;
 		}
-		// Escalation and dangerous commands never run silently, even under accept policies. The name is a
-		// convention, not a list: the shipped tree registers no unsandboxed tool, but a plugin of yours may
-		// register one, and that is exactly the call this has to catch.
-		if (tool.name.endsWith('_unsandboxed')) {
+		// Escalation and dangerous commands never run silently under an accept policy. The tool-name
+		// suffix is a convention, not a list: the shipped tree registers no unsandboxed tool, but a
+		// plugin of yours may register one, and that is the call this catches.
+		if (unconfined) {
+			escalated = true;
+			confirm ||= `no OS sandbox is available; ${call.name} would run unconfined`;
+			continue;
+		}
+		if (outside) {
+			escalated = true;
 			confirm ||= `${call.name} runs outside the OS sandbox`;
 			continue;
 		}
-		if (isDangerous(call, tool)) {
+		if (dangerous) {
+			escalated = true;
 			confirm ||= `dangerous command requires explicit confirmation (${call.name})`;
 			continue;
 		}
 		switch (policy.approval) {
-			case 'universal_reject':
-				return { decision: 'reject', reason: 'approval policy rejects all calls' };
 			case 'universal_accept':
 				break;
 			case 'manual':
@@ -264,7 +296,7 @@ export function gateCalls(
 		}
 	}
 	if (confirm) {
-		return { decision: 'confirm', reason: confirm };
+		return escalated ? { decision: 'confirm', reason: confirm, escalated: true } : { decision: 'confirm', reason: confirm };
 	}
 	return { decision: 'allow', reason: 'allowed by policy' };
 }
@@ -295,12 +327,13 @@ export function modeCapabilities(): string[] {
  * Mermaid source for the tool-call gate, generated from the tables above so the diagram shown in
  * the settings panel's Flow tab cannot drift from `gateCalls`.
  *
- * Shape: the mode / network / workspace checks first, then two frames — the user's rules and the
- * approval policy, with the built-in unsandboxed / dangerous-command escalation between them. Every
- * gate ends in **its own** `Rejected` / `Asks you` / `Runs` node directly below it: sharing one sink
- * per outcome made every edge run back across the whole chart. Only edges whose two ends are both
- * inside a frame may be written inside that frame — mermaid pulls both ends of an inner edge into
- * the subgraph, which would otherwise swallow the outcome nodes and the frame label.
+ * Shape: the mode / network / workspace checks and the reject-all short-circuit first, then two
+ * frames — the user's rules and the remaining approval policies, with the built-in no-sandbox /
+ * unsandboxed / dangerous-command escalation between them. Every gate ends in **its own**
+ * `Rejected` / `Asks you` / `Runs` node directly below it: sharing one sink per outcome made every
+ * edge run back across the whole chart. Only edges whose two ends are both inside a frame may be
+ * written inside that frame — mermaid pulls both ends of an inner edge into the subgraph, which
+ * would otherwise swallow the outcome nodes and the frame label.
  */
 export function gateFlow(): string {
 	return [
@@ -315,7 +348,9 @@ export function gateFlow(): string {
 		'  net -- no --> netNo(["Rejected"])',
 		'  net --> ws{{"workspace ok?"}}',
 		'  ws -- no --> wsNo(["Rejected"])',
-		'  ws --> deny',
+		'  ws --> rejectAllQ{{"approval policy universal_reject?"}}',
+		'  rejectAllQ -- yes --> rejectAll(["Rejected"])',
+		'  rejectAllQ -- no --> deny',
 		'',
 		'  subgraph rules["your rules"]',
 		'    deny{{"deny rule matches?"}}',
@@ -328,26 +363,25 @@ export function gateFlow(): string {
 		'  deny -- yes --> denyReject(["Rejected"])',
 		'  ask -- yes --> askConfirm(["Asks you"])',
 		'  allow -- yes --> allowRun(["Runs"])',
-		'  allow -- no --> danger{{"unsandboxed or dangerous?"}}',
+		'  allow -- no --> sandbox{{"no OS sandbox and shell?"}}',
+		'  sandbox -- yes --> sandboxConfirm(["Asks you"])',
+		'  sandbox -- no --> danger{{"unsandboxed or dangerous?"}}',
 		'  danger -- yes --> dangerConfirm(["Asks you"])',
 		'  danger -- no --> approval',
 		'',
 		'  subgraph policy["approval policy"]',
 		'    approval{{"no rule matched — which policy?"}}',
 		'    policyManual["manual"]',
-		'    policyReject["universal_reject"]',
 		'    policyAccept["universal_accept"]',
 		'    policyWhitelist["whitelist_accept"]',
 		'    policyBlacklist["blacklist_reject"]',
 		'    approval --> policyManual',
-		'    approval --> policyReject',
 		'    approval --> policyAccept',
 		'    approval --> policyWhitelist',
 		'    approval --> policyBlacklist',
 		'  end',
 		'',
 		'  policyManual --> manualConfirm(["Asks you"])',
-		'  policyReject --> rejectAll(["Rejected"])',
 		'  policyAccept --> runAll(["Runs"])',
 		'  policyWhitelist --> whitelist{{"in the whitelist?"}}',
 		'  whitelist -- yes --> whitelistRun(["Runs"])',
@@ -362,7 +396,7 @@ export function gateFlow(): string {
 		'  classDef confirm fill:#6d5620,stroke:#d5a33a,color:#ffffff',
 		'  classDef run fill:#1e5c39,stroke:#43b581,color:#ffffff',
 		'  class modeNo,netNo,wsNo,denyReject,rejectAll,blacklistReject reject',
-		'  class askConfirm,dangerConfirm,manualConfirm,whitelistConfirm confirm',
+		'  class askConfirm,sandboxConfirm,dangerConfirm,manualConfirm,whitelistConfirm confirm',
 		'  class allowRun,runAll,whitelistRun,blacklistRun run',
 	].join('\n');
 }

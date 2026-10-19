@@ -165,6 +165,9 @@ export function chatPanel(ctx: Context): void {
 			mode: config.mode,
 			approval: config.approval,
 			network: config.network,
+			sandbox: ctx.host.sandboxKind(),
+			remote: ctx.host.remoteName() ?? null,
+			allowUnsandboxedShell: config.allowUnsandboxedShell,
 			context: session?.contextForm ?? config.contextForm,
 			display: config.displayForm,
 			reasoningEffort: session?.reasoningEffort ?? config.reasoningEffort,
@@ -1325,6 +1328,7 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 			<div class="pill-menu" hidden></div>
 		</div>
 		<button id="network" type="button">Network</button>
+		<span id="environment" hidden></span>
 	</div>
 	<div id="status"></div>
 </footer>

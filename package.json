@@ -25,6 +25,16 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Project plugins, hooks and instruction files are not loaded in untrusted workspaces. Tool calls still follow the configured approval policy and OS sandbox."
+    }
+  },
   "contributes": {
     "chatParticipants": [
       {
@@ -1006,6 +1016,11 @@
           "type": "boolean",
           "default": true,
           "description": "Offer the unrestricted preset. Set to false to keep the agent behind approvals and sandboxing."
+        },
+        "comonad.allowUnsandboxedShell": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run shell commands without the extra confirmation when no OS sandbox is available (Windows, or Linux/macOS without bwrap/sandbox-exec). Off by default. Tools named *_unsandboxed always ask."
         },
         "comonad.tavernEnabled": {
           "type": "boolean",

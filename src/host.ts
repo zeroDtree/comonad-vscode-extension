@@ -2,6 +2,7 @@
 import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { sandboxKind } from './lib/sandbox';
 import { hostStorage, type Host } from './services/host';
 
 /** The VS Code implementation of the Host contract. This is the only vscode-bound core module. */
@@ -64,6 +65,8 @@ export function host(ctx: Context, config: HostConfig): void {
 		secret: (id) => Promise.resolve(extension.secrets.get(id)),
 		setSecret: (id, value) => Promise.resolve(extension.secrets.store(id, value)),
 		env: (name) => process.env[name],
+		remoteName: () => vscode.env.remoteName,
+		sandboxKind: () => sandboxKind(),
 		ask: async (question, options, multi) => {
 			if (options?.length) {
 				const picked = await vscode.window.showQuickPick(options, { title: question, canPickMany: Boolean(multi), ignoreFocusOut: true });
@@ -76,6 +79,7 @@ export function host(ctx: Context, config: HostConfig): void {
 	};
 	ctx.provide('host', service);
 	ctx.log.attach({ write: (line) => output.appendLine(line), show: () => output.show() });
+	ctx.log.message(`host: ${vscode.env.remoteName ? `remote (${vscode.env.remoteName})` : 'local'} · sandbox: ${sandboxKind()}`);
 
 	ctx.effect(() => {
 		const subscription = vscode.workspace.onDidChangeConfiguration((event) => {

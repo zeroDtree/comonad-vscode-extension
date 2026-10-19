@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
+import { accessSync, constants, existsSync, realpathSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { platform } from 'node:os';
 import type { Confinement } from './types';
 
@@ -160,11 +160,32 @@ export interface RunResult {
 
 export type SandboxKind = 'macos' | 'bwrap' | 'none';
 
+/**
+ * An executable on PATH, with the system folders as a fallback: an extension host launched by a
+ * window manager can carry a PATH that misses `/usr/bin`, and a sandbox that exists must not look
+ * absent because of it. The scan is cheap and deliberately uncached — a stale cache would be worse.
+ */
+function findExecutable(name: string): string | undefined {
+	for (const dir of [...(process.env.PATH ?? '').split(delimiter), '/usr/bin', '/usr/local/bin', '/opt/homebrew/bin']) {
+		if (!dir) {
+			continue;
+		}
+		const candidate = join(dir, name);
+		try {
+			accessSync(candidate, constants.X_OK);
+			return candidate;
+		} catch {
+			// Not in this folder.
+		}
+	}
+	return undefined;
+}
+
 export function sandboxKind(): SandboxKind {
-	if (platform() === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
+	if (platform() === 'darwin' && findExecutable('sandbox-exec')) {
 		return 'macos';
 	}
-	if (platform() === 'linux' && existsSync('/usr/bin/bwrap')) {
+	if (platform() === 'linux' && findExecutable('bwrap')) {
 		return 'bwrap';
 	}
 	return 'none';
@@ -208,10 +229,12 @@ function sandboxArgv(argv: string[], cwd: string, options: SandboxOptions): stri
 	}
 	const kind = sandboxKind();
 	if (kind === 'macos') {
-		return ['/usr/bin/sandbox-exec', '-p', buildSbpl(cwd, options), '--', ...argv];
+		const exe = findExecutable('sandbox-exec');
+		return exe ? [exe, '-p', buildSbpl(cwd, options), '--', ...argv] : null;
 	}
 	if (kind === 'bwrap') {
-		return bwrapArguments('/usr/bin/bwrap', argv, cwd, options);
+		const exe = findExecutable('bwrap');
+		return exe ? bwrapArguments(exe, argv, cwd, options) : null;
 	}
 	return null;
 }

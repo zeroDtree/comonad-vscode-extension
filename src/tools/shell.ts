@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { formatResult, runCommand, shellArgv, sandboxKind } from '../lib/sandbox';
+import { formatResult, runCommand, shellArgv, sandboxKind, type SandboxKind } from '../lib/sandbox';
 import { objectSchema, type Confinement, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
 
@@ -75,9 +75,8 @@ function collect(dir: string, found: Set<string>, depth: number): void {
 }
 
 /** Reports the OS sandbox in use and what the workspace boundary currently covers. */
-export function sandboxStatus(confinement: Confinement): string {
-	const kind = sandboxKind();
-	const engine = kind === 'none' ? 'no OS sandbox available' : `sandbox: ${kind}`;
+export function sandboxStatus(confinement: Confinement, kind: SandboxKind = sandboxKind()): string {
+	const engine = kind === 'none' ? 'no OS sandbox available' : `sandbox: ${kind === 'macos' ? 'sandbox-exec' : kind}`;
 	const boundary = [
 		confinement.read ? 'reads' : null,
 		confinement.write ? 'writes' : null,

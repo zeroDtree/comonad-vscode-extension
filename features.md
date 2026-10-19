@@ -289,8 +289,8 @@ flowchart LR
 
 **P0**
 - [ ] 多根工作区：选择根文件夹作为工作目录，每根独立 checkpoint
-- [ ] macOS / Linux 优先；Windows 降级（无 sandbox-exec/bwrap → 需确认模式）
-- [ ] Remote / WSL / Containers：作为 workspace extension 运行；检测沙箱可用性并提示降级
+- [x] macOS / Linux 优先；Windows 降级（无 sandbox-exec/bwrap → 需确认模式）
+- [x] Remote / WSL / Containers：作为 workspace extension 运行；检测沙箱可用性并提示降级
 
 **P1**
 - [ ] Windows 原生：PowerShell 工具、Windows 沙箱（Codex elevated 思路）
@@ -343,7 +343,7 @@ flowchart LR
 
 1. **Chat 渲染边界**：tool call 卡片、审批按钮、diff 交互如何在 Chat participant 与 Webview 之间分工？
 2. **模型能力差异**：各家 OpenAI 兼容端点的 tool calling / 采样限制；降级与提示策略。
-3. **沙箱可用性**：Remote / WSL / Windows 下 sbpl/bwrap 缺失时的替代（降级为需确认模式）；频繁 spawn 的性能与长驻沙箱方案。
+3. **沙箱可用性**：已实现缺失时对 shell 能力强制确认（可用 `comonad.allowUnsandboxedShell` 显式关闭），并在 `/status`、聊天和设置页提示。bwrap 存在但 user namespace 不可用时命令会失败而非静默降级。频繁 spawn 的性能与长驻沙箱方案仍待评估。
 4. **影子 Git 性能**：大仓库全量快照的代价；ignore 与增量策略；影子仓库容量与 GC。
 5. **Hooks 安全模型**：项目级 hooks 必须绑定 Workspace Trust + 首次运行确认，避免仓库即执行。
 6. **Graph 复杂度平衡**：默认图必须开箱即用，图编辑面向高级用户；配置错误需可定位、可回滚（复用 `graphs.replace` 的事务式校验）。

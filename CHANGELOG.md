@@ -6,6 +6,22 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **Remote SSH, WSL and Dev Containers are first-class.** The extension now declares
+  `extensionKind: ["workspace"]`, so the agent, its file and shell tools, MCP servers, hooks and
+  checkpoints run on the remote where the workspace is. API keys stay in VS Code's client-side
+  `SecretStorage` and are not written to the remote; `keyEnv` is read from the remote environment.
+  `/status`, the chat and the settings panel report the remote kind and the OS sandbox in use, and
+  configuring a loopback model endpoint in a remote window warns instead of silently calling the
+  wrong machine. Documented in the README with a `RemoteForward` recipe for a local model server.
+
+- **Shell calls are never silently unconfined.** When the host has no OS sandbox (Windows, or a
+  Linux/macOS host without `bwrap`/`sandbox-exec`), every `shell_ro`/`shell_rw` call is escalated to
+  an approval even under an accept policy. `comonad.allowUnsandboxedShell` (new, default off) opts
+  out; explicit allow rules, including "Always allow", remain consent, and `*_unsandboxed` tools
+  still always ask. The gate now distinguishes escalated confirmations so a subagent cannot resolve
+  them by delegation, `universal_reject` settles before rules and escalations, and `bwrap` is found
+  through `PATH` as well as the usual system folders. The flow diagram and `/status` reflect both.
+
 - **Images are part of the conversation.** `read_file` reads PNG, JPEG, WebP and GIF files and sends
   them to the model as image content, and the chat composer accepts images pasted or dropped into it
   (six per message, 4 MiB each, 12 MiB in total). Tool cards and prompt bubbles show thumbnails in

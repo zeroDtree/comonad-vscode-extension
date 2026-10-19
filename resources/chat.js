@@ -12,6 +12,7 @@
 	const mentionHead = $('mention-head');
 	const mentionList = $('mention-list');
 	const networkChip = $('network');
+	const environmentChip = $('environment');
 	const changesPanel = $('changes-panel');
 	const changesTitle = $('changes-title');
 	const changesList = $('changes-list');
@@ -2005,6 +2006,15 @@
 		networkChip.classList.toggle('is-on', Boolean(state.network));
 		networkChip.dataset.tip =
 			'Network — allow network tools and network inside the shell sandbox\nCurrent: ' + (state.network ? 'on' : 'off');
+		const noSandbox = state.sandbox === 'none';
+		environmentChip.hidden = !noSandbox;
+		environmentChip.textContent = noSandbox ? (state.remote ? 'remote · no sandbox' : 'no OS sandbox') : '';
+		environmentChip.dataset.tip = noSandbox
+			? 'No OS sandbox on this host — shell commands run unconfined.\n' +
+				(state.allowUnsandboxedShell
+					? 'comonad.allowUnsandboxedShell is on, so they run without a prompt.'
+					: 'Every shell call asks for confirmation; set comonad.allowUnsandboxedShell to skip it.')
+			: '';
 		refreshTip();
 		const detail = [state.detail, state.suspended ? '⏸ waiting for approval — send /resume' : ''].filter(Boolean).join('  ·  ');
 		$('status').textContent = detail;

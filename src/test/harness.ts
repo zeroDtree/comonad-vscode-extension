@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context, type Fiber } from 'cordis';
+import type { SandboxKind } from '../lib/sandbox';
 import { hostStorage, type Host } from '../services/host';
 import { tokenizersPlugin } from '../services/tokenizers';
 import { logPlugin } from '../services/log';
@@ -32,6 +33,10 @@ export interface FakeHost extends Host {
 	values: Record<string, unknown>;
 	/** The environment the kernel sees; tests set a provider key here. */
 	envValues: Record<string, string>;
+	/** What the gate believes about the host; `'bwrap'` keeps CI (which has no sandbox) deterministic. */
+	sandboxValue: SandboxKind;
+	/** Set to `'ssh-remote'` and the like to exercise remote-aware surfaces. */
+	remoteValue?: string;
 }
 
 export interface TestKernel {
@@ -45,7 +50,7 @@ export function fakeHost(root: string, values: Record<string, unknown>, workspac
 	const secrets = new Map<string, string>();
 	// Empty on purpose: a machine with DEEPSEEK_API_KEY exported must not change what tests see.
 	const envValues: Record<string, string> = {};
-	return {
+	const host: FakeHost = {
 		values,
 		storage: hostStorage(root),
 		extensionUri: undefined,
@@ -59,10 +64,14 @@ export function fakeHost(root: string, values: Record<string, unknown>, workspac
 		secret: async (id) => secrets.get(id),
 		setSecret: async (id, value) => void secrets.set(id, value),
 		env: (name) => envValues[name],
+		remoteName: () => host.remoteValue,
+		sandboxKind: () => host.sandboxValue,
 		envValues,
+		sandboxValue: 'bwrap',
 		ask: async () => [],
 		notify: () => undefined,
 	};
+	return host;
 }
 
 /**
