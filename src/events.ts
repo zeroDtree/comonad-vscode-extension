@@ -21,6 +21,8 @@ declare module 'cordis' {
 		'approval/request'(request: ApprovalRequest, next: () => ApprovalDecision | Promise<ApprovalDecision>): ApprovalDecision | Promise<ApprovalDecision>;
 		'sessions/changed'(id?: string): void;
 		'settings/changed'(): void;
+		/** A provider key was stored or cleared: model lists and no-key markers may have changed. */
+		'llm/keys-changed'(): void;
 		'tasks/changed'(): void;
 		'catalog/changed'(): void;
 		'tavern/changed'(): void;

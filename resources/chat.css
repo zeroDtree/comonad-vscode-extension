@@ -210,6 +210,12 @@ button.chat.is-active {
 	animation: rise 0.12s ease-out;
 }
 
+/* A replayed transcript is not new: only a message that arrives live rises into place. Animating
+   every message at once made the whole chat lurch when the panel was opened. */
+.msg.no-anim {
+	animation: none;
+}
+
 @keyframes rise {
 	from {
 		transform: translateY(3px);
@@ -894,6 +900,20 @@ details.thinking summary::before {
 	outline: 2px solid var(--vscode-focusBorder, #007fd4);
 }
 
+.msg.approval.withdrawn {
+	opacity: 0.55;
+}
+
+.msg.approval .a-cancelled {
+	font-size: 12px;
+	opacity: 0.7;
+}
+
+#stop:disabled {
+	opacity: 0.6;
+	cursor: default;
+}
+
 /* ------------------------------------------------------------------ footer */
 
 footer {
@@ -1359,6 +1379,17 @@ footer {
 
 .pill-choice-arrow {
 	opacity: 0.5;
+}
+
+/* A model row the endpoint cannot run yet: visible without opening the tooltip. */
+.pill-choice-note {
+	flex: none;
+	margin-left: auto;
+	padding: 0 6px;
+	border-radius: 8px;
+	font-size: 10px;
+	background: var(--vscode-inputValidation-warningBackground, rgba(255, 200, 0, 0.18));
+	color: var(--vscode-inputValidation-warningForeground, inherit);
 }
 
 /* The model menu keeps room on the right for its hover flyout. */

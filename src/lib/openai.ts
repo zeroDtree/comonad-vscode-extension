@@ -295,7 +295,8 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 		reader.releaseLock();
 	}
 	if (request.signal.aborted) {
-		return aborted();
+		// Stop keeps what the reader already saw; tool-call fragments without a full call are dropped.
+		return aborted(content, reasoning);
 	}
 	const calls = [...toolCalls.entries()]
 		.sort(([left], [right]) => left - right)
@@ -309,8 +310,8 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 	return { message, toolCalls: calls, usage };
 }
 
-function aborted(): Completion {
-	return { message: { role: 'assistant', content: '' }, toolCalls: [] };
+function aborted(content = '', reasoning = ''): Completion {
+	return { message: { role: 'assistant', content, reasoning: reasoning || undefined }, toolCalls: [] };
 }
 
 /**

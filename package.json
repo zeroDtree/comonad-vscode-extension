@@ -680,7 +680,7 @@
         "comonad.network": {
           "type": "boolean",
           "default": false,
-          "description": "Allow tools that need network access, and network inside the shell sandbox."
+          "description": "Allow tools that need network access, and network inside the shell sandbox. When off, loopback connections stay available so local test servers work."
         },
         "comonad.workingDirectory": {
           "type": "string",
@@ -690,7 +690,12 @@
         "comonad.commandTimeout": {
           "type": "number",
           "default": 60,
-          "description": "Shell command timeout in seconds."
+          "description": "Shell command timeout in seconds. The fallback when a foreground shell tool omits its per-call timeout, and the fixed value when comonad.commandTimeoutOverride is on."
+        },
+        "comonad.commandTimeoutOverride": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use comonad.commandTimeout for every foreground shell call and ignore a timeout the model asks for. When off, the model chooses a timeout per call (clamped to 1-300 seconds), with comonad.commandTimeout as the fallback. Background tasks started with start_shell have no timeout."
         },
         "comonad.denyReadPaths": {
           "type": "array",
@@ -775,7 +780,7 @@
               "includeUsage": true
             }
           ],
-          "markdownDescription": "OpenAI-compatible endpoints to chat with. The model menu is read from each endpoint (`GET /models`), so a new model needs no configuration; a profile's `model` is what a bare profile id selects. Empty uses the shipped profiles (DeepSeek Flash first, so **Auto** runs on it); keys come from the variables in `keyEnv` unless a key is stored with **Comonad: Configure Model Provider**.",
+          "markdownDescription": "OpenAI-compatible endpoints to chat with. The model menu is read from each endpoint (`GET /models`), so a new model needs no configuration; a profile's `model` is what a bare profile id selects. Empty uses the shipped profiles (DeepSeek Flash first, so **Auto** runs on it). A key stored with **Comonad: Configure Model Provider** belongs to the endpoint and every profile with the same normalized `base` shares it; without a stored key, the variables in `keyEnv` are tried in order.",
           "items": {
             "type": "object",
             "required": [
@@ -817,7 +822,7 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "Environment variable(s) holding the API key, in order, when no key is stored in the OS keychain."
+                "description": "Environment variable(s) holding the API key, in order, when no key is stored for this endpoint."
               },
               "thinkingOff": {
                 "type": "string",

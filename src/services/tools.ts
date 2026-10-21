@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context, type Plugin } from 'cordis';
+import { abortable } from '../lib/cancel';
 import { capabilityAllowed } from '../lib/policy';
 import { mergeToolLayout } from '../lib/prompt-layout';
 import { hasWorkspace, type SessionPolicy, type ToolCall, type ToolContext, type ToolImage, type ToolSpec } from '../lib/types';
@@ -138,6 +139,7 @@ export class Tools extends Service {
 	}
 
 	async invoke(call: ToolCall, ctx: ToolContext): Promise<ToolOutcome> {
+		ctx.signal.throwIfAborted();
 		const tool = this.get(call.name);
 		if (!tool) {
 			return { content: `Error: unknown tool ${call.name}`, isError: true };
@@ -172,19 +174,34 @@ export class Tools extends Service {
 			sessionId: ctx.sessionId,
 			signal: ctx.signal,
 		};
-		const decision = await this.ctx.waterfall('tools/pre-execute', exec, () => ({ kind: 'allow' }) as PreToolDecision);
+		const decision = await abortable(
+			exec.signal,
+			Promise.resolve(this.ctx.waterfall('tools/pre-execute', exec, () => ({ kind: 'allow' }) as PreToolDecision)),
+		);
 		if (decision.kind === 'deny') {
 			return this.refuse(exec, decision.reason);
 		}
 		if (decision.kind === 'ask') {
 			// No surface is claimed: whichever surface is up answers, and with none up this denies.
-			const answer = await this.ctx.approval.request({ calls: [call], reason: decision.reason ?? `confirm ${call.name}` });
+			const answer = await this.ctx.approval.request({
+				calls: [call],
+				reason: decision.reason ?? `confirm ${call.name}`,
+				signal: exec.signal,
+				sessionId: ctx.sessionId,
+			});
 			if (answer === 'deny') {
 				return this.refuse(exec, decision.reason ?? `${call.name} was not approved`);
 			}
 		}
-		const outcome = await this.ctx.waterfall('tools/execute', exec, () => this.dispatch(tool, exec, args, ctx));
-		const post = await this.ctx.waterfall('tools/post-execute', exec, outcome, () => ({ kind: 'accept' }) as PostToolDecision);
+		const outcome = await abortable(
+			exec.signal,
+			Promise.resolve(this.ctx.waterfall('tools/execute', exec, () => this.dispatch(tool, exec, args, ctx))),
+		);
+		const post = await abortable(
+			exec.signal,
+			Promise.resolve(this.ctx.waterfall('tools/post-execute', exec, outcome, () => ({ kind: 'accept' }) as PostToolDecision)),
+		);
+		exec.signal.throwIfAborted();
 		if (post.kind === 'block') {
 			// A result a hook blocked is an error the model must read, not a picture it should look at.
 			outcome.content = `Error: ${contentText(post.feedback)}`;
@@ -212,6 +229,10 @@ export class Tools extends Service {
 				? { content: output, isError: false }
 				: { content: output.content, isError: false, images: output.images };
 		} catch (error) {
+			// A stop is not a failed tool: let it end the turn instead of becoming model-readable text.
+			if (exec.signal.aborted) {
+				throw error;
+			}
 			return { content: `Error: ${error instanceof Error ? error.message : String(error)}`, isError: true };
 		}
 	}

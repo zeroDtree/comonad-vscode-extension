@@ -354,6 +354,7 @@
 		checked('network', config.network);
 		put($('wd'), config.workingDirectory);
 		put($('timeout'), String(config.commandTimeout));
+		checked('timeout-override', config.commandTimeoutOverride);
 		put($('plans'), config.planDirectory);
 		put($('deny'), (config.denyReadPaths || []).join('\n'));
 		checked('confine-read', config.confineRead);

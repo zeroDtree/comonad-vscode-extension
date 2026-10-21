@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { createHash } from 'node:crypto';
 import { Service, type Context } from 'cordis';
+import { normalizeEndpoint } from '../lib/endpoint';
 import type { Completion } from '../lib/openai';
 import type { CompletionUsage, Message, ToolCall, ToolSpec } from '../lib/types';
 import { profileKeyEnvs, type Profile } from './settings';
@@ -17,6 +18,8 @@ export interface ModelChoice {
 	id: string;
 	label: string;
 	description: string;
+	/** No key resolves for the profile behind this row; picking it would fail on the next turn. */
+	needsKey: boolean;
 }
 
 export interface AdapterRequest {
@@ -49,6 +52,27 @@ const MODEL_TTL = 10 * 60_000;
 
 function secretKey(profileId: string): string {
 	return `comonad.key.${profileId}`;
+}
+
+/**
+ * The secret id for one provider endpoint. A stored key belongs to the endpoint, not to a profile:
+ * the shipped DeepSeek block has two profiles on `https://api.deepseek.com`, and a key entered for
+ * one of them must open both. Hashed so a URL with a query does not become a huge keychain label.
+ */
+function providerSecretKey(base: string | undefined): string {
+	const identity = normalizeEndpoint(base);
+	return identity ? `comonad.key.provider.${createHash('sha256').update(identity).digest('hex')}` : '';
+}
+
+/** A short fingerprint of a key, used to invalidate cached model lists when the key changes. */
+function keyHash(key: string): string {
+	return key ? createHash('sha256').update(key).digest('hex').slice(0, 16) : '';
+}
+
+interface KeyInfo {
+	key: string;
+	/** Where the key came from, for the one log line per profile. */
+	source: string;
 }
 
 /** A model selection: the profile alone (its default model) or `profile:model`. */
@@ -93,6 +117,55 @@ declare module 'cordis' {
 interface ModelCache {
 	at: number;
 	ids: string[];
+	/** The inputs the list was fetched with; a change makes the entry a miss, not a stale answer. */
+	base: string;
+	provider: string;
+	modelPrefix: string;
+	modelSkip: string;
+	keyEnv: string;
+	keyHash: string;
+}
+
+function cacheInputs(profile: Profile, key: string): Omit<ModelCache, 'at' | 'ids'> {
+	return {
+		base: normalizeEndpoint(profile.base),
+		provider: profile.provider ?? 'openai',
+		modelPrefix: profile.modelPrefix ?? '',
+		modelSkip: profile.modelSkip ?? '',
+		keyEnv: profileKeyEnvs(profile).join(','),
+		keyHash: keyHash(key),
+	};
+}
+
+function sameInputs(cached: ModelCache, inputs: ReturnType<typeof cacheInputs>): boolean {
+	return (
+		cached.base === inputs.base &&
+		cached.provider === inputs.provider &&
+		cached.modelPrefix === inputs.modelPrefix &&
+		cached.modelSkip === inputs.modelSkip &&
+		cached.keyEnv === inputs.keyEnv &&
+		cached.keyHash === inputs.keyHash
+	);
+}
+
+/** The keyEnv names that can serve a profile: its own, then those of siblings on the same endpoint. */
+function providerKeyEnvs(profile: Profile, profiles: Profile[]): string[] {
+	const names = [...profileKeyEnvs(profile)];
+	const identity = normalizeEndpoint(profile.base);
+	if (!identity) {
+		return names;
+	}
+	for (const other of profiles) {
+		if (other.id === profile.id || normalizeEndpoint(other.base) !== identity) {
+			continue;
+		}
+		for (const name of profileKeyEnvs(other)) {
+			if (!names.includes(name)) {
+				names.push(name);
+			}
+		}
+	}
+	return names;
 }
 
 export class Llm extends Service {
@@ -147,7 +220,14 @@ export class Llm extends Service {
 		});
 	}
 
-	async complete(policyModel: string, system: string, user: string, timeoutMs = 180_000): Promise<string> {
+	async complete(
+		policyModel: string,
+		system: string,
+		user: string,
+		options: { signal?: AbortSignal; timeoutMs?: number } = {},
+	): Promise<string> {
+		const timeout = AbortSignal.timeout(options.timeoutMs ?? 180_000);
+		const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 		const result = await this.chat(
 			policyModel,
 			[
@@ -156,7 +236,7 @@ export class Llm extends Service {
 			],
 			[],
 			{},
-			AbortSignal.timeout(timeoutMs),
+			signal,
 		);
 		return result.message.content.trim();
 	}
@@ -174,7 +254,7 @@ export class Llm extends Service {
 		].join('\n');
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			try {
-				const text = await this.complete(policyModel, system, 'Choose the next node.');
+				const text = await this.complete(policyModel, system, 'Choose the next node.', { signal });
 				const match = text.match(/\{[\s\S]*?\}/);
 				if (match) {
 					const parsed = JSON.parse(match[0]) as { id?: string };
@@ -183,21 +263,21 @@ export class Llm extends Service {
 					}
 				}
 			} catch (error) {
+				signal.throwIfAborted();
 				this.ctx.log.message(`choose failed: ${error instanceof Error ? error.message : String(error)}`);
 				break;
 			}
-			if (signal.aborted) {
-				break;
-			}
+			signal.throwIfAborted();
 		}
+		signal.throwIfAborted();
 		return ids[0]!;
 	}
 
-	/** What to call a selection: the model when one is named, else the profile's label. */
+	/** What to call a selection: always the model it resolves to, which is what a turn will run. */
 	describe(policyModel: string): string {
 		try {
 			const { profile, model } = this.resolve(policyModel);
-			return model && model !== profile.model ? model : profile.label || profile.id;
+			return model || profile.label || profile.id;
 		} catch {
 			return 'no model';
 		}
@@ -224,7 +304,6 @@ export class Llm extends Service {
 		return (fresh / 1_000_000) * pricingIn + (cached / 1_000_000) * cachedIn + (usage.output / 1_000_000) * pricingOut;
 	}
 
-	/** The model menu: the configured profiles and nothing else, each saying where its key comes from. */
 	/**
 	 * The model menu, read from the endpoints themselves: every profile contributes the models its
 	 * provider lists, so a new model shows up without touching settings. A profile whose list cannot
@@ -233,61 +312,128 @@ export class Llm extends Service {
 	async availableModels(options: { refresh?: boolean } = {}): Promise<ModelChoice[]> {
 		const profiles = this.ctx.settings.get().profiles;
 		const first = profiles[0]!;
-		const choices: ModelChoice[] = [];
+		interface Candidate {
+			choice: ModelChoice;
+			position: number;
+			declared: boolean;
+			hasKey: boolean;
+		}
+		const candidates: Candidate[] = [];
+		let position = 0;
 		for (const profile of profiles) {
-			const key = await this.resolveKey(profile);
-			const envs = profileKeyEnvs(profile);
-			const where = key ? '' : envs.length ? ` · no key — set ${envs.join(' or ')}` : ' · no key — run "Comonad: Configure Model Provider"';
-			const listed = await this.endpointModels(profile, key, Boolean(options.refresh));
+			const info = await this.keyInfo(profile, profiles);
+			const envs = providerKeyEnvs(profile, profiles);
+			const where = info.key
+				? ''
+				: envs.length
+					? ` · no key — set ${envs.join(' or ')}`
+					: ' · no key — run "Comonad: Configure Model Provider"';
+			const listed = await this.endpointModels(profile, info.key, Boolean(options.refresh));
 			const models = listed.length ? listed : profile.model ? [profile.model] : [];
 			for (const model of models) {
-				choices.push({
-					id: formatModelId(profile.id, model),
-					label: model,
-					description: `${profile.label || profile.id} · ${profile.base ?? 'no base URL'}${listed.length ? '' : ' · models not listed'}${where}`,
+				candidates.push({
+					choice: {
+						id: formatModelId(profile.id, model),
+						label: model,
+						description: `${profile.label || profile.id} · ${profile.base ?? 'no base URL'}${listed.length ? '' : ' · models not listed'}${where}`,
+						needsKey: !info.key,
+					},
+					position: position++,
+					declared: profile.model === model,
+					hasKey: Boolean(info.key),
 				});
 			}
 		}
+		// Two profiles on one endpoint can report the same model. Show it once, bound to the profile
+		// that can run it: a keyed profile beats a keyless one, and the profile that declares the model
+		// beats one that merely discovered it (its pricing and context window are the right ones).
+		const byLabel = new Map<string, Candidate>();
+		for (const candidate of candidates) {
+			const label = candidate.choice.label.toLowerCase();
+			const current = byLabel.get(label);
+			if (!current) {
+				byLabel.set(label, candidate);
+				continue;
+			}
+			const better =
+				(candidate.hasKey && !current.hasKey) ||
+				(candidate.hasKey === current.hasKey && candidate.declared && !current.declared);
+			if (better) {
+				byLabel.set(label, { ...candidate, position: current.position });
+			}
+		}
+		const choices = [...byLabel.values()]
+			.sort((a, b) => a.position - b.position)
+			.map((candidate) => candidate.choice);
 		choices.push({
 			id: 'auto',
 			label: 'Auto',
 			description: `${first.label || first.id} — the first profile, model ${first.model}`,
+			needsKey: !(await this.keyInfo(first, profiles)).key,
 		});
-		// Two endpoints can offer the same model id; the picker shows each label once, first wins.
-		const seen = new Set<string>();
-		return choices.filter((choice) => {
-			const key = choice.label.toLowerCase();
-			if (seen.has(key)) {
-				return false;
-			}
-			seen.add(key);
-			return true;
-		});
+		return choices;
 	}
 
 	/** Model ids of one endpoint, shaped by the profile and cached, so opening the menu is not a storm. */
 	async endpointModels(profile: Profile, key: string, refresh = false): Promise<string[]> {
+		return (await this.probeModels(profile, key, refresh)).ids;
+	}
+
+	/**
+	 * The same read, with the failure kept: the wizard needs to say why a list is missing instead of
+	 * silently offering the one model the profile declares.
+	 */
+	async probeModels(profile: Profile, key: string, refresh = false): Promise<{ ids: string[]; error?: string }> {
+		const inputs = cacheInputs(profile, key);
 		const cached = this.modelCache.get(profile.id);
-		if (!refresh && cached && Date.now() - cached.at < MODEL_TTL) {
-			return cached.ids;
+		const usable = cached && sameInputs(cached, inputs) ? cached : undefined;
+		if (!refresh && usable && Date.now() - usable.at < MODEL_TTL) {
+			return { ids: usable.ids };
 		}
 		const adapter = this.findAdapter(profile.provider);
 		if (!adapter?.listModels) {
-			return [];
+			return { ids: usable?.ids ?? [] };
 		}
 		try {
 			const reported = await adapter.listModels({ profile, key, signal: AbortSignal.timeout(8_000) });
 			const ids = shapeModels(reported, profile);
-			this.modelCache.set(profile.id, { at: Date.now(), ids });
-			return ids;
+			this.modelCache.set(profile.id, { at: Date.now(), ids, ...inputs });
+			return { ids };
 		} catch (error) {
-			this.ctx.log.message(`model list of ${profile.id} failed: ${error instanceof Error ? error.message : String(error)}`);
-			return cached?.ids ?? [];
+			const message = error instanceof Error ? error.message : String(error);
+			this.ctx.log.message(`model list of ${profile.id} failed: ${message}`);
+			return { ids: usable?.ids ?? [], error: message };
 		}
 	}
 
-	async setSecret(profileId: string, key: string): Promise<void> {
-		await this.ctx.host.setSecret(secretKey(profileId), key);
+	/**
+	 * Store a key for an endpoint. A key belongs to the provider, not to the profile that was on
+	 * screen: every profile with the same normalized base resolves the same secret. An empty key
+	 * clears the stored one, letting the legacy/sibling/environment fallbacks take over.
+	 */
+	async setSecret(profileId: string, key: string, base?: string): Promise<void> {
+		const profile = this.profile(profileId);
+		const endpoint = base ?? profile?.base;
+		const id = providerSecretKey(endpoint) || secretKey(profileId);
+		if (key) {
+			await this.ctx.host.setSecret(id, key);
+		} else {
+			await this.ctx.host.deleteSecret(id);
+		}
+		this.invalidateModels(endpoint, profileId);
+		this.ctx.emit('llm/keys-changed');
+	}
+
+	/** Drop cached lists (and the once-per-profile key log) for a profile and its provider siblings. */
+	private invalidateModels(base: string | undefined, profileId: string): void {
+		const identity = normalizeEndpoint(base);
+		for (const profile of this.ctx.settings.get().profiles) {
+			if (profile.id === profileId || (identity && normalizeEndpoint(profile.base) === identity)) {
+				this.modelCache.delete(profile.id);
+				this.keyLogged.delete(profile.id);
+			}
+		}
+		this.keyLogged.delete(profileId);
 	}
 
 	profile(id: string): Profile | undefined {
@@ -295,24 +441,69 @@ export class Llm extends Service {
 	}
 
 	/**
-	 * The key of a profile: what the user stored, else the first variable the profile names that is
-	 * set. Which variables those are is data on the profile (`keyEnv`), never a code-level choice.
+	 * The key of a profile and where it came from. A key is a credential for the endpoint, not for a
+	 * profile: a stored provider key outranks everything, then the profile's own legacy secret, then
+	 * a sibling's secret on the same base (keys saved before provider scoping keep working), then the
+	 * environment. Which variables those are is data on the profile (`keyEnv`), never a code choice.
 	 */
-	async resolveKey(profile: Profile): Promise<string> {
-		const stored = await this.ctx.host.secret(secretKey(profile.id));
-		if (stored) {
-			this.noteKey(profile, 'stored', stored);
-			return stored;
+	private async keyInfo(profile: Profile, profiles = this.ctx.settings.get().profiles): Promise<KeyInfo> {
+		const identity = normalizeEndpoint(profile.base);
+		if (identity) {
+			const stored = await this.ctx.host.secret(providerSecretKey(profile.base));
+			if (stored) {
+				return { key: stored, source: 'provider' };
+			}
+		}
+		const own = await this.ctx.host.secret(secretKey(profile.id));
+		if (own) {
+			return { key: own, source: 'stored' };
+		}
+		if (identity) {
+			for (const other of profiles) {
+				if (other.id === profile.id || normalizeEndpoint(other.base) !== identity) {
+					continue;
+				}
+				const sibling = await this.ctx.host.secret(secretKey(other.id));
+				if (sibling) {
+					return { key: sibling, source: `stored ${other.id}` };
+				}
+			}
 		}
 		for (const name of profileKeyEnvs(profile)) {
 			const value = this.ctx.host.env(name);
 			if (value) {
-				this.noteKey(profile, `env ${name}`, value);
-				return value;
+				return { key: value, source: `env ${name}` };
 			}
 		}
-		this.noteKey(profile, 'none');
-		return '';
+		if (identity) {
+			for (const other of profiles) {
+				if (other.id === profile.id || normalizeEndpoint(other.base) !== identity) {
+					continue;
+				}
+				for (const name of profileKeyEnvs(other)) {
+					const value = this.ctx.host.env(name);
+					if (value) {
+						return { key: value, source: `env ${name} (${other.id})` };
+					}
+				}
+			}
+		}
+		return { key: '', source: 'none' };
+	}
+
+	async resolveKey(profile: Profile): Promise<string> {
+		const info = await this.keyInfo(profile);
+		this.noteKey(profile, info.source, info.key);
+		return info.key;
+	}
+
+	/** Whether the model the policy names has a key; the UI asks before switching to a dead row. */
+	async keyReady(policyModel: string): Promise<boolean> {
+		try {
+			return Boolean(await this.resolveKey(this.resolve(policyModel).profile));
+		} catch {
+			return false;
+		}
 	}
 
 	/** One line per profile saying where its key came from, and a fingerprint to tell keys apart. */

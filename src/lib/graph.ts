@@ -73,7 +73,14 @@ export interface Suspended<S> {
 	step: number;
 }
 
-export type Outcome<S> = Finished<S> | Suspended<S>;
+/** The turn's signal aborted: the graph stopped between nodes, before routing another one. */
+export interface Aborted<S> {
+	status: 'aborted';
+	state: S;
+	step: number;
+}
+
+export type Outcome<S> = Finished<S> | Suspended<S> | Aborted<S>;
 
 export interface ResumeCursor {
 	node: string;
@@ -103,10 +110,6 @@ class SuspendSignal {
 }
 
 const END = 'end';
-
-function isAbort(error: unknown, signal: AbortSignal): boolean {
-	return signal.aborted || (error instanceof Error && error.name === 'AbortError');
-}
 
 function exitCount(node: NodeConfig): number {
 	return [node.next, node.route, node.soft].filter((value) => value !== undefined).length;
@@ -219,7 +222,7 @@ export async function runGraph<S>(graph: CompiledGraph<S>, state: S, options: Ru
 	let pending = options.resume;
 	while (current !== END) {
 		if (signal.aborted) {
-			return { status: 'done', state, step };
+			return { status: 'aborted', state, step };
 		}
 		if (step >= maxSteps) {
 			throw new GraphError(`graph exceeded maxSteps (${maxSteps})`);
@@ -247,19 +250,28 @@ export async function runGraph<S>(graph: CompiledGraph<S>, state: S, options: Ru
 			state = await node.run(state, runtime);
 		} catch (error) {
 			if (error instanceof SuspendSignal) {
-				return { status: 'suspended', node: current, state, payload: error.payload, step };
+				// A stop that lands as the graph suspends wins: never park a turn the user just stopped.
+				return signal.aborted
+					? { status: 'aborted', state, step }
+					: { status: 'suspended', node: current, state, payload: error.payload, step };
 			}
-			if (isAbort(error, signal)) {
-				return { status: 'done', state, step };
+			if (signal.aborted) {
+				return { status: 'aborted', state, step };
 			}
 			throw error;
 		}
+		if (signal.aborted) {
+			return { status: 'aborted', state, step };
+		}
 		step += 1;
+		if (signal.aborted) {
+			return { status: 'aborted', state, step };
+		}
 		try {
 			current = await node.exit(state, runtime);
 		} catch (error) {
-			if (isAbort(error, signal)) {
-				return { status: 'done', state, step };
+			if (signal.aborted) {
+				return { status: 'aborted', state, step };
 			}
 			throw error;
 		}

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { Service, type Context } from 'cordis';
+import { abortable, linkAbort } from '../lib/cancel';
 import type { TurnRef } from '../lib/types';
 import {
 	DEFAULT_OUTPUT_RESERVE,
@@ -149,6 +150,17 @@ export interface TurnInput {
 export interface TurnResult {
 	sessionId: string;
 	text: string;
+	/** The turn ended because the user stopped it, not because the model or a hook finished. */
+	stopped?: boolean;
+}
+
+/** One running turn: the signal every part of it shares, from prompt building to the last tool. */
+interface Turn {
+	session: Session;
+	ref: TurnRef;
+	controller: AbortController;
+	signal: AbortSignal;
+	unlink: () => void;
 }
 
 interface RunState {
@@ -231,11 +243,11 @@ declare module 'cordis' {
 export class Agent extends Service {
 	static inject = ['host', 'settings', 'sessions', 'attachments', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
 
-	private readonly stops = new Map<string, AbortController>();
+	private readonly turns = new Map<string, Turn>();
+	/** Background subagents outlive their turn; they are aborted only when the agent unloads. */
+	private readonly backgroundSubagents = new Set<AbortController>();
 	/** Session → the model that refused images there. A different model gets to try them again. */
 	private readonly imagesOff = new Map<string, string>();
-	/** The live Session object per running turn; usage is mutated here and saved by finish(). */
-	private readonly live = new Map<string, Session>();
 	/** `${sessionId}\0${root}` already merged from the journal in this process. */
 	private readonly createdBackfilled = new Set<string>();
 	private readonly todoLists = new Map<string, TodoItem[]>();
@@ -260,7 +272,10 @@ export class Agent extends Service {
 	constructor(ctx: Context) {
 		super(ctx, 'agent');
 		ctx.effect(() => () => {
-			for (const controller of this.stops.values()) {
+			for (const turn of this.turns.values()) {
+				turn.controller.abort();
+			}
+			for (const controller of this.backgroundSubagents) {
 				controller.abort();
 			}
 		});
@@ -283,11 +298,49 @@ export class Agent extends Service {
 			network: config.network,
 			workingDirectory: config.workingDirectory,
 			commandTimeout: config.commandTimeout,
+			commandTimeoutOverride: config.commandTimeoutOverride,
 			denyReadPaths: [...config.denyReadPaths],
 			confinement: { read: config.confineRead, write: config.confineWrite },
 			planDirectory: config.planDirectory,
 			model: config.model,
 		};
+	}
+
+	/** The live session of a running turn, for code that must see what the turn has written so far. */
+	private turnSession(sessionId: string): Session | undefined {
+		return this.turns.get(sessionId)?.session;
+	}
+
+	/**
+	 * Opens a turn: one controller, linked to any surface signal, registered synchronously. A second
+	 * turn for the same chat is refused rather than allowed to overwrite this one's signal.
+	 */
+	private beginTurn(session: Session, ref: TurnRef, external?: AbortSignal): Turn | null {
+		if (this.turns.has(session.id)) {
+			return null;
+		}
+		const controller = new AbortController();
+		const turn: Turn = {
+			session,
+			ref,
+			controller,
+			signal: controller.signal,
+			unlink: linkAbort(external, controller),
+		};
+		this.turns.set(session.id, turn);
+		this.ctx.emit('agent/turn-start', ref, session.transcript[session.transcript.length - 1]?.content ?? '');
+		return turn;
+	}
+
+	private endTurn(turn: Turn): void {
+		turn.unlink();
+		if (this.turns.get(turn.session.id) === turn) {
+			this.turns.delete(turn.session.id);
+		}
+		// A normal finish settles any request that somehow outlived the turn (an approval card left
+		// after a repaint); an aborted turn is already settled and this is a no-op.
+		turn.controller.abort();
+		this.ctx.emit('agent/turn-end', turn.ref);
 	}
 
 	async runTurn(input: TurnInput): Promise<TurnResult> {
@@ -332,218 +385,272 @@ export class Agent extends Service {
 		if (input.rewriteAt !== undefined && !canRewrite(session, input.rewriteAt)) {
 			return { sessionId: session.id, text: 'Error: that message is not a prompt that can be edited.' };
 		}
-		session.policy = { ...session.policy, ...this.policyFor(), ...(input.policy ?? {}) };
-		if (!this.ctx.llm.known(session.policy.model) && !this.warned.has(session.id)) {
-			// The chat remembers a model that no longer exists; say which one runs instead, once.
-			this.warned.add(session.id);
-			this.notice(
-				{ sessionId: session.id, surface: input.surface },
-				`model profile "${session.policy.model}" is gone — using ${this.ctx.llm.describe('auto')}. Pick one from the model menu.`,
-			);
-		}
-		if (session.title === 'New session' && (text || images?.length)) {
-			session.title = text ? threadTitle(text) : 'Image prompt';
-		}
-		const config = this.ctx.settings.get();
-		const contexts: string[] = [];
-		if (!this.greeted.has(session.id)) {
-			this.greeted.add(session.id);
-			const start = await this.ctx.hooks.fire('SessionStart', undefined, { session_id: session.id, cwd: session.policy.workingDirectory });
-			contexts.push(...start.contexts);
-		}
-		const submitted = await this.ctx.hooks.fire('UserPromptSubmit', undefined, { session_id: session.id, prompt: text });
-		if (submitted.blocked) {
-			return { sessionId: session.id, text: `Blocked by hook: ${submitted.reason ?? 'no reason given'}` };
-		}
-		contexts.push(...submitted.contexts, ...this.ctx.hooks.drainContexts(), ...(this.pending.get(session.id) ?? []));
-		this.pending.delete(session.id);
-		// An edit cuts the transcript only after the prompt hook accepted the turn, so a blocked edit
-		// leaves the old prompt in place. The surface restores files and announces the turn here; a
-		// refusal from it cancels the whole operation.
-		if (input.rewriteAt !== undefined) {
-			if (input.prepareRewrite && !(await input.prepareRewrite(session))) {
-				return { sessionId: session.id, text: '' };
-			}
-			// The edited prompt replaces the old one text for text; its pictures stay unless the editor
-			// supplied a new set. Read them before the cut removes the message.
-			if (!input.images?.length) {
-				images = session.transcript[input.rewriteAt]?.images;
-			}
-			const problem = this.ctx.sessions.rewriteAt(session, input.rewriteAt);
-			if (problem) {
-				return { sessionId: session.id, text: `Error: ${problem}` };
-			}
-		}
-		// References are read after the cut and the policy merge: an edit that restored files reads
-		// the restored content, and a fixed systemContext (the participant's native references) and a
-		// resolved one can coexist. The block stays last, so the static prefix keeps caching.
-		if (input.systemContext) {
-			contexts.push(input.systemContext);
-		}
-		if (input.resolveSystemContext && text.trim()) {
-			try {
-				const resolved = await input.resolveSystemContext(session, text);
-				if (resolved) {
-					contexts.push(resolved);
-				}
-			} catch (error) {
-				this.ctx.log.message(`references: ${describe(error)}`);
-			}
-		}
-		// No snapshot here: a turn is journaled file by file, as the agent actually writes each one.
-		// A continue and an impersonation add no prompt of their own: the conversation is already there,
-		// and quiet throws its prompt away again at the end.
-		const prompted = trigger !== 'continue' && trigger !== 'impersonate';
-		let prior = [...session.transcript];
-		// The prompt keeps the time it was asked at however often the transcript is re-derived below, so
-		// a compaction in the middle of this turn cannot make it look like a later message.
-		const askedAt = Date.now();
-		const seed = (): Message[] =>
-			prompted ? [...session.transcript, { role: 'user', content: text, images, at: askedAt } as Message] : [...session.transcript];
-		let seeded = seed();
-		// A continue grows the last reply, and only when nothing comes after it. A turn that was
-		// stopped, is waiting on a tool call, or failed leaves the transcript ending in something else
-		// — merging there would cut that away. With nothing to grow, the answer is a turn of its own.
-		// It is derived again whenever a fold rewrites the transcript the turn is running on.
-		let continueInto = trigger === 'continue' ? continuationIndex(seeded) : undefined;
-		// What the model is asked to do when the turn carries no prompt of its own. It is also said *as a
-		// turn*: a request whose last turn is the model's own is completed by OpenAI but refused outright
-		// by Gemini ("Requests ending with a model turn are not supported"). Upstream answers the same
-		// problem with a preset's `send_if_empty`, said as the user when the history ends on a reply.
-		let ask = '';
-		if (trigger === 'continue') {
-			// The preset's own nudge travels with the messages (see `compose`); when it has none, the
-			// agent says what it wants in its own words — and only when there is a reply to carry on.
-			const nudge = this.tavern()?.continueNudge(
-				{ character: session.character, persona: session.persona, preset: session.preset },
-				session.transcript[session.transcript.length - 1]?.content ?? '',
-			);
-			if (!nudge && continueInto !== undefined) {
-				contexts.push(CONTINUE_ASK);
-			}
-			// The ask itself is always there to be sent: a turn that was cut short before it said anything
-			// still leaves the model's own turn last, and that is the request Gemini refuses.
-			ask = nudge || CONTINUE_ASK;
-		}
-		if (trigger === 'impersonate') {
-			// The tavern layer knows the preset's template and the user's name; without it, the plain
-			// request stands.
-			const impersonation =
-				this.tavern()?.impersonationPrompt({ character: session.character, persona: session.persona, preset: session.preset }) ??
-				'Write the next message of this conversation as the user, in their voice, and nothing else.';
-			// The words stand in the system prompt as well: an impersonation whose history already ends on
-			// your own turn has nowhere else to be said.
-			contexts.push(impersonation);
-			ask = impersonation;
-		}
-		const blocks = await this.promptBlocks(session, contexts, trigger);
-		// The fallback is the only place the user's block order and switches apply: under ST the active
-		// preset owns them, and `compose` receives the full block list rather than this filtered view.
-		const system = promptText(applyPromptLayout(blocks, config.prompts));
 		const ref: TurnRef = { sessionId: session.id, surface: input.surface };
-		// The world-info budget, the context budget and every counter in the panels read the same
-		// counter, so the model's own tokenizer is made exact before anything is measured with it.
-		await this.ctx.tokenizers.warm(this.ctx.llm.modelName(session.policy.model));
-		// A silent generation is offered no tools, so its budget is measured without them.
-		const tools = SILENT_TRIGGERS.has(trigger) ? [] : this.ctx.tools.visible(session.policy);
-		const budget = this.budgetFor(session.policy, session.contextWindow, system, tools);
-		let history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
-		// A conversation that no longer fits is summarized before it is sent, not after the endpoint
-		// refuses it. The whole older stretch becomes one summary, so the newest turn is still answered
-		// in full — and because the summary replaces those turns in the chat itself, nothing is lost
-		// quietly.
-		if (estimateMessages(history) > budget.input) {
-			// The conversation no longer fits, so it is summarized before it is sent rather than after the
-			// endpoint refuses it. The summary replaces those turns in the chat itself, so nothing is lost
-			// quietly — and the prompt this turn is answering survives word for word.
-			this.notice(ref, 'Summarizing the conversation — it no longer fits the model’s window.');
-			try {
-				const fold = await this.fold(session, session.transcript, budget.input);
-				if (fold) {
-					seeded = seed();
-					history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
-					// The fold rewrote the record the turn is running on, so the turn's own view of it moves
-					// too: the record a quiet trigger restores at the end of the turn, and the reply a
-					// continue extends — which has a new index in the folded transcript, or none at all when
-					// the fold took it with the rest.
-					prior = foldedRecord(fold.summary, prior, fold.covers);
-					continueInto = trigger === 'continue' ? continuationIndex(seeded) : undefined;
-				}
-			} catch (error) {
-				this.ctx.log.message(`summarize failed: ${describe(error)}`);
-				this.notice(ref, `Could not summarize the conversation (${describe(error)}); its older turns stay as they are.`);
+		const turn = this.beginTurn(session, ref, input.signal);
+		if (!turn) {
+			return { sessionId: session.id, text: 'Error: a turn is already running in this chat.' };
+		}
+		try {
+			// A surface can stop the turn before the first await; nothing below should start.
+			turn.signal.throwIfAborted();
+			session.policy = { ...session.policy, ...this.policyFor(), ...(input.policy ?? {}) };
+			if (!this.ctx.llm.known(session.policy.model) && !this.warned.has(session.id)) {
+				// The chat remembers a model that no longer exists; say which one runs instead, once.
+				this.warned.add(session.id);
+				this.notice(
+					{ sessionId: session.id, surface: input.surface },
+					`model profile "${session.policy.model}" is gone — using ${this.ctx.llm.describe('auto')}. Pick one from the model menu.`,
+				);
 			}
-		}
-		const tavern = await this.tavernTurn(session, seeded, history, blocks, trigger, budget.window);
-		if (tavern?.overflowAlert && !this.overflowWarned.has(session.id)) {
-			this.overflowWarned.add(session.id);
-			this.notice(
-				ref,
-				`World info budget reached after ${tavern.activated.length} entries — the rest were left out. Raise "Context %", give the book fewer entries, or tick "Ignore budget" on the ones that must always be sent.`,
+			if (session.title === 'New session' && (text || images?.length)) {
+				session.title = text ? threadTitle(text) : 'Image prompt';
+			}
+			const config = this.ctx.settings.get();
+			const contexts: string[] = [];
+			if (!this.greeted.has(session.id)) {
+				this.greeted.add(session.id);
+				const start = await abortable(
+					turn.signal,
+					this.ctx.hooks.fire('SessionStart', undefined, { session_id: session.id, cwd: session.policy.workingDirectory }),
+				);
+				contexts.push(...start.contexts);
+			}
+			const submitted = await abortable(
+				turn.signal,
+				this.ctx.hooks.fire('UserPromptSubmit', undefined, { session_id: session.id, prompt: text }),
 			);
+			if (submitted.blocked) {
+				return { sessionId: session.id, text: `Blocked by hook: ${submitted.reason ?? 'no reason given'}` };
+			}
+			contexts.push(...submitted.contexts, ...this.ctx.hooks.drainContexts(), ...(this.pending.get(session.id) ?? []));
+			this.pending.delete(session.id);
+			// An edit cuts the transcript only after the prompt hook accepted the turn, so a blocked edit
+			// leaves the old prompt in place. The surface restores files and announces the turn here; a
+			// refusal from it cancels the whole operation.
+			if (input.rewriteAt !== undefined) {
+				// A restore is not raced: abandoning it halfway would leave the workspace inconsistent.
+				if (input.prepareRewrite && !(await input.prepareRewrite(session))) {
+					return { sessionId: session.id, text: '' };
+				}
+				turn.signal.throwIfAborted();
+				// The edited prompt replaces the old one text for text; its pictures stay unless the editor
+				// supplied a new set. Read them before the cut removes the message.
+				if (!input.images?.length) {
+					images = session.transcript[input.rewriteAt]?.images;
+				}
+				const problem = this.ctx.sessions.rewriteAt(session, input.rewriteAt);
+				if (problem) {
+					return { sessionId: session.id, text: `Error: ${problem}` };
+				}
+			}
+			// References are read after the cut and the policy merge: an edit that restored files reads
+			// the restored content, and a fixed systemContext (the participant's native references) and a
+			// resolved one can coexist. The block stays last, so the static prefix keeps caching.
+			if (input.systemContext) {
+				contexts.push(input.systemContext);
+			}
+			if (input.resolveSystemContext && text.trim()) {
+				try {
+					const resolved = await abortable(turn.signal, input.resolveSystemContext(session, text));
+					if (resolved) {
+						contexts.push(resolved);
+					}
+				} catch (error) {
+					if (turn.signal.aborted) {
+						throw error;
+					}
+					this.ctx.log.message(`references: ${describe(error)}`);
+				}
+			}
+			turn.signal.throwIfAborted();
+			// No snapshot here: a turn is journaled file by file, as the agent actually writes each one.
+			// A continue and an impersonation add no prompt of their own: the conversation is already there,
+			// and quiet throws its prompt away again at the end.
+			const prompted = trigger !== 'continue' && trigger !== 'impersonate';
+			let prior = [...session.transcript];
+			// The prompt keeps the time it was asked at however often the transcript is re-derived below, so
+			// a compaction in the middle of this turn cannot make it look like a later message.
+			const askedAt = Date.now();
+			const seed = (): Message[] =>
+				prompted ? [...session.transcript, { role: 'user', content: text, images, at: askedAt } as Message] : [...session.transcript];
+			let seeded = seed();
+			// A continue grows the last reply, and only when nothing comes after it. A turn that was
+			// stopped, is waiting on a tool call, or failed leaves the transcript ending in something else
+			// — merging there would cut that away. With nothing to grow, the answer is a turn of its own.
+			// It is derived again whenever a fold rewrites the transcript the turn is running on.
+			let continueInto = trigger === 'continue' ? continuationIndex(seeded) : undefined;
+			// What the model is asked to do when the turn carries no prompt of its own. It is also said *as a
+			// turn*: a request whose last turn is the model's own is completed by OpenAI but refused outright
+			// by Gemini ("Requests ending with a model turn are not supported"). Upstream answers the same
+			// problem with a preset's `send_if_empty`, said as the user when the history ends on a reply.
+			let ask = '';
+			if (trigger === 'continue') {
+				// The preset's own nudge travels with the messages (see `compose`); when it has none, the
+				// agent says what it wants in its own words — and only when there is a reply to carry on.
+				const nudge = this.tavern()?.continueNudge(
+					{ character: session.character, persona: session.persona, preset: session.preset },
+					session.transcript[session.transcript.length - 1]?.content ?? '',
+				);
+				if (!nudge && continueInto !== undefined) {
+					contexts.push(CONTINUE_ASK);
+				}
+				// The ask itself is always there to be sent: a turn that was cut short before it said anything
+				// still leaves the model's own turn last, and that is the request Gemini refuses.
+				ask = nudge || CONTINUE_ASK;
+			}
+			if (trigger === 'impersonate') {
+				// The tavern layer knows the preset's template and the user's name; without it, the plain
+				// request stands.
+				const impersonation =
+					this.tavern()?.impersonationPrompt({ character: session.character, persona: session.persona, preset: session.preset }) ??
+					'Write the next message of this conversation as the user, in their voice, and nothing else.';
+				// The words stand in the system prompt as well: an impersonation whose history already ends on
+				// your own turn has nowhere else to be said.
+				contexts.push(impersonation);
+				ask = impersonation;
+			}
+			const blocks = await abortable(turn.signal, this.promptBlocks(session, contexts, trigger));
+			// The fallback is the only place the user's block order and switches apply: under ST the active
+			// preset owns them, and `compose` receives the full block list rather than this filtered view.
+			const system = promptText(applyPromptLayout(blocks, config.prompts));
+			// The world-info budget, the context budget and every counter in the panels read the same
+			// counter, so the model's own tokenizer is made exact before anything is measured with it.
+			await abortable(turn.signal, this.ctx.tokenizers.warm(this.ctx.llm.modelName(session.policy.model)));
+			// A silent generation is offered no tools, so its budget is measured without them.
+			const tools = SILENT_TRIGGERS.has(trigger) ? [] : this.ctx.tools.visible(session.policy);
+			const budget = this.budgetFor(session.policy, session.contextWindow, system, tools);
+			let history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
+			// A conversation that no longer fits is summarized before it is sent, not after the endpoint
+			// refuses it. The whole older stretch becomes one summary, so the newest turn is still answered
+			// in full — and because the summary replaces those turns in the chat itself, nothing is lost
+			// quietly.
+			if (estimateMessages(history) > budget.input) {
+				// The conversation no longer fits, so it is summarized before it is sent rather than after the
+				// endpoint refuses it. The summary replaces those turns in the chat itself, so nothing is lost
+				// quietly — and the prompt this turn is answering survives word for word.
+				this.notice(ref, 'Summarizing the conversation — it no longer fits the model’s window.');
+				try {
+					const fold = await this.fold(session, session.transcript, budget.input, undefined, turn.signal);
+					if (fold) {
+						seeded = seed();
+						history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
+						// The fold rewrote the record the turn is running on, so the turn's own view of it moves
+						// too: the record a quiet trigger restores at the end of the turn, and the reply a
+						// continue extends — which has a new index in the folded transcript, or none at all when
+						// the fold took it with the rest.
+						prior = foldedRecord(fold.summary, prior, fold.covers);
+						continueInto = trigger === 'continue' ? continuationIndex(seeded) : undefined;
+					}
+				} catch (error) {
+					if (turn.signal.aborted) {
+						throw error;
+					}
+					this.ctx.log.message(`summarize failed: ${describe(error)}`);
+					this.notice(ref, `Could not summarize the conversation (${describe(error)}); its older turns stay as they are.`);
+				}
+			}
+			const tavern = await abortable(turn.signal, this.tavernTurn(session, seeded, history, blocks, trigger, budget.window));
+			if (tavern?.overflowAlert && !this.overflowWarned.has(session.id)) {
+				this.overflowWarned.add(session.id);
+				this.notice(
+					ref,
+					`World info budget reached after ${tavern.activated.length} entries — the rest were left out. Raise "Context %", give the book fewer entries, or tick "Ignore budget" on the ones that must always be sent.`,
+				);
+			}
+			// The ST layer takes the whole request whenever it is on: with nothing selected it composes the
+			// built-in default collection. Only an absent or disabled layer keeps the agent's own shape.
+			const composed = tavern?.takeover === true;
+			const messages = composed ? [...tavern!.messages] : [{ role: 'system', content: system } as Message, ...history];
+			// The ask goes last whenever the request would end in the model's own turn — which is what a
+			// continue and an impersonation look like until something is said as the user.
+			if (ask && messages[messages.length - 1]?.role !== 'user') {
+				messages.push({ role: 'user', content: ask, at: Date.now() } as Message);
+			}
+			// The Tools entry gates the whole request in both shapes: the preset's row under ST, the core
+			// layout's block when the agent composes its own prompt.
+			const toolsEnabled = composed
+				? tavern!.toolsEnabled
+				: config.prompts.find((entry) => entry.id === COMONAD_BLOCK.tools)?.enabled !== false;
+			// `/context` reads what was actually sent: the composed system messages, and the tool overhead
+			// the preset left in place.
+			this.systems.set(session.id, composed ? this.systemText(messages) : system);
+			this.toolModes.set(session.id, toolsEnabled);
+			const state: RunState = {
+				ref,
+				sessionId: session.id,
+				policy: session.policy,
+				transcript: seeded,
+				messages,
+				toolCalls: [],
+				gateReason: '',
+				confirmed: null,
+				toolsEnabled,
+				samplers: tavern?.samplers,
+				trigger,
+				prior,
+				continueInto,
+				swipes,
+				// A composed request is not a slice of the chat, so there is nothing to fold it back into.
+				foldable: !composed,
+			};
+			session.transcript = seeded;
+			this.ctx.sessions.save(session);
+			this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000), images: imageNotes(images) });
+			return await this.execute(session, state, turn);
+		} catch (error) {
+			if (turn.signal.aborted) {
+				return { sessionId: session.id, text: '', stopped: true };
+			}
+			throw error;
+		} finally {
+			this.endTurn(turn);
 		}
-		// The ST layer takes the whole request whenever it is on: with nothing selected it composes the
-		// built-in default collection. Only an absent or disabled layer keeps the agent's own shape.
-		const composed = tavern?.takeover === true;
-		const messages = composed ? [...tavern!.messages] : [{ role: 'system', content: system } as Message, ...history];
-		// The ask goes last whenever the request would end in the model's own turn — which is what a
-		// continue and an impersonation look like until something is said as the user.
-		if (ask && messages[messages.length - 1]?.role !== 'user') {
-			messages.push({ role: 'user', content: ask, at: Date.now() } as Message);
-		}
-		// The Tools entry gates the whole request in both shapes: the preset's row under ST, the core
-		// layout's block when the agent composes its own prompt.
-		const toolsEnabled = composed
-			? tavern!.toolsEnabled
-			: config.prompts.find((entry) => entry.id === COMONAD_BLOCK.tools)?.enabled !== false;
-		// `/context` reads what was actually sent: the composed system messages, and the tool overhead
-		// the preset left in place.
-		this.systems.set(session.id, composed ? this.systemText(messages) : system);
-		this.toolModes.set(session.id, toolsEnabled);
-		const state: RunState = {
-			ref,
-			sessionId: session.id,
-			policy: session.policy,
-			transcript: seeded,
-			messages,
-			toolCalls: [],
-			gateReason: '',
-			confirmed: null,
-			toolsEnabled,
-			samplers: tavern?.samplers,
-			trigger,
-			prior,
-			continueInto,
-			swipes,
-			// A composed request is not a slice of the chat, so there is nothing to fold it back into.
-			foldable: !composed,
-		};
-		session.transcript = seeded;
-		this.ctx.sessions.save(session);
-		this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000), images: imageNotes(images) });
-		return this.execute(session, state, input.signal);
 	}
 
 	/** Continues the suspended tool call of a session (after approval). */
-	async resume(sessionId: string, options: { surface?: string } = {}): Promise<TurnResult> {
+	async resume(sessionId: string, options: { surface?: string; signal?: AbortSignal } = {}): Promise<TurnResult> {
 		const session = this.ctx.sessions.require(sessionId);
 		const cursor = session.cursor;
 		if (!cursor) {
 			return { sessionId, text: 'This session has no suspended turn.' };
 		}
-		const calls = Array.isArray(cursor.payload) ? (cursor.payload as ToolCall[]) : [];
-		const answer = await this.ctx.approval.request({ calls, reason: 'resume the suspended turn', surface: options.surface });
 		const state = cursor.state as RunState;
-		state.policy = session.policy;
-		state.ref.surface = options.surface ?? state.ref.surface;
-		session.cursor = null;
-		this.ctx.sessions.save(session);
-		return this.execute(session, state, undefined, {
-			node: cursor.node,
-			value: answer !== 'deny',
-			payload: cursor.payload,
-			step: cursor.step,
-		});
+		const ref: TurnRef = { sessionId, surface: options.surface ?? state.ref.surface };
+		const turn = this.beginTurn(session, ref, options.signal);
+		if (!turn) {
+			return { sessionId, text: 'Error: a turn is already running in this chat.' };
+		}
+		try {
+			const calls = Array.isArray(cursor.payload) ? (cursor.payload as ToolCall[]) : [];
+			const answer = await this.ctx.approval.request({
+				calls,
+				reason: 'resume the suspended turn',
+				surface: options.surface,
+				sessionId,
+				signal: turn.signal,
+			});
+			// A stop during the resume prompt leaves the original suspension intact and resumable.
+			if (turn.signal.aborted) {
+				return { sessionId, text: '', stopped: true };
+			}
+			state.policy = session.policy;
+			state.ref.surface = options.surface ?? state.ref.surface;
+			session.cursor = null;
+			this.ctx.sessions.save(session);
+			return await this.execute(session, state, turn, {
+				node: cursor.node,
+				value: answer !== 'deny',
+				payload: cursor.payload,
+				step: cursor.step,
+			});
+		} catch (error) {
+			if (turn.signal.aborted) {
+				return { sessionId, text: '', stopped: true };
+			}
+			throw error;
+		} finally {
+			this.endTurn(turn);
+		}
 	}
 
 	/**
@@ -600,12 +707,18 @@ export class Agent extends Service {
 	 * chat that cannot be summarized is still a chat and losing the record would be worse than sending a
 	 * request that may be refused.
 	 */
-	private async fold(session: Session, transcript: Message[], budget: number, instructions?: string): Promise<FoldResult | null> {
+	private async fold(
+		session: Session,
+		transcript: Message[],
+		budget: number,
+		instructions?: string,
+		signal?: AbortSignal,
+	): Promise<FoldResult | null> {
 		const plan = planCompaction(transcript, budget, SUMMARY_RESERVE);
 		if (!plan.older.length) {
 			return null;
 		}
-		const text = await this.summaryText(session.policy.model, plan.older, session.summary, instructions);
+		const text = await this.summaryText(session.policy.model, plan.older, session.summary, instructions, signal);
 		if (!text) {
 			return null;
 		}
@@ -658,6 +771,7 @@ export class Agent extends Service {
 		state: RunState,
 		session: Session | undefined,
 		tools: ToolSpec[],
+		signal: AbortSignal,
 	): Promise<{ messages: Message[]; transcript?: Message[] }> {
 		const budget = this.budgetFor(state.policy, session?.contextWindow, this.systemText(state.messages), tools);
 		// The budget's input already has the system prompt and the tool definitions taken off, so the
@@ -684,8 +798,9 @@ export class Agent extends Service {
 		this.notice(state.ref, 'Summarizing the conversation — this turn outgrew the model’s window.');
 		let text: string;
 		try {
-			text = await this.summaryText(state.policy.model, plan.older, session.summary);
+			text = await this.summaryText(state.policy.model, plan.older, session.summary, undefined, signal);
 		} catch (error) {
+			signal.throwIfAborted();
 			// The turn still has to be answered, so a summary that failed is reported and not fatal.
 			this.ctx.log.message(`summarize failed mid-turn: ${describe(error)}`);
 			return { messages: elided.messages };
@@ -786,7 +901,7 @@ export class Agent extends Service {
 			} else {
 				// The estimate said it fit and the endpoint disagreed. Trust the endpoint: shrink hard, retry once.
 				this.notice(state.ref, 'The model refused the request as too long; shrinking it and trying again.');
-				const shrunk = await this.emergencyFit(state, session);
+				const shrunk = await this.emergencyFit(state, session, signal);
 				if (!shrunk) {
 					throw error;
 				}
@@ -817,7 +932,7 @@ export class Agent extends Service {
 	 * to its marker, and every turn but the last folded away. Returns `null` when there is nothing left
 	 * to give, which is the endpoint's answer to keep.
 	 */
-	private async emergencyFit(state: RunState, session: Session | undefined): Promise<Message[] | null> {
+	private async emergencyFit(state: RunState, session: Session | undefined, signal: AbortSignal): Promise<Message[] | null> {
 		const system = state.messages.filter((message) => message.role === 'system');
 		// Tool output goes to its markers first; older prompts' pictures go next, keeping the newest
 		// prompt intact so the question being answered still has what it was asked about.
@@ -832,7 +947,7 @@ export class Agent extends Service {
 			return null;
 		}
 		try {
-			const text = await this.summaryText(state.policy.model, plan.older, session.summary);
+			const text = await this.summaryText(state.policy.model, plan.older, session.summary, undefined, signal);
 			if (!text) {
 				return null;
 			}
@@ -842,6 +957,7 @@ export class Agent extends Service {
 			this.rebaseState(state, fold);
 			return [...system, ...fold.folded];
 		} catch (error) {
+			signal.throwIfAborted();
 			this.ctx.log.message(`emergency summarize failed: ${describe(error)}`);
 			return null;
 		}
@@ -866,6 +982,7 @@ export class Agent extends Service {
 		older: Message[],
 		previous?: SessionSummary,
 		instructions?: string,
+		signal?: AbortSignal,
 	): Promise<string> {
 		const lines = older.map((message) => `${message.role}: ${clip(message.content, 2_000)}`);
 		let head = 0;
@@ -895,6 +1012,7 @@ export class Agent extends Service {
 			]
 				.filter(Boolean)
 				.join('\n\n'),
+			{ signal },
 		);
 	}
 
@@ -912,11 +1030,12 @@ export class Agent extends Service {
 
 	stop(sessionId?: string): boolean {
 		const id = sessionId ?? this.ctx.sessions.active()?.id ?? '';
-		const controller = this.stops.get(id);
-		if (!controller) {
+		// A command with no target stops the one running turn even if the panel moved to another chat.
+		const turn = this.turns.get(id) ?? (sessionId === undefined && this.turns.size === 1 ? [...this.turns.values()][0] : undefined);
+		if (!turn) {
 			return false;
 		}
-		controller.abort();
+		turn.controller.abort();
 		return true;
 	}
 
@@ -971,35 +1090,34 @@ export class Agent extends Service {
 		].join('\n');
 	}
 
-	private async execute(
-		session: Session,
-		state: RunState,
-		signal?: AbortSignal,
-		resume?: ResumeCursor,
-	): Promise<TurnResult> {
-		const abort = new AbortController();
-		const link = () => abort.abort();
-		signal?.addEventListener('abort', link, { once: true });
-		this.stops.set(session.id, abort);
-		this.live.set(session.id, session);
-		await this.backfillCreated(session, state.policy.workingDirectory);
+	private async execute(session: Session, state: RunState, turn: Turn, resume?: ResumeCursor): Promise<TurnResult> {
+		const signal = turn.signal;
 		let cursor = resume;
 		let stopRetried = false;
-		this.ctx.emit('agent/turn-start', state.ref, state.transcript[state.transcript.length - 1]?.content ?? '');
 		try {
+			// Journal backfill can be slow on a remote filesystem; it must not outlive a Stop.
+			await abortable(signal, this.backfillCreated(session, state.policy.workingDirectory));
 			const graph = this.graph();
 			for (;;) {
 				const outcome = await runGraph(graph, state, {
 					resume: cursor,
-					signal: abort.signal,
-					choose: (request: SoftRequest) => this.ctx.llm.choose(state.policy.model, request, abort.signal),
+					signal,
+					choose: (request: SoftRequest) => this.ctx.llm.choose(state.policy.model, request, signal),
 				});
 				state = outcome.state;
+				if (outcome.status === 'aborted') {
+					return this.aborted(session, state);
+				}
 				if (outcome.status === 'done') {
-					const stop = await this.ctx.hooks.fire('Stop', undefined, {
-						session_id: session.id,
-						last_assistant_message: lastAssistant(state.transcript)?.content ?? '',
-					});
+					// A Stop that lands as the graph finishes wins over the Stop hook.
+					signal.throwIfAborted();
+					const stop = await abortable(
+						signal,
+						this.ctx.hooks.fire('Stop', undefined, {
+							session_id: session.id,
+							last_assistant_message: lastAssistant(state.transcript)?.content ?? '',
+						}),
+					);
 					if (stop.blocked && !stopRetried) {
 						stopRetried = true;
 						state = {
@@ -1016,8 +1134,17 @@ export class Agent extends Service {
 				session.cursor = { node: outcome.node, payload: outcome.payload, step: outcome.step, state };
 				this.ctx.sessions.save(session);
 				const answer = calls.length
-					? await this.ctx.approval.request({ calls, reason: state.gateReason, surface: state.ref.surface })
+					? await this.ctx.approval.request({
+							calls,
+							reason: state.gateReason,
+							surface: state.ref.surface,
+							sessionId: session.id,
+							signal,
+						})
 					: 'deny';
+				if (signal.aborted) {
+					return this.aborted(session, state);
+				}
 				if (answer === 'always' && calls[0]) {
 					const rule = suggestAllowRule(calls[0], this.ctx.tools.get(calls[0].name));
 					await this.ctx.settings.addAllowRule(rule).catch(() => undefined);
@@ -1027,25 +1154,51 @@ export class Agent extends Service {
 				cursor = { node: outcome.node, value: answer !== 'deny', payload: outcome.payload, step: outcome.step };
 			}
 		} catch (error) {
-			if (abort.signal.aborted) {
-				this.finish(session, state);
-				return { sessionId: session.id, text: lastAssistant(state.transcript)?.content ?? '' };
+			if (signal.aborted) {
+				return this.aborted(session, state);
 			}
 			this.ctx.log.message(`turn failed: ${describe(error)}`);
 			this.ctx.audit.write(session.id, { kind: 'error', message: describe(error) });
 			return { sessionId: session.id, text: `Error: ${describe(error)}` };
-		} finally {
-			signal?.removeEventListener('abort', link);
-			this.stops.delete(session.id);
-			this.live.delete(session.id);
-			this.ctx.emit('agent/turn-end', state.ref);
 		}
 	}
 
-	private finish(session: Session, state: RunState): void {
+	/** The clean end of a stopped turn: no Stop hook, no stale reply, a wire-valid transcript. */
+	private aborted(session: Session, state: RunState): TurnResult {
+		this.settleCancelledCalls(state);
+		session.cursor = null;
+		this.finish(session, state, { aborted: true });
+		const reply = lastAssistant(state.transcript.slice(state.prior.length))?.content.trim() ?? '';
+		return { sessionId: session.id, text: reply, stopped: true };
+	}
+
+	/** Give every unanswered tool call a result, so the next request is still a valid conversation. */
+	private settleCancelledCalls(state: RunState): void {
+		if (!state.toolCalls.length) {
+			return;
+		}
+		const answered = new Set(state.transcript.filter((message) => message.role === 'tool').map((message) => message.toolCallId));
+		const missing = state.toolCalls.filter((call) => !answered.has(call.id));
+		if (missing.length) {
+			state.transcript = [
+				...state.transcript,
+				...missing.map((call): Message => ({ role: 'tool', toolCallId: call.id, content: 'Stopped by the user.', at: Date.now() })),
+			];
+		}
+		state.toolCalls = [];
+	}
+
+	private finish(session: Session, state: RunState, options: { aborted?: boolean } = {}): void {
 		const answer = lastAssistant(state.transcript);
 		const reply = answer?.content.trim() ? answer.content : '';
-		if (state.trigger === 'quiet' || state.trigger === 'impersonate') {
+		if (options.aborted) {
+			// A stopped turn keeps the partial reply it streamed, but never merges a continue: the
+			// previous reply is already in the transcript and must not be concatenated with itself.
+			session.transcript =
+				state.trigger === 'quiet' || state.trigger === 'impersonate' || state.trigger === 'swipe' || state.trigger === 'regenerate'
+					? state.prior
+					: state.transcript;
+		} else if (state.trigger === 'quiet' || state.trigger === 'impersonate') {
 			// Upstream keeps neither in the chat: a quiet generation is the caller's alone, and an
 			// impersonation is streamed into the composer, for you to edit and send yourself.
 			session.transcript = state.prior;
@@ -1145,12 +1298,12 @@ export class Agent extends Service {
 				.visible(state.policy)
 				.filter((tool) => !state.filter || (SUBAGENT_CAPABILITIES.has(tool.capability) && (!state.filter.allow || state.filter.allow.includes(tool.name))));
 			const visible = SILENT_TRIGGERS.has(state.trigger) || state.toolsEnabled === false ? [] : offered;
-			const live = this.live.get(state.sessionId);
+			const live = this.turnSession(state.sessionId);
 			const session = live ?? this.ctx.sessions.get(state.sessionId);
 			// A long turn grows by its own tool results, so the request is checked here as well as at the
 			// turn's start: eliding old output costs nothing, and folding the turns before this one is
 			// what keeps a request that has outgrown the window from being refused outright.
-			const fitted = await this.fitRequest(state, session, visible);
+			const fitted = await this.fitRequest(state, session, visible, runtime.signal);
 			if (fitted.messages !== state.messages || fitted.transcript !== undefined) {
 				state = { ...state, messages: fitted.messages, transcript: fitted.transcript ?? state.transcript };
 			}
@@ -1195,7 +1348,17 @@ export class Agent extends Service {
 
 		nodes.set('agent.tools', async (state, runtime) => {
 			const results = new Array<Message | null>(state.toolCalls.length).fill(null);
+			const stopped = (call: ToolCall): Message => ({
+				role: 'tool',
+				toolCallId: call.id,
+				content: 'Stopped by the user.',
+				at: Date.now(),
+			});
 			const runCall = async (call: ToolCall, index: number): Promise<void> => {
+				if (runtime.signal.aborted) {
+					results[index] = stopped(call);
+					return;
+				}
 				// A preset can switch tools off for the whole turn. The router rejects such a call first;
 				// this is the second line for a custom graph or a resumed cursor that reached the tools node.
 				if (state.toolsEnabled === false) {
@@ -1214,11 +1377,27 @@ export class Agent extends Service {
 					return;
 				}
 				let args = call.arguments;
-				const pre = await this.ctx.hooks.fire('PreToolUse', call.name, {
-					session_id: state.sessionId,
-					tool_name: call.name,
-					tool_input: parseArguments(call.arguments),
-				});
+				let pre;
+				try {
+					pre = await abortable(
+						runtime.signal,
+						this.ctx.hooks.fire('PreToolUse', call.name, {
+							session_id: state.sessionId,
+							tool_name: call.name,
+							tool_input: parseArguments(call.arguments),
+						}),
+					);
+				} catch (error) {
+					if (runtime.signal.aborted) {
+						results[index] = stopped(call);
+						return;
+					}
+					throw error;
+				}
+				if (runtime.signal.aborted) {
+					results[index] = stopped(call);
+					return;
+				}
 				if (pre.updatedInput) {
 					args = JSON.stringify(pre.updatedInput);
 				}
@@ -1227,14 +1406,39 @@ export class Agent extends Service {
 				if (pre.blocked) {
 					outcome = { content: `Error: blocked by hook: ${pre.reason ?? 'no reason given'}`, isError: true };
 				} else {
-					outcome = await this.ctx.tools.invoke({ ...call, arguments: args }, this.toolContext(state, runtime.signal));
+					try {
+						outcome = await this.ctx.tools.invoke({ ...call, arguments: args }, this.toolContext(state, runtime.signal));
+					} catch (error) {
+						if (runtime.signal.aborted) {
+							results[index] = stopped(call);
+							return;
+						}
+						throw error;
+					}
+					if (runtime.signal.aborted) {
+						results[index] = stopped(call);
+						this.ctx.emit('agent/tool-result', state.ref, { ...call, arguments: args }, 'Stopped by the user.');
+						return;
+					}
 					const failed = outcome.isError || outcome.content.startsWith('Error:');
-					const post = await this.ctx.hooks.fire(failed ? 'PostToolUseFailure' : 'PostToolUse', call.name, {
-						session_id: state.sessionId,
-						tool_name: call.name,
-						tool_input: parseArguments(args),
-						tool_response: outcome.content,
-					});
+					let post;
+					try {
+						post = await abortable(
+							runtime.signal,
+							this.ctx.hooks.fire(failed ? 'PostToolUseFailure' : 'PostToolUse', call.name, {
+								session_id: state.sessionId,
+								tool_name: call.name,
+								tool_input: parseArguments(args),
+								tool_response: outcome.content,
+							}),
+						);
+					} catch (error) {
+						if (runtime.signal.aborted) {
+							results[index] = stopped(call);
+							return;
+						}
+						throw error;
+					}
 					if (post.contexts.length) {
 						outcome = { ...outcome, content: `${outcome.content}\n\n[hook] ${post.contexts.join('\n[hook] ')}` };
 					}
@@ -1278,6 +1482,10 @@ export class Agent extends Service {
 			for (const index of serial) {
 				await runCall(state.toolCalls[index]!, index);
 			}
+			// Every call gets a result so the model's tool-call message is still a valid request.
+			state.toolCalls.forEach((call, index) => {
+				results[index] ??= stopped(call);
+			});
 			const messages = results.filter((message): message is Message => message !== null);
 			return { ...state, toolCalls: [], messages: [...state.messages, ...messages], transcript: [...state.transcript, ...messages] };
 		});
@@ -1427,7 +1635,7 @@ export class Agent extends Service {
 		const workspace = state.policy.workingDirectory;
 		// The turn saves its own copy of the session when it ends. A mark written to any other copy is
 		// overwritten by that save, so the mark goes on the live object the turn is running with.
-		const session = this.live.get(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const session = this.turnSession(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
 		// The journal is a feature of its own, not a part of the agent: without its plugin (or with
 		// checkpoints switched off) a write is simply a write, and nothing is recorded.
 		const journal = this.ctx.get('checkpoints') as JournalApi | undefined;
@@ -1511,12 +1719,12 @@ export class Agent extends Service {
 
 	/** The provenance the gate may use, bound to the workspace it was recorded under. */
 	private createdInSession(state: RunState): ReadonlySet<string> {
-		const session = this.live.get(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const session = this.turnSession(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
 		return session ? createdInWorkspace(session, state.policy.workingDirectory) : new Set();
 	}
 
 	private noteCreated(state: RunState, path: string): void {
-		const session = this.live.get(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const session = this.turnSession(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
 		const workspace = state.policy.workingDirectory;
 		if (!session || !workspace.trim()) {
 			return;
@@ -1539,7 +1747,7 @@ export class Agent extends Service {
 	}
 
 	private noteDeleted(state: RunState, path: string): void {
-		const session = this.live.get(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const session = this.turnSession(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
 		const workspace = state.policy.workingDirectory;
 		if (!session || !workspace.trim()) {
 			return;
@@ -1612,17 +1820,21 @@ export class Agent extends Service {
 					foldable: false,
 				};
 				const abort = new AbortController();
-				const link = () => abort.abort();
-				request.signal.addEventListener('abort', link, { once: true });
+				const unlink = linkAbort(request.signal, abort);
+				if (request.background) {
+					this.backgroundSubagents.add(abort);
+				}
 				try {
+					abort.signal.throwIfAborted();
 					const outcome = await runGraph(this.graph(), state, {
 						maxSteps: Math.max(4, (agent?.maxTurns ?? 20) * 2),
 						signal: abort.signal,
 						choose: (soft: SoftRequest) => this.ctx.llm.choose(policy.model, soft, abort.signal),
 					});
-					return lastAssistant(outcome.state.transcript)?.content ?? '(no report)';
+					return outcome.status === 'aborted' ? '(stopped)' : (lastAssistant(outcome.state.transcript)?.content ?? '(no report)');
 				} finally {
-					request.signal.removeEventListener('abort', link);
+					unlink();
+					this.backgroundSubagents.delete(abort);
 				}
 			} finally {
 				this.activeSubagents -= 1;

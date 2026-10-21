@@ -382,7 +382,11 @@
 		row.type = 'button';
 		row.className = 'pill-choice';
 		row.dataset.tip = item.description ? item.label + ' — ' + item.description : item.label;
-		row.innerHTML = '<span class="pill-choice-label">' + esc((item.id === current ? '✓ ' : '') + (item.label || item.id)) + '</span>';
+		row.innerHTML =
+			'<span class="pill-choice-label">' +
+			esc((item.id === current ? '✓ ' : '') + (item.label || item.id)) +
+			'</span>' +
+			(item.needsKey ? '<span class="pill-choice-note">no key</span>' : '');
 		row.classList.toggle('is-on', item.id === current);
 		row.addEventListener('click', () => {
 			// The menu the row belongs to is the one that has to close: a pick is an action, not a
@@ -443,6 +447,10 @@
 	/** The open @ picker, if any. */
 	let mention = null;
 	let running = false;
+	/** The chat whose turn is running, so Stop targets it after the user switches away. */
+	let runningSession = null;
+	/** A stop was requested and the host has not settled the turn yet. */
+	let stopping = false;
 	let pinned = true;
 	/** Tool step per call id, so a result can be written back into the step that asked for it. */
 	const toolCards = new Map();
@@ -1510,14 +1518,19 @@
 		messagesEl.innerHTML = '';
 		if (!turns.length) {
 			welcome();
-			return;
+		} else {
+			for (const turn of turns) {
+				turnEl(turn);
+				renderSteps(turn);
+				renderFoot(turn);
+			}
+			refreshActions();
 		}
-		for (const turn of turns) {
-			turnEl(turn);
-			renderSteps(turn);
-			renderFoot(turn);
+		// The whole transcript is drawn at once on open and on a chat switch: the rise animation
+		// belongs to a message arriving during a turn, not to a replay of what was already there.
+		for (const message of messagesEl.querySelectorAll('.msg')) {
+			message.classList.add('no-anim');
 		}
-		refreshActions();
 		pinned = true;
 		scroll(true);
 	}
@@ -1543,6 +1556,7 @@
 		// the transcript once the turn is over either way, so the two views always end the same.
 		const continuing = message.continues === undefined ? null : turns.find((turn) => turn.index === message.continues);
 		if (continuing) {
+			continuing.sessionId = continuing.sessionId || message.sessionId;
 			const grown = [...(continuing.steps || [])].reverse().find((step) => step.kind === 'text' && step._body);
 			live = { turn: continuing, thought: null, text: grown ?? null, think: '', pending: false };
 			renderFoot(continuing);
@@ -1570,6 +1584,7 @@
 		const last = turns.length ? turns[turns.length - 1] : null;
 		const turn = {
 			index: from !== undefined && Number.isFinite(from) ? from : last ? last.index + 1 : 0,
+			sessionId: message.sessionId,
 			// A swipe or a regenerate re-runs the same prompt, and the host sends no text with it.
 			prompt: message.text || replacing?.prompt || '',
 			promptImages: message.images || replacing?.promptImages || [],
@@ -1777,12 +1792,17 @@
 	/* ------------------------------------------------------------------ approvals */
 
 	function approval(message) {
+		// A repost after a chat switch or a reload is the same card, not a second question.
+		if (document.querySelector('.approval[data-id="' + message.id + '"]')) {
+			return;
+		}
 		const calls = (message.calls || [])
 			.map((call) => '<li><b>' + esc(call.name) + '</b><span>' + esc(call.args || '') + '</span></li>')
 			.join('');
 		const root = document.createElement('div');
 		root.className = 'msg approval';
 		root.dataset.id = message.id;
+		root.dataset.session = message.sessionId || '';
 		root.innerHTML =
 			'<div class="card"><div class="a-title">⚠ Approval required</div><div class="a-reason">' +
 			esc(message.reason || '') +
@@ -1796,6 +1816,24 @@
 			messagesEl.appendChild(root);
 		}
 		scroll(true);
+	}
+
+	/** A stopped turn withdraws its question: the card stays as a record, but nothing can be chosen. */
+	function withdrawApprovals(ids) {
+		for (const id of ids || []) {
+			const card = document.querySelector('.approval[data-id="' + id + '"]');
+			if (!card) {
+				continue;
+			}
+			card.classList.add('withdrawn');
+			for (const button of card.querySelectorAll('button')) {
+				button.disabled = true;
+			}
+			const actions = card.querySelector('.actions');
+			if (actions) {
+				actions.innerHTML = '<span class="a-cancelled">Cancelled</span>';
+			}
+		}
 	}
 
 	/* ------------------------------------------------------------------ event delegation */
@@ -1826,11 +1864,12 @@
 			return;
 		}
 		const decision = event.target.closest('.approval button[data-d]');
-		if (decision) {
+		if (decision && !decision.disabled) {
 			const card = decision.closest('.approval');
 			for (const button of card.querySelectorAll('button')) {
 				button.disabled = true;
 			}
+			card.classList.add('answered');
 			decision.classList.add('chosen');
 			vscode.postMessage({ type: 'approve', id: card.dataset.id, decision: decision.dataset.d });
 		}
@@ -1839,10 +1878,18 @@
 	/* ------------------------------------------------------------------ state & history */
 
 	function setRunning(value) {
-		if (value) {
+		if (value && !running) {
 			closeEdit();
 			closeMention();
 			closeMenus();
+			stopping = false;
+			$('stop').disabled = false;
+			$('stop').textContent = 'Stop';
+		}
+		if (!value) {
+			stopping = false;
+			$('stop').disabled = false;
+			$('stop').textContent = 'Stop';
 		}
 		running = value;
 		$('send').hidden = value;
@@ -1850,6 +1897,17 @@
 		// Every generation type is refused while a turn runs; a disabled menu says so up front.
 		generationPill.trigger.disabled = value;
 		refreshActions();
+	}
+
+	/** Stop is acknowledged by the host, but it behaves like a command: one click, then waiting. */
+	function requestStop() {
+		if (!running || stopping) {
+			return;
+		}
+		stopping = true;
+		$('stop').disabled = true;
+		$('stop').textContent = 'Stopping…';
+		vscode.postMessage({ type: 'stop', sessionId: runningSession });
 	}
 
 	function choiceTitle(items, current) {
@@ -2019,6 +2077,9 @@
 		const detail = [state.detail, state.suspended ? '⏸ waiting for approval — send /resume' : ''].filter(Boolean).join('  ·  ');
 		$('status').textContent = detail;
 		renderTodos();
+		if (state.runningSessionId) {
+			runningSession = state.runningSessionId;
+		}
 		setRunning(Boolean(state.running));
 	}
 
@@ -2181,10 +2242,13 @@
 				addNotice(message.text);
 				break;
 			case 'turn-start':
+				runningSession = message.sessionId || runningSession;
 				setRunning(true);
 				beginTurn(message);
 				break;
 			case 'turn-resume': {
+				runningSession = message.sessionId || runningSession;
+				setRunning(true);
 				// A resumed turn is the same turn: keep appending its steps to the last one.
 				const turn = turns.length ? turns[turns.length - 1] : null;
 				if (turn) {
@@ -2225,11 +2289,35 @@
 			case 'approval':
 				approval(message);
 				break;
-			case 'turn-end':
-				setRunning(false);
-				draft = false;
-				endTurn(message);
+			case 'approval-withdraw':
+				withdrawApprovals(message.ids);
 				break;
+			case 'stop-ack':
+				if (message.ok === false) {
+					stopping = false;
+					$('stop').disabled = false;
+					$('stop').textContent = 'Stop';
+					addNotice('Nothing to stop — the turn already ended.');
+				}
+				break;
+			case 'turn-end': {
+				// The panel may have switched chats mid-turn; only settle the live turn it belongs to.
+				const mine = !live || !message.sessionId || message.sessionId === live.sessionId;
+				setRunning(false);
+				runningSession = null;
+				// Anything still unanswered in the DOM belongs to the turn that just ended.
+				for (const card of document.querySelectorAll('.approval:not(.answered):not(.withdrawn)')) {
+					card.classList.add('withdrawn');
+					for (const button of card.querySelectorAll('button')) {
+						button.disabled = true;
+					}
+				}
+				if (mine) {
+					draft = false;
+					endTurn(message);
+				}
+				break;
+			}
 			case 'insertReference':
 				insertReferenceToken(message.token);
 				break;
@@ -2652,7 +2740,11 @@
 
 	let submitting = false;
 	async function submit() {
-		if (running || submitting) {
+		if (running) {
+			addNotice('A turn is still running in this chat — press Stop or wait for it to finish.');
+			return;
+		}
+		if (submitting) {
 			return;
 		}
 		submitting = true;
@@ -2680,6 +2772,7 @@
 	/** Runs one of the generation types. `Normal` is Send; `Quiet` uses what is in the box. */
 	function runGeneration(trigger) {
 		if (running) {
+			addNotice('A turn is still running in this chat — press Stop or wait for it to finish.');
 			return;
 		}
 		closeMention();
@@ -2711,7 +2804,7 @@
 	}
 
 	$('send').addEventListener('click', submit);
-	$('stop').addEventListener('click', () => vscode.postMessage({ type: 'stop' }));
+	$('stop').addEventListener('click', requestStop);
 	input.addEventListener('keydown', (event) => {
 		if (mention && event.key === 'Enter' && event.shiftKey) {
 			closeMention();
@@ -2816,7 +2909,10 @@
 			closeChats();
 			return;
 		}
-		vscode.postMessage({ type: 'stop' });
+		// Escape only stops a running turn; with nothing running it must not poison the next one.
+		if (running) {
+			requestStop();
+		}
 	});
 	// The header controls (recent chats, settings, new session) are title-bar commands now.
 	// Searching goes through the extension, which also matches message text.

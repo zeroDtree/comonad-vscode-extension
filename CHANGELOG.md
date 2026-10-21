@@ -6,6 +6,50 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **Stop stops.** The turn owns one cancellation signal from the first await to the last. A
+  foreground shell command is killed together with its process group (Windows: `taskkill /T`), so a
+  long remote build no longer ignores the button; a pending approval is withdrawn and denied; hooks,
+  reference reads and plugin waits no longer hold the turn after it was stopped. The transcript stays
+  valid — unanswered tool calls get a `Stopped by the user.` result — and the partial streamed reply
+  is kept. Stop also targets the chat that owns the turn after a session switch, the button shows
+  “Stopping…” until the turn settles, and pressing Enter while a turn runs shows a notice and keeps
+  the draft. Background tasks from `start_shell` are untouched by Stop.
+
+- **The model chooses how long a shell command may run.** `run_shell` and `run_shell_readonly` take
+  an optional `timeout` in seconds, clamped to 1–300, so a slow build or test suite is no longer
+  killed at the user's fixed value. `comonad.commandTimeout` stays the fallback when the model omits
+  one, and the new `comonad.commandTimeoutOverride` (Agent tab: **Always use the command timeout**)
+  pins every foreground call to that value and ignores the model. `start_shell` remains unbounded.
+
+- **Tests keep working under write confinement.** A write-confined shell now gets a writable scratch
+  directory at `<working directory>/.comonad/tmp`, created before the command starts, with `TMPDIR`
+  pointing at it. `mktemp`, test runners and package managers no longer fail with `EPERM` when they
+  touch the host temp directory, on macOS and on bwrap alike. The boundary is unchanged: nothing
+  outside the workspace becomes writable, and a read-only shell still gets no writable temp space.
+
+- **Loopback stays open when network is off.** A shell with network disabled can still bind and
+  connect over `localhost`, so test servers that listen on `127.0.0.1` work. macOS gets explicit
+  `network-bind`/`network-inbound`/`network-outbound` rules for `localhost`, and bwrap brings `lo`
+  up inside its private network namespace with `ip` or `ifconfig` when available. Traffic leaving
+  the machine stays blocked on both.
+
+- **The model pill names the model, and opening the chat no longer makes it lurch.** The pill and
+  the menu's Model row now show the model a turn will run (`deepseek-flash`) instead of the profile
+  id that provides it, and a replayed transcript is drawn without the live message animation that
+  made every message rise at once when the panel opened.
+
+- **One key now opens every model a provider offers.** A stored key belongs to the endpoint
+  (normalized `base`), not to the profile id that happened to be on screen, so the shipped DeepSeek
+  Flash and V4 Pro profiles share one key; a key saved under an older profile id is still found
+  through a sibling on the same base. A duplicate model row binds to a profile that can run it — a
+  keyed profile wins over a keyless one, and the profile that declares the model keeps its pricing
+  and context window. The model menu marks a keyless row with an inline **no key** and offers the
+  provider wizard before switching to it, and the model cache now invalidates when the key, base,
+  `modelPrefix`, `modelSkip` or `keyEnv` changes instead of serving the old list for ten minutes.
+  The wizard reuses a key already saved for the endpoint, preserves the matched provider's metadata,
+  stores the key only after the profile is confirmed (cancelling leaves no secret behind), and
+  reports a failed `GET /models` instead of silently offering only the declared model.
+
 - **Cleaning up its own scratch files no longer asks.** The dangerous-command prompt now exempts a
   literal, non-recursive `rm` when every target is inside the workspace and was created by this
   session: file-tool writes and provable shell creations (`touch`, `>`/`>>`, `tee`, checked before and

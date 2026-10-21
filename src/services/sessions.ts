@@ -546,6 +546,7 @@ export class Sessions extends Service {
 				network: false,
 				workingDirectory: '',
 				commandTimeout: 60,
+				commandTimeoutOverride: false,
 				denyReadPaths: [],
 				confinement: { ...WORKSPACE_BOUNDARY },
 				model: 'auto',

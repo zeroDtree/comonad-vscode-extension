@@ -4,10 +4,18 @@ import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { formatResult, runCommand, shellArgv, sandboxKind, type SandboxKind } from '../lib/sandbox';
 import { creationTargets, rmTargets } from '../lib/shell';
-import { objectSchema, type Confinement, type ToolContext } from '../lib/types';
+import { objectSchema, type Confinement, type SessionPolicy, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
 
 /** Shell tools with OS sandboxing (sandbox-exec on macOS, bwrap on Linux). */
+
+/** The model may choose a foreground deadline, but not one that can hang a turn. */
+export const MIN_SHELL_TIMEOUT_SECONDS = 1;
+export const MAX_SHELL_TIMEOUT_SECONDS = 300;
+/** Mirrors the settings default, for a corrupt stored policy. */
+const DEFAULT_SHELL_TIMEOUT_SECONDS = 60;
+/** setTimeout treats delays above 2^31-1 ms as immediate; keep the human value inside its range. */
+const TIMER_SAFE_SECONDS = Math.floor(0x7fff_ffff / 1000);
 
 type Presence = 'present' | 'absent' | 'unknown';
 
@@ -29,13 +37,49 @@ async function createdFile(path: string): Promise<boolean> {
 	}
 }
 
-async function run(ctx: ToolContext, command: string, writable: boolean): Promise<string> {
+/** A numeric timeout from tool arguments; numeric strings count, everything else is absent. */
+function seconds(value: unknown): number | undefined {
+	if (typeof value === 'number') {
+		return Number.isNaN(value) ? undefined : value;
+	}
+	if (typeof value === 'string' && value.trim() !== '') {
+		const parsed = Number(value);
+		return Number.isNaN(parsed) ? undefined : parsed;
+	}
+	return undefined;
+}
+
+/**
+ * The deadline for one foreground shell call, in seconds. The model's `timeout` is clamped to
+ * 1–300; an absent or non-numeric value falls back to the configured `commandTimeout`. With
+ * `commandTimeoutOverride` on, the model's value is discarded. The configured value is the human's
+ * decision, so it is not held to the model's cap, only to setTimeout's range.
+ */
+export function shellTimeoutSeconds(
+	policy: Pick<SessionPolicy, 'commandTimeout'> & { commandTimeoutOverride?: boolean },
+	requested?: unknown,
+): number {
+	const configured = seconds(policy.commandTimeout);
+	const fallback =
+		configured === undefined || configured < MIN_SHELL_TIMEOUT_SECONDS
+			? DEFAULT_SHELL_TIMEOUT_SECONDS
+			: Math.min(TIMER_SAFE_SECONDS, configured);
+	if (policy.commandTimeoutOverride === true) {
+		return fallback;
+	}
+	const asked = seconds(requested);
+	return asked === undefined
+		? fallback
+		: Math.min(MAX_SHELL_TIMEOUT_SECONDS, Math.max(MIN_SHELL_TIMEOUT_SECONDS, asked));
+}
+
+async function run(ctx: ToolContext, command: string, writable: boolean, requestedTimeout?: unknown): Promise<string> {
 	const workspace = ctx.policy.workingDirectory;
 	const track = process.platform !== 'win32' && Boolean(workspace.trim());
 	const creates = track ? creationTargets(command, workspace) : [];
 	const removals = track ? rmTargets(command, workspace) : [];
 	const before = await Promise.all(creates.map(presence));
-	const result = await runCommand(shellArgv(command), workspace, shellOptions(ctx, writable));
+	const result = await runCommand(shellArgv(command), workspace, shellOptions(ctx, writable, requestedTimeout));
 	for (let index = 0; index < creates.length; index += 1) {
 		const path = creates[index]!;
 		if (before[index] === 'absent' && (await createdFile(path))) {
@@ -53,14 +97,16 @@ async function run(ctx: ToolContext, command: string, writable: boolean): Promis
 }
 
 /** The boundary a shell tool runs under, from the session policy. */
-function shellOptions(ctx: ToolContext, writable: boolean) {
+function shellOptions(ctx: ToolContext, writable: boolean, requestedTimeout?: unknown) {
 	const workspace = ctx.policy.workingDirectory;
 	return {
 		writable,
 		confinement: ctx.policy.confinement,
 		network: ctx.policy.network,
 		denyReadPaths: deniedFiles(workspace, ctx.policy.denyReadPaths),
-		timeoutMs: ctx.policy.commandTimeout * 1000,
+		// Only runCommand reads these; start_shell spawns without a deadline or a turn signal.
+		timeoutMs: shellTimeoutSeconds(ctx.policy, requestedTimeout) * 1000,
+		signal: ctx.signal,
 		filterEnv: ctx.sensitiveEnv !== false,
 	};
 }
@@ -124,35 +170,46 @@ export function sandboxStatus(confinement: Confinement, kind: SandboxKind = sand
 	return `${engine} · confined to the workspace: ${boundary}`;
 }
 
+/** The optional per-call deadline both foreground tools share. */
+const timeoutParameter = {
+	type: 'number',
+	minimum: MIN_SHELL_TIMEOUT_SECONDS,
+	maximum: MAX_SHELL_TIMEOUT_SECONDS,
+	description:
+		'Seconds before the command is killed. Defaults to the configured command timeout; clamped to 1–300. The user can pin a fixed value, in which case this is ignored. Use start_shell for work that should keep running.',
+};
+
 export const shellTools = toolset([
 	{
 		name: 'run_shell_readonly',
-		description: 'Run a shell command in a read-only sandbox of the workspace. Use for inspection: git, ls, tests that do not write.',
+		description:
+			'Run a shell command in a read-only sandbox of the workspace. Use for inspection: git, ls, tests that do not write. Pass timeout (seconds) to give a slow command more time; the maximum is 300.',
 		capability: 'shell_ro',
 		needsNetwork: false,
 		needsWorkspace: true,
-		parameters: objectSchema({ command: { type: 'string' } }, ['command']),
+		parameters: objectSchema({ command: { type: 'string' }, timeout: timeoutParameter }, ['command']),
 		execute(args, ctx) {
-			const { command } = args as { command: string };
-			return run(ctx, command, false);
+			const { command, timeout } = args as { command: string; timeout?: unknown };
+			return run(ctx, command, false, timeout);
 		},
 	},
 	{
 		name: 'run_shell',
-		description: 'Run a shell command in a sandbox that can write inside the workspace. Use for builds, tests and formatters.',
+		description:
+			'Run a shell command in a sandbox that can write inside the workspace. Use for builds, tests and formatters. Pass timeout (seconds) for a slow command; the maximum is 300. Use start_shell for servers and watchers that should keep running.',
 		capability: 'shell_rw',
 		needsNetwork: false,
 		needsWorkspace: true,
-		parameters: objectSchema({ command: { type: 'string' } }, ['command']),
+		parameters: objectSchema({ command: { type: 'string' }, timeout: timeoutParameter }, ['command']),
 		execute(args, ctx) {
-			const { command } = args as { command: string };
-			return run(ctx, command, true);
+			const { command, timeout } = args as { command: string; timeout?: unknown };
+			return run(ctx, command, true, timeout);
 		},
 	},
 	{
 		name: 'start_shell',
 		description:
-			'Start a long-running shell command in the background. Read output with shell_output.',
+			'Start a long-running shell command in the background; it has no timeout. Read output with shell_output.',
 		capability: 'shell_rw',
 		needsNetwork: false,
 		needsWorkspace: true,

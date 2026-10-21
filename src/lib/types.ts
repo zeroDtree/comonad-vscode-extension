@@ -107,6 +107,11 @@ export interface SessionPolicy {
 	network: boolean;
 	workingDirectory: string;
 	commandTimeout: number;
+	/**
+	 * Use the configured `commandTimeout` for every foreground shell call, ignoring a `timeout` the
+	 * model asks for. Sessions stored by older builds lack it; absent reads as `false`.
+	 */
+	commandTimeoutOverride: boolean;
 	denyReadPaths: string[];
 	/** How far outside the working directory reads and writes may reach. */
 	confinement: Confinement;
@@ -221,5 +226,9 @@ export type ApprovalDecision = 'allow' | 'always' | 'deny';
 export interface ApprovalRequest {
 	calls: ToolCall[];
 	reason: string;
+	/** The turn's cancellation: an aborted request resolves deny. */
+	signal: AbortSignal;
+	/** The chat that owns the request; a surface shows the card only for that chat. */
+	sessionId: string;
 	surface?: string;
 }

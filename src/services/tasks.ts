@@ -2,7 +2,7 @@
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Service, type Context } from 'cordis';
-import { shellArgv, spawnSandboxed, warmLoginPath, type SandboxOptions } from '../lib/sandbox';
+import { killProcessTree, shellArgv, spawnSandboxed, warmLoginPath, type SandboxOptions } from '../lib/sandbox';
 import type { BackgroundTask, TaskApi } from '../lib/types';
 
 const MAX_OUTPUT = 400_000;
@@ -72,7 +72,14 @@ export class Tasks extends Service implements TaskApi {
 		if (!entry || entry.task.exitCode !== null) {
 			return false;
 		}
-		entry.child.kill('SIGTERM');
+		// Ask the tree to leave, then make sure it does: a shell command may ignore SIGTERM.
+		killProcessTree(entry.child, 'SIGTERM');
+		const kill = setTimeout(() => {
+			if (entry.task.exitCode === null) {
+				killProcessTree(entry.child, 'SIGKILL');
+			}
+		}, 2_000);
+		kill.unref();
 		return true;
 	}
 
@@ -83,7 +90,7 @@ export class Tasks extends Service implements TaskApi {
 	killAll(): void {
 		for (const entry of this.running.values()) {
 			if (entry.task.exitCode === null) {
-				entry.child.kill('SIGKILL');
+				killProcessTree(entry.child, 'SIGKILL');
 			}
 		}
 		this.running.clear();

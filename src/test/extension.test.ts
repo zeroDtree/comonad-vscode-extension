@@ -8,9 +8,9 @@ import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
-import { isLoopbackBase } from '../lib/endpoint';
+import { isLoopbackBase, normalizeEndpoint } from '../lib/endpoint';
 import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule, WORKSPACE_BOUNDARY, type GateEnvironment } from '../lib/policy';
-import { sandboxStatus, shellTools } from '../tools/shell';
+import { MAX_SHELL_TIMEOUT_SECONDS, MIN_SHELL_TIMEOUT_SECONDS, sandboxStatus, shellTimeoutSeconds, shellTools } from '../tools/shell';
 import type { SandboxKind } from '../lib/sandbox';
 import {
 	applyContextForm,
@@ -159,6 +159,7 @@ const policy = (patch: Partial<SessionPolicy> = {}): SessionPolicy => ({
 	network: false,
 	workingDirectory: '/tmp/workspace',
 	commandTimeout: 60,
+	commandTimeoutOverride: false,
 	denyReadPaths: [],
 	confinement: { read: false, write: false },
 	model: 'auto',
@@ -518,6 +519,15 @@ suite('Comonad domain', () => {
 			const readonly = buildSbpl('/ws', { ...base, writable: false, confinement: { read: true, write: true } });
 			assert.ok(readonly.includes('(deny file-write*)'));
 			assert.ok(!readonly.includes('(allow file-write* (subpath "/ws"))'));
+
+			// Network off still leaves loopback for test servers and IPC, never the outside.
+			assert.ok(open.includes('(deny network*)'));
+			assert.ok(open.includes('(allow network-bind (local ip "localhost:*"))'));
+			assert.ok(open.includes('(allow network-inbound (local ip "localhost:*"))'));
+			assert.ok(open.includes('(allow network-outbound (remote ip "localhost:*"))'));
+			const online = buildSbpl('/ws', { ...base, network: true });
+			assert.ok(online.includes('(allow network*)'));
+			assert.ok(!online.includes('localhost:*'));
 		});
 
 		test('the bwrap mounts follow the boundary flags', () => {
@@ -552,6 +562,13 @@ suite('Comonad domain', () => {
 			const atTmp = bwrapArguments('bwrap', ['ls'], '/tmp', base).join(' ');
 			assert.ok(!atTmp.includes('--tmpfs /tmp'));
 			assert.ok(!atTmp.includes('--remount-ro /tmp'));
+
+			// The private namespace isolates the host; lo still has to be brought up for local servers.
+			assert.ok(confined.includes('--unshare-net'));
+			assert.ok(confined.includes('lo up'), 'loopback is brought up inside the private network namespace');
+			const online = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, network: true }).join(' ');
+			assert.ok(!online.includes('--unshare-net'));
+			assert.ok(!online.includes('lo up'));
 		});
 
 		test('the sandbox mounts the real workspace path, not a symlink', () => {
@@ -595,16 +612,35 @@ suite('Comonad domain', () => {
 		}
 	});
 
-	test('the sandbox environment pins TMPDIR for bwrap and merges the login PATH', () => {
+	test('the sandbox environment gives commands a writable TMPDIR and merges the login PATH', () => {
+		const root = mkdtempSync(join(tmpdir(), 'comonad-env-'));
+		const ws = join(root, 'ws');
+		mkdirSync(ws, { recursive: true });
+		const scratch = join(realpathSync(ws), '.comonad', 'tmp');
 		const base: SandboxOptions = { writable: true, confinement: { read: false, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
-		const env = sandboxEnv(base, 'bwrap', '/login/bin:/usr/bin');
-		assert.strictEqual(env?.TMPDIR, '/tmp');
-		assert.ok(env?.PATH?.startsWith('/login/bin:/usr/bin'), env?.PATH);
-		const mac = sandboxEnv(base, 'macos', '/login/bin');
-		assert.strictEqual(mac?.TMPDIR, process.env.TMPDIR, 'macOS keeps the host temp directory');
-		const direct = sandboxEnv({ ...base, mode: 'direct' }, 'bwrap', '/login/bin');
+
+		const bwrap = sandboxEnv(base, 'bwrap', '/login/bin:/usr/bin', ws);
+		assert.strictEqual(bwrap?.TMPDIR, scratch, 'a write-confined bwrap shell writes temp files inside the workspace');
+		assert.ok(existsSync(scratch), 'the scratch directory exists before the command starts');
+		assert.ok(bwrap?.PATH?.startsWith('/login/bin:/usr/bin'), bwrap?.PATH);
+		assert.strictEqual(sandboxEnv(base, 'macos', '/login/bin', ws)?.TMPDIR, scratch, 'macOS uses the same workspace scratch directory');
+
+		const open: SandboxOptions = { ...base, confinement: { read: false, write: false } };
+		assert.strictEqual(sandboxEnv(open, 'bwrap', '/login/bin', ws)?.TMPDIR, '/tmp', 'bwrap keeps its private /tmp when writes are open');
+		assert.strictEqual(
+			sandboxEnv(open, 'macos', '/login/bin', ws)?.TMPDIR,
+			process.env.TMPDIR,
+			'macOS keeps the host temp directory when writes are open',
+		);
+		assert.strictEqual(
+			sandboxEnv({ ...base, writable: false }, 'macos', '/login/bin', ws)?.TMPDIR,
+			process.env.TMPDIR,
+			'a read-only shell gets no writable scratch space',
+		);
+		const direct = sandboxEnv({ ...base, mode: 'direct' }, 'bwrap', '/login/bin', ws);
 		assert.strictEqual(direct?.TMPDIR, process.env.TMPDIR, 'a direct command is not inside bwrap');
 		assert.strictEqual(sandboxEnv({ ...base, filterEnv: false }, 'macos', undefined), undefined, 'inheriting is preserved');
+		rmSync(root, { recursive: true, force: true });
 	});
 
 	test('an agent-tab patch writes only the keys it carries', () => {
@@ -617,6 +653,7 @@ suite('Comonad domain', () => {
 			network: false,
 			workingDirectory: '/ws',
 			commandTimeout: 60,
+			commandTimeoutOverride: false,
 			planDirectory: '',
 			denyReadPaths: ['.env'],
 			confineRead: false,
@@ -624,6 +661,8 @@ suite('Comonad domain', () => {
 			allowUnsandboxedShell: false,
 		};
 		assert.deepStrictEqual(normalizeAgentPatch({ confineWrite: false }, current), { confineWrite: false });
+		assert.deepStrictEqual(normalizeAgentPatch({ commandTimeoutOverride: true }, current), { commandTimeoutOverride: true });
+		assert.deepStrictEqual(normalizeAgentPatch({ commandTimeoutOverride: false }, current), { commandTimeoutOverride: false });
 		assert.deepStrictEqual(
 			normalizeAgentPatch(
 				{ workingDirectory: '  /next  ', commandTimeout: '45', denyReadPaths: 'a\n b ', mode: 'nonsense', network: true },
@@ -642,6 +681,7 @@ suite('Comonad domain', () => {
 				'network',
 				'workingDirectory',
 				'commandTimeout',
+				'commandTimeoutOverride',
 				'planDirectory',
 				'denyReadPaths',
 				'confineRead',
@@ -960,6 +1000,67 @@ suite('Comonad domain', () => {
 			writeFileSync(join(workspace, 'user.txt'), 'x');
 			await spec.execute({ command: 'rm -f made.txt user.txt' }, context);
 			assert.deepStrictEqual(removed.map((path) => basename(path)).sort(), ['made.txt', 'user.txt']);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a model-chosen shell timeout is clamped, or replaced by the user override', () => {
+		const base = policy();
+		assert.strictEqual(shellTimeoutSeconds(base, 30), 30);
+		assert.strictEqual(shellTimeoutSeconds(base, '45'), 45);
+		assert.strictEqual(shellTimeoutSeconds(base, 1.5), 1.5, 'fractional seconds are honored');
+		assert.strictEqual(shellTimeoutSeconds(base, 0), MIN_SHELL_TIMEOUT_SECONDS);
+		assert.strictEqual(shellTimeoutSeconds(base, -5), MIN_SHELL_TIMEOUT_SECONDS);
+		assert.strictEqual(shellTimeoutSeconds(base, 5000), MAX_SHELL_TIMEOUT_SECONDS);
+		assert.strictEqual(shellTimeoutSeconds(base, Infinity), MAX_SHELL_TIMEOUT_SECONDS);
+		assert.strictEqual(shellTimeoutSeconds(base, -Infinity), MIN_SHELL_TIMEOUT_SECONDS);
+		assert.strictEqual(shellTimeoutSeconds(base), 60, 'an omitted timeout falls back to the setting');
+		for (const junk of [null, '', 'soon', Number.NaN, true, {}, []]) {
+			assert.strictEqual(shellTimeoutSeconds(base, junk), 60, `junk ${String(junk)} falls back`);
+		}
+
+		const pinned = policy({ commandTimeout: 90, commandTimeoutOverride: true });
+		assert.strictEqual(shellTimeoutSeconds(pinned, 5), 90, 'the override ignores the model');
+		assert.strictEqual(shellTimeoutSeconds(pinned), 90);
+		assert.strictEqual(shellTimeoutSeconds(policy({ commandTimeout: 600 })), 600, 'the human value is not held to the model cap');
+		assert.strictEqual(shellTimeoutSeconds(policy({ commandTimeout: Number.NaN })), 60, 'a corrupt stored policy reads as the default');
+		const huge = shellTimeoutSeconds(policy({ commandTimeout: Number.MAX_SAFE_INTEGER }));
+		assert.ok(Number.isFinite(huge) && huge <= Math.floor(0x7fff_ffff / 1000), 'a huge stored value stays inside setTimeout’s range');
+	});
+
+	test('both foreground shell tools accept an optional timeout in seconds', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(shellTools);
+			for (const name of ['run_shell', 'run_shell_readonly']) {
+				const spec = kernel.ctx.tools.get(name);
+				assert.ok(spec, name);
+				const timeout = (spec.parameters.properties as Record<string, { type?: string; minimum?: number; maximum?: number; description?: string }>).timeout;
+				assert.deepStrictEqual(spec.parameters.required, ['command'], `${name} requires only the command`);
+				assert.strictEqual(timeout?.type, 'number');
+				assert.strictEqual(timeout?.minimum, MIN_SHELL_TIMEOUT_SECONDS);
+				assert.strictEqual(timeout?.maximum, MAX_SHELL_TIMEOUT_SECONDS);
+				assert.match(String(timeout?.description), /1–300/, 'the model is told the clamp');
+			}
+			const background = kernel.ctx.tools.get('start_shell');
+			assert.ok(background);
+			assert.ok(!('timeout' in background.parameters.properties), 'start_shell has no deadline');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('run_shell kills a command that outlives the model-chosen timeout', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(shellTools);
+			const spec = kernel.ctx.tools.get('run_shell');
+			assert.ok(spec);
+			const started = Date.now();
+			const result = await spec.execute({ command: 'sleep 5', timeout: 1 }, directToolContext(kernel));
+			assert.match(String(result), /timed_out: true/, String(result));
+			assert.ok(Date.now() - started < 4000, 'the command was killed at the requested deadline, not the fallback');
 		} finally {
 			await kernel.dispose();
 		}
@@ -1747,6 +1848,15 @@ suite('Comonad domain', () => {
 		assert.match(css, /#pr-wrap\s*\{/, 'the tab has its own layout');
 		assert.match(css, /\.pr-row\s*\{/, 'with a row per prompt');
 		assert.match(css, /\.pr-item\s*\{/, 'and a card that can be dragged');
+	});
+
+	test('the agent tab carries the command timeout override', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		assert.match(panel, /id="timeout-override"[^>]*data-key="commandTimeoutOverride"/, 'the override is a live agent-tab control');
+		assert.match(panel, /commandTimeoutOverride: config\.commandTimeoutOverride/, 'its state is pushed with the rest of the agent config');
+		assert.match(panel, /The model's fallback when it picks no timeout/, 'the number explains its fallback role');
+		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
+		assert.match(guest, /checked\('timeout-override', config\.commandTimeoutOverride\)/, 'the guest renders it');
 	});
 
 	test('a setting picked with no folder open is written to the user’s own settings', () => {
@@ -2981,6 +3091,7 @@ suite('Cordis kernel', () => {
 			const scripts = [...document.matchAll(/<script nonce="[^"]*" src="([^"]+)"/g)].map((match) => basename(decodeURIComponent(match[1])));
 			assert.deepStrictEqual(scripts, ['settings.js', 'worldinfo.js', 'persona.js', 'content.js', 'st.js'], 'the host’s client comes first, and the pane’s last');
 			assert.match(document, /id="plugins-install"/, 'and the host’s own tabs are still there');
+			assert.match(document, /id="timeout-override"[^>]*data-key="commandTimeoutOverride"/, 'including the timeout override');
 
 			// A tab and its markup are the pane's own strings, so they are escaped rather than trusted.
 			const hostile = { ...pane, id: 'x"><script>alert(1)</script>', label: '<b>no</b>', title: '" onload="alert(1)' };
@@ -3131,6 +3242,19 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(kernel.ctx.agent.policyFor().planDirectory, 'notes/plans');
 			await kernel.ctx.settings.update('planDirectory', '');
 			assert.strictEqual(kernel.ctx.agent.policyFor().planDirectory, '');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the command timeout override reaches the session policy', async () => {
+		const kernel = await createTestKernel({ config: { commandTimeout: 90, commandTimeoutOverride: true } });
+		try {
+			assert.strictEqual(kernel.ctx.settings.get().commandTimeoutOverride, true);
+			assert.strictEqual(kernel.ctx.agent.policyFor().commandTimeoutOverride, true);
+			assert.strictEqual(kernel.ctx.agent.policyFor().commandTimeout, 90);
+			await kernel.ctx.settings.update('commandTimeoutOverride', false);
+			assert.strictEqual(kernel.ctx.agent.policyFor().commandTimeoutOverride, false, 'the next turn sees the change');
 		} finally {
 			await kernel.dispose();
 		}
@@ -3825,6 +3949,7 @@ suite('Cordis kernel', () => {
 			);
 			assert.strictEqual(shipped[0]!.id, 'deepseek:deepseek-flash', 'a choice names profile and model');
 			assert.match(shipped[3]!.description, /DeepSeek Flash — the first profile, model deepseek-flash/);
+			assert.ok(shipped.every((choice) => choice.needsKey), 'no key anywhere marks every row, including Auto');
 			const shippedProfiles = kernel.ctx.settings.get().profiles;
 			assert.deepStrictEqual(profileKeyEnvs(shippedProfiles[0]!), ['DEEPSEEK_API_KEY'], 'a single name is still a list');
 			// The shipped prices are DeepSeek's peak cache-miss input and output rates, with the much
@@ -3851,7 +3976,9 @@ suite('Cordis kernel', () => {
 			const live = await kernel.ctx.llm.availableModels({ refresh: true });
 			assert.deepStrictEqual(live.map((choice) => choice.label), ['deepseek-v5-preview', 'deepseek-flash', 'gemini-3.8-flash', 'gemini-3.9-pro', 'Auto']);
 			assert.ok(!live[0]!.description.includes('no key'), 'the DeepSeek endpoint has a key now');
+			assert.strictEqual(live[0]!.needsKey, false);
 			assert.match(live[2]!.description, /no key — set GEMINI_API_KEY or GOOGLE_API_KEY/, 'Gemini still has none');
+			assert.strictEqual(live[2]!.needsKey, true);
 			assert.strictEqual(asked, 3, 'one request per endpoint');
 			// The list is cached, so opening the menu is not a request storm; refresh asks again.
 			await kernel.ctx.llm.availableModels();
@@ -3860,8 +3987,9 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(asked, 6, 'a refresh re-reads the endpoints');
 
 			// An explicit model id selects that model; a bare profile id keeps its declared default.
+			// The label names the model the turn will run, not the profile that provides it.
 			assert.strictEqual(kernel.ctx.llm.describe('deepseek:deepseek-v5-preview'), 'deepseek-v5-preview');
-			assert.strictEqual(kernel.ctx.llm.describe('deepseek'), 'DeepSeek Flash');
+			assert.strictEqual(kernel.ctx.llm.describe('deepseek'), 'deepseek-flash');
 			assert.strictEqual(kernel.ctx.llm.known('gemini:gemini-3.9-pro'), true);
 			assert.strictEqual(kernel.ctx.llm.known('nope:any'), false);
 
@@ -3886,9 +4014,9 @@ suite('Cordis kernel', () => {
 			});
 			// The first DeepSeek profile, with no key anywhere: the empty key reaches the adapter,
 			// which turns it into a message that names the variables to set.
-			assert.strictEqual(kernel.ctx.llm.describe('auto'), 'DeepSeek Flash');
-			assert.strictEqual(kernel.ctx.llm.describe('deepseek-pro'), 'DeepSeek V4 Pro');
-			assert.strictEqual(kernel.ctx.llm.describe('gemini'), 'Gemini 3.8 Flash');
+			assert.strictEqual(kernel.ctx.llm.describe('auto'), 'deepseek-flash');
+			assert.strictEqual(kernel.ctx.llm.describe('deepseek-pro'), 'deepseek-v4-pro');
+			assert.strictEqual(kernel.ctx.llm.describe('gemini'), 'gemini-3.8-flash');
 			await kernel.ctx.llm.chat('auto', [{ role: 'user', content: 'hi' }], [], {}, new AbortController().signal);
 			assert.deepStrictEqual(seen, { model: 'deepseek-flash', key: '', base: 'https://api.deepseek.com' });
 
@@ -3909,6 +4037,8 @@ suite('Cordis kernel', () => {
 			await kernel.ctx.llm.chat('deepseek', [], [], {}, new AbortController().signal);
 			assert.strictEqual(seen?.key, 'sk-stored');
 			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-env';
+			// The stored key belongs to the endpoint now, so clear it before asserting the env fallback.
+			await kernel.ctx.llm.setSecret('deepseek', '');
 			const profiles = kernel.ctx.settings.get().profiles.map((profile) => ({ ...profile }));
 			await kernel.ctx.settings.update('profiles', profiles.map((profile) => ({ ...profile, id: `${profile.id}-x`, keyEnv: 'DEEPSEEK_API_KEY' })));
 			await kernel.ctx.llm.chat('deepseek-x', [], [], {}, new AbortController().signal);
@@ -3923,7 +4053,7 @@ suite('Cordis kernel', () => {
 			kernel.ctx.sessions.save(session);
 			await kernel.ctx.agent.runTurn({ text: 'hello', sessionId: 'legacy', policy: { model: 'copilot:deepseek-flash' } });
 			assert.strictEqual(seen?.model, 'deepseek-flash', 'the stale id runs on the shipped default');
-			assert.deepStrictEqual(notices, ['model profile "copilot:deepseek-flash" is gone — using DeepSeek Flash. Pick one from the model menu.']);
+			assert.deepStrictEqual(notices, ['model profile "copilot:deepseek-flash" is gone — using deepseek-flash. Pick one from the model menu.']);
 			assert.strictEqual(kernel.ctx.llm.known('copilot:deepseek-flash'), false);
 			assert.strictEqual(kernel.ctx.llm.known('auto'), true);
 
@@ -3937,6 +4067,144 @@ suite('Cordis kernel', () => {
 			kernel.host.envValues.GEMINI_API_KEY = 'sk-gemini';
 			await kernel.ctx.llm.chat('multi', [], [], {}, new AbortController().signal);
 			assert.strictEqual(seen?.key, 'sk-gemini', 'the first variable in the list wins');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a key is shared by every profile on the same endpoint', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let seen: { key?: string } | undefined;
+			kernel.ctx.llm.use({
+				name: 'openai',
+				async chat(request) {
+					seen = { key: request.key };
+					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
+				},
+			});
+			// A key stored under one profile id before keys were endpoint-scoped still serves the other
+			// profiles on that base (the shipped DeepSeek block has two).
+			kernel.host.secretValues.set('comonad.key.deepseek', 'sk-legacy');
+			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek')!), 'sk-legacy');
+			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek-pro')!), 'sk-legacy');
+			await kernel.ctx.llm.chat('deepseek-pro', [], [], {}, new AbortController().signal);
+			assert.strictEqual(seen?.key, 'sk-legacy', 'the sibling profile runs on the stored key');
+
+			// New writes are endpoint-scoped: rotating through either profile updates both.
+			await kernel.ctx.llm.setSecret('deepseek-pro', 'sk-new');
+			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek')!), 'sk-new');
+			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek-pro')!), 'sk-new');
+
+			// Clearing it falls back to the environment once the legacy secret is gone too.
+			await kernel.ctx.llm.setSecret('deepseek-pro', '');
+			kernel.host.secretValues.delete('comonad.key.deepseek');
+			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-env';
+			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek-pro')!), 'sk-env');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an endpoint identity ignores spelling but keeps paths and queries', () => {
+		assert.strictEqual(normalizeEndpoint(' HTTPS://API.DeepSeek.com/ '), 'https://api.deepseek.com');
+		assert.strictEqual(normalizeEndpoint('https://api.deepseek.com/v1/'), 'https://api.deepseek.com/v1');
+		assert.strictEqual(normalizeEndpoint('https://api.deepseek.com/V1'), 'https://api.deepseek.com/V1', 'paths are case-sensitive');
+		assert.strictEqual(normalizeEndpoint('https://x.test/base/?account=b#frag'), 'https://x.test/base?account=b');
+		assert.strictEqual(normalizeEndpoint(''), '');
+		assert.strictEqual(normalizeEndpoint(undefined), '');
+	});
+
+	test('a model row binds to a profile that can actually run it', async () => {
+		const kernel = await createTestKernel({
+			config: {
+				profiles: [
+					{ id: 'a', base: 'https://a.test', model: 'only-a', keyEnv: 'A_KEY' },
+					{ id: 'b', base: 'https://b.test', model: 'only-b', keyEnv: 'B_KEY' },
+				],
+			},
+		});
+		try {
+			kernel.ctx.llm.use({
+				name: 'openai',
+				async chat() {
+					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
+				},
+				async listModels(request) {
+					return request.profile.base?.includes('a.test') ? ['shared', 'only-a'] : ['shared', 'only-b'];
+				},
+			});
+			kernel.host.envValues.B_KEY = 'sk-b';
+			const choices = await kernel.ctx.llm.availableModels({ refresh: true });
+			const shared = choices.find((choice) => choice.label === 'shared')!;
+			assert.strictEqual(shared.id, 'b:shared', 'the keyed profile wins the duplicate');
+			assert.strictEqual(shared.needsKey, false);
+			const onlyA = choices.find((choice) => choice.label === 'only-a')!;
+			assert.strictEqual(onlyA.id, 'a:only-a');
+			assert.strictEqual(onlyA.needsKey, true, 'a keyless endpoint is marked before it is picked');
+			assert.match(onlyA.description, /no key — set A_KEY/);
+			const auto = choices.at(-1)!;
+			assert.strictEqual(auto.label, 'Auto');
+			assert.strictEqual(auto.needsKey, true, 'Auto runs on the first profile, which has no key');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the model cache follows the key, so a new key is not stuck on the old list', async () => {
+		const kernel = await createTestKernel({
+			config: { profiles: [{ id: 'p', base: 'https://p.test', model: 'fallback', keyEnv: 'P_KEY' }] },
+		});
+		try {
+			let asked = 0;
+			let lastKey = '';
+			kernel.ctx.llm.use({
+				name: 'openai',
+				async chat() {
+					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
+				},
+				async listModels(request) {
+					asked += 1;
+					lastKey = request.key;
+					return request.key ? ['with-key'] : ['without-key'];
+				},
+			});
+			let choices = await kernel.ctx.llm.availableModels();
+			assert.deepStrictEqual(choices.map((choice) => choice.label), ['without-key', 'Auto']);
+			assert.strictEqual(asked, 1);
+			// The same read is cached.
+			await kernel.ctx.llm.availableModels();
+			assert.strictEqual(asked, 1);
+			// A key appears (stored, endpoint-scoped): the cached no-key list is not served.
+			await kernel.ctx.llm.setSecret('p', 'sk-p', 'https://p.test');
+			assert.strictEqual(lastKey, '', 'storing a key alone does not fetch');
+			choices = await kernel.ctx.llm.availableModels();
+			assert.deepStrictEqual(choices.map((choice) => choice.label), ['with-key', 'Auto']);
+			assert.strictEqual(asked, 2);
+			assert.strictEqual(choices[0]!.needsKey, false);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a failed model list keeps the error for the wizard', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'openai',
+				async chat() {
+					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
+				},
+				async listModels() {
+					throw new Error('model list failed (401): invalid key');
+				},
+			});
+			const profile = kernel.ctx.settings.get().profiles[0]!;
+			const probe = await kernel.ctx.llm.probeModels(profile, '', true);
+			assert.deepStrictEqual(probe.ids, []);
+			assert.match(probe.error ?? '', /401/);
+			const choices = await kernel.ctx.llm.availableModels();
+			assert.match(choices[0]!.description, /models not listed/);
 		} finally {
 			await kernel.dispose();
 		}
@@ -8481,5 +8749,13 @@ suite('Images', () => {
 		assert.ok(css.includes('.thumbs') && css.includes('.composer-images'));
 		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		assert.ok(panel.includes('id="composer-images"'));
+	});
+
+	test('a replayed transcript does not run the live rise animation', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		assert.ok(js.includes("classList.add('no-anim')"), 'renderTurns settles the messages it replays');
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.match(css, /\.msg\.no-anim\s*\{\s*animation:\s*none;/, 'the class cancels the animation');
 	});
 });

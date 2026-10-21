@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
+import { abortable } from '../lib/cancel';
 import { formatResult, guardPath, resolveInside, runCommand } from '../lib/sandbox';
 import { objectSchema } from '../lib/types';
 import { toolset } from '../services/tools';
@@ -179,6 +180,7 @@ export const vscodeTools = toolset([
 				network: false,
 				denyReadPaths: [] as string[],
 				timeoutMs: 20_000,
+				signal: ctx.signal,
 			};
 			const status = await runCommand(['git', 'status', '--porcelain=v1', '--branch'], ctx.policy.workingDirectory, options);
 			const diff = await runCommand(['git', 'diff', ...(staged ? ['--cached'] : [])], ctx.policy.workingDirectory, options);
@@ -196,7 +198,7 @@ export const vscodeTools = toolset([
 		needsNetwork: false,
 		needsWorkspace: true,
 		parameters: objectSchema({ name: { type: 'string' } }),
-		async execute(args) {
+		async execute(args, ctx) {
 			const { name } = args as { name?: string };
 			const tasks = await vscode.tasks.fetchTasks();
 			if (!name) {
@@ -206,8 +208,9 @@ export const vscodeTools = toolset([
 			if (!task) {
 				return `Error: no task named ${name}`;
 			}
+			ctx.signal.throwIfAborted();
 			const execution = await vscode.tasks.executeTask(task);
-			const exitCode = await new Promise<number | undefined>((resolvePromise) => {
+			const wait = new Promise<number | undefined>((resolvePromise) => {
 				const timer = setTimeout(() => {
 					// The task outlived the wait: stop listening, or every run that times out leaves a
 					// listener behind that fires on the next one.
@@ -222,6 +225,13 @@ export const vscodeTools = toolset([
 					}
 				});
 			});
+			let exitCode: number | undefined;
+			try {
+				exitCode = await abortable(ctx.signal, wait);
+			} catch (error) {
+				execution.terminate();
+				throw error;
+			}
 			return exitCode === undefined ? `task ${name} is still running` : `task ${name} finished with exit code ${exitCode}`;
 		},
 	},

@@ -164,7 +164,7 @@ async function main() {
 		tests
 			? {
 					...common,
-					entryPoints: ['src/test/extension.test.ts', 'src/test/activation.test.ts'],
+					entryPoints: ['src/test/extension.test.ts', 'src/test/activation.test.ts', 'src/test/cancellation.test.ts'],
 					outdir: 'out/test',
 					sourcemap: true,
 				}

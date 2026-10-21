@@ -12,12 +12,12 @@ export const webTools = toolset([
 		needsNetwork: true,
 		needsWorkspace: false,
 		parameters: objectSchema({ url: { type: 'string' }, maxBytes: { type: 'number' } }, ['url']),
-		async execute(args) {
+		async execute(args, ctx) {
 			const { url, maxBytes } = args as { url: string; maxBytes?: number };
 			const response = await fetch(url, {
 				headers: { 'user-agent': 'comonad-vscode/0.2' },
 				redirect: 'follow',
-				signal: AbortSignal.timeout(20_000),
+				signal: AbortSignal.any([AbortSignal.timeout(20_000), ctx.signal]),
 			});
 			if (!response.ok) {
 				return `Error: ${response.status} ${response.statusText}`;
@@ -38,11 +38,11 @@ export const webTools = toolset([
 		needsNetwork: true,
 		needsWorkspace: false,
 		parameters: objectSchema({ query: { type: 'string' }, count: { type: 'number' } }, ['query']),
-		async execute(args) {
+		async execute(args, ctx) {
 			const { query, count } = args as { query: string; count?: number };
 			const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
 				headers: { 'user-agent': 'Mozilla/5.0 (compatible; comonad/0.2)' },
-				signal: AbortSignal.timeout(20_000),
+				signal: AbortSignal.any([AbortSignal.timeout(20_000), ctx.signal]),
 			});
 			if (!response.ok) {
 				return `Error: search failed with ${response.status}`;

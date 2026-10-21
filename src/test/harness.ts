@@ -33,6 +33,8 @@ export interface FakeHost extends Host {
 	values: Record<string, unknown>;
 	/** The environment the kernel sees; tests set a provider key here. */
 	envValues: Record<string, string>;
+	/** The secrets the kernel sees; tests seed legacy keys here. */
+	secretValues: Map<string, string>;
 	/** What the gate believes about the host; `'bwrap'` keeps CI (which has no sandbox) deterministic. */
 	sandboxValue: SandboxKind;
 	/** Set to `'ssh-remote'` and the like to exercise remote-aware surfaces. */
@@ -63,10 +65,12 @@ export function fakeHost(root: string, values: Record<string, unknown>, workspac
 		},
 		secret: async (id) => secrets.get(id),
 		setSecret: async (id, value) => void secrets.set(id, value),
+		deleteSecret: async (id) => void secrets.delete(id),
 		env: (name) => envValues[name],
 		remoteName: () => host.remoteValue,
 		sandboxKind: () => host.sandboxValue,
 		envValues,
+		secretValues: secrets,
 		sandboxValue: 'bwrap',
 		ask: async () => [],
 		notify: () => undefined,
@@ -90,6 +94,7 @@ export async function createTestKernel(
 		network: false,
 		workingDirectory: workspace,
 		commandTimeout: 30,
+		commandTimeoutOverride: false,
 		denyReadPaths: [],
 		maxSteps: 12,
 		checkpoints: false,

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Context } from 'cordis';
+import { abortable } from '../lib/cancel';
 import { appendMemory, memoryDir, readMemory } from '../lib/instructions';
 import { objectSchema } from '../lib/types';
 import { toolset } from '../services/tools';
@@ -23,7 +24,8 @@ export const askTools = toolset([
 		),
 		async execute(args, ctx) {
 			const { question, options, multi } = args as { question: string; options?: string[]; multi?: boolean };
-			const answers = await ctx.ask(question, options, multi);
+			// The native quick pick cannot be dismissed here, but Stop must not wait for it.
+			const answers = await abortable(ctx.signal, ctx.ask(question, options, multi));
 			return answers.join(', ') || '(no answer)';
 		},
 	},

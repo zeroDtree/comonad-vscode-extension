@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { spawn, type ChildProcess } from 'node:child_process';
-import { accessSync, constants, existsSync, realpathSync } from 'node:fs';
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { accessSync, constants, existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir, platform } from 'node:os';
+import { abortable } from './cancel';
 import type { Confinement } from './types';
 
 /** Path guards, OS sandboxing and process helpers. Pure module (Node only, no vscode). */
@@ -145,6 +146,8 @@ export interface SandboxOptions {
 	network: boolean;
 	denyReadPaths: readonly string[];
 	timeoutMs: number;
+	/** The turn's cancellation for foreground commands. Background tasks never receive it. */
+	signal?: AbortSignal;
 	/** `direct` skips the OS sandbox; the policy gate forces confirmation for such tools. */
 	mode?: 'sandbox' | 'direct';
 	/** Remove secret-shaped environment variables before spawning. Defaults to true. */
@@ -156,6 +159,8 @@ export interface RunResult {
 	stdout: string;
 	stderr: string;
 	timedOut: boolean;
+	/** Killed because the turn was stopped, not because the deadline passed. */
+	aborted: boolean;
 }
 
 export type SandboxKind = 'macos' | 'bwrap' | 'none';
@@ -353,24 +358,49 @@ export function isProtectedPath(workspace: string, target: string): boolean {
 }
 
 /**
+ * The scratch directory a write-confined shell gets. It sits inside the workspace, so the boundary
+ * that refuses writes elsewhere still holds while `mktemp` and test runners keep working.
+ */
+export function workspaceTempDir(workspace: string): string {
+	return join(canonicalPath(workspace), '.comonad', 'tmp');
+}
+
+/**
  * The environment a sandboxed child gets: secrets stripped unless the user turned that off, the
- * login shell's PATH in front of the host's, and TMPDIR pinned to the private /tmp bwrap mounts.
+ * login shell's PATH in front of the host's, and a TMPDIR the child can actually write to.
  * `undefined` keeps Node's inherit-everything behaviour when there is nothing to adjust.
+ *
+ * bwrap always gets its private /tmp. Once writes are confined the host temp directory lies outside
+ * the boundary, so both sandboxes point TMPDIR at a workspace scratch directory instead of leaving
+ * every `mktemp` to fail with EPERM; the directory is created here, before the command starts.
  */
 export function sandboxEnv(
 	options: SandboxOptions,
 	kind: SandboxKind = sandboxKind(),
 	loginPath: string | undefined = loginPathNow(),
+	cwd?: string,
 ): NodeJS.ProcessEnv | undefined {
+	const sandboxed = kind !== 'none' && options.mode !== 'direct';
+	const scratch =
+		sandboxed && options.writable && options.confinement.write && cwd?.trim()
+			? workspaceTempDir(cwd)
+			: undefined;
 	const wantsTmp = kind === 'bwrap' && options.mode !== 'direct';
-	if (options.filterEnv === false && !loginPath && !wantsTmp) {
+	if (options.filterEnv === false && !loginPath && !wantsTmp && !scratch) {
 		return undefined;
 	}
 	const env = options.filterEnv === false ? { ...process.env } : sanitizedEnv();
 	if (loginPath) {
 		env.PATH = mergePath(loginPath, env.PATH);
 	}
-	if (wantsTmp) {
+	if (scratch) {
+		env.TMPDIR = scratch;
+		try {
+			mkdirSync(scratch, { recursive: true });
+		} catch {
+			// An unwritable workspace is the command's failure to report, not this helper's to pre-empt.
+		}
+	} else if (wantsTmp) {
 		env.TMPDIR = '/tmp';
 	}
 	return env;
@@ -402,10 +432,18 @@ function executable(file: string, env: NodeJS.ProcessEnv | undefined): string {
 }
 
 export async function runCommand(argv: string[], cwd: string, options: SandboxOptions): Promise<RunResult> {
-	await warmLoginPath();
-	const env = sandboxEnv(options);
+	// The login-shell probe can take seconds on a fresh host; a stopped turn should not wait for it.
+	try {
+		await abortable(options.signal, warmLoginPath());
+	} catch (error) {
+		if (options.signal?.aborted) {
+			return { code: 1, stdout: '', stderr: '', timedOut: false, aborted: true };
+		}
+		throw error;
+	}
+	const env = sandboxEnv(options, sandboxKind(), loginPathNow(), cwd);
 	const sandboxed = sandboxArgv(argv, cwd, options) ?? argv;
-	return runProcess(sandboxed, cwd, options.timeoutMs, env);
+	return runProcess(sandboxed, cwd, options.timeoutMs, env, options.signal);
 }
 
 /**
@@ -413,37 +451,126 @@ export async function runCommand(argv: string[], cwd: string, options: SandboxOp
  * output as it arrives instead of waiting for it to exit.
  */
 export function spawnSandboxed(argv: string[], cwd: string, options: SandboxOptions): ChildProcess {
-	const env = sandboxEnv(options);
+	const env = sandboxEnv(options, sandboxKind(), loginPathNow(), cwd);
 	const sandboxed = sandboxArgv(argv, cwd, options) ?? argv;
-	return spawn(executable(sandboxed[0]!, env), sandboxed.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+	return spawn(executable(sandboxed[0]!, env), sandboxed.slice(1), spawnOptions(cwd, env));
 }
 
-export function runProcess(argv: string[], cwd: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<RunResult> {
+/** Children lead their own group on POSIX, so a signal can reach the whole tree without the host's. */
+function spawnOptions(cwd: string, env: NodeJS.ProcessEnv | undefined): SpawnOptions {
+	return {
+		cwd,
+		env,
+		stdio: ['ignore', 'pipe', 'pipe'],
+		detached: platform() !== 'win32',
+		windowsHide: platform() === 'win32',
+	};
+}
+
+/**
+ * Kill a spawned command and its descendants. POSIX signals the child's process group; Windows
+ * uses taskkill's tree. Only call this on children spawned detached on POSIX.
+ */
+export function killProcessTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGKILL'): void {
+	const pid = child.pid;
+	if (!pid) {
+		return;
+	}
+	if (platform() === 'win32') {
+		spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+		try {
+			child.kill();
+		} catch {
+			// Already gone.
+		}
+		return;
+	}
+	try {
+		process.kill(-pid, signal);
+	} catch {
+		try {
+			child.kill(signal);
+		} catch {
+			// Already gone.
+		}
+	}
+}
+
+export function runProcess(
+	argv: string[],
+	cwd: string,
+	timeoutMs: number,
+	env?: NodeJS.ProcessEnv,
+	signal?: AbortSignal,
+): Promise<RunResult> {
+	if (signal?.aborted) {
+		return Promise.resolve({ code: 1, stdout: '', stderr: '', timedOut: false, aborted: true });
+	}
 	return new Promise((resolvePromise, reject) => {
-		const child = spawn(executable(argv[0]!, env), argv.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+		const child = spawn(executable(argv[0]!, env), argv.slice(1), spawnOptions(cwd, env));
 		let stdout = '';
 		let stderr = '';
 		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			child.kill('SIGKILL');
-		}, Math.max(250, timeoutMs));
-		child.stdout.setEncoding('utf8');
-		child.stderr.setEncoding('utf8');
-		child.stdout.on('data', (chunk: string) => {
+		let aborted = false;
+		let settled = false;
+		let timer: NodeJS.Timeout | undefined;
+		let drain: NodeJS.Timeout | undefined;
+		const finish = (result: RunResult): void => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			clearTimeout(timer);
+			clearTimeout(drain);
+			signal?.removeEventListener('abort', onAbort);
+			// A pipe-holding grandchild must not keep the turn waiting after the tree was killed.
+			child.stdout?.destroy();
+			child.stderr?.destroy();
+			resolvePromise(result);
+		};
+		const kill = (why: 'timeout' | 'abort'): void => {
+			if (settled) {
+				return;
+			}
+			if (why === 'timeout') {
+				timedOut = true;
+			} else {
+				aborted = true;
+			}
+			killProcessTree(child);
+			// Do not wait for `close`: it arrives only after every inherited pipe is gone.
+			drain = setTimeout(() => finish({ code: child.exitCode ?? 1, stdout, stderr, timedOut, aborted }), 100);
+		};
+		const onAbort = (): void => kill('abort');
+		timer = setTimeout(() => kill('timeout'), Math.max(250, timeoutMs));
+		signal?.addEventListener('abort', onAbort, { once: true });
+		child.stdout?.setEncoding('utf8');
+		child.stderr?.setEncoding('utf8');
+		child.stdout?.on('data', (chunk: string) => {
 			stdout += chunk;
 		});
-		child.stderr.on('data', (chunk: string) => {
+		child.stderr?.on('data', (chunk: string) => {
 			stderr += chunk;
 		});
 		child.on('error', (error) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
 			clearTimeout(timer);
+			clearTimeout(drain);
+			signal?.removeEventListener('abort', onAbort);
 			reject(error);
 		});
-		child.on('close', (code) => {
-			clearTimeout(timer);
-			resolvePromise({ code: code ?? 1, stdout, stderr, timedOut });
+		child.on('exit', (code) => {
+			if (timedOut || aborted) {
+				finish({ code: code ?? 1, stdout, stderr, timedOut, aborted });
+				return;
+			}
+			// A daemonized grandchild can hold the pipes open forever; settle shortly after exit.
+			drain = setTimeout(() => finish({ code: code ?? 0, stdout, stderr, timedOut, aborted }), 1_000);
 		});
+		child.on('close', (code) => finish({ code: code ?? 1, stdout, stderr, timedOut, aborted }));
 	});
 }
 
@@ -517,8 +644,13 @@ export function buildSbpl(workspace: string, options: SandboxOptions): string {
 	if (options.network) {
 		lines.push('(allow network*)');
 	} else {
+		// Everything off except loopback, which a test server or an IPC client needs. The filters
+		// are spelled per operation: `local ip` on `network*` also admits outbound traffic.
 		lines.push('(deny network*)');
 		lines.push('(allow network* (local unix-socket))');
+		lines.push('(allow network-bind (local ip "localhost:*"))');
+		lines.push('(allow network-inbound (local ip "localhost:*"))');
+		lines.push('(allow network-outbound (remote ip "localhost:*"))');
 	}
 	return lines.join('\n');
 }
@@ -568,6 +700,17 @@ export function bwrapArguments(bwrap: string, command: string[], cwd: string, op
 	if (root !== tmpRoot && !openWrite) {
 		args.push('--remount-ro', '/tmp');
 	}
-	args.push('--chdir', root, '--', ...command);
+	args.push('--chdir', root, '--', ...(options.network ? command : loopbackCommand(command)));
 	return args;
+}
+
+/**
+ * A private network namespace starts with `lo` down. Bring it up when the image has a tool for it,
+ * so a test server can listen while the outside stays unreachable; `exec` keeps the exit code.
+ */
+const LOOPBACK_UP =
+	'command -v ip >/dev/null 2>&1 && ip link set lo up >/dev/null 2>&1; command -v ifconfig >/dev/null 2>&1 && ifconfig lo up >/dev/null 2>&1; exec "$@"';
+
+function loopbackCommand(command: string[]): string[] {
+	return ['/bin/sh', '-c', LOOPBACK_UP, 'comonad-loopback', ...command];
 }

@@ -71,12 +71,21 @@ export function chatPanel(ctx: Context): void {
 	let running = false;
 	let streamed = false;
 	let stopped = false;
+	/** The chat that owns the running turn, so Stop and turn-end target it even after a switch. */
+	let runningSessionId: string | null = null;
+	/** The panel's own stop for work before `runTurn` registers the agent's turn signal. */
+	let turnController: AbortController | null = null;
 	/** References picked in the editor before the chat webview finished loading. */
 	let pendingReferences: string[] = [];
 	/** The picker's file list, shared by every client and invalidated by a short TTL. */
 	const mentionFiles = new WorkspaceFileCache();
 	let seq = 0;
-	const approvals = new Map<string, (answer: ApprovalDecision) => void>();
+	interface PendingApproval {
+		sessionId: string;
+		payload: Record<string, unknown>;
+		resolve(answer: ApprovalDecision): void;
+	}
+	const approvals = new Map<string, PendingApproval>();
 
 	// A chord pressed inside a webview is resolved against the workbench's *root* context, where the
 	// part-scoped keys (`auxiliaryBarFocus`, `focusedView`) are out of scope — that is why `Cmd+N`
@@ -136,8 +145,8 @@ export function chatPanel(ctx: Context): void {
 		listeners.get(webview)?.dispose();
 		listeners.delete(webview);
 		if (!clients.size) {
-			for (const resolve of approvals.values()) {
-				resolve('deny');
+			for (const approval of approvals.values()) {
+				approval.resolve('deny');
 			}
 			approvals.clear();
 		}
@@ -160,6 +169,7 @@ export function chatPanel(ctx: Context): void {
 				.join('  ·  '),
 			suspended: Boolean(session?.cursor),
 			running,
+			runningSessionId,
 			sessionId: session?.id ?? null,
 			workspace: config.workingDirectory,
 			mode: config.mode,
@@ -354,6 +364,8 @@ export function chatPanel(ctx: Context): void {
 		if (moved || cut) {
 			publishTurns(session);
 		}
+		// After a repaint, not before it: a card the guest already holds is deduped by id.
+		postPendingApprovals();
 	};
 
 	// Pending checkpoint changes: the list above the composer, with the per-file counts the review
@@ -448,6 +460,8 @@ export function chatPanel(ctx: Context): void {
 	};
 	ctx.on('sessions/changed', refresh);
 	ctx.on('settings/changed', refreshSoon);
+	// Storing or clearing a key changes which rows the model menu can actually run.
+	ctx.on('llm/keys-changed', refreshSoon);
 	ctx.on('checkpoints/changed', () => void refreshChanges());
 	// Content changes (a reload, a card added) only move what the composer reads out, never the
 	// transcript.
@@ -458,19 +472,56 @@ export function chatPanel(ctx: Context): void {
 		if (request.surface !== SURFACE || !clients.size) {
 			return next();
 		}
-		return new Promise((resolve) => {
+		if (request.signal.aborted) {
+			return 'deny';
+		}
+		return new Promise<ApprovalDecision>((resolvePromise) => {
 			const id = `ap-${++seq}`;
-			approvals.set(id, resolve);
-			post({
+			const payload = {
 				type: 'approval',
 				id,
+				sessionId: request.sessionId,
 				reason: request.reason,
 				// The approval is a decision about the whole call, so the prompt keeps the argument
 				// that matters (a shell command, a path) in full; 8k is a display bound, not a summary.
 				calls: request.calls.map((call) => ({ name: call.name, args: preview(call.arguments, 8_000) })),
-			});
+			};
+			const pending: PendingApproval = {
+				sessionId: request.sessionId,
+				payload,
+				resolve: (answer) => {
+					request.signal.removeEventListener('abort', withdraw);
+					approvals.delete(id);
+					resolvePromise(answer);
+				},
+			};
+			const withdraw = (): void => {
+				if (!approvals.has(id)) {
+					return;
+				}
+				approvals.delete(id);
+				request.signal.removeEventListener('abort', withdraw);
+				resolvePromise('deny');
+				post({ type: 'approval-withdraw', ids: [id] });
+			};
+			approvals.set(id, pending);
+			request.signal.addEventListener('abort', withdraw, { once: true });
+			// A card belongs to the chat that asked; a switch away keeps it pending for the way back.
+			if (request.sessionId === ctx.sessions.active()?.id) {
+				post(payload);
+			}
 		});
 	});
+
+	/** Hand the guest the cards of the chat now on screen, e.g. after a switch or a reload. */
+	const postPendingApprovals = (): void => {
+		const active = ctx.sessions.active()?.id;
+		for (const approval of approvals.values()) {
+			if (approval.sessionId === active) {
+				post(approval.payload);
+			}
+		}
+	};
 
 	/**
 	 * Turns the composer's data URLs into stored references. The webview is not trusted: the bytes are
@@ -516,24 +567,33 @@ export function chatPanel(ctx: Context): void {
 
 	const send = async (text: string, incoming?: unknown, source?: vscode.Webview): Promise<void> => {
 		if (running) {
-			return;
-		}
-		const input = text.trim();
-		const { images, problem } = await ingestImages(incoming);
-		if (problem) {
-			post({ type: 'notice', text: problem }, source);
-		}
-		if (!input && !images.length) {
+			post({ type: 'notice', text: 'A turn is already running in this chat — Stop it or wait for it to finish.' }, source);
 			return;
 		}
 		running = true;
 		streamed = false;
 		stopped = false;
+		turnController = new AbortController();
+		let turnSession = ctx.sessions.active()?.id ?? null;
+		runningSessionId = turnSession;
+		let started = false;
 		let handledByCommand = false;
 		let rewrite = false;
 		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
-		post({ type: 'turn-start', text: input, images: ctx.attachments.publicParts(images) });
 		try {
+			const input = text.trim();
+			const { images, problem } = await ingestImages(incoming);
+			if (turnController.signal.aborted) {
+				return;
+			}
+			if (problem) {
+				post({ type: 'notice', text: problem }, source);
+			}
+			if (!input && !images.length) {
+				return;
+			}
+			started = true;
+			post({ type: 'turn-start', text: input, sessionId: turnSession, images: ctx.attachments.publicParts(images) });
 			// A command answers through the surface, and a redraw — `/compact` replaces the transcript —
 			// would wipe an answer that was already on screen. The answers are held back until the
 			// command is through; its progress is shown as it goes.
@@ -549,12 +609,18 @@ export function chatPanel(ctx: Context): void {
 			};
 			const before = ctx.sessions.active()?.transcript.length ?? 0;
 			const handled = await ctx.commands.handle(undefined, input, surface);
+			// A Stop during command handling ends the turn here; the slash command itself is not
+			// cancellable, so the turn waits for it but never starts the model afterwards.
+			if (turnController.signal.aborted) {
+				return;
+			}
 			if (handled.done) {
 				handledByCommand = true;
 				// A command can rewrite the chat itself: `/compact` swaps the transcript for a summary.
 				// A chat that still holds what the panel is drawing has to be handed the new transcript,
 				// before its own answer, which the redraw would wipe.
 				const active = ctx.sessions.active();
+				turnSession = active?.id ?? turnSession;
 				if (active && active.transcript.length !== before) {
 					publishTurns(active);
 				}
@@ -577,18 +643,26 @@ export function chatPanel(ctx: Context): void {
 				policy: handled.policy,
 				trigger: handled.trigger,
 				surface: SURFACE,
+				signal: turnController.signal,
 				resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
 			});
+			turnSession = result.sessionId;
+			stopped ||= result.stopped === true;
 			// `/continue`, `/impersonate`, `/swipe`, `/regenerate` and `/quiet` are the ▾ menu from the
 			// keyboard, so their answer is delivered the same way the menu's is.
-			settled = deliver(handled.trigger ?? 'normal', result.text);
+			settled = result.stopped && !result.text ? null : deliver(handled.trigger ?? 'normal', result.text);
 			rewrite = rewrote(handled.trigger);
 		} finally {
 			running = false;
+			runningSessionId = null;
+			turnController = null;
 			if (rewrite) {
-				publishTurns(ctx.sessions.active());
+				publishTurns(ctx.sessions.get(turnSession ?? '') ?? ctx.sessions.active());
 			}
-			post({ type: 'turn-end', stopped, command: handledByCommand, ...settledTurn() });
+			if (started) {
+				const settledSession = ctx.sessions.get(turnSession ?? '') ?? ctx.sessions.active();
+				post({ type: 'turn-end', sessionId: settledSession?.id ?? turnSession, stopped, command: handledByCommand, ...settledTurn(settledSession) });
+			}
 			stopped = false;
 			// After the redraw: a notice and a draft have nowhere else to be read.
 			if (settled) {
@@ -601,7 +675,11 @@ export function chatPanel(ctx: Context): void {
 	/** The generation types the composer's ▾ menu offers: upstream's own list, in its order. */
 	const generate = async (trigger: GenerationTrigger, text = ''): Promise<void> => {
 		const session = ctx.sessions.active();
-		if (!session || running) {
+		if (!session) {
+			return;
+		}
+		if (running) {
+			post({ type: 'notice', text: 'A turn is already running in this chat — Stop it or wait for it to finish.' });
 			return;
 		}
 		const turns = turnsOf(session.transcript);
@@ -623,7 +701,10 @@ export function chatPanel(ctx: Context): void {
 			return;
 		}
 		running = true;
+		runningSessionId = session.id;
 		streamed = false;
+		stopped = false;
+		turnController = new AbortController();
 		// A swipe and a regenerate replace the last reply in place: the webview swaps that turn for the
 		// streaming one, and the variants it had are handed over so nothing the reader saw is lost.
 		const replaces = trigger === 'swipe' || trigger === 'regenerate' ? last?.index : undefined;
@@ -635,6 +716,7 @@ export function chatPanel(ctx: Context): void {
 		post({
 			type: 'turn-start',
 			text,
+			sessionId: session.id,
 			replaces,
 			continues,
 			draft: trigger === 'impersonate',
@@ -648,18 +730,22 @@ export function chatPanel(ctx: Context): void {
 				sessionId: session.id,
 				trigger,
 				surface: SURFACE,
+				signal: turnController.signal,
 				resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
 			});
-			settled = deliver(trigger, result.text);
+			stopped ||= result.stopped === true;
+			settled = result.stopped && !result.text ? null : deliver(trigger, result.text);
 		} finally {
 			running = false;
+			runningSessionId = null;
+			turnController = null;
 			// A continue, an impersonation, a quiet turn and the swipes all rewrite what the panel is
 			// drawing — the streamed turn is not the transcript. Hand it the transcript instead, the
 			// same way a reload or a chat switch does.
 			if (rewrote(trigger)) {
 				publishTurns(ctx.sessions.active());
 			}
-			post({ type: 'turn-end', stopped, ...settledTurn() });
+			post({ type: 'turn-end', sessionId: session.id, stopped, ...settledTurn(session) });
 			stopped = false;
 			// After the redraw: a quiet reply, a draft and an error have nowhere else to be read.
 			if (settled) {
@@ -756,8 +842,10 @@ export function chatPanel(ctx: Context): void {
 		const promptAt = turn.promptAt;
 		const journal = ctx.get('checkpoints') as JournalApi | undefined;
 		running = true;
+		runningSessionId = session.id;
 		streamed = false;
 		stopped = false;
+		turnController = new AbortController();
 		let started = false;
 		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
 		try {
@@ -766,6 +854,7 @@ export function chatPanel(ctx: Context): void {
 				text: input,
 				sessionId: session.id,
 				surface: SURFACE,
+				signal: turnController.signal,
 				rewriteAt: promptAt,
 				resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
 				prepareRewrite: async (live) => {
@@ -791,6 +880,7 @@ export function chatPanel(ctx: Context): void {
 					post({
 						type: 'turn-start',
 						text: input,
+						sessionId: session.id,
 						replacesFrom: turnIndex,
 						images: ctx.attachments.publicParts(turn.promptImages),
 					});
@@ -798,19 +888,22 @@ export function chatPanel(ctx: Context): void {
 					return true;
 				},
 			});
+			stopped ||= result.stopped === true;
 			if (started) {
-				settled = deliver('normal', result.text);
+				settled = result.stopped && !result.text ? null : deliver('normal', result.text);
 			} else if (result.text) {
 				// A hook or a stale index stopped the edit before anything was cut or redrawn.
 				post({ type: 'notice', text: result.text });
 			}
 		} finally {
 			running = false;
+			runningSessionId = null;
+			turnController = null;
 			if (started) {
 				// A turn can end with the panel on another chat: settle the one that was edited.
 				const edited = ctx.sessions.get(session.id) ?? ctx.sessions.active();
 				publishTurns(edited);
-				post({ type: 'turn-end', stopped, ...settledTurn(edited) });
+				post({ type: 'turn-end', sessionId: session.id, stopped, ...settledTurn(edited) });
 				stopped = false;
 				if (settled) {
 					post(settled);
@@ -826,17 +919,23 @@ export function chatPanel(ctx: Context): void {
 			return;
 		}
 		running = true;
+		runningSessionId = session.id;
 		streamed = false;
+		stopped = false;
+		turnController = new AbortController();
 		// A resume continues the suspended turn: no new prompt, the same turn keeps going.
-		post({ type: 'turn-resume' });
+		post({ type: 'turn-resume', sessionId: session.id });
 		try {
-			const result = await ctx.agent.resume(session.id, { surface: SURFACE });
+			const result = await ctx.agent.resume(session.id, { surface: SURFACE, signal: turnController.signal });
+			stopped ||= result.stopped === true;
 			if (result.text.startsWith('Error:') || result.text.startsWith('Blocked by hook')) {
 				post({ type: 'notice', text: result.text });
 			}
 		} finally {
 			running = false;
-			post({ type: 'turn-end', stopped, ...settledTurn() });
+			runningSessionId = null;
+			turnController = null;
+			post({ type: 'turn-end', sessionId: session.id, stopped, ...settledTurn(session) });
 			stopped = false;
 			refresh();
 		}
@@ -850,6 +949,7 @@ export function chatPanel(ctx: Context): void {
 					// A fresh guest has no transcript of its own: hand it the one the session holds.
 					published = null;
 					refresh();
+					postPendingApprovals();
 					// References picked before the composer loaded are finally in place to receive them.
 					for (const token of pendingReferences.splice(0)) {
 						post({ type: 'insertReference', token }, source);
@@ -871,16 +971,28 @@ export function chatPanel(ctx: Context): void {
 					post({ type: 'attachment', id, url: ctx.attachments.dataUrlById(id) ?? null }, source);
 					break;
 				}
-				case 'stop':
-					stopped = true;
-					ctx.agent.stop();
+				case 'stop': {
+					// The host knows which turn it owns; the guest's id is only a fallback.
+					const target = runningSessionId ?? (typeof message.sessionId === 'string' ? message.sessionId : null);
+					const controller = turnController;
+					let ok = false;
+					if (controller && !controller.signal.aborted) {
+						controller.abort();
+						ok = true;
+					}
+					if (ctx.agent.stop(target ?? undefined)) {
+						ok = true;
+					}
+					stopped = ok;
+					post({ type: 'stop-ack', ok }, source);
 					break;
+				}
 				case 'approve': {
 					const id = String(message.id ?? '');
-					const resolve = approvals.get(id);
+					const pending = approvals.get(id);
 					approvals.delete(id);
 					const decision = message.decision === 'allow' || message.decision === 'always' ? message.decision : 'deny';
-					resolve?.(decision);
+					pending?.resolve(decision);
 					break;
 				}
 				case 'newSession':
@@ -888,6 +1000,7 @@ export function chatPanel(ctx: Context): void {
 					break;
 				case 'switchSession':
 					ctx.sessions.setActive(String(message.id ?? ''));
+					postPendingApprovals();
 					break;
 				case 'search': {
 					const query = String(message.query ?? '');
@@ -1003,9 +1116,21 @@ export function chatPanel(ctx: Context): void {
 				case 'toggleNetwork':
 					await ctx.settings.applyPolicy({ network: !ctx.settings.get().network });
 					break;
-				case 'setModel':
-					await ctx.settings.update('model', String(message.model ?? 'auto'));
+				case 'setModel': {
+					const model = String(message.model ?? 'auto');
+					if (!(await ctx.llm.keyReady(model))) {
+						const action = await vscode.window.showWarningMessage(
+							`Comonad: ${ctx.llm.describe(model)} has no API key for its endpoint.`,
+							'Configure provider…',
+						);
+						if (action) {
+							await vscode.commands.executeCommand('comonad.configureModel');
+						}
+						break;
+					}
+					await ctx.settings.update('model', model);
 					break;
+				}
 				case 'review':
 					await vscode.commands.executeCommand('comonad.review');
 					break;

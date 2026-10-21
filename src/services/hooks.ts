@@ -261,7 +261,7 @@ export class Hooks extends Service {
 			handler.model ?? this.ctx.settings.get().model,
 			'You are a policy evaluator for a coding agent. Reply with JSON {"ok": true} or {"ok": false, "reason": "..."} only.',
 			prompt,
-			60_000,
+			{ timeoutMs: 60_000 },
 		);
 		const parsed = parseHookJson(text);
 		if (parsed && parsed.ok === false) {

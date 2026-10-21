@@ -29,6 +29,7 @@ export interface Host {
 	update(key: string, value: unknown): Promise<void>;
 	secret(id: string): Promise<string | undefined>;
 	setSecret(id: string, value: string): Promise<void>;
+	deleteSecret(id: string): Promise<void>;
 	/**
 	 * A variable of the extension host process, so a provider key can come from the environment. In
 	 * a remote window that is the *remote* environment; `secret()` stays on the client.

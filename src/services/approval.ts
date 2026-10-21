@@ -19,7 +19,18 @@ export class Approval extends Service {
 	}
 
 	request(input: ApprovalRequest): Promise<ApprovalDecision> {
-		return Promise.resolve(this.ctx.waterfall('approval/request', input, () => 'deny' as const));
+		if (input.signal.aborted) {
+			return Promise.resolve('deny');
+		}
+		return new Promise<ApprovalDecision>((resolve) => {
+			const finish = (answer: ApprovalDecision): void => {
+				input.signal.removeEventListener('abort', cancel);
+				resolve(answer);
+			};
+			const cancel = (): void => finish('deny');
+			input.signal.addEventListener('abort', cancel, { once: true });
+			Promise.resolve(this.ctx.waterfall('approval/request', input, () => 'deny' as const)).then(finish, cancel);
+		});
 	}
 }
 

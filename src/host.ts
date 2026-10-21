@@ -64,6 +64,7 @@ export function host(ctx: Context, config: HostConfig): void {
 		},
 		secret: (id) => Promise.resolve(extension.secrets.get(id)),
 		setSecret: (id, value) => Promise.resolve(extension.secrets.store(id, value)),
+		deleteSecret: (id) => Promise.resolve(extension.secrets.delete(id)),
 		env: (name) => process.env[name],
 		remoteName: () => vscode.env.remoteName,
 		sandboxKind: () => sandboxKind(),

@@ -144,6 +144,8 @@ export interface Config {
 	network: boolean;
 	workingDirectory: string;
 	commandTimeout: number;
+	/** Pin every foreground shell call to `commandTimeout` instead of letting the model choose. */
+	commandTimeoutOverride: boolean;
 	denyReadPaths: string[];
 	/** Refuse reads outside the working directory, in the file tools and in the shell sandbox. */
 	confineRead: boolean;
@@ -194,6 +196,7 @@ export const CONFIG_KEYS = [
 	'network',
 	'workingDirectory',
 	'commandTimeout',
+	'commandTimeoutOverride',
 	'denyReadPaths',
 	'confineRead',
 	'confineWrite',
@@ -233,6 +236,7 @@ export const AGENT_KEYS = [
 	'network',
 	'workingDirectory',
 	'commandTimeout',
+	'commandTimeoutOverride',
 	'planDirectory',
 	'denyReadPaths',
 	'confineRead',
@@ -289,6 +293,9 @@ export function normalizeAgentPatch(patch: Record<string, unknown>, current: Age
 	}
 	if (has('commandTimeout')) {
 		next.commandTimeout = Math.max(1, Number(patch.commandTimeout) || current.commandTimeout);
+	}
+	if (has('commandTimeoutOverride')) {
+		next.commandTimeoutOverride = Boolean(patch.commandTimeoutOverride);
 	}
 	if (has('planDirectory')) {
 		next.planDirectory = String(patch.planDirectory ?? '').trim();
@@ -357,6 +364,7 @@ export class Settings extends Service {
 			network: flag('network', false),
 			workingDirectory: (typeof raw.workingDirectory === 'string' ? raw.workingDirectory : '') || folder,
 			commandTimeout: count('commandTimeout', 60, 1),
+			commandTimeoutOverride: flag('commandTimeoutOverride', false),
 			denyReadPaths: lines('denyReadPaths', ['.env', '**/.env']),
 			confineRead: flag('confineRead', false),
 			confineWrite: flag('confineWrite', true),

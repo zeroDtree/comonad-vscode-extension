@@ -33,7 +33,9 @@ window only renders it. No local-agent split is involved.
 - **Credentials stay on your machine.** API keys are stored with VS Code's `SecretStorage`, which is
   client-side even for a remote extension: the key is encrypted by your local OS keychain and is not
   written to the remote workspace or `~/.vscode-server`. It is read into the remote extension host's
-  memory when a request is made. `keyEnv` is the exception — it reads the **remote** environment.
+  memory when a request is made. A stored key belongs to the **endpoint** (its normalized base URL),
+  so every profile that points at that endpoint shares it — the two shipped DeepSeek profiles need
+  one key, not two. `keyEnv` is the exception — it reads the **remote** environment.
 - **Model calls originate from the remote host.** A profile whose base URL is `localhost` points at
   the remote machine. To reach a model server on your own computer, forward it in `~/.ssh/config`:
 
@@ -161,14 +163,19 @@ cannot run a chat turn. Selecting a model stores `profile:model` in `comonad.mod
 id means its default model), which is also what the session remembers. A profile whose list cannot be
 fetched — no key yet, offline — still offers the model it declares, marked *models not listed*.
 
-Keys are data, not code: each profile lists the variables it reads (`keyEnv`, tried in order) before
-falling back to the OS keychain, and the menu says `no key — set DEEPSEEK_API_KEY` on any profile it
-found none for. Nothing in the extension knows a provider's name except the shipped profile data.
+Keys are data, not code, and a key belongs to the endpoint rather than to the profile that was on
+screen: once stored, every profile whose `base` normalizes to the same address uses it. A key saved
+under an older profile id is still found through a sibling profile on that base. With no stored key,
+a profile reads the variables it names (`keyEnv`, in order), then those of a sibling on the same
+endpoint. The menu marks a row whose endpoint has no key with `no key — set DEEPSEEK_API_KEY`, and
+picking it offers the provider wizard instead of failing the next turn. Nothing in the extension
+knows a provider's name except the shipped profile data.
 
 - **Comonad: Select Model** lists the profiles plus **Auto** (the first one); the menu's last row
   opens the provider wizard.
 - **Comonad: Configure Model Provider** adds any OpenAI-compatible endpoint: base URL, model name and
-  key (leave the key empty to keep reading the environment).
+  key (leave the key empty to keep reading the environment or to reuse a key already saved for that
+  endpoint).
 
 `comonad.profiles` is an array of `{ id, label, base, model, keyEnv, ... }` entries — edit it in
 settings when your account answers to different model ids, or to add Ollama, LM Studio, OpenAI,
@@ -413,7 +420,11 @@ Three layers, evaluated in order, deny wins:
    `whitelist_accept` runs the whitelisted calls and asks for the rest, `blacklist_reject` rejects
    the blacklisted calls (writes, out of the box) and runs the rest, `universal_accept` runs
    everything the mode allows and `universal_reject` runs nothing. Approvals pause the turn;
-   "Always allow" adds an allow rule.
+   "Always allow" adds an allow rule. **Stop** — the composer button or Esc — cancels the running
+   turn for real: a foreground shell command is killed with its process tree, a pending approval is
+   withdrawn and denied, and the composer is free again. Background tasks started with `start_shell`
+   are independent and keep running; stop them from the Tasks view or with `stop_shell`. Sending
+   while a turn is running shows a notice and keeps the draft instead of dropping it.
 
 Shell commands run under `sandbox-exec` (macOS) or `bwrap` (Linux). The workspace boundary is set by
 pair of settings: **`comonad.confineWrite`** (on by default) keeps writes inside the working
@@ -421,12 +432,18 @@ directory, and **`comonad.confineRead`** (off by default) does the same for read
 file tools and to the shell sandbox, so a path the model names and a path a command touches meet the
 same rule; turning read confinement on also hides files like `~/.gitconfig` and `~/.npmrc` from `git`
 and `npm`. The file tools resolve symlinks before checking containment, so a link inside the workspace
-cannot reach outside it. A write-confined or read-only shell gets a private, empty, read-only `/tmp`,
-so builds that need host temp space run with write confinement off. The settings panel's **Agent** tab
+cannot reach outside it. A write-confined shell gets a writable scratch directory at
+`<working directory>/.comonad/tmp` with `TMPDIR` pointing at it, so `mktemp`, test runners and package
+managers keep working without reaching outside the boundary; a read-only shell can write no temp
+files at all. The settings panel's **Agent** tab
 saves each control as it changes; because a running turn keeps the policy it started with, a change
 takes effect from the next message. Shell commands and tasks search the login shell's `PATH` as well
-as the extension host's. Network is off by default, and `.env` files are denied to both reading and
-writing. Commands shaped like `rm -rf`, `sudo`, `curl | sh`, `git push --force` and friends always
+as the extension host's. Foreground shell calls take an optional model-chosen `timeout` in seconds,
+clamped to 1–300; `comonad.commandTimeout` is the fallback, and **Always use the command timeout**
+replaces the model's choice with that fixed value. `start_shell` tasks have no timeout. Network is
+off by default, but loopback TCP and UDP stay available on both
+sandboxes, so test servers that listen on `127.0.0.1` work; only traffic that leaves the machine is
+blocked. `.env` files are denied to both reading and writing. Commands shaped like `rm -rf`, `sudo`, `curl | sh`, `git push --force` and friends always
 prompt, even under accept policies. Cleaning up its own work is the exception: a literal,
 non-recursive `rm` whose every target is inside the workspace and recorded as created by this session
 — file-tool writes, plus `touch`, `>`/`>>` and `tee` from its shell commands, verified by a
@@ -750,8 +767,9 @@ src/
 The default agent loop is a Mermaid graph (`comonad.graph`); edit it in **Comonad: Open Settings**.
 The panel is tabbed — **Graph** (Mermaid source beside a live preview, Max steps, parsed Nodes /
 Routes), **Agent** (model, work mode, approval, display, context, network, working directory,
-command timeout, plan directory, deny read paths, and the **Restrict to workspace** pair that narrows
-reads and writes to the working directory), **Rules** (the `comonad.permissions` allow / ask /
+command timeout with its **Always use the command timeout** override, plan directory, deny read
+paths, and the **Restrict to workspace** pair that narrows reads and writes to the working
+directory), **Rules** (the `comonad.permissions` allow / ask /
 deny lists, one rule per line, validated on save), **Prompts** (Comonad's own prompt blocks and every
 tool definition: reorder them, switch them, and edit each block's static prefix; when ST takes over,
 the block order and switches mirror the active preset read-only, while the prefix still applies),

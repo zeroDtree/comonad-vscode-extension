@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { COMONAD_BLOCK, COMONAD_BLOCKS, DEFAULT_BLOCK_PREFIX, isComonadBlockId, type ComonadBlockId } from '../lib/blocks';
-import { isLoopbackBase } from '../lib/endpoint';
+import { isLoopbackBase, normalizeEndpoint } from '../lib/endpoint';
 import { defaultPromptLayout, mergePromptPrefixes, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
 import { compileGraphs } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
@@ -338,6 +338,7 @@ export function settingsPanel(ctx: Context): void {
 				network: config.network,
 				workingDirectory: config.workingDirectory,
 				commandTimeout: config.commandTimeout,
+				commandTimeoutOverride: config.commandTimeoutOverride,
 				planDirectory: config.planDirectory,
 				denyReadPaths: config.denyReadPaths,
 				confineRead: config.confineRead,
@@ -667,6 +668,11 @@ export function settingsPanel(ctx: Context): void {
 	ctx.on('settings/changed', schedulePush);
 	ctx.on('tools/changed', schedulePush);
 	ctx.on('plugins/changed', schedulePush);
+	// A saved key changes both the no-key markers and the lists each endpoint can now report.
+	ctx.on('llm/keys-changed', () => {
+		schedulePush();
+		void refreshModels(true);
+	});
 
 	registerCommand(ctx, 'comonad.openSettings', () => open());
 	registerCommand(ctx, 'comonad.reloadMcp', async () => {
@@ -682,7 +688,11 @@ export async function pickModel(ctx: Context): Promise<void> {
 	const choices = await ctx.llm.availableModels({ refresh: true });
 	const picked = await vscode.window.showQuickPick(
 		[
-			...choices.map((choice) => ({ label: choice.label, description: choice.description, id: choice.id })),
+			...choices.map((choice) => ({
+				label: choice.needsKey ? `$(warning) ${choice.label}` : choice.label,
+				description: choice.description,
+				id: choice.id,
+			})),
 			{ label: '$(gear) Configure a provider…', description: 'Add an OpenAI-compatible endpoint', id: '' },
 		],
 		{ title: 'Comonad model', ignoreFocusOut: true },
@@ -692,6 +702,17 @@ export async function pickModel(ctx: Context): Promise<void> {
 	}
 	if (!picked.id) {
 		await configureModel(ctx);
+		return;
+	}
+	const choice = choices.find((item) => item.id === picked.id);
+	if (choice?.needsKey) {
+		const action = await vscode.window.showWarningMessage(
+			`Comonad: ${choice.label} has no API key for its endpoint.`,
+			'Configure provider…',
+		);
+		if (action) {
+			await configureModel(ctx);
+		}
 		return;
 	}
 	await ctx.settings.update('model', picked.id);
@@ -725,11 +746,13 @@ export async function configureModel(ctx: Context): Promise<void> {
 			return;
 		}
 	}
-	// The key lookup is data on the profile: the environment variables named here are tried in order
-	// before the OS keychain, and nothing in the code has to know the provider.
+	// A profile on an endpoint that is already configured inherits the provider-level facts; the
+	// per-model ones (pricing, window, samplers) are copied later only if it declares the same model.
+	const identity = normalizeEndpoint(base);
+	const match = ctx.settings.get().profiles.find((profile) => identity && normalizeEndpoint(profile.base) === identity);
 	const keyEnvAnswer = await vscode.window.showInputBox({
 		prompt: 'Environment variable(s) holding the key, comma separated (optional)',
-		value: profileKeyEnvs(shipped ?? { id: '', model: '' }).join(', '),
+		value: profileKeyEnvs(match ?? shipped ?? { id: '', model: '' }).join(', '),
 		ignoreFocusOut: true,
 	});
 	if (keyEnvAnswer === undefined) {
@@ -739,28 +762,43 @@ export async function configureModel(ctx: Context): Promise<void> {
 		.split(',')
 		.map((name) => name.trim())
 		.filter(Boolean);
+	const profile: Profile = { id, base, model: '', includeUsage: match?.includeUsage ?? true };
+	if (match) {
+		profile.provider = match.provider;
+		profile.modelPrefix = match.modelPrefix;
+		profile.modelSkip = match.modelSkip;
+		profile.thinkingOff = match.thinkingOff;
+		profile.keyEnv = keyEnv.length ? keyEnv : match.keyEnv;
+	} else if (keyEnv.length) {
+		profile.keyEnv = keyEnv;
+	}
+	const existing = await ctx.llm.resolveKey(profile);
 	const key = await vscode.window.showInputBox({
-		prompt: keyEnv.length
-			? `API key — stored by VS Code on your local machine; leave empty to read ${keyEnv.join(' or ')} from the ${remote ? 'remote ' : ''}environment`
-			: 'API key — stored by VS Code on your local machine',
+		prompt: existing
+			? 'API key — this endpoint already has a saved key; leave empty to reuse it'
+			: keyEnv.length
+				? `API key — stored by VS Code for this endpoint; leave empty to read ${keyEnv.join(' or ')} from the ${remote ? 'remote ' : ''}environment`
+				: 'API key — stored by VS Code for this endpoint',
 		password: true,
 		ignoreFocusOut: true,
 	});
 	if (key === undefined) {
 		return;
 	}
-	if (key) {
-		await ctx.llm.setSecret(id, key);
+	// Ask the endpoint what it offers, so the saved profile names a model that exists. The key is used
+	// here but only stored after the profile is saved, so cancelling leaves no secret behind.
+	const probe = await ctx.llm.probeModels(profile, key || existing, true);
+	if (probe.error) {
+		void vscode.window.showWarningMessage(`Comonad: could not list models from ${base}: ${probe.error}`);
 	}
-	const profile: Profile = { id, base, model: shipped?.model ?? '', keyEnv: keyEnv.length ? keyEnv : undefined, includeUsage: true };
-	// Ask the endpoint what it offers, so the saved profile names a model that exists.
-	const listed = await ctx.llm.endpointModels(profile, key || (await ctx.llm.resolveKey(profile)), true);
+	const declared = match?.model ?? shipped?.model ?? '';
+	const offered = probe.ids.length ? probe.ids : declared ? [declared] : [];
 	const model = await vscode.window.showQuickPick(
-		[...listed, ...(shipped?.model ? [shipped.model] : [])].filter((value, index, all) => all.indexOf(value) === index),
+		offered.filter((value, index, all) => all.indexOf(value) === index),
 		{ title: `${id}: pick the model`, ignoreFocusOut: true },
 	);
 	if (!model) {
-		const typed = await vscode.window.showInputBox({ prompt: 'Model name', value: shipped?.model ?? '', ignoreFocusOut: true });
+		const typed = await vscode.window.showInputBox({ prompt: 'Model name', value: declared, ignoreFocusOut: true });
 		if (!typed) {
 			return;
 		}
@@ -768,10 +806,25 @@ export async function configureModel(ctx: Context): Promise<void> {
 	} else {
 		profile.model = model;
 	}
+	// The metadata belongs to the model, not to the endpoint: copy it only when the same model was
+	// declared by the matching profile (DeepSeek Pro prices and window are not Flash's).
+	if (match && match.model === profile.model) {
+		profile.label = match.label;
+		profile.contextWindow = match.contextWindow;
+		profile.pricingIn = match.pricingIn;
+		profile.pricingCachedIn = match.pricingCachedIn;
+		profile.pricingOut = match.pricingOut;
+		profile.temperature = match.temperature;
+		profile.topP = match.topP;
+		profile.maxTokens = match.maxTokens;
+	}
 	const profiles = ctx.settings.get().profiles.filter((item) => item.id !== id);
 	profiles.push(profile);
 	await ctx.settings.update('profiles', profiles);
 	await ctx.settings.update('model', `${id}:${profile.model}`);
+	if (key) {
+		await ctx.llm.setSecret(id, key, base);
+	}
 	void vscode.window.showInformationMessage(`Comonad: profile ${id} saved (${profile.model}).`);
 }
 
@@ -900,7 +953,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       </div>
       <div class="field">
         <label for="network">Network</label>
-        <p class="hint">Network tools and network access inside the shell sandbox.</p>
+        <p class="hint">Network tools and network access inside the shell sandbox. Loopback stays available when this is off.</p>
         <label class="check"><input type="checkbox" id="network" data-key="network" /></label>
       </div>
     </div>
@@ -916,8 +969,13 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       </div>
       <div class="field">
         <label for="timeout">Command timeout</label>
-        <p class="hint">Seconds before a shell command is killed.</p>
+        <p class="hint">Seconds before a shell command is killed. The model's fallback when it picks no timeout, and the fixed value when the override below is on.</p>
         <input id="timeout" class="control" type="number" min="1" data-key="commandTimeout" />
+      </div>
+      <div class="field">
+        <label for="timeout-override">Always use the command timeout</label>
+        <p class="hint">On: every foreground shell command gets the timeout above, ignoring the model's own. Off: the model chooses a timeout per call (clamped to 1–300 seconds), and the timeout above is the fallback when it omits one. Background tasks started with start_shell have no timeout.</p>
+        <label class="check"><input type="checkbox" id="timeout-override" data-key="commandTimeoutOverride" /></label>
       </div>
       <div class="field">
         <label for="plans">Plan directory</label>
@@ -947,7 +1005,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <p class="hint">When no sandbox is available, shell commands run unconfined without the extra confirmation. Tools named <code>*_unsandboxed</code> still ask.</p>
         <label class="check"><input type="checkbox" id="allow-unsandboxed" data-key="allowUnsandboxedShell" /></label>
       </div>
-      <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
+      <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. A write-confined shell still gets a writable scratch directory at <code>.comonad/tmp</code>, so <code>mktemp</code> and test runners keep working. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
       <p class="group-note" id="environment-note"></p>
     </div>
   </section>
