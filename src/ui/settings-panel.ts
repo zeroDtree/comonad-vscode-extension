@@ -15,16 +15,22 @@ import { type ContextForm } from '../lib/prompt';
 import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
-import { asList, normalizeAgentPatch, profileKeyEnvs, type Profile } from '../services/settings';
+import { asList, normalizeAgentPatch, profileKeyEnvs, type Profile, type ToolCardMode } from '../services/settings';
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
 /** Webview settings panel: tabs for the agent policy, the graph editor, MCP servers and tools. */
 
 const DISPLAY_LABELS: Record<ContextForm, string> = {
-	rendered: 'Rendered — folded thoughts and tool calls',
+	rendered: 'Rendered — folded thoughts, tool cards',
 	token: 'Token — assistant text only',
 	raw: 'Raw — the full record',
+};
+
+const TOOL_CARD_LABELS: Record<ToolCardMode, string> = {
+	preview: 'Preview — folded, with the first lines',
+	collapsed: 'Collapsed — header only',
+	open: 'Open — command and output',
 };
 
 const CONTEXT_LABELS: Record<ContextForm, string> = {
@@ -299,8 +305,13 @@ export function settingsPanel(ctx: Context): void {
 	let lastModels: Awaited<ReturnType<typeof ctx.llm.availableModels>> = [];
 	let modelsAt = 0;
 	let modelsInFlight: Promise<void> | null = null;
+	/** A forced refresh arrived while a fetch was running: its answer is already stale. */
+	let modelsDirty = false;
 	const refreshModels = (force = false): Promise<void> => {
 		if (modelsInFlight) {
+			if (force) {
+				modelsDirty = true;
+			}
 			return modelsInFlight;
 		}
 		if (!force && Date.now() - modelsAt < 60_000) {
@@ -308,8 +319,16 @@ export function settingsPanel(ctx: Context): void {
 		}
 		modelsInFlight = (async () => {
 			try {
-				lastModels = await ctx.llm.availableModels({ refresh: force });
-				modelsAt = Date.now();
+				let refresh = force;
+				for (;;) {
+					modelsDirty = false;
+					lastModels = await ctx.llm.availableModels({ refresh });
+					modelsAt = Date.now();
+					if (!modelsDirty) {
+						break;
+					}
+					refresh = true;
+				}
 				if (panel) {
 					void panel.webview.postMessage({ type: 'models', models: lastModels });
 				}
@@ -346,6 +365,7 @@ export function settingsPanel(ctx: Context): void {
 				allowUnsandboxedShell: config.allowUnsandboxedShell,
 				maxSteps: config.maxSteps,
 				displayForm: config.displayForm,
+				toolCard: config.toolCard,
 				contextForm: config.contextForm,
 				model: config.model,
 				graph,
@@ -362,7 +382,13 @@ export function settingsPanel(ctx: Context): void {
 				writable: String(pluginHost()?.patchFile ?? ''),
 				trusted: Boolean(ctx.host.trusted()),
 			},
-			labels: { modes: MODE_LABELS, approvals: APPROVAL_LABELS, displays: DISPLAY_LABELS, contexts: CONTEXT_LABELS },
+			labels: {
+				modes: MODE_LABELS,
+				approvals: APPROVAL_LABELS,
+				displays: DISPLAY_LABELS,
+				toolCards: TOOL_CARD_LABELS,
+				contexts: CONTEXT_LABELS,
+			},
 			models: lastModels,
 			mcpServers: config.mcpServers,
 			mcp: ctx.mcp.status(),
@@ -806,17 +832,21 @@ export async function configureModel(ctx: Context): Promise<void> {
 	} else {
 		profile.model = model;
 	}
-	// The metadata belongs to the model, not to the endpoint: copy it only when the same model was
-	// declared by the matching profile (DeepSeek Pro prices and window are not Flash's).
-	if (match && match.model === profile.model) {
-		profile.label = match.label;
-		profile.contextWindow = match.contextWindow;
-		profile.pricingIn = match.pricingIn;
-		profile.pricingCachedIn = match.pricingCachedIn;
-		profile.pricingOut = match.pricingOut;
-		profile.temperature = match.temperature;
-		profile.topP = match.topP;
-		profile.maxTokens = match.maxTokens;
+	// The metadata belongs to the model, not to the endpoint: copy it from any configured profile that
+	// declares this exact model (DeepSeek Pro prices and window are not Flash's), not merely from the
+	// first profile on the endpoint.
+	const declaredBy = identity
+		? ctx.settings.get().profiles.find((item) => item.model === profile.model && normalizeEndpoint(item.base) === identity)
+		: undefined;
+	if (declaredBy) {
+		profile.label = declaredBy.label;
+		profile.contextWindow = declaredBy.contextWindow;
+		profile.pricingIn = declaredBy.pricingIn;
+		profile.pricingCachedIn = declaredBy.pricingCachedIn;
+		profile.pricingOut = declaredBy.pricingOut;
+		profile.temperature = declaredBy.temperature;
+		profile.topP = declaredBy.topP;
+		profile.maxTokens = declaredBy.maxTokens;
 	}
 	const profiles = ctx.settings.get().profiles.filter((item) => item.id !== id);
 	profiles.push(profile);
@@ -945,6 +975,11 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <label for="display">Display</label>
         <p class="hint">How the context sent with a turn is shown in the chat.</p>
         <select id="display" class="control" data-key="displayForm"></select>
+      </div>
+      <div class="field">
+        <label for="toolCard">Tool cards</label>
+        <p class="hint">How a tool call starts out: folded with a preview of its output, folded to the header alone, or open with the command and output.</p>
+        <select id="toolCard" class="control" data-key="toolCard"></select>
       </div>
       <div class="field">
         <label for="context">Context</label>

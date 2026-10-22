@@ -147,6 +147,93 @@ suite('Cancellation', () => {
 			const result = await within(turn);
 			assert.strictEqual(result.stopped, true);
 			assert.strictEqual(chats, 0, 'the model was never asked');
+			// The panel drew the prompt as soon as Send was pressed; a stop must not make it vanish
+			// from the chat on the next reload.
+			assert.deepStrictEqual(
+				kernel.ctx.sessions.active()?.transcript.map((message) => message.content),
+				['go'],
+				'the prompt that was shown is kept',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('stopping a swipe leaves the exchange it replaced in place', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'swipe-stop');
+			session.transcript = [
+				{ role: 'user', content: 'hello', at: 1 },
+				{ role: 'assistant', content: 'hi', at: 2, swipes: ['hi'], swipeId: 0 },
+			];
+			kernel.ctx.sessions.save(session);
+			let entered!: () => void;
+			const building = new Promise<void>((resolvePromise) => {
+				entered = resolvePromise;
+			});
+			const turn = kernel.ctx.agent.runTurn({
+				text: '',
+				trigger: 'swipe',
+				sessionId: 'swipe-stop',
+				surface: 'test',
+				resolveSystemContext: async () => {
+					entered();
+					await new Promise(() => undefined);
+					return undefined;
+				},
+			});
+			await building;
+			assert.strictEqual(kernel.ctx.agent.stop(), true);
+			const result = await within(turn);
+			assert.strictEqual(result.stopped, true);
+			const after = kernel.ctx.sessions.require('swipe-stop').transcript;
+			assert.deepStrictEqual(
+				after.map((message) => message.content),
+				['hello', 'hi'],
+				'the prompt and the reply are both back',
+			);
+			assert.deepStrictEqual(after[1]?.swipes, ['hi'], 'and so are the variants');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('turn-start names the prompt that opened the turn', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'cancel-test',
+				async chat() {
+					return { message: { role: 'assistant', content: 'reply' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const seen: string[] = [];
+			kernel.ctx.on('agent/turn-start', (_ref, text) => {
+				seen.push(text);
+			});
+			await kernel.ctx.agent.runTurn({ text: 'the prompt', surface: 'test' });
+			assert.deepStrictEqual(seen, ['the prompt'], 'a subscriber gets the prompt, not the previous reply');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a failing approval surface is reported, not read as a denial', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.on('approval/request', async () => {
+				throw new Error('broken surface');
+			});
+			await assert.rejects(
+				kernel.ctx.approval.request({
+					calls: [],
+					reason: 'probe',
+					sessionId: 's',
+					signal: new AbortController().signal,
+				}),
+				/broken surface/,
+			);
 		} finally {
 			await kernel.dispose();
 		}
@@ -234,6 +321,58 @@ suite('Cancellation', () => {
 			assert.strictEqual(session?.cursor, null);
 			const tool = session?.transcript.find((message): message is Message => message.role === 'tool');
 			assert.strictEqual(tool?.content, 'Stopped by the user.', 'the pending call still has a result');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a reused synthetic call id still gets a result when the turn is stopped', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'manual' } });
+		try {
+			kernel.ctx.tools.register({
+				name: 'probe',
+				description: 'needs approval',
+				capability: 'ro',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: objectSchema({}, []),
+				execute: async () => 'ran',
+			});
+			kernel.ctx.llm.use({
+				name: 'cancel-test',
+				async chat() {
+					const call = { id: 'call_0', name: 'probe', arguments: '{}' };
+					return {
+						message: { role: 'assistant', content: '', toolCalls: [call] },
+						toolCalls: [call],
+						usage: { input: 1, output: 1 },
+					};
+				},
+			});
+			// An endpoint that omits ids gives every response its own call_0. An older turn already
+			// answered one, and that result must not be mistaken for this turn's pending call.
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'reused-id');
+			session.transcript = [
+				{ role: 'user', content: 'one', at: 1 },
+				{ role: 'assistant', content: '', at: 2, toolCalls: [{ id: 'call_0', name: 'probe', arguments: '{}' }] },
+				{ role: 'tool', toolCallId: 'call_0', content: 'old result', at: 3 },
+				{ role: 'assistant', content: 'done', at: 4 },
+			];
+			kernel.ctx.sessions.save(session);
+			kernel.ctx.on('approval/request', () => new Promise(() => undefined));
+			const turn = kernel.ctx.agent.runTurn({ text: 'two', sessionId: 'reused-id', surface: 'test' });
+			await until(() => Boolean(kernel.ctx.sessions.require('reused-id').cursor));
+			assert.strictEqual(kernel.ctx.agent.stop(), true);
+			const result = await within(turn);
+			assert.strictEqual(result.stopped, true);
+			const transcript = kernel.ctx.sessions.require('reused-id').transcript;
+			assert.strictEqual(transcript[transcript.length - 1]?.role, 'tool', 'the answer ends with a tool result');
+			assert.strictEqual(transcript[transcript.length - 1]?.content, 'Stopped by the user.');
+			assert.strictEqual(
+				transcript.filter((message) => message.role === 'tool' && message.toolCallId === 'call_0').length,
+				2,
+				'both the old and the pending call were answered',
+			);
 		} finally {
 			await kernel.dispose();
 		}

@@ -652,22 +652,23 @@ export class Sessions extends Service {
 	/**
 	 * Drops the last user turn (its message and everything the model answered with) and returns the
 	 * prompt, images included, so the surface can run it again. An empty text is not an empty prompt:
-	 * an image-only message is still something to replay.
+	 * an image-only message is still something to replay. The transcript it replaced travels with the
+	 * prompt, so a stopped generation can put the turn back instead of losing it.
 	 */
-	replayLast(id: string): { text: string; images?: ImagePart[] } {
+	replayLast(id: string): { text: string; images?: ImagePart[]; replaced: Message[] } {
 		const session = this.require(id);
 		if (session.cursor) {
-			return { text: '' };
+			return { text: '', replaced: [] };
 		}
 		let at = session.transcript.length - 1;
 		while (at >= 0 && session.transcript[at]!.role !== 'user') {
 			at -= 1;
 		}
 		if (at < 0) {
-			return { text: '' };
+			return { text: '', replaced: [] };
 		}
 		const message = session.transcript[at]!;
-		const replay = { text: message.content, images: message.images } as { text: string; images?: ImagePart[] };
+		const replay = { text: message.content, images: message.images, replaced: [...session.transcript] };
 		session.transcript = session.transcript.slice(0, at);
 		this.save(session);
 		return replay;

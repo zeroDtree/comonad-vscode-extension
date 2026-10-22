@@ -9,6 +9,10 @@ import type { Host } from './host';
 
 /** Typed view over the `comonad.*` settings section. */
 
+/** How a tool card starts out: folded with a preview, folded to its header, or open. */
+export type ToolCardMode = 'preview' | 'collapsed' | 'open';
+export const TOOL_CARD_MODES: readonly ToolCardMode[] = ['preview', 'collapsed', 'open'];
+
 export interface Profile {
 	id: string;
 	label?: string;
@@ -166,6 +170,8 @@ export interface Config {
 	chatWindow: boolean;
 	contextForm: ContextForm;
 	displayForm: ContextForm;
+	/** How a tool call is drawn when it first appears: preview, header only, or open. */
+	toolCard: ToolCardMode;
 	reasoningEffort: ReasoningEffort;
 	/** Window override in tokens for new chats; `0` resolves from the model profile. */
 	contextWindow: number;
@@ -214,6 +220,7 @@ export const CONFIG_KEYS = [
 	'chatWindow',
 	'contextForm',
 	'displayForm',
+	'toolCard',
 	'reasoningEffort',
 	'contextWindow',
 	'budgetUsd',
@@ -232,6 +239,7 @@ export const AGENT_KEYS = [
 	'mode',
 	'approval',
 	'displayForm',
+	'toolCard',
 	'contextForm',
 	'network',
 	'workingDirectory',
@@ -284,6 +292,13 @@ export function normalizeAgentPatch(patch: Record<string, unknown>, current: Age
 	}
 	if (has('contextForm')) {
 		next.contextForm = form('contextForm');
+	}
+	if (has('toolCard')) {
+		const value = patch.toolCard;
+		next.toolCard =
+			typeof value === 'string' && (TOOL_CARD_MODES as readonly string[]).includes(value)
+				? (value as ToolCardMode)
+				: current.toolCard;
 	}
 	if (has('network')) {
 		next.network = Boolean(patch.network);
@@ -391,6 +406,7 @@ export class Settings extends Service {
 			chatWindow: flag('chatWindow', false),
 			contextForm: oneOf('contextForm', CONTEXT_FORMS, 'rendered'),
 			displayForm: oneOf('displayForm', CONTEXT_FORMS, 'rendered'),
+			toolCard: oneOf('toolCard', TOOL_CARD_MODES, 'preview'),
 			reasoningEffort: oneOf('reasoningEffort', REASONING_EFFORTS, 'auto'),
 			contextWindow: count('contextWindow', 0, 0),
 			budgetUsd: count('budgetUsd', 0, 0),

@@ -108,6 +108,7 @@ export async function createTestKernel(
 		permissions: { allow: [], ask: [], deny: [] },
 		contextForm: 'rendered',
 		displayForm: 'rendered',
+		toolCard: 'preview',
 		reasoningEffort: 'auto',
 		contextWindow: 0,
 		budgetUsd: 0,

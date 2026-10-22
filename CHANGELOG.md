@@ -6,6 +6,20 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **Tool calls read like a transcript, not a JSON dump.** Every call is now a card: the model writes
+  a 5–10 word `description` for `run_shell`, `run_shell_readonly` and `start_shell` (a required
+  argument), which becomes the title; the utilities the command used (`ls, echo, find, sort`) are
+  extracted from the command itself. Folded, the card previews the first five lines of output;
+  expanded, it shows the whole command highlighted with `$` and the full output. A hover `…` menu
+  copies the command/arguments or the output. Other tools get a human title, their most telling
+  argument and pretty-printed arguments when expanded. The old black code block and raw `name {...}`
+  header are gone.
+
+- **Tool cards have a default fold.** `comonad.toolCard` (Settings → Agent → **Tool cards**)
+  chooses how every card starts: `preview` folds it with the first five output lines (the default),
+  `collapsed` folds it to the header alone, and `open` expands the command and output. Changing the
+  setting redraws the transcript; a click still toggles a single card.
+
 - **Stop stops.** The turn owns one cancellation signal from the first await to the last. A
   foreground shell command is killed together with its process group (Windows: `taskkill /T`), so a
   long remote build no longer ignores the button; a pending approval is withdrawn and denied; hooks,

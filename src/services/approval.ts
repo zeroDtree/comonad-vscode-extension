@@ -22,14 +22,45 @@ export class Approval extends Service {
 		if (input.signal.aborted) {
 			return Promise.resolve('deny');
 		}
-		return new Promise<ApprovalDecision>((resolve) => {
-			const finish = (answer: ApprovalDecision): void => {
+		return new Promise<ApprovalDecision>((resolve, reject) => {
+			let settled = false;
+			const finish = (): boolean => {
+				if (settled) {
+					return false;
+				}
+				settled = true;
 				input.signal.removeEventListener('abort', cancel);
-				resolve(answer);
+				return true;
 			};
-			const cancel = (): void => finish('deny');
+			const cancel = (): void => {
+				if (finish()) {
+					resolve('deny');
+				}
+			};
 			input.signal.addEventListener('abort', cancel, { once: true });
-			Promise.resolve(this.ctx.waterfall('approval/request', input, () => 'deny' as const)).then(finish, cancel);
+			let answered: Promise<ApprovalDecision>;
+			try {
+				// A synchronous throw from a listener is a broken surface, not a denial: it has to reach
+				// the caller, and the abort listener registered above has to be released either way.
+				answered = Promise.resolve(this.ctx.waterfall('approval/request', input, () => 'deny' as const));
+			} catch (error) {
+				if (finish()) {
+					reject(error);
+				}
+				return;
+			}
+			answered.then(
+				(answer) => {
+					if (finish()) {
+						resolve(answer);
+					}
+				},
+				(error) => {
+					if (finish()) {
+						reject(error);
+					}
+				},
+			);
 		});
 	}
 }

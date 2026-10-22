@@ -88,22 +88,30 @@ what its provider documents. The two pills that list Rendered / Token /
 Raw are told apart by their icons: **↑ Context** decides the shape of what this chat sends back
 (new chats start from the Context setting), **👁 Display** is the one control for how the whole
 transcript is drawn and redraws it at once (`comonad.displayForm`): **Rendered** draws every step in
-order with the noise folded away — a turn starts as the prompt, a *Thinking* line and one row per
-tool call (name, arguments and whether it worked), and a click opens the reasoning or that call's
-output — **Token** shows only what the model said plus a count of the calls it made, **Raw** shows the
-whole record as plain text. **Comonad: Open Chat in a New Window** opens the chat as an editor
-tab instead — set `comonad.chatWindow` to move it straight into its own floating window. `@comonad`
-In the built-in chat view still works and shares the same sessions, policy and commands.
+order with the noise folded away — a turn starts as the prompt, a *Thinking* line and a card per tool
+call. A card's title is the model's own one-line description of the call (`description` is required
+by the shell tools), followed by the utilities the command used (`ls, echo, find, sort`) and how
+long it took. Folded, it previews the first five lines of output; a click opens the whole command —
+highlighted — and the full output, with **Copy command** / **Copy output** under the card's `…`
+menu. Other tools show a human title and their most telling argument instead. **Settings → Agent →
+Tool cards** (or `comonad.toolCard`) chooses how a card starts: **Preview** (the default, folded with
+the first lines), **Collapsed** (header only) or **Open** (command and output); changing it redraws
+the transcript, and a click still toggles one card. **Token** shows only what the model said plus a
+count of the calls it made, **Raw** shows the whole record as plain text.
+**Comonad: Open Chat in a New Window** opens the chat as an editor tab instead — set
+`comonad.chatWindow` to move it straight into its own floating window. `@comonad` In the built-in
+chat view still works and shares the same sessions, policy and commands.
 
 **The transcript is turns, not messages.** One prompt and everything the agent did for it — its
 thoughts, its text and its tool calls — is a single turn, drawn as one block in the order it
 happened, no matter how many rounds the model took between tools. A turn that is streaming and the
 same turn after a reload are built by the same renderer, so a refresh never changes the shape of an
 answer (no more one bubble becoming five). Every step also carries **how long it took** —
-`🧠 Thought 12.4s` (it reads *Thinking…* while the model is still reasoning), `✓ run_shell {"command":"pytest"} 8.1s`, and a plain answer's own round trip —
+`🧠 Thought 12.4s` (it reads *Thinking…* while the model is still reasoning), `Run the test suite · pytest 8.1s`, and a plain answer's own round trip —
 climbing live while it runs and settling on the number the extension measured when it finishes, so a
-slow call shows its cost instead of only a spinner. A shell tool card, expanded, shows the whole
-command first — highlighted, with a Copy button — and the command's output underneath. Fenced code
+slow call shows its cost instead of only a spinner. A folded shell card previews the first five
+lines of output; expanded, it shows the whole command first — highlighted — and the command's
+output underneath. Fenced code
 blocks are syntax-highlighted for highlight.js's common languages (Python, JavaScript/TypeScript,
 JSON, shell, C/C++, Java, Go, Rust, SQL, Markdown, …) with theme-aware token colors; Copy still
 copies the code source, not the markup. Each turn ends with a dated footer — *Worked for

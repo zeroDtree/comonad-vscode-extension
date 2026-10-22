@@ -539,6 +539,7 @@ export function runProcess(
 			}
 			killProcessTree(child);
 			// Do not wait for `close`: it arrives only after every inherited pipe is gone.
+			clearTimeout(drain);
 			drain = setTimeout(() => finish({ code: child.exitCode ?? 1, stdout, stderr, timedOut, aborted }), 100);
 		};
 		const onAbort = (): void => kill('abort');
@@ -563,12 +564,15 @@ export function runProcess(
 			reject(error);
 		});
 		child.on('exit', (code) => {
+			// The process is gone, so its deadline no longer applies: a timer that fired after this
+			// would call a finished command timed out and kill the group it deliberately left behind.
+			clearTimeout(timer);
 			if (timedOut || aborted) {
 				finish({ code: code ?? 1, stdout, stderr, timedOut, aborted });
 				return;
 			}
 			// A daemonized grandchild can hold the pipes open forever; settle shortly after exit.
-			drain = setTimeout(() => finish({ code: code ?? 0, stdout, stderr, timedOut, aborted }), 1_000);
+			drain = setTimeout(() => finish({ code: code ?? 1, stdout, stderr, timedOut, aborted }), 1_000);
 		});
 		child.on('close', (code) => finish({ code: code ?? 1, stdout, stderr, timedOut, aborted }));
 	});

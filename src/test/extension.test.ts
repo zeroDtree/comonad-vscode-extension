@@ -649,6 +649,7 @@ suite('Comonad domain', () => {
 			mode: 'sw' as const,
 			approval: 'manual' as const,
 			displayForm: 'rendered' as const,
+			toolCard: 'preview' as const,
 			contextForm: 'rendered' as const,
 			network: false,
 			workingDirectory: '/ws',
@@ -663,6 +664,8 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(normalizeAgentPatch({ confineWrite: false }, current), { confineWrite: false });
 		assert.deepStrictEqual(normalizeAgentPatch({ commandTimeoutOverride: true }, current), { commandTimeoutOverride: true });
 		assert.deepStrictEqual(normalizeAgentPatch({ commandTimeoutOverride: false }, current), { commandTimeoutOverride: false });
+		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'open' }, current), { toolCard: 'open' });
+		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'nonsense' }, current), { toolCard: 'preview' });
 		assert.deepStrictEqual(
 			normalizeAgentPatch(
 				{ workingDirectory: '  /next  ', commandTimeout: '45', denyReadPaths: 'a\n b ', mode: 'nonsense', network: true },
@@ -677,6 +680,7 @@ suite('Comonad domain', () => {
 				'mode',
 				'approval',
 				'displayForm',
+				'toolCard',
 				'contextForm',
 				'network',
 				'workingDirectory',
@@ -1029,15 +1033,18 @@ suite('Comonad domain', () => {
 		assert.ok(Number.isFinite(huge) && huge <= Math.floor(0x7fff_ffff / 1000), 'a huge stored value stays inside setTimeout’s range');
 	});
 
-	test('both foreground shell tools accept an optional timeout in seconds', async () => {
+	test('both foreground shell tools accept a title and an optional timeout in seconds', async () => {
 		const kernel = await createTestKernel();
 		try {
 			await kernel.ctx.plugin(shellTools);
 			for (const name of ['run_shell', 'run_shell_readonly']) {
 				const spec = kernel.ctx.tools.get(name);
 				assert.ok(spec, name);
-				const timeout = (spec.parameters.properties as Record<string, { type?: string; minimum?: number; maximum?: number; description?: string }>).timeout;
-				assert.deepStrictEqual(spec.parameters.required, ['command'], `${name} requires only the command`);
+				const properties = spec.parameters.properties as Record<string, { type?: string; minimum?: number; maximum?: number; description?: string }>;
+				const timeout = properties.timeout;
+				assert.deepStrictEqual(spec.parameters.required, ['command', 'description'], `${name} requires a command and its title`);
+				assert.strictEqual(properties.description?.type, 'string');
+				assert.match(String(properties.description?.description), /5–10 word/, 'the model is told what the title is for');
 				assert.strictEqual(timeout?.type, 'number');
 				assert.strictEqual(timeout?.minimum, MIN_SHELL_TIMEOUT_SECONDS);
 				assert.strictEqual(timeout?.maximum, MAX_SHELL_TIMEOUT_SECONDS);
@@ -1045,6 +1052,7 @@ suite('Comonad domain', () => {
 			}
 			const background = kernel.ctx.tools.get('start_shell');
 			assert.ok(background);
+			assert.deepStrictEqual(background.parameters.required, ['command', 'description'], 'start_shell takes a title too');
 			assert.ok(!('timeout' in background.parameters.properties), 'start_shell has no deadline');
 		} finally {
 			await kernel.dispose();
@@ -8411,6 +8419,20 @@ suite('Markdown math plugin', () => {
 		assert.ok(chat.includes('highlightCode') && chat.includes('window.hljs'));
 		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
 		assert.ok(css.includes('.hljs-keyword') && css.includes('.hljs-string'));
+	});
+
+	test('the tool card keeps its title, preview and copy seams', () => {
+		const root = join(__dirname, '..', '..');
+		const chat = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		for (const needle of ['tool-card', 'tool-details', 'tool-preview', 'tool-command', 'tool-out', 'tool-menu', 'data-copy', 'step._open', 'shellUtilities', 'toolCardMode']) {
+			assert.ok(chat.includes(needle), needle);
+		}
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		for (const needle of ['.tool-card', '.tool-head', '.tool-preview', '.tool-command', '.tool-out', '.tool-menu']) {
+			assert.ok(css.includes(needle), needle);
+		}
+		const host = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.strictEqual(host.match(/description: shellDescription\(/g)?.length, 2, 'replay and live payloads carry the title');
 	});
 });
 

@@ -179,6 +179,13 @@ const timeoutParameter = {
 		'Seconds before the command is killed. Defaults to the configured command timeout; clamped to 1–300. The user can pin a fixed value, in which case this is ignored. Use start_shell for work that should keep running.',
 };
 
+/** The one-line title the chat card shows; the command itself is the summary below it. */
+const descriptionParameter = {
+	type: 'string',
+	description:
+		'A 5–10 word title for this call, shown on the tool card. Describe the intent (e.g. "Run the unit tests"), not the command syntax.',
+};
+
 export const shellTools = toolset([
 	{
 		name: 'run_shell_readonly',
@@ -187,7 +194,10 @@ export const shellTools = toolset([
 		capability: 'shell_ro',
 		needsNetwork: false,
 		needsWorkspace: true,
-		parameters: objectSchema({ command: { type: 'string' }, timeout: timeoutParameter }, ['command']),
+		parameters: objectSchema(
+			{ command: { type: 'string' }, description: descriptionParameter, timeout: timeoutParameter },
+			['command', 'description'],
+		),
 		execute(args, ctx) {
 			const { command, timeout } = args as { command: string; timeout?: unknown };
 			return run(ctx, command, false, timeout);
@@ -200,7 +210,10 @@ export const shellTools = toolset([
 		capability: 'shell_rw',
 		needsNetwork: false,
 		needsWorkspace: true,
-		parameters: objectSchema({ command: { type: 'string' }, timeout: timeoutParameter }, ['command']),
+		parameters: objectSchema(
+			{ command: { type: 'string' }, description: descriptionParameter, timeout: timeoutParameter },
+			['command', 'description'],
+		),
 		execute(args, ctx) {
 			const { command, timeout } = args as { command: string; timeout?: unknown };
 			return run(ctx, command, true, timeout);
@@ -213,7 +226,7 @@ export const shellTools = toolset([
 		capability: 'shell_rw',
 		needsNetwork: false,
 		needsWorkspace: true,
-		parameters: objectSchema({ command: { type: 'string' } }, ['command']),
+		parameters: objectSchema({ command: { type: 'string' }, description: descriptionParameter }, ['command', 'description']),
 		async execute(args, ctx) {
 			const { command } = args as { command: string };
 			const task = await ctx.tasks.start(command, ctx.policy.workingDirectory, shellOptions(ctx, true));

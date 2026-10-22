@@ -501,8 +501,7 @@ a:hover {
    behind every wrapped line. The more specific selectors beat `.body.md code` / `.bubble.md code`. */
 .codeblock pre > code,
 .body.md .codeblock pre > code,
-.bubble.md .codeblock pre > code,
-.card .codeblock pre > code {
+.bubble.md .codeblock pre > code {
 	background: transparent;
 	padding: 0;
 	border-radius: 0;
@@ -663,79 +662,274 @@ details.thinking summary::before {
 	margin-top: 4px;
 }
 
-.card {
-	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
-	border-radius: 8px;
-	overflow: hidden;
-	background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.06));
+/* A tool call: title and summary, a preview while folded, the command and full output when open. */
+.tool-card {
+	position: relative;
+	border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.28)));
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.06)));
 }
 
-.card-head {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 5px 10px;
+/* No overflow:hidden here: it would clip the copy menu. The header rounds its own top corners. */
+.tool-head {
+	display: block;
+	padding: 0;
 	cursor: pointer;
-	font-size: 12px;
+	user-select: none;
+	list-style: none;
 }
 
-.card-head b {
-	font-weight: 600;
-}
-
-.card-head .args {
-	opacity: 0.7;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	flex: 1;
-	font-family: var(--vscode-editor-font-family, monospace);
-	font-size: 11px;
-}
-
-.card-head .timer {
-	flex: none;
-}
-
-.card-head .chev {
-	opacity: 0.5;
-	transition: transform 0.12s ease;
-}
-
-.card:not(.collapsed) .chev {
-	transform: rotate(180deg);
-}
-
-.card.collapsed .out,
-.card.collapsed .codeblock {
+.tool-head::-webkit-details-marker {
 	display: none;
 }
 
-/* A shell card's expanded command: the same code block as a reply, flush under the head. */
-.card > .codeblock {
-	margin: 0;
-	border: none;
-	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-	border-radius: 0;
-	background: #000;
+.tool-head:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, #007fd4);
+	outline-offset: -1px;
+	border-radius: 10px;
 }
 
-.card > .codeblock pre {
-	max-height: 240px;
-	overflow-y: auto;
+.tool-head-row {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+	padding: 7px 32px 7px 10px;
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+	border-radius: 10px 10px 0 0;
 }
 
-.card .out {
-	margin: 0;
-	padding: 8px 10px;
-	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+.tool-head:hover .tool-head-row {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.tool-glyph {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 14px;
+	color: var(--vscode-icon-foreground, var(--vscode-descriptionForeground));
+	opacity: 0.8;
+}
+
+.tool-glyph svg {
+	width: 14px;
+	height: 14px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.25;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.tool-icon,
+.tool-chev,
+.tool-glyph .spin {
+	display: none;
+}
+
+.tool-card[data-status='running'] .tool-glyph .spin {
+	display: block;
+}
+
+.tool-card[data-status='running'] .tool-icon,
+.tool-card[data-status='running'] .tool-chev {
+	display: none;
+}
+
+.tool-card:not([data-status='running']) .tool-icon {
+	display: inline-flex;
+}
+
+.tool-details[open] .tool-icon {
+	display: none;
+}
+
+.tool-card:not([data-status='running']) .tool-details[open] .tool-chev {
+	display: inline-flex;
+}
+
+.tool-card[data-status='error'] {
+	border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground, #f44336));
+}
+
+.tool-card[data-status='error'] .tool-glyph,
+.tool-card[data-status='error'] .tool-preview {
+	color: var(--vscode-errorForeground, #f44336);
+}
+
+.tool-title {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 500;
+}
+
+.tool-summary {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.8;
+	font-size: 12px;
+}
+
+.timer.tool-time {
+	flex: none;
+	margin-left: 0;
+	font-size: 11px;
+}
+
+/* The folded preview: output once the call finished, the command while it is still running. */
+.tool-preview {
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 6;
+	overflow: hidden;
+	padding: 8px 10px 10px;
 	white-space: pre-wrap;
-	word-break: break-word;
+	overflow-wrap: anywhere;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: var(--vscode-editor-font-size, 12px);
+	line-height: 1.5;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.75;
+}
+
+.tool-details[open] .tool-preview {
+	display: none;
+}
+
+.tool-body {
+	padding: 8px 10px 10px;
+}
+
+.tool-command {
+	margin: 0 0 8px;
+	max-height: 200px;
+	overflow-y: auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: var(--vscode-editor-font-size, 12px);
+	line-height: 1.6;
+}
+
+.tool-prompt {
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.6;
+	user-select: none;
+}
+
+.tool-command code {
+	background: transparent;
+	padding: 0;
+	border-radius: 0;
+	font-size: inherit;
+}
+
+.tool-args {
+	margin: 0 0 8px;
+	padding: 0 0 8px;
+	max-height: 160px;
+	overflow-y: auto;
+	border-bottom: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	opacity: 0.6;
 	font-family: var(--vscode-editor-font-family, monospace);
 	font-size: 11.5px;
+}
+
+.tool-out {
+	margin: 0;
 	max-height: 320px;
 	overflow-y: auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: var(--vscode-editor-font-size, 12px);
+	line-height: 1.55;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.82;
+}
+
+.tool-card[data-status='error'] .tool-out {
+	color: var(--vscode-errorForeground, #f44336);
 	opacity: 0.9;
+}
+
+.tool-card .thumbs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 0 10px 8px;
+	border-top: none;
+}
+
+.tool-more {
+	position: absolute;
+	top: 5px;
+	right: 6px;
+	z-index: 2;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	opacity: 0;
+	pointer-events: none;
+	background: transparent;
+	border: none;
+	border-radius: 4px;
+	color: inherit;
+	cursor: pointer;
+}
+
+.tool-card:hover .tool-more,
+.tool-card:focus-within .tool-more {
+	opacity: 0.6;
+	pointer-events: auto;
+}
+
+.tool-more:hover,
+.tool-more:focus-visible {
+	opacity: 1;
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.tool-menu {
+	position: absolute;
+	top: 34px;
+	right: 7px;
+	z-index: 20;
+	display: flex;
+	flex-direction: column;
+	min-width: 140px;
+	padding: 4px;
+	border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border));
+	border-radius: 6px;
+	background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
+	box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35));
+}
+
+.tool-menu button {
+	text-align: left;
+	background: transparent;
+	border: none;
+	padding: 5px 8px;
+	border-radius: 4px;
+}
+
+.tool-menu button:hover {
+	background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
 }
 
 .spin {
@@ -752,14 +946,6 @@ details.thinking summary::before {
 	to {
 		transform: rotate(360deg);
 	}
-}
-
-.good {
-	color: var(--vscode-testing-iconPassed, #4caf50);
-}
-
-.bad {
-	color: var(--vscode-testing-iconFailed, #f44336);
 }
 
 /* ------------------------------------------------------------------ turns */
@@ -842,7 +1028,14 @@ details.thinking summary::before {
 
 /* ------------------------------------------------------------------ approvals */
 
-.msg.approval .card {
+.approval-card {
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	border-radius: 8px;
+	overflow: hidden;
+	background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.06));
+}
+
+.msg.approval .approval-card {
 	border-color: var(--vscode-editorWarning-foreground, #d19a00);
 	background: var(--vscode-inputValidation-warningBackground, rgba(209, 154, 0, 0.08));
 }
@@ -1205,11 +1398,6 @@ footer {
 	flex-wrap: wrap;
 	gap: 6px;
 	padding: 6px 0 0;
-}
-
-.card .thumbs {
-	padding: 8px 10px;
-	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
 }
 
 .thumb {

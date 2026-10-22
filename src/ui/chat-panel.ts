@@ -180,6 +180,7 @@ export function chatPanel(ctx: Context): void {
 			allowUnsandboxedShell: config.allowUnsandboxedShell,
 			context: session?.contextForm ?? config.contextForm,
 			display: config.displayForm,
+			toolCard: config.toolCard,
 			reasoningEffort: session?.reasoningEffort ?? config.reasoningEffort,
 			contextWindow: session?.contextWindow ?? config.contextWindow,
 			// The window this chat's requests are measured against, which is what the model menu's
@@ -200,17 +201,33 @@ export function chatPanel(ctx: Context): void {
 		};
 	};
 
-	/** A shell tool's command, kept whole so the expanded card can show it instead of the clipped JSON. */
-	const shellCommand = (name: string | undefined, args: string | undefined): string | undefined => {
-		if (!name || !/^run_shell/.test(name)) {
+	/** run_shell_readonly and start_shell carry the same command/description pair. */
+	const SHELL_TOOL = /^(?:run_shell|start_shell)/;
+
+	const shellArgument = (
+		name: string | undefined,
+		args: string | undefined,
+		key: 'command' | 'description',
+	): string | undefined => {
+		if (!name || !SHELL_TOOL.test(name)) {
 			return undefined;
 		}
 		try {
-			const parsed = JSON.parse(args ?? '{}') as { command?: unknown };
-			return typeof parsed.command === 'string' ? parsed.command : undefined;
+			const value = (JSON.parse(args ?? '{}') as Record<string, unknown>)[key];
+			return typeof value === 'string' ? value : undefined;
 		} catch {
 			return undefined;
 		}
+	};
+
+	/** A shell tool's command, kept whole so the expanded card can show it instead of the clipped JSON. */
+	const shellCommand = (name: string | undefined, args: string | undefined): string | undefined =>
+		shellArgument(name, args, 'command');
+
+	/** The model's title for the call, normalized for one line and bounded for the webview. */
+	const shellDescription = (name: string | undefined, args: string | undefined): string | undefined => {
+		const text = shellArgument(name, args, 'description')?.replace(/\s+/g, ' ').trim();
+		return text ? clip(text, 120) : undefined;
 	};
 
 	// The transcript is sent as turns: one prompt plus the steps the agent took for it. The webview
@@ -222,6 +239,7 @@ export function chatPanel(ctx: Context): void {
 		name: step.name,
 		args: step.args === undefined ? undefined : clip(step.args, 2_000),
 		command: shellCommand(step.name, step.args),
+		description: shellDescription(step.name, step.args),
 		result: step.result === undefined ? undefined : clip(step.result, 30_000),
 		images: ctx.attachments.publicParts(step.images),
 		status: step.status,
@@ -435,7 +453,14 @@ export function chatPanel(ctx: Context): void {
 	ctx.on('agent/tool-start', (ref, call) => {
 		if (ref.surface === SURFACE) {
 			streamed = true;
-			post({ type: 'tool-start', id: call.id, name: call.name, args: clip(call.arguments, 1_500), command: shellCommand(call.name, call.arguments) });
+			post({
+				type: 'tool-start',
+				id: call.id,
+				name: call.name,
+				args: clip(call.arguments, 2_000),
+				command: shellCommand(call.name, call.arguments),
+				description: shellDescription(call.name, call.arguments),
+			});
 		}
 	});
 	ctx.on('agent/tool-result', (ref, call, output, images) => {

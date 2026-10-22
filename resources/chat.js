@@ -26,7 +26,7 @@
 	const tip = $('tip');
 
 	const FORMS = [
-		['rendered', 'Rendered', 'folded thoughts and tool calls'],
+		['rendered', 'Rendered', 'folded thoughts, tool cards'],
 		['token', 'Token', 'assistant text only'],
 		['raw', 'Raw', 'the full record'],
 	];
@@ -972,6 +972,11 @@
 		return state && (state.display === 'token' || state.display === 'raw') ? state.display : 'rendered';
 	}
 
+	/** How a tool card starts: with its preview (the default), with only its header, or open. */
+	function toolCardMode() {
+		return state && (state.toolCard === 'collapsed' || state.toolCard === 'open') ? state.toolCard : 'preview';
+	}
+
 	function turnTools(turn) {
 		return (turn.steps || []).filter((step) => step.kind === 'tool').length;
 	}
@@ -1010,20 +1015,341 @@
 		return minutes + 'm ' + seconds + 's';
 	}
 
-	/** A shell step's command: sent whole by the host, or read back from the (unclipped) args. */
+	/* ------------------------------------------------------------------ tool cards */
+
+	// A tool card's visible words: a one-line title, the utility summary under it, and the output.
+	// Shell calls carry their title from the model (`description`), so the host sends it whole; every
+	// other title/summary is derived from the name and the arguments here, where the DOM lives.
+
+	const SHELL_TOOL = /^(?:run_shell|start_shell)/;
+
+	const TOOL_LABELS = {
+		run_shell: 'Run shell',
+		run_shell_readonly: 'Run shell (read-only)',
+		start_shell: 'Start shell',
+		shell_output: 'Shell output',
+		stop_shell: 'Stop shell',
+		read_file: 'Read file',
+		write_file: 'Write file',
+		list_dir: 'List directory',
+		grep_files: 'Search files',
+		apply_patch: 'Apply patch',
+		apply_edits: 'Apply edits',
+		find_files: 'Find files',
+		find_symbols: 'Find symbols',
+		get_diagnostics: 'Get diagnostics',
+		git_diff: 'Read git diff',
+		run_task: 'Run task',
+		fetch_url: 'Fetch URL',
+		web_search: 'Search the web',
+		ask_user: 'Ask you',
+		agent: 'Run agent',
+		skill: 'Run skill',
+		memory: 'Use memory',
+		todo_write: 'Update todos',
+		list_plans: 'List plans',
+		read_plan: 'Read plan',
+		write_plan: 'Write plan',
+		calculate: 'Calculate',
+		describe_numbers: 'Describe numbers',
+		percentile: 'Percentile',
+		convert_units: 'Convert units',
+	};
+
+	const TOOL_FAMILIES = {
+		run_shell: 'terminal',
+		run_shell_readonly: 'terminal',
+		start_shell: 'terminal',
+		shell_output: 'terminal',
+		stop_shell: 'terminal',
+		run_task: 'terminal',
+		read_file: 'file',
+		list_dir: 'file',
+		git_diff: 'file',
+		write_file: 'pencil',
+		apply_patch: 'pencil',
+		apply_edits: 'pencil',
+		write_plan: 'pencil',
+		grep_files: 'search',
+		find_files: 'search',
+		find_symbols: 'search',
+		fetch_url: 'globe',
+		web_search: 'globe',
+		todo_write: 'list',
+		list_plans: 'list',
+		read_plan: 'list',
+		agent: 'spark',
+		skill: 'spark',
+		memory: 'spark',
+		ask_user: 'spark',
+	};
+
+	// The card's glyph is the tool's family, not its name: a shell is a prompt, a read is a page.
+	const TOOL_ICONS = {
+		terminal: '<svg viewBox="0 0 16 16"><path d="M3 4.2l3.1 3.6L3 11.4"/><path d="M8.4 11.4h4.4"/></svg>',
+		file: '<svg viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></svg>',
+		pencil: '<svg viewBox="0 0 16 16"><path d="M10.6 2.7l2.7 2.7-7.8 7.8-3.3.6.6-3.3z"/><path d="M9.2 4.1l2.7 2.7"/></svg>',
+		search: '<svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="3.8"/><path d="M10 10l3.3 3.3"/></svg>',
+		globe: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.2"/><path d="M2.8 8h10.4M8 2.8c1.5 1.4 2.3 3.2 2.3 5.2S9.5 11.8 8 13.2C6.5 11.8 5.7 10 5.7 8S6.5 4.2 8 2.8z"/></svg>',
+		list: '<svg viewBox="0 0 16 16"><path d="M6 4.5h7M6 8h7M6 11.5h7"/><path d="M3.2 4.5h.1M3.2 8h.1M3.2 11.5h.1"/></svg>',
+		spark: '<svg viewBox="0 0 16 16"><path d="M8 2.2l1.4 3.8 3.8 1.4-3.8 1.4L8 12.6 6.6 8.8 2.8 7.4l3.8-1.4z"/></svg>',
+		tool: '<svg viewBox="0 0 16 16"><path d="M9.6 2.6a3.4 3.4 0 0 0-3.2 4.5L2.6 10.9l2.5 2.5 3.8-3.8a3.4 3.4 0 0 0 4.5-3.2l-2 2-2.3-.6-.6-2.3z"/></svg>',
+	};
+	const CHEVRON_ICON = '<svg viewBox="0 0 16 16"><path d="M4.8 6.4L8 9.6l3.2-3.2"/></svg>';
+
+	function toolIcon(name) {
+		return TOOL_ICONS[TOOL_FAMILIES[name]] || TOOL_ICONS.tool;
+	}
+
+	function humanToolName(name) {
+		const known = TOOL_LABELS[name];
+		if (known) {
+			return known;
+		}
+		const words = String(name || 'tool').replace(/_/g, ' ').trim() || 'tool';
+		return words.charAt(0).toUpperCase() + words.slice(1);
+	}
+
+	/** A tool call's arguments as an object; clipped or malformed JSON is simply unknown. */
+	function toolArgs(step) {
+		if (typeof step.args !== 'string' || !step.args.trim()) {
+			return null;
+		}
+		try {
+			const parsed = JSON.parse(step.args);
+			return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+		} catch {
+			return null;
+		}
+	}
+
+	/** A shell step's command: sent whole by the host, or read back from the (clipped) args. */
 	function shellCommandOf(step) {
 		if (step.command) {
 			return step.command;
 		}
-		if (!step.name || !/^run_shell/.test(step.name)) {
+		const parsed = SHELL_TOOL.test(step.name || '') ? toolArgs(step) : null;
+		return parsed && typeof parsed.command === 'string' ? parsed.command : '';
+	}
+
+	/** The model's title for a shell call, sent whole by the host or read back from the args. */
+	function shellDescriptionOf(step) {
+		if (step.description) {
+			return step.description;
+		}
+		const parsed = SHELL_TOOL.test(step.name || '') ? toolArgs(step) : null;
+		return parsed && typeof parsed.description === 'string' ? parsed.description : '';
+	}
+
+	/** One trimmed line, clipped for a header or a summary. */
+	function oneLine(text, limit) {
+		const clean = String(text || '')
+			.replace(/\s+/g, ' ')
+			.trim();
+		return clean.length > limit ? clean.slice(0, limit) + '…' : clean;
+	}
+
+	// Shell words that wrap another command, start a compound statement, or only navigate.
+	const SHELL_WRAPPERS = new Set(['sudo', 'command', 'builtin', 'exec', 'env', 'nohup', 'time', 'timeout', 'nice', 'ionice', 'stdbuf', 'xargs']);
+	const SHELL_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'function', 'select', 'in', '!', '{', '}', '(', ')']);
+	const SHELL_HEADERS = new Set(['if', 'for', 'while', 'until', 'case', 'select', 'function']);
+	const SHELL_NAVIGATION = new Set(['cd', 'export', 'set', 'unset', 'source', '.', ':']);
+	// Options that take the next word as their value: `sudo -u root apt`, `nice -n 5 npm`.
+	const SHELL_FLAG_VALUES = new Set(['-u', '-g', '-p', '-C', '-h', '-r', '-t', '-U', '-n', '-c', '-I', '-P', '-s', '-e']);
+	const SHELL_REDIRECT = /^(?:\d*[<>]|&>)/;
+
+	/** Unquoted command separators: `;`, newlines, pipes, `&&`, parentheses and background `&`. */
+	function shellSegments(command) {
+		const text = String(command);
+		const segments = [];
+		let current = '';
+		let quote = '';
+		let escaped = false;
+		for (let index = 0; index < text.length; index += 1) {
+			const char = text[index];
+			if (escaped) {
+				current += char;
+				escaped = false;
+				continue;
+			}
+			if (char === '\\') {
+				current += char;
+				escaped = true;
+				continue;
+			}
+			if (quote) {
+				current += char;
+				if (char === quote) {
+					quote = '';
+				}
+				continue;
+			}
+			if (char === '"' || char === "'") {
+				quote = char;
+				current += char;
+				continue;
+			}
+			// `2>&1`, `&>file`: the ampersand belongs to the redirection, not to the command chain.
+			if (char === '&' && (current.endsWith('>') || current.endsWith('<') || text[index + 1] === '>')) {
+				current += char;
+				continue;
+			}
+			if (';\n()|&'.includes(char)) {
+				segments.push(current);
+				current = '';
+				continue;
+			}
+			current += char;
+		}
+		segments.push(current);
+		return segments;
+	}
+
+	/** The words of one simple command; quotes are stripped and redirections are left out. */
+	function shellWords(segment) {
+		const words = [];
+		let current = '';
+		let quote = '';
+		let escaped = false;
+		for (const char of segment) {
+			if (escaped) {
+				current += char;
+				escaped = false;
+				continue;
+			}
+			if (char === '\\') {
+				escaped = true;
+				continue;
+			}
+			if (quote) {
+				if (char === quote) {
+					quote = '';
+				} else {
+					current += char;
+				}
+				continue;
+			}
+			if (char === '"' || char === "'") {
+				quote = char;
+				continue;
+			}
+			if (/\s/.test(char)) {
+				if (current) {
+					words.push(current);
+					current = '';
+				}
+				continue;
+			}
+			current += char;
+		}
+		if (current) {
+			words.push(current);
+		}
+		return words.filter((word) => !SHELL_REDIRECT.test(word));
+	}
+
+	/**
+	 * The utilities a shell command uses, deduplicated in order: `ls, echo, find, sort`. It is the
+	 * subtitle of the card, not a parse of the shell — enough to recognize the call at a glance.
+	 */
+	function shellUtilities(command) {
+		const names = [];
+		for (const segment of shellSegments(command)) {
+			const words = shellWords(segment);
+			let index = 0;
+			while (index < words.length) {
+				const word = words[index];
+				if (SHELL_HEADERS.has(word)) {
+					// `for x in …`, `if [ … ]`: the segment declares a block, not a command.
+					index = words.length;
+					break;
+				}
+				if (SHELL_NAVIGATION.has(word)) {
+					// `cd src && …`: navigating is not what the call is about; drop the segment.
+					index = words.length;
+					break;
+				}
+				if (SHELL_WRAPPERS.has(word)) {
+					index += 1;
+					// `timeout 10 npm`: the duration belongs to the wrapper, not to the command.
+					if (word === 'timeout' && index < words.length && !words[index].startsWith('-')) {
+						index += 1;
+					}
+					continue;
+				}
+				if (word.startsWith('-')) {
+					index += 1;
+					if (SHELL_FLAG_VALUES.has(word) && index < words.length) {
+						index += 1;
+					}
+					continue;
+				}
+				if (SHELL_KEYWORDS.has(word) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+					index += 1;
+					continue;
+				}
+				break;
+			}
+			if (index >= words.length) {
+				continue;
+			}
+			const name = words[index].split('/').pop();
+			if (!name || name === '[' || name === 'test' || names.includes(name)) {
+				continue;
+			}
+			names.push(name);
+		}
+		const head = names.slice(0, 4);
+		if (names.length > 4) {
+			head.push('…');
+		}
+		return head.join(', ');
+	}
+
+	const SUMMARY_KEYS = ['path', 'file_path', 'file', 'pattern', 'query', 'url', 'question', 'description', 'prompt', 'name', 'id', 'todos'];
+
+	/** The one argument worth showing beside a non-shell tool's title. */
+	function argSummary(step, parsed) {
+		if (!parsed) {
+			return oneLine(step.args || '', 100);
+		}
+		for (const key of SUMMARY_KEYS) {
+			const value = parsed[key];
+			if (typeof value === 'string' && value.trim()) {
+				return oneLine(value, 100);
+			}
+			if (typeof value === 'number') {
+				return String(value);
+			}
+			if (Array.isArray(value)) {
+				return '[' + value.length + (value.length === 1 ? ' item' : ' items') + ']';
+			}
+		}
+		const fields = Object.entries(parsed).filter(([, value]) => typeof value === 'string' || typeof value === 'number');
+		return fields.length ? oneLine(fields.slice(0, 2).map(([key, value]) => key + '=' + value).join(' '), 100) : '';
+	}
+
+	/** The first lines a collapsed card previews: output when done, the command while running. */
+	function previewOf(step) {
+		const source = step.result !== undefined ? step.result : shellCommandOf(step);
+		if (!source) {
 			return '';
 		}
-		try {
-			const parsed = JSON.parse(step.args || '{}');
-			return typeof parsed.command === 'string' ? parsed.command : '';
-		} catch {
+		const lines = String(source)
+			.replace(/\r/g, '')
+			.replace(/^\n+/, '')
+			.replace(/\s+$/, '')
+			.split('\n');
+		if (!lines.length || (lines.length === 1 && !lines[0])) {
 			return '';
 		}
+		const limit = step.result === undefined ? 2 : 5;
+		const head = lines.slice(0, limit).map((line) => (line.length > 240 ? line.slice(0, 240) + '…' : line));
+		if (lines.length > limit) {
+			head.push('…');
+		}
+		const text = head.join('\n');
+		return step.result === undefined ? '$ ' + text : text;
 	}
 
 	/* ------------------------------------------------------------------ images */
@@ -1063,7 +1389,8 @@
 		if (!Array.isArray(parts) || !parts.length) {
 			return null;
 		}
-		const box = document.createElement('div');
+		// A span, not a div: a tool card keeps its pictures inside the <summary>.
+		const box = document.createElement('span');
 		box.className = 'thumbs';
 		for (const part of parts) {
 			box.appendChild(imageThumb(part));
@@ -1096,36 +1423,130 @@
 		}
 	}
 
+	/**
+	 * One tool call: a title, a utility summary and a preview of the output while closed; the whole
+	 * command (highlighted) and the whole output when open. The preview lives in the summary so it
+	 * stays visible while the card is folded; the copy menu is a sibling so it can never toggle it.
+	 */
 	function toolCard(step) {
-		const card = document.createElement('div');
-		const failed = step.status === 'error' || /^Error:/.test(step.result || '');
-		const mark = step.result === undefined ? 'spin' : failed ? 'bad' : 'good';
+		const parsed = toolArgs(step);
+		const shell = SHELL_TOOL.test(step.name || '');
 		const command = shellCommandOf(step);
-		card.className = 'card collapsed';
-		card.innerHTML =
-			'<div class="card-head"><span class="' +
-			mark +
-			'">' +
-			(step.result === undefined ? '' : failed ? '✗' : '✓') +
-			'</span><b>' +
-			esc(step.name || 'tool') +
-			'</b><span class="args">' +
-			esc(step.args || '') +
-			'</span><span class="timer"></span><span class="chev">▾</span></div>' +
-			// Expanded, a shell card reads like the command it ran: first the whole script, highlighted,
-			// then what it printed. Other tools keep the one output block.
-			(command ? codeBlock('bash', command) : '') +
-			'<pre class="out"></pre>';
-		card.querySelector('.out').textContent = step.result || '';
-		// A picture is the answer itself, so it sits above the text and stays visible while collapsed.
+		const failed = step.status === 'error' || /^Error:/.test(step.result || '');
+		const state = step.result === undefined ? 'running' : failed ? 'error' : 'ok';
+		const title = shell ? oneLine(shellDescriptionOf(step), 120) || humanToolName(step.name) : humanToolName(step.name);
+		const summary = shell ? shellUtilities(command) || oneLine(command, 100) : argSummary(step, parsed);
+		const mode = toolCardMode();
+		// `collapsed` is header-only: the preview is not built at all, not merely hidden.
+		const preview = mode === 'collapsed' ? '' : previewOf(step);
+
+		const card = document.createElement('div');
+		card.className = 'tool-card';
+		card.dataset.status = state;
+		if (step.name) {
+			card.dataset.tool = step.name;
+		}
+
+		const details = document.createElement('details');
+		details.className = 'tool-details';
+		// Set the state before listening: a programmatic open must not be read back as a click.
+		// An explicit per-card toggle wins; otherwise the configured mode decides the first state.
+		details.open = step._open === undefined ? mode === 'open' : step._open === true;
+
+		const head = document.createElement('summary');
+		head.className = 'tool-head';
+		head.innerHTML =
+			'<span class="tool-head-row">' +
+			'<span class="tool-glyph"><span class="spin"></span><span class="tool-icon">' +
+			toolIcon(step.name) +
+			'</span><span class="tool-chev">' +
+			CHEVRON_ICON +
+			'</span></span>' +
+			'<span class="tool-title">' +
+			esc(title) +
+			'</span>' +
+			(summary ? '<span class="tool-summary">' + esc(summary) + '</span>' : '') +
+			'<span class="timer tool-time"></span></span>' +
+			(preview ? '<span class="tool-preview"></span>' : '');
+		if (preview) {
+			// Output is text, never markup: a command may print anything.
+			head.querySelector('.tool-preview').textContent = preview;
+		}
+		// A picture is the answer itself: it stays beside the title whether the card is open or not.
 		const thumbs = imageThumbs(step.images);
 		if (thumbs) {
-			card.insertBefore(thumbs, card.querySelector('.out'));
+			head.appendChild(thumbs);
 		}
-		// Folded by default whatever the size: the head already says which call it was, whether it
-		// worked, what it ran and how long it took. A click shows the command and the output.
+
+		const body = document.createElement('div');
+		body.className = 'tool-body';
+		if (command) {
+			const pre = document.createElement('pre');
+			pre.className = 'tool-command';
+			pre.innerHTML = '<span class="tool-prompt">$ </span><code>' + highlightCode('bash', command) + '</code>';
+			body.appendChild(pre);
+		} else if (step.args) {
+			// Clipped args do not parse; they are still the record, so show them as they came.
+			const formatted = parsed && Object.keys(parsed).length ? JSON.stringify(parsed, null, 2) : step.args;
+			const pre = document.createElement('pre');
+			pre.className = 'tool-args';
+			pre.textContent = formatted;
+			if (pre.textContent) {
+				body.appendChild(pre);
+			}
+		}
+		if (step.result !== undefined) {
+			const out = document.createElement('pre');
+			out.className = 'tool-out';
+			out.textContent = step.result || '(no output)';
+			body.appendChild(out);
+		}
+
+		details.appendChild(head);
+		details.appendChild(body);
+		card.appendChild(details);
+
+		const inputText = command || step.args || '';
+		if (inputText || step.result) {
+			const more = document.createElement('button');
+			more.type = 'button';
+			more.className = 'tool-more';
+			more.setAttribute('aria-haspopup', 'menu');
+			more.setAttribute('aria-expanded', 'false');
+			more.setAttribute('aria-label', 'Tool actions');
+			more.dataset.tip = 'Copy command or output';
+			more.textContent = '…';
+
+			const menu = document.createElement('div');
+			menu.className = 'tool-menu';
+			menu.setAttribute('role', 'menu');
+			menu.hidden = true;
+			if (inputText) {
+				const copy = document.createElement('button');
+				copy.type = 'button';
+				copy.setAttribute('role', 'menuitem');
+				copy.dataset.copy = 'input';
+				copy.textContent = command ? 'Copy command' : 'Copy arguments';
+				menu.appendChild(copy);
+			}
+			if (step.result) {
+				const copy = document.createElement('button');
+				copy.type = 'button';
+				copy.setAttribute('role', 'menuitem');
+				copy.dataset.copy = 'output';
+				copy.textContent = 'Copy output';
+				menu.appendChild(copy);
+			}
+			card.appendChild(more);
+			card.appendChild(menu);
+		}
+
+		details.addEventListener('toggle', () => {
+			step._open = details.open;
+		});
 		step._card = card;
-		step._timer = card.querySelector('.timer');
+		step._details = details;
+		step._timer = head.querySelector('.tool-time');
 		return card;
 	}
 
@@ -1701,6 +2122,7 @@
 				name: message.name,
 				args: message.args || '',
 				command: message.command || '',
+				description: message.description || '',
 				status: 'running',
 				startedAt: Date.now(),
 				at: Date.now(),
@@ -1723,8 +2145,10 @@
 		step.images = Array.isArray(message.images) ? message.images : [];
 		step.status = /^Error:/.test(step.result) ? 'error' : 'ok';
 		freeze(step);
-		// Redraw the card in place: `toolCard` stores the new element on the step, so the old one has
-		// to be held first or the swapped-out card would replace itself.
+		// A click may not have dispatched its toggle yet: read the live element, then redraw the card
+		// in place. `toolCard` stores the new element on the step, so the old one has to be held first
+		// or the swapped-out card would replace itself.
+		step._open = (step._details && step._details.open) || step._open === true;
 		const card = step._card;
 		card.replaceWith(toolCard(step));
 		paintTimer(step, false, Date.now());
@@ -1804,7 +2228,7 @@
 		root.dataset.id = message.id;
 		root.dataset.session = message.sessionId || '';
 		root.innerHTML =
-			'<div class="card"><div class="a-title">⚠ Approval required</div><div class="a-reason">' +
+			'<div class="approval-card"><div class="a-title">⚠ Approval required</div><div class="a-reason">' +
 			esc(message.reason || '') +
 			'</div><ul class="calls">' +
 			calls +
@@ -1838,23 +2262,86 @@
 
 	/* ------------------------------------------------------------------ event delegation */
 
+	/** Clipboard first, the host second: the webview API can be denied where the host's cannot. */
+	function copyText(text) {
+		if (!text) {
+			return;
+		}
+		Promise.resolve()
+			.then(() => navigator.clipboard.writeText(text))
+			.catch(() => vscode.postMessage({ type: 'copy', text }));
+	}
+
+	function closeToolMenus() {
+		let closed = false;
+		for (const menu of messagesEl.querySelectorAll('.tool-menu')) {
+			if (menu.hidden) {
+				continue;
+			}
+			menu.hidden = true;
+			closed = true;
+			const more = menu.parentElement.querySelector('.tool-more');
+			if (more) {
+				more.setAttribute('aria-expanded', 'false');
+			}
+		}
+		return closed;
+	}
+
+	function toggleToolMenu(button) {
+		const menu = button.parentElement.querySelector('.tool-menu');
+		if (!menu) {
+			return;
+		}
+		const open = menu.hidden;
+		closeToolMenus();
+		menu.hidden = !open;
+		button.setAttribute('aria-expanded', String(open));
+	}
+
+	function copyToolPart(item) {
+		const card = item.closest('.tool-card');
+		if (!card) {
+			return;
+		}
+		const text =
+			item.dataset.copy === 'input'
+				? (card.querySelector('.tool-command code')?.textContent ?? card.querySelector('.tool-args')?.textContent ?? '')
+				: (card.querySelector('.tool-out')?.textContent ?? '');
+		if (!text) {
+			return;
+		}
+		copyText(text);
+		const label = item.textContent;
+		item.textContent = 'Copied';
+		setTimeout(() => {
+			item.textContent = label;
+			closeToolMenus();
+		}, 700);
+	}
+
 	messagesEl.addEventListener('click', (event) => {
+		const more = event.target.closest('button.tool-more');
+		if (more) {
+			event.stopPropagation();
+			toggleToolMenu(more);
+			return;
+		}
+		const copied = event.target.closest('.tool-menu button[data-copy]');
+		if (copied) {
+			event.stopPropagation();
+			copyToolPart(copied);
+			return;
+		}
+		closeToolMenus();
 		const copy = event.target.closest('button.copy');
 		if (copy) {
 			const code = copy.closest('.codeblock').querySelector('code');
-			const text = code ? code.textContent : '';
-			Promise.resolve()
-				.then(() => navigator.clipboard.writeText(text))
-				.catch(() => vscode.postMessage({ type: 'copy', text }));
+			copyText(code ? code.textContent : '');
 			copy.textContent = 'Copied';
 			setTimeout(() => {
 				copy.textContent = 'Copy';
 			}, 1200);
-			return;
-		}
-		const head = event.target.closest('.card-head');
-		if (head) {
-			head.parentElement.classList.toggle('collapsed');
 			return;
 		}
 		const link = event.target.closest('a[data-url]');
@@ -1927,6 +2414,8 @@
 	let chatsOpen = false;
 	// The display form the transcript was drawn with; changing it redraws every turn.
 	let shownView = '';
+	// The tool card mode the transcript was drawn with; changing it also redraws every turn.
+	let shownToolCard = '';
 	let chatsAll = false;
 	let searchQuery = '';
 	let searchTimer = 0;
@@ -2048,12 +2537,26 @@
 		fillGenerations();
 		Object.assign(tavernState, state.tavern || {});
 		renderLore();
-		// Switching the display form redraws what is on screen — never during a turn, where the
-		// transcript is being written to.
-		if (shownView && shownView !== currentView() && !running && !live) {
+		// Switching the display form or the tool card mode redraws what is on screen — never during a
+		// turn, where the transcript is being written to. A mode change also drops per-card toggles so
+		// every card follows the new default.
+		const cardMode = toolCardMode();
+		const viewChanged = shownView && shownView !== currentView();
+		const cardsChanged = shownToolCard && shownToolCard !== cardMode;
+		if ((viewChanged || cardsChanged) && !running && !live) {
+			if (cardsChanged) {
+				for (const turn of turns) {
+					for (const step of turn.steps || []) {
+						delete step._open;
+					}
+				}
+			}
 			renderTurns(turns);
 		}
 		shownView = currentView();
+		if (!running && !live) {
+			shownToolCard = cardMode;
+		}
 		modelState.models = state.models || [];
 		modelState.model = state.model;
 		modelState.modelLabel = state.modelLabel || state.model || 'auto';
@@ -2252,6 +2755,7 @@
 				// A resumed turn is the same turn: keep appending its steps to the last one.
 				const turn = turns.length ? turns[turns.length - 1] : null;
 				if (turn) {
+					turn.sessionId = turn.sessionId || message.sessionId;
 					live = { turn, thought: null, text: null, think: '', pending: false };
 					renderFoot(turn);
 				}
@@ -2302,7 +2806,7 @@
 				break;
 			case 'turn-end': {
 				// The panel may have switched chats mid-turn; only settle the live turn it belongs to.
-				const mine = !live || !message.sessionId || message.sessionId === live.sessionId;
+				const mine = !live || !message.sessionId || message.sessionId === live.turn.sessionId;
 				setRunning(false);
 				runningSession = null;
 				// Anything still unanswered in the DOM belongs to the turn that just ended.
@@ -2902,7 +3406,7 @@
 			hideFlyout();
 			return;
 		}
-		if (closeMenus()) {
+		if (closeToolMenus() || closeMenus()) {
 			return;
 		}
 		if (chatsOpen) {

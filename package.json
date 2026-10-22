@@ -988,7 +988,17 @@
             "raw"
           ],
           "default": "rendered",
-          "markdownDescription": "How a reply is shown: `rendered` folds thoughts and tool calls, `token` shows assistant text only, `raw` shows the full record. New replies start here; the tabs above a reply switch just that reply."
+          "markdownDescription": "How a reply is shown: `rendered` folds thoughts and draws each tool call as a card, `token` shows assistant text only, `raw` shows the full record. New replies start here; the tabs above a reply switch just that reply."
+        },
+        "comonad.toolCard": {
+          "type": "string",
+          "enum": [
+            "preview",
+            "collapsed",
+            "open"
+          ],
+          "default": "preview",
+          "markdownDescription": "How a tool call is drawn when it first appears: `preview` folds the card and shows the first lines of its output, `collapsed` folds it to the header alone, `open` expands the command and output. A click still toggles an individual card."
         },
         "comonad.reasoningEffort": {
           "type": "string",

@@ -186,6 +186,8 @@ interface RunState {
 	trigger: GenerationTrigger;
 	/** The transcript as it stood before this turn, which is what a quiet generation leaves behind. */
 	prior: Message[];
+	/** The exchange a swipe or a regenerate replaced, put back if the turn is stopped. */
+	restore?: Message[];
 	/** The reply a continue extends: its index in the transcript as it stood before this turn. */
 	continueInto?: number;
 	/** The variants a swipe or a regenerate replaces or grows. */
@@ -315,7 +317,7 @@ export class Agent extends Service {
 	 * Opens a turn: one controller, linked to any surface signal, registered synchronously. A second
 	 * turn for the same chat is refused rather than allowed to overwrite this one's signal.
 	 */
-	private beginTurn(session: Session, ref: TurnRef, external?: AbortSignal): Turn | null {
+	private beginTurn(session: Session, ref: TurnRef, text: string, external?: AbortSignal): Turn | null {
 		if (this.turns.has(session.id)) {
 			return null;
 		}
@@ -328,7 +330,7 @@ export class Agent extends Service {
 			unlink: linkAbort(external, controller),
 		};
 		this.turns.set(session.id, turn);
-		this.ctx.emit('agent/turn-start', ref, session.transcript[session.transcript.length - 1]?.content ?? '');
+		this.ctx.emit('agent/turn-start', ref, text);
 		return turn;
 	}
 
@@ -349,21 +351,28 @@ export class Agent extends Service {
 		if (input.rewriteAt !== undefined && trigger !== 'normal') {
 			return { sessionId: input.sessionId ?? '', text: 'Error: only a new prompt can be edited.' };
 		}
+		const replay = trigger === 'swipe' || trigger === 'regenerate';
+		const target = replay ? (input.sessionId ?? this.ctx.sessions.active()?.id ?? '') : '';
+		// A swipe cuts the stored transcript as it starts: refuse it before the cut, not after.
+		if (target && this.turns.has(target)) {
+			return { sessionId: target, text: 'Error: a turn is already running in this chat.' };
+		}
 		// A swipe or a regenerate re-runs the prompt that is already there: the reply it produced is
-		// dropped here, and the variants it had are handed to `finish` so none of them is lost. The
-		// session is read *after* the replay, which rewrites the stored transcript.
+		// dropped here, and the variants it had are handed to `finish` so none of them is lost. What
+		// the turn replaced is kept too: a stopped generation puts that exchange back.
 		let swipes: SwipeCarry | undefined;
 		let images = input.images;
-		if (trigger === 'swipe' || trigger === 'regenerate') {
-			const target = input.sessionId ?? this.ctx.sessions.active()?.id ?? '';
+		let restore: Message[] | undefined;
+		if (replay) {
 			swipes = target ? this.ctx.sessions.swipeCarry(target) : undefined;
-			const replayed = target ? this.ctx.sessions.replayLast(target) : { text: '' };
+			const replayed = target ? this.ctx.sessions.replayLast(target) : { text: '', replaced: [] };
 			if (!replayed.text && !replayed.images?.length) {
 				return { sessionId: target, text: 'There is nothing to generate again yet.' };
 			}
 			text = replayed.text;
 			// A replayed prompt brings its pictures back; an explicit new set wins.
 			images = input.images?.length ? input.images : replayed.images;
+			restore = replayed.replaced;
 		}
 		const session = input.sessionId ? (this.ctx.sessions.get(input.sessionId) ?? this.ctx.sessions.ensureActive(this.policyFor())) : this.ctx.sessions.ensureActive(this.policyFor());
 		if (!text && !images?.length && trigger !== 'continue' && trigger !== 'impersonate') {
@@ -386,10 +395,27 @@ export class Agent extends Service {
 			return { sessionId: session.id, text: 'Error: that message is not a prompt that can be edited.' };
 		}
 		const ref: TurnRef = { sessionId: session.id, surface: input.surface };
-		const turn = this.beginTurn(session, ref, input.signal);
+		// A continue and an impersonation add no prompt of their own: the conversation is already there,
+		// and quiet throws its prompt away again at the end.
+		const prompted = trigger !== 'continue' && trigger !== 'impersonate';
+		const turn = this.beginTurn(
+			session,
+			ref,
+			prompted ? text : (session.transcript[session.transcript.length - 1]?.content ?? ''),
+			input.signal,
+		);
 		if (!turn) {
 			return { sessionId: session.id, text: 'Error: a turn is already running in this chat.' };
 		}
+		// The prompt keeps the time it was asked at however often the transcript is re-derived below, so
+		// a compaction in the middle of this turn cannot make it look like a later message.
+		const askedAt = Date.now();
+		const seed = (): Message[] =>
+			prompted ? [...session.transcript, { role: 'user', content: text, images, at: askedAt } as Message] : [...session.transcript];
+		// Whether the rewrite has cut the transcript, and whether the seeded prompt has been saved.
+		// The catch below uses them to leave a stopped turn in a state a reload can reproduce.
+		let cut = false;
+		let committed = false;
 		try {
 			// A surface can stop the turn before the first await; nothing below should start.
 			turn.signal.throwIfAborted();
@@ -432,7 +458,9 @@ export class Agent extends Service {
 				if (input.prepareRewrite && !(await input.prepareRewrite(session))) {
 					return { sessionId: session.id, text: '' };
 				}
-				turn.signal.throwIfAborted();
+				// The cut follows the restore without an abort check: once files are rolled back, leaving
+				// the later turns in the chat would make the transcript disagree with the workspace. A
+				// stop from here ends the reply, and the catch below keeps the edited prompt.
 				// The edited prompt replaces the old one text for text; its pictures stay unless the editor
 				// supplied a new set. Read them before the cut removes the message.
 				if (!input.images?.length) {
@@ -442,6 +470,7 @@ export class Agent extends Service {
 				if (problem) {
 					return { sessionId: session.id, text: `Error: ${problem}` };
 				}
+				cut = true;
 			}
 			// References are read after the cut and the policy merge: an edit that restored files reads
 			// the restored content, and a fixed systemContext (the participant's native references) and a
@@ -464,15 +493,7 @@ export class Agent extends Service {
 			}
 			turn.signal.throwIfAborted();
 			// No snapshot here: a turn is journaled file by file, as the agent actually writes each one.
-			// A continue and an impersonation add no prompt of their own: the conversation is already there,
-			// and quiet throws its prompt away again at the end.
-			const prompted = trigger !== 'continue' && trigger !== 'impersonate';
 			let prior = [...session.transcript];
-			// The prompt keeps the time it was asked at however often the transcript is re-derived below, so
-			// a compaction in the middle of this turn cannot make it look like a later message.
-			const askedAt = Date.now();
-			const seed = (): Message[] =>
-				prompted ? [...session.transcript, { role: 'user', content: text, images, at: askedAt } as Message] : [...session.transcript];
 			let seeded = seed();
 			// A continue grows the last reply, and only when nothing comes after it. A turn that was
 			// stopped, is waiting on a tool call, or failed leaves the transcript ending in something else
@@ -539,6 +560,9 @@ export class Agent extends Service {
 						// continue extends — which has a new index in the folded transcript, or none at all when
 						// the fold took it with the rest.
 						prior = foldedRecord(fold.summary, prior, fold.covers);
+						// The stopped-swipe record is folded with the same cut, so putting it back cannot
+						// resurrect turns the summary just replaced.
+						restore = restore ? foldedRecord(fold.summary, restore, fold.covers) : undefined;
 						continueInto = trigger === 'continue' ? continuationIndex(seeded) : undefined;
 					}
 				} catch (error) {
@@ -588,17 +612,32 @@ export class Agent extends Service {
 				samplers: tavern?.samplers,
 				trigger,
 				prior,
+				restore,
 				continueInto,
 				swipes,
 				// A composed request is not a slice of the chat, so there is nothing to fold it back into.
 				foldable: !composed,
 			};
 			session.transcript = seeded;
+			committed = true;
 			this.ctx.sessions.save(session);
 			this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000), images: imageNotes(images) });
 			return await this.execute(session, state, turn);
 		} catch (error) {
 			if (turn.signal.aborted) {
+				// A stop ends the answer, not the prompt: keep what the panel already drew. A swipe puts
+				// back the exchange it replaced; an edit that never cut has nothing of its own to keep.
+				let keep: Message[] | undefined;
+				if (restore) {
+					keep = restore;
+				} else if (!committed && !SILENT_TRIGGERS.has(trigger) && (input.rewriteAt === undefined || cut)) {
+					keep = seed();
+				}
+				if (keep) {
+					session.transcript = keep;
+					this.ctx.sessions.save(session);
+					this.ctx.sessions.changed(session.id);
+				}
 				return { sessionId: session.id, text: '', stopped: true };
 			}
 			throw error;
@@ -616,7 +655,7 @@ export class Agent extends Service {
 		}
 		const state = cursor.state as RunState;
 		const ref: TurnRef = { sessionId, surface: options.surface ?? state.ref.surface };
-		const turn = this.beginTurn(session, ref, options.signal);
+		const turn = this.beginTurn(session, ref, session.transcript[session.transcript.length - 1]?.content ?? '', options.signal);
 		if (!turn) {
 			return { sessionId, text: 'Error: a turn is already running in this chat.' };
 		}
@@ -757,6 +796,7 @@ export class Agent extends Service {
 		state.transcript = fold.folded;
 		state.continueInto = rebaseIndex(state.continueInto, fold.covers);
 		state.prior = foldedRecord(fold.summary, state.prior, fold.covers);
+		state.restore = state.restore ? foldedRecord(fold.summary, state.restore, fold.covers) : undefined;
 	}
 
 	/**
@@ -1159,6 +1199,11 @@ export class Agent extends Service {
 			}
 			this.ctx.log.message(`turn failed: ${describe(error)}`);
 			this.ctx.audit.write(session.id, { kind: 'error', message: describe(error) });
+			// A swipe or a regenerate that failed keeps the exchange it replaced: the chat is left with
+			// the reply it had, not with a prompt whose answer was thrown away.
+			if (state.restore) {
+				this.finish(session, state, { aborted: true });
+			}
 			return { sessionId: session.id, text: `Error: ${describe(error)}` };
 		}
 	}
@@ -1177,14 +1222,13 @@ export class Agent extends Service {
 		if (!state.toolCalls.length) {
 			return;
 		}
-		const answered = new Set(state.transcript.filter((message) => message.role === 'tool').map((message) => message.toolCallId));
-		const missing = state.toolCalls.filter((call) => !answered.has(call.id));
-		if (missing.length) {
-			state.transcript = [
-				...state.transcript,
-				...missing.map((call): Message => ({ role: 'tool', toolCallId: call.id, content: 'Stopped by the user.', at: Date.now() })),
-			];
-		}
+		// This batch's results live in the aborted node's local array, never in the transcript: every
+		// call is unanswered here. Scanning the whole transcript would mistake an earlier turn's reused
+		// synthetic id (call_0) for an answer and leave the request ending in dangling tool calls.
+		state.transcript = [
+			...state.transcript,
+			...state.toolCalls.map((call): Message => ({ role: 'tool', toolCallId: call.id, content: 'Stopped by the user.', at: Date.now() })),
+		];
 		state.toolCalls = [];
 	}
 
@@ -1194,10 +1238,15 @@ export class Agent extends Service {
 		if (options.aborted) {
 			// A stopped turn keeps the partial reply it streamed, but never merges a continue: the
 			// previous reply is already in the transcript and must not be concatenated with itself.
-			session.transcript =
-				state.trigger === 'quiet' || state.trigger === 'impersonate' || state.trigger === 'swipe' || state.trigger === 'regenerate'
-					? state.prior
-					: state.transcript;
+			// A swipe puts back the exchange it replaced; a quiet or impersonated turn was never in the
+			// chat at all, so it leaves the record as it stood before the turn.
+			if (state.restore) {
+				session.transcript = state.restore;
+			} else if (state.trigger === 'quiet' || state.trigger === 'impersonate') {
+				session.transcript = state.prior;
+			} else {
+				session.transcript = state.transcript;
+			}
 		} else if (state.trigger === 'quiet' || state.trigger === 'impersonate') {
 			// Upstream keeps neither in the chat: a quiet generation is the caller's alone, and an
 			// impersonation is streamed into the composer, for you to edit and send yourself.
@@ -1402,6 +1451,12 @@ export class Agent extends Service {
 					args = JSON.stringify(pre.updatedInput);
 				}
 				this.ctx.emit('agent/tool-start', state.ref, { ...call, arguments: args });
+				// The card is on screen from here on: a stop has to settle it as well as the transcript,
+				// or the webview keeps a call spinner that nothing will ever finish.
+				const settleStopped = (): void => {
+					results[index] = stopped(call);
+					this.ctx.emit('agent/tool-result', state.ref, { ...call, arguments: args }, 'Stopped by the user.');
+				};
 				let outcome: ToolOutcome;
 				if (pre.blocked) {
 					outcome = { content: `Error: blocked by hook: ${pre.reason ?? 'no reason given'}`, isError: true };
@@ -1410,14 +1465,13 @@ export class Agent extends Service {
 						outcome = await this.ctx.tools.invoke({ ...call, arguments: args }, this.toolContext(state, runtime.signal));
 					} catch (error) {
 						if (runtime.signal.aborted) {
-							results[index] = stopped(call);
+							settleStopped();
 							return;
 						}
 						throw error;
 					}
 					if (runtime.signal.aborted) {
-						results[index] = stopped(call);
-						this.ctx.emit('agent/tool-result', state.ref, { ...call, arguments: args }, 'Stopped by the user.');
+						settleStopped();
 						return;
 					}
 					const failed = outcome.isError || outcome.content.startsWith('Error:');
@@ -1434,7 +1488,7 @@ export class Agent extends Service {
 						);
 					} catch (error) {
 						if (runtime.signal.aborted) {
-							results[index] = stopped(call);
+							settleStopped();
 							return;
 						}
 						throw error;
@@ -1820,7 +1874,10 @@ export class Agent extends Service {
 					foldable: false,
 				};
 				const abort = new AbortController();
-				const unlink = linkAbort(request.signal, abort);
+				// A background run outlives the turn that started it: it is aborted when the agent
+				// unloads, not when the parent turn ends (which endTurn's cleanup abort would do). A
+				// foreground run is the turn's own work and stops with it.
+				const unlink = request.background ? () => undefined : linkAbort(request.signal, abort);
 				if (request.background) {
 					this.backgroundSubagents.add(abort);
 				}

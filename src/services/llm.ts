@@ -238,6 +238,11 @@ export class Llm extends Service {
 			{},
 			signal,
 		);
+		// A stopped or timed-out request leaves a partial stream. Returning it would let a fragment be
+		// read as the whole answer — a summary replacing the conversation with half a sentence.
+		if (signal.aborted) {
+			throw signal.reason ?? new DOMException('The request was stopped.', 'AbortError');
+		}
 		return result.message.content.trim();
 	}
 
