@@ -440,15 +440,70 @@ button.chat.is-active {
 	padding-left: 2px;
 }
 
+/* The empty chat's card: what the agent is for, where it runs, and the two ways into more. */
 .msg.welcome {
-	border: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
-	border-radius: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.28));
+	border-radius: 10px;
 	padding: 14px 16px;
+	background: var(--vscode-sideBarSectionHeader-background, rgba(128, 128, 128, 0.05));
+}
+
+.welcome-head {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+
+.welcome-mark {
+	font-size: 14px;
+	color: var(--vscode-textLink-foreground, #3794ff);
 }
 
 .msg.welcome h2 {
-	margin: 0 0 6px;
+	margin: 0;
 	font-size: 15px;
+	font-weight: 600;
+}
+
+.welcome-lead {
+	margin: 0;
+	font-size: 12.5px;
+	opacity: 0.8;
+}
+
+.welcome-workspace {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	font-size: 11.5px;
+}
+
+.welcome-label {
+	flex: none;
+	font-size: 10px;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	opacity: 0.55;
+}
+
+.welcome-workspace code {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.welcome-keys {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 14px;
+	font-size: 11.5px;
+	opacity: 0.85;
 }
 
 .muted {

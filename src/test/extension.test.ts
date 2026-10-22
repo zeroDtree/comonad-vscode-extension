@@ -3672,6 +3672,7 @@ suite('Cordis kernel', () => {
 			'paintJump',
 			"'jump-latest'",
 			'resizeInput',
+			'welcome-workspace',
 		]) {
 			assert.ok(js.includes(needle), needle);
 		}

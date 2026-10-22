@@ -2013,11 +2013,15 @@
 	}
 
 	function welcome() {
+		const workspace = (state && state.workspace) || '';
 		add(
 			'welcome',
-			'<h2>◉ Comonad</h2><p>Ask for a change, a review or an explanation. Tools run against <code>' +
-				esc((state && state.workspace) || 'no workspace') +
-				'</code>.</p><p class="muted">Type <code>/help</code> for commands. Writes and shell commands ask for approval first.</p>',
+			'<div class="welcome-head"><span class="welcome-mark" aria-hidden="true">◉</span><h2>Comonad</h2></div>' +
+				'<p class="welcome-lead">Ask for a change, a review or an explanation.</p>' +
+				'<div class="welcome-workspace"><span class="welcome-label">Workspace</span><code>' +
+				esc(workspace || 'no folder open') +
+				'</code></div>' +
+				'<div class="welcome-keys"><span><code>/help</code> for commands</span><span><code>@</code> to reference code</span></div>',
 		);
 	}
 

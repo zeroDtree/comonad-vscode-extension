@@ -1539,7 +1539,7 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 	</div>
 	<div id="editor">
 		<div id="composer-images" class="composer-images" hidden></div>
-		<textarea id="input" rows="1" placeholder="Ask Comonad…  Enter to send · Shift+Enter for a new line · @ to reference code · paste or drop images · /help for commands"></textarea>
+		<textarea id="input" rows="1" placeholder="Ask Comonad…  @ to reference code · /help for commands"></textarea>
 		<div id="mention" class="mention-menu" role="listbox" aria-label="Reference a workspace item" hidden>
 			<div id="mention-head" class="mention-head" hidden></div>
 			<div id="mention-list"></div>
