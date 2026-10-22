@@ -363,6 +363,21 @@ suite('Comonad domain', () => {
 		assert.strictEqual(second.state.value, 11);
 	});
 
+	test('a graph run stops at the configured maxSteps', async () => {
+		const config = parseGraphSource(`flowchart TD
+  %% start: loop
+  loop["loop"] --> loop
+`);
+		const registry = {
+			nodes: new Map<string, (state: Record<string, never>) => Promise<Record<string, never>>>([
+				['loop', async () => ({})],
+			]),
+			routes: new Map(),
+		};
+		const graph = compileGraphs(config, registry).get('agent')!;
+		await assert.rejects(() => runGraph(graph, {}, { maxSteps: 3 }), /exceeded maxSteps \(3\)/);
+	});
+
 	test('invalid graphs are rejected', () => {
 		assert.throws(() => parseGraphSource('flowchart TD\n  a --> b\n'), /outgoing edge|one of/);
 	});
@@ -649,7 +664,7 @@ suite('Comonad domain', () => {
 			mode: 'sw' as const,
 			approval: 'manual' as const,
 			displayForm: 'rendered' as const,
-			toolCard: 'preview' as const,
+			toolCard: 'collapsed' as const,
 			contextForm: 'rendered' as const,
 			network: false,
 			workingDirectory: '/ws',
@@ -665,7 +680,7 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(normalizeAgentPatch({ commandTimeoutOverride: true }, current), { commandTimeoutOverride: true });
 		assert.deepStrictEqual(normalizeAgentPatch({ commandTimeoutOverride: false }, current), { commandTimeoutOverride: false });
 		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'open' }, current), { toolCard: 'open' });
-		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'nonsense' }, current), { toolCard: 'preview' });
+		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'nonsense' }, current), { toolCard: 'collapsed' });
 		assert.deepStrictEqual(
 			normalizeAgentPatch(
 				{ workingDirectory: '  /next  ', commandTimeout: '45', denyReadPaths: 'a\n b ', mode: 'nonsense', network: true },
@@ -693,6 +708,15 @@ suite('Comonad domain', () => {
 				'allowUnsandboxedShell',
 			],
 		);
+	});
+
+	test('the turn policy carries the configured step budget', async () => {
+		const kernel = await createTestKernel();
+		try {
+			assert.strictEqual(kernel.ctx.agent.policyFor().maxSteps, 12);
+		} finally {
+			await kernel.dispose();
+		}
 	});
 
 	test('a path escape from apply_edits is an error, not a success', async () => {

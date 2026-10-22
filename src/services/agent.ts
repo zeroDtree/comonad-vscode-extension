@@ -304,6 +304,7 @@ export class Agent extends Service {
 			denyReadPaths: [...config.denyReadPaths],
 			confinement: { read: config.confineRead, write: config.confineWrite },
 			planDirectory: config.planDirectory,
+			maxSteps: config.maxSteps,
 			model: config.model,
 		};
 	}
@@ -1140,6 +1141,9 @@ export class Agent extends Service {
 			const graph = this.graph();
 			for (;;) {
 				const outcome = await runGraph(graph, state, {
+					// The turn's own cap: changing Max steps in the settings panel or the Graph tab
+					// takes effect from the next turn, exactly like the rest of the policy.
+					maxSteps: state.policy.maxSteps,
 					resume: cursor,
 					signal,
 					choose: (request: SoftRequest) => this.ctx.llm.choose(state.policy.model, request, signal),

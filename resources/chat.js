@@ -972,9 +972,9 @@
 		return state && (state.display === 'token' || state.display === 'raw') ? state.display : 'rendered';
 	}
 
-	/** How a tool card starts: with its preview (the default), with only its header, or open. */
+	/** How a tool card starts: header only (the default), with its preview, or open. */
 	function toolCardMode() {
-		return state && (state.toolCard === 'collapsed' || state.toolCard === 'open') ? state.toolCard : 'preview';
+		return state && (state.toolCard === 'preview' || state.toolCard === 'open') ? state.toolCard : 'collapsed';
 	}
 
 	function turnTools(turn) {

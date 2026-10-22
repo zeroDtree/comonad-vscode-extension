@@ -10,10 +10,12 @@ node_modules/**
 src/**
 packages/*/src/**
 pkgs/**
+docs/**
+scripts/**
 .github/**
 .kilo/**
 .kilocode/**
-features.md
+CONTRIBUTING.md
 .gitignore
 esbuild.js
 **/tsconfig.json

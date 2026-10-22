@@ -117,6 +117,8 @@ export interface SessionPolicy {
 	confinement: Confinement;
 	/** Workspace-relative folder for plan files; empty uses `.comonad/plans`. */
 	planDirectory?: string;
+	/** Maximum graph steps for one turn; absent uses the compiled graph's own limit. */
+	maxSteps?: number;
 	/** Model profile id, or `auto` for the first configured profile. */
 	model: string;
 	temperature?: number;

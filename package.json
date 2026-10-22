@@ -720,7 +720,7 @@
         },
         "comonad.maxSteps": {
           "type": "number",
-          "default": 48,
+          "default": 128,
           "description": "Maximum graph steps per turn."
         },
         "comonad.planDirectory": {
@@ -993,12 +993,12 @@
         "comonad.toolCard": {
           "type": "string",
           "enum": [
-            "preview",
             "collapsed",
+            "preview",
             "open"
           ],
-          "default": "preview",
-          "markdownDescription": "How a tool call is drawn when it first appears: `preview` folds the card and shows the first lines of its output, `collapsed` folds it to the header alone, `open` expands the command and output. A click still toggles an individual card."
+          "default": "collapsed",
+          "markdownDescription": "How a tool call is drawn when it first appears: `collapsed` shows only the header (the default), `preview` folds the card and shows the first lines of its output, and `open` expands the command and output. A click still toggles an individual card."
         },
         "comonad.reasoningEffort": {
           "type": "string",
@@ -1255,6 +1255,9 @@
   "scripts": {
     "vscode:prepublish": "npm run package",
     "compile": "npm run check-types && npm run lint && node esbuild.js && node esbuild.js --plugin",
+    "docs:dev": "npm --prefix docs run dev",
+    "docs:build": "npm --prefix docs run build",
+    "reinstall": "bash scripts/reinstall.sh",
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
     "build:plugins": "node esbuild.js --plugin",

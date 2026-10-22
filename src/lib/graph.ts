@@ -96,7 +96,7 @@ export interface RunOptions {
 	signal?: AbortSignal;
 }
 
-export const DEFAULT_MAX_STEPS = 48;
+export const DEFAULT_MAX_STEPS = 128;
 
 export class GraphError extends Error {
 	constructor(message: string) {

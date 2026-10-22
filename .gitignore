@@ -2,6 +2,8 @@ out
 dist
 node_modules
 .vscode-test/
+docs/.vitepress/dist
+docs/.vitepress/cache
 *.vsix
 pkgs/
 resources/highlight.js

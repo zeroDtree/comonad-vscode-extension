@@ -9,9 +9,9 @@ import type { Host } from './host';
 
 /** Typed view over the `comonad.*` settings section. */
 
-/** How a tool card starts out: folded with a preview, folded to its header, or open. */
-export type ToolCardMode = 'preview' | 'collapsed' | 'open';
-export const TOOL_CARD_MODES: readonly ToolCardMode[] = ['preview', 'collapsed', 'open'];
+/** How a tool card starts out: folded to its header, folded with a preview, or open. */
+export type ToolCardMode = 'collapsed' | 'preview' | 'open';
+export const TOOL_CARD_MODES: readonly ToolCardMode[] = ['collapsed', 'preview', 'open'];
 
 export interface Profile {
 	id: string;
@@ -384,7 +384,7 @@ export class Settings extends Service {
 			confineRead: flag('confineRead', false),
 			confineWrite: flag('confineWrite', true),
 			planDirectory: typeof raw.planDirectory === 'string' ? raw.planDirectory : '',
-			maxSteps: count('maxSteps', 48, 1),
+			maxSteps: count('maxSteps', 128, 1),
 			graph: typeof raw.graph === 'string' ? raw.graph : DEFAULT_GRAPH_SOURCE,
 			model: typeof raw.model === 'string' ? raw.model : 'auto',
 			// An empty list means "nothing configured", which would leave the chat without a model, so
@@ -406,7 +406,7 @@ export class Settings extends Service {
 			chatWindow: flag('chatWindow', false),
 			contextForm: oneOf('contextForm', CONTEXT_FORMS, 'rendered'),
 			displayForm: oneOf('displayForm', CONTEXT_FORMS, 'rendered'),
-			toolCard: oneOf('toolCard', TOOL_CARD_MODES, 'preview'),
+			toolCard: oneOf('toolCard', TOOL_CARD_MODES, 'collapsed'),
 			reasoningEffort: oneOf('reasoningEffort', REASONING_EFFORTS, 'auto'),
 			contextWindow: count('contextWindow', 0, 0),
 			budgetUsd: count('budgetUsd', 0, 0),

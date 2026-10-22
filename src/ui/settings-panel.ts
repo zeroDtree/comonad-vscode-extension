@@ -28,8 +28,8 @@ const DISPLAY_LABELS: Record<ContextForm, string> = {
 };
 
 const TOOL_CARD_LABELS: Record<ToolCardMode, string> = {
+	collapsed: 'Collapsed — header only (default)',
 	preview: 'Preview — folded, with the first lines',
-	collapsed: 'Collapsed — header only',
 	open: 'Open — command and output',
 };
 
@@ -978,7 +978,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       </div>
       <div class="field">
         <label for="toolCard">Tool cards</label>
-        <p class="hint">How a tool call starts out: folded with a preview of its output, folded to the header alone, or open with the command and output.</p>
+        <p class="hint">How a tool call starts out: folded to the header alone (the default), folded with a preview of its output, or open with the command and output.</p>
         <select id="toolCard" class="control" data-key="toolCard"></select>
       </div>
       <div class="field">
