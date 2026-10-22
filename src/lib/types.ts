@@ -8,8 +8,11 @@ export type WorkMode = 'chat' | 'ro' | 'sw' | 'aw' | 'pl';
 
 export type Approval = 'manual' | 'universal_reject' | 'blacklist_reject' | 'whitelist_accept' | 'universal_accept';
 
-/** Thinking effort forwarded to models that support it. */
-export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high';
+/**
+ * The thinking levels a chat can ask for. `auto` leaves the provider default alone; `none` turns
+ * thinking off where the model allows it; `max` is the deepest level the endpoint offers.
+ */
+export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'max';
 
 export type Preset = 'ask' | 'plan' | 'auto' | 'readonly' | 'full';
 

@@ -32,6 +32,7 @@ import { instructionBody, loadInstructions, memoryDir, readMemory } from '../lib
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, type Completion } from '../lib/openai';
 import { callTarget, gateCalls, isShellCapability, MODE_LABELS, suggestAllowRule } from '../lib/policy';
+import { testScratchEnvironment } from '../lib/sandbox';
 import { creationTargets, rmTargets } from '../lib/shell';
 import {
 	COMONAD_BLOCK,
@@ -1173,6 +1174,10 @@ export class Agent extends Service {
 					resume: cursor,
 					signal,
 					choose: (request: SoftRequest) => this.ctx.llm.choose(state.policy.model, request, signal),
+					// The chat's stored transcript follows the turn as it runs. A panel that reloads or
+					// resyncs mid-turn can then redraw the steps it missed, and a turn suspended on an
+					// approval leaves a complete record behind instead of only the prompt.
+					onStep: (current) => this.persistTranscript(session, current),
 				});
 				state = outcome.state;
 				if (outcome.status === 'aborted') {
@@ -1201,6 +1206,9 @@ export class Agent extends Service {
 					return { sessionId: session.id, text: lastAssistant(state.transcript)?.content ?? '' };
 				}
 				const calls = Array.isArray(outcome.payload) ? (outcome.payload as ToolCall[]) : [];
+				// The suspension is where a turn can sit for a long time: write down everything it has
+				// done first, so the chat shows the work while the approval question is open.
+				this.persistTranscript(session, state);
 				session.cursor = { node: outcome.node, payload: outcome.payload, step: outcome.step, state };
 				this.ctx.sessions.save(session);
 				const answer = calls.length
@@ -1260,6 +1268,20 @@ export class Agent extends Service {
 			...state.toolCalls.map((call): Message => ({ role: 'tool', toolCallId: call.id, content: 'Stopped by the user.', at: Date.now() })),
 		];
 		state.toolCalls = [];
+	}
+
+	/**
+	 * Writes the turn's transcript into the session while it is still running. The transcript is
+	 * otherwise only written when the turn ends, which leaves a reload (or a resync after the chat's
+	 * view was hidden) with nothing to show but the prompt. A silent generation is not the chat's,
+	 * so it never touches the stored transcript.
+	 */
+	private persistTranscript(session: Session, state: RunState): void {
+		if (SILENT_TRIGGERS.has(state.trigger) || session.transcript === state.transcript) {
+			return;
+		}
+		session.transcript = state.transcript;
+		this.ctx.sessions.save(session);
 	}
 
 	private finish(session: Session, state: RunState, options: { aborted?: boolean } = {}): void {
@@ -1643,12 +1665,17 @@ export class Agent extends Service {
 					}
 				}
 			}
+			// The test shell's environment and the tree it owns outright: `rm "$TMPDIR/out"/*.png` can
+			// then be expanded and checked instead of asking about every glob it contains.
+			const scratch = join(this.ctx.host.storage.tmp, 'shell', state.rootSessionId);
 			const gate = gateCalls(state.toolCalls, (name) => this.ctx.tools.get(name), state.policy, this.ctx.settings.rules(), {
 				sandbox: this.ctx.host.sandboxKind(),
 				allowUnsandboxedShell: this.ctx.settings.get().allowUnsandboxedShell,
 				created: process.platform === 'win32' ? undefined : created,
 				deletionStaysInside:
 					process.platform === 'win32' ? undefined : (target) => insideRealWorkspace(workspace, target),
+				testVariables: process.platform === 'win32' ? undefined : testScratchEnvironment(scratch),
+				testScratchInside: process.platform === 'win32' ? undefined : (target) => insideRealWorkspace(scratch, target),
 			});
 			state.gateReason = gate.reason;
 			if (gate.decision === 'allow') {

@@ -748,6 +748,7 @@
               "model": "deepseek-flash",
               "keyEnv": "DEEPSEEK_API_KEY",
               "thinkingOff": "thinking",
+              "topEffort": "max",
               "includeUsage": true,
               "contextWindow": 1048576,
               "pricingIn": 0.3,
@@ -761,6 +762,7 @@
               "model": "deepseek-v4-pro",
               "keyEnv": "DEEPSEEK_API_KEY",
               "thinkingOff": "thinking",
+              "topEffort": "max",
               "includeUsage": true,
               "contextWindow": 1048576,
               "pricingIn": 1.32,
@@ -779,6 +781,7 @@
                 "GOOGLE_API_KEY"
               ],
               "thinkingOff": "effort",
+              "topEffort": "high",
               "includeUsage": true,
               "contextWindow": 1048576
             }
@@ -834,6 +837,17 @@
                   "effort"
                 ],
                 "description": "How this endpoint turns thinking off for the `none` reasoning effort: DeepSeek's `thinking` field, or `reasoning_effort: \"none\"` (`effort`)."
+              },
+              "topEffort": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "description": "The deepest thinking level this endpoint accepts. A pick above it runs at this level; leave it unset to send the pick unchanged."
               },
               "temperature": {
                 "type": "number"
@@ -1035,10 +1049,11 @@
             "none",
             "low",
             "medium",
-            "high"
+            "high",
+            "max"
           ],
           "default": "auto",
-          "markdownDescription": "Thinking effort for models that support `reasoning_effort`. New chats start here; the model menu changes the current chat and saves the pick here."
+          "markdownDescription": "Thinking effort: `auto` uses the provider default, `none` turns thinking off where the model allows it, and `max` runs as deep as the endpoint goes (capped by the profile's `topEffort`). New chats start here; the model menu changes the current chat and saves the pick here."
         },
         "comonad.contextWindow": {
           "type": "number",

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { createHash } from 'node:crypto';
 import { Service, type Context } from 'cordis';
+import { limitEffort } from '../lib/effort';
 import { normalizeEndpoint } from '../lib/endpoint';
 import type { Completion } from '../lib/openai';
-import type { CompletionUsage, Message, ToolCall, ToolSpec } from '../lib/types';
+import type { CompletionUsage, Message, ReasoningEffort, ToolCall, ToolSpec } from '../lib/types';
 import { profileKeyEnvs, type Profile } from './settings';
 
 /** Model access: profile resolution plus the OpenAI-compatible adapter that runs them. */
@@ -213,7 +214,8 @@ export class Llm extends Service {
 			tools,
 			signal,
 			sink,
-			reasoningEffort: options.reasoningEffort,
+			// A level the endpoint does not go up to runs at the endpoint's ceiling instead.
+			reasoningEffort: options.reasoningEffort === undefined ? undefined : limitEffort(options.reasoningEffort, profile.topEffort),
 			temperature: options.temperature,
 			topP: options.topP,
 			maxTokens: options.maxTokens,
@@ -560,13 +562,27 @@ export class Llm extends Service {
 		}
 	}
 
+	/**
+	 * The profile a chat's model id names, falling back to the first profile the way a turn does for
+	 * an id whose profile is gone. Reads settings only: a panel drawing its state must not need an
+	 * adapter to exist yet.
+	 */
+	private profileForModel(policyModel: string): Profile | undefined {
+		const profiles = this.ctx.settings.get().profiles;
+		const wanted = policyModel.trim();
+		const selected = parseModelId(wanted);
+		const named = wanted && wanted !== 'auto' ? profiles.find((profile) => profile.id === selected.profile) : undefined;
+		return named ?? profiles[0];
+	}
+
 	/** The profile a chat's model id resolves to, for the settings the request itself needs. */
 	profileFor(policyModel: string): Profile | undefined {
-		try {
-			return this.resolve(policyModel).profile;
-		} catch {
-			return undefined;
-		}
+		return this.profileForModel(policyModel);
+	}
+
+	/** The level the endpoint will actually run: the pick, capped at the profile's ceiling. */
+	effortFor(policyModel: string, effort: ReasoningEffort): string {
+		return limitEffort(effort, this.profileForModel(policyModel)?.topEffort);
 	}
 
 	/** The adapter a profile names, or the only loaded one. */

@@ -417,20 +417,31 @@ export function sandboxEnv(
 		env.PATH = mergePath(loginPath, env.PATH);
 	}
 	if (testScratch) {
-		const tmp = join(testScratch, 'tmp');
-		env.TMPDIR = tmp;
-		env.TMP = tmp;
-		env.TEMP = tmp;
-		env.HOME = join(testScratch, 'home');
-		env.XDG_CACHE_HOME = join(testScratch, 'cache');
-		env.PYTHONPYCACHEPREFIX = join(testScratch, 'pycache');
-		env.COMONAD_SCRATCH = testScratch;
+		Object.assign(env, testScratchEnvironment(testScratch));
 	} else if (workspaceScratch) {
 		env.TMPDIR = workspaceScratch;
 	} else if (wantsTmp) {
 		env.TMPDIR = '/tmp';
 	}
 	return env;
+}
+
+/**
+ * The environment a test shell gets: every place a test runner would write outside the workspace
+ * points into the scratch tree. The gate uses the same map to resolve `$TMPDIR` in an `rm` before it
+ * decides whether the deleted files are the shell's own.
+ */
+export function testScratchEnvironment(scratch: string): Record<string, string> {
+	const tmp = join(scratch, 'tmp');
+	return {
+		TMPDIR: tmp,
+		TMP: tmp,
+		TEMP: tmp,
+		HOME: join(scratch, 'home'),
+		XDG_CACHE_HOME: join(scratch, 'cache'),
+		PYTHONPYCACHEPREFIX: join(scratch, 'pycache'),
+		COMONAD_SCRATCH: scratch,
+	};
 }
 
 /** The scratch tree a test shell uses; created before the command starts so the sandbox can bind it. */

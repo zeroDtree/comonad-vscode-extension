@@ -4,10 +4,11 @@ import * as vscode from 'vscode';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
+import { limitEffort } from '../lib/effort';
 import { isLoopbackBase, normalizeEndpoint } from '../lib/endpoint';
 import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule, WORKSPACE_BOUNDARY, type GateEnvironment } from '../lib/policy';
 import { MAX_SHELL_TIMEOUT_SECONDS, MIN_SHELL_TIMEOUT_SECONDS, sandboxStatus, shellTimeoutSeconds, shellTools } from '../tools/shell';
@@ -24,11 +25,11 @@ import {
 } from '../lib/prompt';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, ModelRequestError, toOpenAiMessages } from '../lib/openai';
 import { MAX_IMAGE_BYTES, asImagePart, estimateImageTokens, sniffImage } from '../lib/images';
-import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, loginShellArgv, mergePath, parseLoginPath, PathEscapeError, resolveInside, sandboxEnv, sandboxKind, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
+import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, loginShellArgv, mergePath, parseLoginPath, PathEscapeError, resolveInside, sandboxEnv, sandboxKind, sanitizedEnv, testScratchEnvironment, type SandboxOptions } from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
 import { applyHunk, diffLines, editForHunk, revertHunk } from '../lib/line-diff';
 import { listEndpointModels, openAiChat } from '../lib/openai';
-import type { ApprovalRequest, ImagePart, Message, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
+import type { ApprovalDecision, ApprovalRequest, ImagePart, Message, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
 import { findSymbolRange, formatReference, parseReferences, rankPaths } from '../lib/references';
@@ -52,7 +53,8 @@ import {
 	unusedChat,
 	type Mark,
 } from '../services/sessions';
-import { creationTargets, deletionTargetsAreOwned, rmInvocations } from '../lib/shell';
+import { deletionTargetsAreOwned } from '../lib/deletions';
+import { creationTargets, rmInvocations, rmTargets } from '../lib/shell';
 import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
 import {
 	AGENT_KEYS,
@@ -129,7 +131,7 @@ import { chatDocument } from '../ui/chat-panel';
 import tavernEntry from 'comonad-plugin-tavern';
 import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
 import { contentController } from 'comonad-plugin-tavern/panel/controller';
-import { settingsDocument } from '../ui/settings-panel';
+import { settingsDocument, settingsPanel } from '../ui/settings-panel';
 import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
 import { settingsTarget } from '../host';
@@ -1010,14 +1012,15 @@ suite('Comonad domain', () => {
 			assert.deepStrictEqual(creationTargets(command, ws), [], command);
 		}
 		assert.deepStrictEqual(
-			rmInvocations('rm -f a; rm -rf b')?.map((invocation) => [invocation.recursive, invocation.operands]),
+			rmInvocations('rm -f a; rm -rf b')?.map((invocation) => [invocation.recursive, invocation.operands.map((operand) => operand.value)]),
 			[
 				[false, ['a']],
 				[true, ['b']],
 			],
 		);
 		assert.deepStrictEqual(rmInvocations('sudo rm -f a'), [], 'rm must be in command position');
-		assert.strictEqual(rmInvocations('rm -f $A'), undefined, 'a non-literal operand is ambiguous');
+		assert.strictEqual(rmInvocations('rm -f $A')?.[0]?.operands[0]?.literal, false, 'a dynamic operand is kept for expansion');
+		assert.deepStrictEqual(rmTargets('rm -f $A', '/ws'), [], 'but it has no single path');
 
 		// The compound probe that prompted this feature: quotes, redirections, fd duplication,
 		// pipelines, &&/|| and a touch+rm of the same path in one command.
@@ -1057,6 +1060,86 @@ suite('Comonad domain', () => {
 		);
 		assert.strictEqual(asked.decision, 'confirm');
 		assert.strictEqual(asked.escalated, true);
+	});
+
+	test('the gate runs a scratch glob from the test shell without asking', () => {
+		const root = mkdtempSync(join(tmpdir(), 'comonad-gate-rm-'));
+		try {
+			const scratch = join(root, 'scratch');
+			mkdirSync(join(scratch, 'tmp', 'pages2'), { recursive: true });
+			writeFileSync(join(scratch, 'tmp', 'pages2', 'p-1.png'), 'x');
+			const inside = (target: string): boolean => {
+				try {
+					const rel = relative(realpathSync(scratch), realpathSync(dirname(target)));
+					return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+				} catch {
+					return false;
+				}
+			};
+			const env = {
+				sandbox: 'bwrap' as const,
+				allowUnsandboxedShell: false,
+				created: new Set<string>(),
+				testVariables: testScratchEnvironment(scratch),
+				testScratchInside: inside,
+			};
+			const accepted = policy({ approval: 'universal_accept' });
+			const command = 'rm -f "$TMPDIR/pages2"/*.png';
+			const allowed = gateCalls([call('run_shell_test', { command })], lookup, accepted, { allow: [], ask: [], deny: [] }, env);
+			assert.strictEqual(allowed.decision, 'allow', allowed.reason);
+			// Without the scratch tree the same command cannot be proven and still asks.
+			const asked = gateCalls(
+				[call('run_shell_test', { command })],
+				lookup,
+				accepted,
+				{ allow: [], ask: [], deny: [] },
+				{ ...env, testScratchInside: undefined },
+			);
+			assert.strictEqual(asked.decision, 'confirm');
+			assert.strictEqual(asked.escalated, true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('the deletion check expands the scratch globs it can prove', () => {
+		const root = mkdtempSync(join(tmpdir(), 'comonad-rm-'));
+		try {
+			const workspace = join(root, 'ws');
+			const scratch = join(root, 'scratch');
+			mkdirSync(workspace);
+			mkdirSync(join(scratch, 'tmp', 'pages2'), { recursive: true });
+			writeFileSync(join(scratch, 'tmp', 'pages2', 'p-1.png'), 'x');
+			writeFileSync(join(scratch, 'tmp', 'pages2', 'p-2.png'), 'x');
+			const variables = testScratchEnvironment(scratch);
+			// The production check is realpath-based; a symlink must not smuggle a user path in.
+			const inside = (target: string): boolean => {
+				try {
+					const rel = relative(realpathSync(scratch), realpathSync(dirname(target)));
+					return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+				} catch {
+					return false;
+				}
+			};
+			const command = 'rm -f "$TMPDIR/pages2"/*.png';
+			assert.ok(deletionTargetsAreOwned(command, workspace, new Set(), undefined, { variables, scratch: inside }), command);
+			// Without the scratch tree those files are not journaled, so the same glob cannot be proven.
+			assert.ok(!deletionTargetsAreOwned(command, workspace, new Set(), undefined, { variables }));
+			assert.ok(!deletionTargetsAreOwned('rm -f "$OTHER/pages2"/*.png', workspace, new Set(), undefined, { variables, scratch: inside }));
+			// A workspace glob is owned only when every file it matches was created by this session.
+			writeFileSync(join(workspace, 'a.log'), 'x');
+			writeFileSync(join(workspace, 'b.log'), 'x');
+			assert.ok(deletionTargetsAreOwned('rm -f *.log', workspace, new Set(['a.log', 'b.log'])));
+			assert.ok(!deletionTargetsAreOwned('rm -f *.log', workspace, new Set(['a.log'])), 'every match must be owned');
+			// A symlink inside the scratch that leads outside it is not the session's to delete.
+			const outside = join(root, 'outside');
+			mkdirSync(outside);
+			writeFileSync(join(outside, 'secret.png'), 'x');
+			symlinkSync(outside, join(scratch, 'tmp', 'link'));
+			assert.ok(!deletionTargetsAreOwned('rm -f "$TMPDIR/link/secret.png"', workspace, new Set(), undefined, { variables, scratch: inside }));
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	test('created paths are sanitized, persisted, and bound to their workspace', () => {
@@ -1659,6 +1742,40 @@ suite('Comonad domain', () => {
 		}
 	});
 
+	test('a thinking level above the endpoint ceiling runs at the ceiling', async () => {
+		const kernel = await createTestKernel();
+		try {
+			// The shipped profiles declare how deep their provider goes: DeepSeek reaches max, Gemini
+			// stops at high (Gemini 3 has no xhigh or max).
+			assert.strictEqual(kernel.ctx.llm.effortFor('deepseek', 'max'), 'max');
+			assert.strictEqual(kernel.ctx.llm.effortFor('gemini', 'max'), 'high');
+			assert.strictEqual(kernel.ctx.llm.effortFor('gemini', 'medium'), 'medium');
+			// `auto` and `none` are modes, not depths: no ceiling applies to either.
+			assert.strictEqual(kernel.ctx.llm.effortFor('gemini', 'auto'), 'auto');
+			assert.strictEqual(kernel.ctx.llm.effortFor('gemini', 'none'), 'none');
+			// A profile between high and max keeps its own ceiling, and no ceiling sends the pick as-is.
+			assert.strictEqual(limitEffort('max', 'xhigh'), 'xhigh');
+			assert.strictEqual(limitEffort('high', 'xhigh'), 'high');
+			assert.strictEqual(limitEffort('max', undefined), 'max');
+
+			let seen: string | undefined;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					seen = request.reasoningEffort;
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			// The adapter is handed the resolved level, so no endpoint ever sees a value above its top.
+			await kernel.ctx.llm.chat('gemini', [{ role: 'user', content: 'hi' }], [], {}, new AbortController().signal, {
+				reasoningEffort: 'max',
+			});
+			assert.strictEqual(seen, 'high');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('the endpoint model list is read in either shape', async () => {
 		const original = globalThis.fetch;
 		const calls: string[] = [];
@@ -2096,6 +2213,20 @@ suite('Comonad domain', () => {
 			contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
 		};
 		assert.deepStrictEqual(manifest.contributes.configuration.properties['comonad.profiles']?.default, DEFAULT_PROFILES);
+	});
+
+	test('the settings panel injects every service it reads', () => {
+		const root = join(__dirname, '..', '..');
+		const source = readFileSync(join(root, 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		// Cordis members that need no service of their own; every other `ctx.X` is an injected service.
+		const members = new Set(['on', 'once', 'emit', 'get', 'inject', 'effect', 'plugin', 'provide', 'scope', 'dispose']);
+		const used = [...new Set([...source.matchAll(/\bctx\.([a-zA-Z]+)/g)].map((match) => match[1]!))]
+			.filter((name) => !members.has(name))
+			.sort();
+		const inject = ((settingsPanel as unknown as { inject?: readonly string[] }).inject ?? []).slice().sort();
+		// A service read without an injection throws `cannot get property "X" without inject` the moment
+		// the panel builds its state — which takes every dropdown on the page down with it.
+		assert.deepStrictEqual(inject, used);
 	});
 });
 
@@ -3673,6 +3804,8 @@ suite('Cordis kernel', () => {
 			"'jump-latest'",
 			'resizeInput',
 			'welcome-workspace',
+			"label: 'Max'",
+			'reasoningEffortResolved',
 		]) {
 			assert.ok(js.includes(needle), needle);
 		}
@@ -3683,6 +3816,7 @@ suite('Cordis kernel', () => {
 			'id="chats-scope"',
 			'id="jump-latest"',
 			'id="input" rows="1"',
+			'reasoningEffortResolved',
 		]) {
 			assert.ok(panel.includes(needle), needle);
 		}
@@ -4591,6 +4725,73 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(requests.length, 2);
 			assert.strictEqual(toolStarts, 1);
 			assert.strictEqual(allowed.text, 'executed ok');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a turn suspended on approval keeps the work it has done in the session transcript', async () => {
+		const kernel = await createTestKernel({ config: { approval: 'manual' } });
+		try {
+			let calls = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					calls += 1;
+					if (calls === 1) {
+						const toolCall: ToolCall = { id: 'c1', name: 'probe', arguments: '{}' };
+						return { message: { role: 'assistant', content: 'calling', toolCalls: [toolCall] }, toolCalls: [toolCall] };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [] };
+				},
+			});
+			await kernel.ctx.plugin(
+				toolset([
+					{
+						name: 'probe',
+						description: '',
+						parameters: objectSchema({}),
+						capability: 'ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						execute: async () => 'ran',
+					},
+				]),
+			);
+			// Hold the approval open: the turn parks at the gate, which is where the chat used to be
+			// left with nothing but the prompt until the turn ended.
+			let asked: (() => void) | undefined;
+			let answer: ((decision: 'allow') => void) | undefined;
+			const question = new Promise<void>((resolve) => {
+				asked = resolve;
+			});
+			kernel.ctx.on('approval/request', (request, next) => {
+				if (request.surface !== 'test') {
+					return next();
+				}
+				asked?.();
+				return new Promise<ApprovalDecision>((resolve) => {
+					answer = resolve;
+				});
+			});
+			const turn = kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			await question;
+			const parked = kernel.ctx.sessions.active();
+			assert.ok(parked, 'a session is active');
+			assert.ok(parked.cursor, 'the turn is parked at the gate');
+			assert.deepStrictEqual(
+				parked.transcript.map((message) => message.role),
+				['user', 'assistant'],
+				'the parked turn keeps the assistant message that asked for the call',
+			);
+			assert.strictEqual(parked.transcript[1]?.toolCalls?.[0]?.name, 'probe');
+			answer?.('allow');
+			const result = await turn;
+			assert.strictEqual(result.text, 'done');
+			assert.deepStrictEqual(
+				kernel.ctx.sessions.require(result.sessionId).transcript.map((message) => message.role),
+				['user', 'assistant', 'tool', 'assistant'],
+			);
 		} finally {
 			await kernel.dispose();
 		}

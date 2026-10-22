@@ -4,12 +4,13 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { asReasoningEffort } from '../lib/effort';
 import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES } from '../lib/images';
 import { APPROVAL_LABELS, MODE_LABELS } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { turnsOf, type Step, type Turn } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
-import type { Approval, ApprovalDecision, ImagePart, ReasoningEffort, WorkMode } from '../lib/types';
+import type { Approval, ApprovalDecision, ImagePart, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
 import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
 import { formatReference } from '../lib/references';
@@ -155,6 +156,7 @@ export function chatPanel(ctx: Context): void {
 		readyClients.delete(webview);
 		focusedClients.delete(webview);
 		subagentViews.delete(webview);
+		published.delete(webview);
 		syncFocus();
 		listeners.get(webview)?.dispose();
 		listeners.delete(webview);
@@ -170,6 +172,7 @@ export function chatPanel(ctx: Context): void {
 		const config = ctx.settings.get();
 		const session = ctx.sessions.active();
 		const all = ctx.sessions.list().filter(inHistory);
+		const effort = session?.reasoningEffort ?? config.reasoningEffort;
 		const usage = session?.usage;
 		const tokens = usage ? usage.inputTokens + usage.outputTokens : 0;
 		return {
@@ -195,7 +198,10 @@ export function chatPanel(ctx: Context): void {
 			context: session?.contextForm ?? config.contextForm,
 			display: config.displayForm,
 			toolCard: config.toolCard,
-			reasoningEffort: session?.reasoningEffort ?? config.reasoningEffort,
+			reasoningEffort: effort,
+			// What the endpoint will actually run, when its ceiling is below the pick: the menu reads
+			// `Max → high` rather than claiming a level the provider does not have.
+			reasoningEffortResolved: ctx.llm.effortFor(config.model, effort),
 			contextWindow: session?.contextWindow ?? config.contextWindow,
 			// The window this chat's requests are measured against, which is what the model menu's
 			// `Auto (…)` reads out.
@@ -314,13 +320,22 @@ export function chatPanel(ctx: Context): void {
 			: { steps: [] };
 	};
 
-	/** The transcript the panel was last handed: which chat, and how much of it. */
-	let published: { id: string; length: number } | null = null;
+	/**
+	 * The transcript each panel was last handed: which chat, and how much of it. Per client, so a
+	 * second panel opening or a hidden view resyncing cannot redraw a live turn in another one.
+	 */
+	const published = new Map<vscode.Webview, { id: string; length: number }>();
 
-	/** The one place the panel is handed a transcript: a reload, a chat switch, and every rewrite. */
-	const publishTurns = (session: Session | undefined): void => {
-		published = session ? { id: session.id, length: session.transcript.length } : null;
-		post({ type: 'turns', turns: history(session) });
+	/** The one place a panel is handed a transcript: a reload, a chat switch, and every rewrite. */
+	const publishTurns = (session: Session | undefined, only?: vscode.Webview): void => {
+		for (const client of only ? [only] : clients) {
+			if (session) {
+				published.set(client, { id: session.id, length: session.transcript.length });
+			} else {
+				published.delete(client);
+			}
+		}
+		post({ type: 'turns', sessionId: session?.id, turns: history(session) }, only);
 	};
 
 	/** A subagent's conversation as the overlay draws it; `undefined` when it is gone. */
@@ -406,20 +421,24 @@ export function chatPanel(ctx: Context): void {
 			panel.title = session ? `Comonad · ${trimTitle(session.title)}` : 'Comonad';
 		}
 		if (!session) {
-			if (published) {
+			if ([...clients].some((client) => published.has(client))) {
 				publishTurns(undefined);
 			}
 			return;
 		}
 		// A different chat, or one that was cut shorter behind the panel's back — a fork above, or an
 		// edit: the panel has to be handed the transcript again, not left drawing what is gone. A chat
-		// that merely grew is a turn the panel watched happen, with its own streaming to keep. While a
-		// turn is running its own mid-flight compaction must not wipe the live stream; the final
-		// refresh after it ends catches up.
-		const moved = published?.id !== session.id;
-		const cut = !running && published?.id === session.id && session.transcript.length < published.length;
-		if (moved || cut) {
-			publishTurns(session);
+		// that merely grew is a turn the panel watched happen, with its own streaming to keep; while a
+		// turn is running its own mid-flight compaction must not wipe the live stream. The guest
+		// re-attaches to the running turn from this transcript (`resumeLive`), so a resync after a
+		// reload or a hidden view still ends with the stream on the same turn.
+		for (const client of clients) {
+			const seen = published.get(client);
+			const moved = seen?.id !== session.id;
+			const cut = !running && seen?.id === session.id && session.transcript.length < seen.length;
+			if (moved || cut) {
+				publishTurns(session, client);
+			}
 		}
 		// After a repaint, not before it: a card the guest already holds is deduped by id.
 		postPendingApprovals();
@@ -956,9 +975,11 @@ export function chatPanel(ctx: Context): void {
 							return false;
 						}
 					}
-					// The webview is about to draw the cut. The panel already holds this much of the
+					// The webview is about to draw the cut. Every panel already holds this much of the
 					// transcript, so the `sessions/changed` this rewrite emits cannot repaint the live turn.
-					published = { id: live.id, length: promptAt };
+					for (const client of clients) {
+						published.set(client, { id: live.id, length: promptAt });
+					}
 					post({
 						type: 'turn-start',
 						text: input,
@@ -1029,7 +1050,8 @@ export function chatPanel(ctx: Context): void {
 				case 'ready':
 					readyClients.add(source);
 					// A fresh guest has no transcript of its own: hand it the one the session holds.
-					published = null;
+					// Only this client is forgotten; another panel may be mid-turn with its own copy.
+					published.delete(source);
 					refresh();
 					postPendingApprovals();
 					// References picked before the composer loaded are finally in place to receive them.
@@ -1047,6 +1069,15 @@ export function chatPanel(ctx: Context): void {
 						}
 					}
 					break;
+				case 'resync': {
+					// The guest lost the live stream (a dropped message, a race with a reload) and
+					// asks for the transcript the host persisted while the turn ran. Only this client
+					// is redrawn; a live turn re-attaches to it and the stream continues there.
+					post(await state(), source);
+					publishTurns(ctx.sessions.active(), source);
+					postPendingApprovals();
+					break;
+				}
 				case 'focusState':
 					if (message.focused === true) {
 						focusedClients.add(source);
@@ -1370,7 +1401,9 @@ export function chatPanel(ctx: Context): void {
 			webviewView.onDidChangeVisibility(() => {
 				if (webviewView.visible) {
 					// Messages posted while the view is hidden are dropped: resync from the session.
-					published = null;
+					// Only this view is forgotten — the transcript now includes the running turn, so
+					// the guest can re-attach its live stream to it.
+					published.delete(webviewView.webview);
 					refresh();
 				} else {
 					focusedClients.delete(webviewView.webview);
@@ -1472,9 +1505,6 @@ function asForm(value: unknown): ContextForm {
 	return value === 'token' || value === 'raw' ? value : 'rendered';
 }
 
-function asReasoningEffort(value: unknown): ReasoningEffort {
-	return value === 'none' || value === 'low' || value === 'medium' || value === 'high' ? value : 'auto';
-}
 
 function trimTitle(title: string): string {
 	return title.length > 42 ? `${title.slice(0, 42)}…` : title;

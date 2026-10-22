@@ -218,10 +218,11 @@
 
 	const REASONING = [
 		{ id: 'auto', label: 'Auto', description: 'use the provider default' },
-		{ id: 'none', label: 'None', description: 'answer without extra thinking' },
+		{ id: 'none', label: 'Off', description: 'answer without extra thinking, where the model allows it' },
 		{ id: 'low', label: 'Low', description: 'a quick pass of thinking' },
 		{ id: 'medium', label: 'Medium', description: 'balanced thinking' },
-		{ id: 'high', label: 'High', description: 'the deepest thinking the model offers' },
+		{ id: 'high', label: 'High', description: 'deep thinking for hard work' },
+		{ id: 'max', label: 'Max', description: 'the deepest thinking the endpoint offers, at the highest cost' },
 	];
 	// The window the model is treated as having. Auto takes the model's own, which is the only setting
 	// that stays right when the model changes; the rest override it for a model whose window is not what
@@ -244,7 +245,15 @@
 		}
 	});
 
-	const modelState = { models: [], model: '', modelLabel: 'auto', reasoningEffort: 'auto', contextWindow: 0, windowTokens: 0 };
+	const modelState = {
+		models: [],
+		model: '',
+		modelLabel: 'auto',
+		reasoningEffort: 'auto',
+		reasoningEffortResolved: '',
+		contextWindow: 0,
+		windowTokens: 0,
+	};
 
 	// Hovering Reasoning / Context / Model expands the choices in a flyout on the right.
 	const modelFlyout = document.createElement('div');
@@ -420,10 +429,17 @@
 		return row;
 	}
 
+	/** The Reasoning value, plus the endpoint's ceiling when the pick is above it. */
+	function reasoningValue() {
+		const label = choiceLabel(REASONING, modelState.reasoningEffort);
+		const resolved = modelState.reasoningEffortResolved;
+		return resolved && resolved !== modelState.reasoningEffort && resolved !== 'auto' ? label + ' → ' + resolved : label;
+	}
+
 	function renderModelMenu() {
 		const menu = modelPill.menu;
 		menu.innerHTML = '';
-		menu.append(flyoutRow('reasoning', 'Reasoning', choiceLabel(REASONING, modelState.reasoningEffort)));
+		menu.append(flyoutRow('reasoning', 'Reasoning', reasoningValue()));
 		menu.append(flyoutRow('context', 'Context window', formatLimit(modelState.contextWindow)));
 		menu.append(flyoutRow('model', 'Model', modelState.modelLabel));
 	}
@@ -2026,7 +2042,7 @@
 	}
 
 	/** Draws a whole transcript: the one path used by a reload, a chat switch and a display change. */
-	function renderTurns(list) {
+	function renderTurns(list, sessionId) {
 		turns = list || [];
 		live = null;
 		editing = null;
@@ -2049,6 +2065,44 @@
 		}
 		pinned = true;
 		scroll(true);
+		// A reload or a resync while a turn runs: the transcript the host persisted ends at the last
+		// settled step, and the rest of the stream continues in this same turn. Without this, every
+		// event after the redraw would be dropped because `live` was cleared above.
+		const runningSessionId = state && state.running ? state.runningSessionId || runningSession : null;
+		if (runningSessionId && sessionId && sessionId === runningSessionId) {
+			resumeLive(turns[turns.length - 1]);
+		}
+	}
+
+	/**
+	 * Re-attaches the live stream to a turn drawn from the persisted transcript. The steps already
+	 * on screen are the host's record of this turn; a thought or text block still being written
+	 * continues in place, and every tool call is registered so its result settles its own card.
+	 */
+	function resumeLive(turn) {
+		if (!turn) {
+			return;
+		}
+		live = { turn, thought: null, text: null, think: '', pending: false };
+		for (const step of turn.steps || []) {
+			if (step.kind === 'tool' && step.id) {
+				toolCards.set(step.id, step);
+			}
+		}
+		const steps = turn.steps || [];
+		const last = steps[steps.length - 1];
+		if (last && last.kind === 'thought' && last._think) {
+			live.thought = last;
+			live.think = last.text || '';
+			if (last._summary) {
+				last._summary.textContent = 'Thinking…';
+			}
+		} else if (last && last.kind === 'text' && last._body) {
+			live.text = last;
+		}
+		renderFoot(turn);
+		refreshActions();
+		tick();
 	}
 
 	/* ------------------------------------------------------------- subagent overlay */
@@ -2312,8 +2366,27 @@
 		schedule();
 	}
 
+	// A guest that missed the stream (a hidden view, a dropped message) asks the host for the
+	// transcript it persisted while the turn ran. One request a second is enough: the answer
+	// re-attaches the live turn, and the events after it land normally.
+	let resyncAt = 0;
+
+	function requestResync(force) {
+		const runningSessionId = state && state.running ? state.runningSessionId || runningSession : null;
+		if (!force && (!runningSessionId || state.sessionId !== runningSessionId)) {
+			return;
+		}
+		const now = Date.now();
+		if (now - resyncAt < 1_000) {
+			return;
+		}
+		resyncAt = now;
+		vscode.postMessage({ type: 'resync' });
+	}
+
 	function toolStart(message) {
 		if (!live) {
+			requestResync();
 			return;
 		}
 		flushOpen();
@@ -2345,6 +2418,9 @@
 	function toolResult(message) {
 		const step = toolCards.get(message.id);
 		if (!step) {
+			// The card is gone (a redraw the guest never caught up with): the transcript has it,
+			// so ask for it instead of leaving the result as a loose notice.
+			requestResync();
 			addNotice(message.output || '');
 			return;
 		}
@@ -2364,6 +2440,10 @@
 
 	function endTurn(message) {
 		if (!live) {
+			// The turn ended without this guest ever holding its live stream (a reload, a resync
+			// that raced it). The host has the settled transcript now, so draw that instead of
+			// leaving the reply missing.
+			requestResync(true);
 			return;
 		}
 		const turn = live.turn;
@@ -2416,7 +2496,12 @@
 			return true;
 		});
 		live = null;
+		// A resync or a dropped message can leave the drawn turn short of the steps the host
+		// settled; the host's record is authoritative, so redraw it from there.
 		if (currentView() !== 'rendered') {
+			renderSteps(turn);
+		} else if (settled.length > turn.steps.length) {
+			turn.steps = settled;
 			renderSteps(turn);
 		}
 		renderFoot(turn);
@@ -2837,6 +2922,7 @@
 		modelState.model = state.model;
 		modelState.modelLabel = state.modelLabel || state.model || 'auto';
 		modelState.reasoningEffort = state.reasoningEffort || 'auto';
+		modelState.reasoningEffortResolved = state.reasoningEffortResolved || '';
 		modelState.contextWindow = Number(state.contextWindow) || 0;
 		modelState.windowTokens = Number(state.windowTokens) || 0;
 		updateModelPill();
@@ -2986,7 +3072,7 @@
 				renderChanges(message.files || [], message.reviewed || []);
 				break;
 			case 'turns':
-				renderTurns(message.turns || []);
+				renderTurns(message.turns || [], message.sessionId);
 				break;
 			case 'search':
 				// Only the surface that asked renders these hits.
@@ -3032,8 +3118,7 @@
 				const turn = turns.length ? turns[turns.length - 1] : null;
 				if (turn) {
 					turn.sessionId = turn.sessionId || message.sessionId;
-					live = { turn, thought: null, text: null, think: '', pending: false };
-					renderFoot(turn);
+					resumeLive(turn);
 				}
 				break;
 			}

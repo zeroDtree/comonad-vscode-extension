@@ -13,7 +13,7 @@ UI.
 | --- | --- | --- |
 | `comonad.model` | `auto` | `auto` for the first profile, a profile id for its default model, or `profile:model` |
 | `comonad.profiles` | shipped DeepSeek/Gemini profiles | OpenAI-compatible endpoints; see [Chat](/guide/chat) |
-| `comonad.reasoningEffort` | `auto` | Thinking effort for models that support `reasoning_effort` |
+| `comonad.reasoningEffort` | `auto` | Thinking effort: `auto`, `none` (Off), `low`, `medium`, `high` or `max`; a profile's `topEffort` caps it |
 | `comonad.contextWindow` | `0` | Override the model's input window; `0` uses the profile |
 
 ## Chat display

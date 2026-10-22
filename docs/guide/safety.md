@@ -134,10 +134,12 @@ tasks have no timeout.
 ## Dangerous commands
 
 Commands shaped like `rm -rf`, `sudo`, `curl | sh`, `git push --force` and similar always prompt,
-even under accept policies. The one exception is cleanup of the agent's own work: a literal,
-non-recursive `rm` whose every target is inside the workspace and recorded as created by this
-session. Recursive deletes, globs, variables, symlinked parents that resolve outside the workspace,
-and anything the scanner cannot prove still prompt.
+even under accept policies. The one exception is cleanup of the agent's own work: a non-recursive
+`rm` whose every target is either inside the workspace and recorded as created by this session, or
+inside the test shell's private scratch tree. A `*`/`?` glob and the variables the test shell sets
+(`$TMPDIR`, `$HOME`, `$COMONAD_SCRATCH`, …) are expanded first and every match is checked. Recursive
+deletes, unknown variables, substitutions, symlinked parents that resolve outside the allowed
+trees, a glob that matches nothing, and anything else the scanner cannot prove still prompt.
 
 ## Presets
 

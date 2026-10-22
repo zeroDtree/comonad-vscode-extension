@@ -25,9 +25,12 @@ The model pill opens one menu with three controls:
 
 | Control | What it does |
 | --- | --- |
-| **Reasoning** | Thinking effort: Auto, None, Low, Medium or High |
+| **Reasoning** | Thinking effort: Auto, Off, Low, Medium, High or Max |
 | **Context window** | Auto uses the model profile; fixed sizes override it |
 | **Model** | The model for new turns; the list is read from each endpoint |
+
+**Max** runs as deep as the endpoint goes. A profile's `topEffort` caps it — Gemini stops at
+**High** — and the menu then reads the pick as `Max → high`.
 
 Below the input:
 

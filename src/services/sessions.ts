@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
+import { asReasoningEffort } from '../lib/effort';
 import { asImagePart } from '../lib/images';
 import { WORKSPACE_BOUNDARY, asApproval, asWorkMode } from '../lib/policy';
 import { isInside } from '../lib/sandbox';
@@ -443,6 +444,9 @@ export class SessionStore {
 			// Only a string is a workspace; a hand-edited value falls back to the directory the chat ran
 			// in, which is what the history uses for sessions written before the field existed.
 			workspace: typeof session.workspace === 'string' ? session.workspace : undefined,
+			// Levels come from a menu in one build and from a JSON file the next: an unknown value must
+			// not travel to an endpoint. A session without one keeps inheriting the setting.
+			reasoningEffort: session.reasoningEffort === undefined ? undefined : asReasoningEffort(session.reasoningEffort),
 			// Image references are checked too: a hand-edited id must never become a path, and a media
 			// type is derived from the id rather than trusted.
 			transcript: (session.transcript ?? []).map((message) => {

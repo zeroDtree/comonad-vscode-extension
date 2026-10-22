@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
+import type { EffortTop } from '../lib/effort';
 import { DEFAULT_GRAPH_SOURCE } from '../lib/mermaid';
 import { asApproval, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
@@ -32,6 +33,8 @@ export interface Profile {
 	keyEnv?: string | string[];
 	/** How this endpoint turns thinking off for the `none` effort (`thinking` = DeepSeek's field). */
 	thinkingOff?: 'thinking' | 'effort';
+	/** The deepest thinking level the endpoint accepts; a pick above it runs at this level. */
+	topEffort?: EffortTop;
 	temperature?: number;
 	topP?: number;
 	maxTokens?: number;
@@ -80,6 +83,7 @@ export const DEFAULT_PROFILES: Profile[] = [
 		model: 'deepseek-flash',
 		keyEnv: 'DEEPSEEK_API_KEY',
 		thinkingOff: 'thinking',
+		topEffort: 'max',
 		includeUsage: true,
 		contextWindow: 1_048_576,
 		pricingIn: 0.3,
@@ -93,6 +97,7 @@ export const DEFAULT_PROFILES: Profile[] = [
 		model: 'deepseek-v4-pro',
 		keyEnv: 'DEEPSEEK_API_KEY',
 		thinkingOff: 'thinking',
+		topEffort: 'max',
 		includeUsage: true,
 		contextWindow: 1_048_576,
 		pricingIn: 1.32,
@@ -110,6 +115,8 @@ export const DEFAULT_PROFILES: Profile[] = [
 		modelSkip: 'computer-use|deep-research|antigravity|aqa|-image|imagen|veo|embedding|-tts|live',
 		keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
 		thinkingOff: 'effort',
+		// Gemini 3's ladder stops at high: minimal/low/medium/high, and some probes only low/high.
+		topEffort: 'high',
 		includeUsage: true,
 		contextWindow: 1_048_576,
 	},
@@ -550,4 +557,4 @@ function withDefaults(profiles: Profile[]): Profile[] {
 
 /** The remaining value sets a `get()` may fall back within — a settings file is untrusted input. */
 const CONTEXT_FORMS: readonly ContextForm[] = ['rendered', 'token', 'raw'];
-const REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high'];
+const REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'max'];

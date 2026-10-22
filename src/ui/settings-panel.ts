@@ -733,7 +733,7 @@ export function settingsPanel(ctx: Context): void {
 	registerCommand(ctx, 'comonad.pickModel', () => pickModel(ctx));
 	registerCommand(ctx, 'comonad.configureModel', () => configureModel(ctx));
 }
-settingsPanel.inject = ['host', 'settings', 'llm', 'tools', 'mcp', 'sessions', 'agent'];
+settingsPanel.inject = ['host', 'settings', 'llm', 'tools', 'mcp', 'sessions', 'agent', 'catalog'];
 
 export async function pickModel(ctx: Context): Promise<void> {
 	const choices = await ctx.llm.availableModels({ refresh: true });
@@ -819,6 +819,7 @@ export async function configureModel(ctx: Context): Promise<void> {
 		profile.modelPrefix = match.modelPrefix;
 		profile.modelSkip = match.modelSkip;
 		profile.thinkingOff = match.thinkingOff;
+		profile.topEffort = match.topEffort;
 		profile.keyEnv = keyEnv.length ? keyEnv : match.keyEnv;
 	} else if (keyEnv.length) {
 		profile.keyEnv = keyEnv;
@@ -865,6 +866,7 @@ export async function configureModel(ctx: Context): Promise<void> {
 		: undefined;
 	if (declaredBy) {
 		profile.label = declaredBy.label;
+		profile.topEffort = declaredBy.topEffort;
 		profile.contextWindow = declaredBy.contextWindow;
 		profile.pricingIn = declaredBy.pricingIn;
 		profile.pricingCachedIn = declaredBy.pricingCachedIn;

@@ -24,9 +24,12 @@ Secondary Side Bar。同样的会话也可以在 VS Code 内置聊天视图里�
 
 | 控件 | 作用 |
 | --- | --- |
-| **Reasoning** | 思考强度：Auto、None、Low、Medium、High |
+| **Reasoning** | 思考强度：Auto、Off、Low、Medium、High、Max |
 | **Context window** | Auto 使用模型 profile；固定档位覆盖它 |
 | **Model** | 新一轮使用的模型；列表从各端点读取 |
+
+**Max** 会用到端点支持的最深层级；profile 的 `topEffort` 会封顶——Gemini 最高只到 **High**，
+此时菜单会显示成 `Max → high`。
 
 输入框下方：
 

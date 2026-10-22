@@ -12,5 +12,6 @@
     "js/ts.tsc.autoDetect": "off",
     "comonad.model": "deepseek:deepseek-flash",
     "comonad.contextWindow": 262144,
-    "comonad.reasoningEffort": "medium"
+    "comonad.reasoningEffort": "medium",
+    "comonad.network": true
 }

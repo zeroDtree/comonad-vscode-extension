@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `comonad.model` | `auto` | `auto` 取第一个 profile；profile id 取其默认模型；或 `profile:model` |
 | `comonad.profiles` | 内置 DeepSeek/Gemini profile | OpenAI 兼容端点；见[聊天](/zh/guide/chat) |
-| `comonad.reasoningEffort` | `auto` | 支持 `reasoning_effort` 的模型的思考强度 |
+| `comonad.reasoningEffort` | `auto` | 思考强度：`auto`、`none`（Off）、`low`、`medium`、`high`、`max`；受 profile 的 `topEffort` 封顶 |
 | `comonad.contextWindow` | `0` | 覆盖模型输入窗口；`0` 使用 profile |
 
 ## 聊天显示

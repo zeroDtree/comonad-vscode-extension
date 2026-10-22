@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 
 /**
  * A conservative scanner for the POSIX `sh` commands Comonad runs. It answers two questions for the
@@ -11,6 +11,15 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 /** An rm with at least one short-flag group containing `r` or `f`, and a target. */
 export const RM_PATTERN = /\brm\s+(-[a-z-]*[rf][a-z-]*\s+)+\S/i;
 
+/** One rm target, kept both ways: resolved when literal, and as written for controlled expansion. */
+export interface RmOperand {
+	/** The word after quote removal. Shell variables are dropped, so only a literal operand has one. */
+	value: string;
+	/** The word as written: quotes, variables and globs intact, so a caller can expand it safely. */
+	raw: string;
+	literal: boolean;
+}
+
 export interface RmInvocation {
 	/** Offset of the `rm` word in the command. */
 	start: number;
@@ -20,12 +29,13 @@ export interface RmInvocation {
 	cwd: string;
 	/** A recursive form was present (`-r`, `-R`, `-d`, `--recursive`, `--dir`). */
 	recursive: boolean;
-	/** Literal operands after quote removal. */
-	operands: string[];
+	operands: RmOperand[];
 }
 
 interface Word {
 	value: string;
+	/** The source slice this word was read from, before quote removal. */
+	raw: string;
 	literal: boolean;
 	start: number;
 	end: number;
@@ -407,7 +417,7 @@ function scan(command: string): SimpleCommand[] | undefined {
 			value += char;
 			i += 1;
 		}
-		return { value, literal, start: wordStart, end: i };
+		return { value, raw: command.slice(wordStart, i), literal, start: wordStart, end: i };
 	};
 
 	const readRedirect = (): boolean => {
@@ -569,7 +579,7 @@ export function rmInvocations(command: string): RmInvocation[] | undefined {
 		}
 		let recursive = false;
 		let options = true;
-		const operands: string[] = [];
+		const operands: RmOperand[] = [];
 		for (const word of simple.words.slice(1)) {
 			if (options && word.value === '--') {
 				options = false;
@@ -603,10 +613,8 @@ export function rmInvocations(command: string): RmInvocation[] | undefined {
 				}
 				continue;
 			}
-			if (!word.literal || !word.value) {
-				return undefined;
-			}
-			operands.push(word.value);
+			// A dynamic operand is kept for the caller to expand; it is not a literal path any more.
+			operands.push({ value: word.value, raw: word.raw, literal: word.literal });
 		}
 		if (!operands.length) {
 			return undefined;
@@ -629,7 +637,11 @@ export function rmTargets(command: string, workspace: string): string[] {
 	const targets = new Set<string>();
 	for (const invocation of invocations) {
 		for (const operand of invocation.operands) {
-			targets.add(resolve(root, invocation.cwd, operand));
+			// A dynamic operand has no single path: the caller treats the command as unprovable.
+			if (!operand.literal) {
+				return [];
+			}
+			targets.add(resolve(root, invocation.cwd, operand.value));
 		}
 	}
 	return [...targets];
@@ -695,49 +707,3 @@ export function creationTargets(command: string, workspace: string): string[] {
 	return [...targets];
 }
 
-/**
- * True only when every `rm` the command contains is literal, non-recursive, inside the workspace and
- * every operand is a path the session created. Any unparsed raw `rm` match fails the check: a hidden
- * `rm -rf /` inside `sh -c '...'` must not be excused by a safe-looking sibling.
- */
-export function deletionTargetsAreOwned(
-	command: string,
-	workspace: string,
-	created: ReadonlySet<string>,
-	inside?: (absoluteTarget: string) => boolean,
-): boolean {
-	if (!workspace.trim()) {
-		return false;
-	}
-	const invocations = rmInvocations(command);
-	if (!invocations || !invocations.length) {
-		return false;
-	}
-	const raw = new RegExp(RM_PATTERN.source, 'gi');
-	for (const match of command.matchAll(raw)) {
-		const index = match.index ?? -1;
-		if (!invocations.some((invocation) => index >= invocation.start && index < invocation.end)) {
-			return false;
-		}
-	}
-	const root = resolve(workspace);
-	for (const invocation of invocations) {
-		if (invocation.recursive) {
-			return false;
-		}
-		for (const operand of invocation.operands) {
-			const target = resolve(root, invocation.cwd, operand);
-			const rel = relative(root, target);
-			if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
-				return false;
-			}
-			if (inside && !inside(target)) {
-				return false;
-			}
-			if (!created.has(rel.split(sep).join('/'))) {
-				return false;
-			}
-		}
-	}
-	return true;
-}
