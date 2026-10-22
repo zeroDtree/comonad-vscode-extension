@@ -242,6 +242,13 @@ function blockName(id: ComonadBlockId): string {
 function joins(text: string, reply: string): string {
 	return !text || /\s$/.test(text) || /^\s/.test(reply) ? reply : ` ${reply}`;
 }
+
+/** The title of a subagent's hidden conversation, short enough for the panel header. */
+function subagentTitle(name: string, description?: string): string {
+	const label = description?.replace(/\s+/g, ' ').trim();
+	return label ? `Subagent: ${name} — ${clip(label, 60)}` : `Subagent: ${name}`;
+}
+
 const MAX_SUBAGENTS = 4;
 
 declare module 'cordis' {
@@ -281,6 +288,8 @@ export class Agent extends Service {
 	/** Sessions already told that their stored model profile is gone. */
 	private readonly warned = new Set<string>();
 	private activeSubagents = 0;
+	/** Live subagent sessions, so a nested spawn edits the same object the child's run saves. */
+	private readonly subagentSessions = new Map<string, Session>();
 	/** The write-capable subagent currently running, if any: file writes are serialised. */
 	private writingSubagent: string | null = null;
 	private compiledSource = '';
@@ -1932,12 +1941,28 @@ export class Agent extends Service {
 				this.writingSubagent = null;
 			}
 		};
+		const subId = `sub-${randomUUID()}`;
+		// The parent's `agent` card links to the child conversation. The map lives on the session that
+		// owns the call, so a nested spawn links the subagent's card, not the root's.
+		const owner =
+			this.turnSession(parent.sessionId) ?? this.subagentSessions.get(parent.sessionId) ?? this.ctx.sessions.get(parent.sessionId);
+		const callId = request.callId?.trim();
+		if (owner && callId && callId.length <= 200 && callId !== '__proto__' && callId !== 'prototype' && callId !== 'constructor') {
+			const links = Object.entries({ ...(owner.subagents ?? {}), [callId]: subId });
+			// Keep the newest links: an old card losing its link is better than an unbounded session file.
+			owner.subagents = Object.fromEntries(links.slice(-256));
+			try {
+				this.ctx.sessions.save(owner);
+			} catch (error) {
+				this.ctx.log.message(`subagent link: ${describe(error)}`);
+			}
+		}
 		const run = async (): Promise<string> => {
 			this.activeSubagents += 1;
-			const subId = `sub-${randomUUID()}`;
 			// The depth is the *child's*: a spawn from inside this run reads it off `subId`, and two
 			// siblings finishing at different times each retire only their own entry.
 			this.depths.set(subId, depth + 1);
+			let finishChild: (() => void) | undefined;
 			try {
 				const system = [
 					`You are the ${agent?.name ?? 'explore'} subagent of Comonad.`,
@@ -1948,7 +1973,50 @@ export class Agent extends Service {
 				const parentSession = request.fork ? this.ctx.sessions.get(parent.sessionId) : undefined;
 				const base = request.fork && parentSession ? parentSession.transcript : [];
 				const inherited = request.fork ? parent.messages.filter((message) => message.role !== 'system') : [];
-				const subTranscript: Message[] = [...base, { role: 'user', content: request.prompt }];
+				const subTranscript: Message[] = [...base, { role: 'user', content: request.prompt, at: Date.now() }];
+				// The child's conversation is a real session from this moment on: the card can open it
+				// while it works, and it outlives the parent turn as a transcript.
+				const child = this.ctx.sessions.createChild(policy, subId, {
+					title: subagentTitle(agent?.name ?? 'explore', request.description),
+					parentId: parent.sessionId,
+					subagent: agent?.name ?? 'explore',
+					transcript: subTranscript,
+				});
+				this.subagentSessions.set(subId, child);
+				let latest = subTranscript;
+				const remember = (next: Message[]): void => {
+					latest = next;
+					child.transcript = next;
+					child.turnIndex = next.some((message) => message.role === 'user') ? 1 : 0;
+					try {
+						this.ctx.sessions.save(child);
+					} catch (error) {
+						this.ctx.log.message(`subagent session: ${describe(error)}`);
+					}
+					this.ctx.emit('subagent/changed', subId);
+				};
+				// Settles the child conversation even when an event listener throws before the graph starts.
+				finishChild = () => {
+					child.transcript = latest;
+					child.subagentDone = true;
+					try {
+						this.ctx.sessions.save(child);
+					} catch (error) {
+						this.ctx.log.message(`subagent session: ${describe(error)}`);
+					}
+					this.ctx.emit('subagent/changed', subId);
+					this.subagentSessions.delete(subId);
+				};
+				this.ctx.emit('agent/subagent-start', parent.ref, {
+					callId,
+					id: subId,
+					name: agent?.name ?? 'explore',
+					description: request.description,
+				});
+				// A nested spawn's card lives in its parent subagent's view: repaint that view now.
+				if (parent.filter) {
+					this.ctx.emit('subagent/changed', parent.sessionId);
+				}
 				const state: RunState = {
 					ref: { sessionId: subId },
 					sessionId: subId,
@@ -1983,6 +2051,7 @@ export class Agent extends Service {
 						maxSteps: Math.max(4, (agent?.maxTurns ?? 20) * 2),
 						signal: abort.signal,
 						choose: (soft: SoftRequest) => this.ctx.llm.choose(policy.model, soft, abort.signal),
+						onStep: (current) => remember(current.transcript),
 					});
 					const report = outcome.status === 'aborted' ? '(stopped)' : (lastAssistant(outcome.state.transcript)?.content ?? '(no report)');
 					return state.writes.size ? `${report}\n\nFiles changed:\n${[...state.writes].map((path) => `- ${path}`).join('\n')}` : report;
@@ -1991,6 +2060,11 @@ export class Agent extends Service {
 					this.backgroundSubagents.delete(abort);
 				}
 			} finally {
+				try {
+					finishChild?.();
+				} catch (error) {
+					this.ctx.log.message(`subagent session: ${describe(error)}`);
+				}
 				this.activeSubagents -= 1;
 				this.depths.delete(subId);
 			}

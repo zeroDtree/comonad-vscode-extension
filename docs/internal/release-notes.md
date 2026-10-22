@@ -17,8 +17,9 @@
   adds the first five output lines, and `open` expands the command and output. Changing the setting
   redraws the transcript; a click still toggles a single card.
 
-- **The step budget is real.** `comonad.maxSteps` (the Graph tab's **Max steps**) now caps the turn;
-  the default is 128 instead of 48, so a long tool loop no longer stops at the old graph fallback.
+- **The step budget is real, and optional.** `comonad.maxSteps` (the Graph tab's **Max steps**) now
+  caps the turn; the default is 0 (no limit), so a long tool loop never stops on a step budget
+  unless one is set.
 
 - **Stop stops.** The turn owns one cancellation signal from the first await to the last. A
   foreground shell command is killed together with its process group (Windows: `taskkill /T`), so a
@@ -51,6 +52,16 @@
   writes are journaled under the parent chat, appear in its diff, and a write-capable subagent runs
   in the foreground, one at a time. `ask` rules are escalated, so a subagent cannot silently answer
   them; no-sandbox and dangerous-command escalations are refused for the same reason.
+
+- **A subagent's work is a conversation you can open.** Every `spawnAgent` records the parent tool
+  call in `Session.subagents` and creates a real child `Session` (`parentId`, `subagent`,
+  `subagentDone`) hidden from the history. `runGraph` gained an `onStep` hook; the child session is
+  written after each node and `agent/subagent-start` / `subagent/changed` keep the UI in step. The
+  `agent` card carries **Open session** while the call runs, and the chat webview draws the child's
+  turns in a fixed read-only overlay (tool cards included, expanded cards preserved, live scroll
+  pinned to the bottom only when it already was). The parent chat is never switched or repainted,
+  so its stream survives. Children are removed with their parent, recursively, and the attachment
+  sweep counts their images.
 
 - **Loopback stays open when network is off.** A shell with network disabled can still bind and
   connect over `localhost`, so test servers that listen on `127.0.0.1` work. macOS gets explicit

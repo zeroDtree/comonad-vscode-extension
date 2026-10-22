@@ -122,6 +122,31 @@ button:disabled {
 	color: var(--vscode-input-placeholderForeground, rgba(128, 128, 128, 0.8));
 }
 
+/* The history scope: this workspace by default, every workspace when lit. */
+#chats-scope {
+	flex: none;
+	padding: 1px 7px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	border-radius: 8px;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	font-size: 11px;
+	opacity: 0.75;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+#chats-scope:hover,
+#chats-scope.is-on {
+	opacity: 1;
+}
+
+#chats-scope.is-on {
+	border-color: var(--vscode-focusBorder, var(--vscode-textLink-foreground, #3794ff));
+	color: var(--vscode-textLink-foreground, #3794ff);
+}
+
 #chats-list {
 	display: flex;
 	flex-direction: column;
@@ -199,6 +224,51 @@ button.chat.is-active {
 /* ------------------------------------------------------------------ messages */
 
 #messages {
+	flex: 1;
+	overflow-y: auto;
+	padding: 16px 18px 8px;
+	line-height: 1.55;
+}
+
+/* A subagent's conversation: a read-only overlay, so the parent chat keeps its scroll and stream. */
+#subagent-view {
+	position: fixed;
+	inset: 0;
+	z-index: 30;
+	display: flex;
+	flex-direction: column;
+	background: var(--vscode-editor-background);
+}
+
+#subagent-view[hidden] {
+	display: none !important;
+}
+
+#subagent-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: none;
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+}
+
+#subagent-head #subagent-title {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 600;
+}
+
+#subagent-head #subagent-status {
+	flex: none;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+#subagent-messages {
 	flex: 1;
 	overflow-y: auto;
 	padding: 16px 18px 8px;
@@ -653,6 +723,15 @@ details.thinking summary::before {
 	margin: 2px 0 0;
 }
 
+/* How much the thought cost: the same quiet numbers as the timer it follows. */
+.thought-tokens {
+	font-size: 11px;
+	opacity: 0.55;
+	margin-left: 6px;
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
 .think {
 	font-size: 12px;
 	opacity: 0.75;
@@ -767,6 +846,23 @@ details.thinking summary::before {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	font-weight: 500;
+}
+
+/* The `agent` card's way into the child conversation, present while the call still runs. */
+.tool-open-subagent {
+	flex: none;
+	margin-left: auto;
+	padding: 0 4px;
+	border: 0;
+	background: transparent;
+	color: var(--vscode-textLink-foreground, #3794ff);
+	font: inherit;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.tool-open-subagent:hover {
+	text-decoration: underline;
 }
 
 .tool-summary {
@@ -1423,7 +1519,6 @@ footer {
 
 #input {
 	resize: none;
-	min-height: 48px;
 	max-height: 200px;
 	background: transparent;
 	color: var(--vscode-input-foreground);
@@ -1433,6 +1528,18 @@ footer {
 	font-size: inherit;
 	line-height: 1.45;
 	outline: none;
+}
+
+/* Shown while the reader is behind a streaming reply: one click resumes following it. */
+#jump-latest {
+	position: absolute;
+	right: 10px;
+	bottom: calc(100% + 8px);
+	z-index: 6;
+	padding: 2px 10px;
+	border-radius: 999px;
+	font-size: 11px;
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 
 #controls {
@@ -1485,6 +1592,12 @@ footer {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+/* The model pill's reasoning effort: present, but quieter than the model name it follows. */
+.pill-effort {
+	margin-left: 4px;
+	opacity: 0.65;
 }
 
 /* The Context (↑) and Display (👁) pills take the same values, so each one leads with an icon. */

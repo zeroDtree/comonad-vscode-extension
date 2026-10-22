@@ -14,8 +14,9 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 - **Tool cards** now carry the model's one-line description, the command utilities, an optional
   preview and a copy menu; `comonad.toolCard` starts them collapsed (the default), preview or open.
-- **The step budget now works.** The default is 128 (was 48), and `comonad.maxSteps` — the Graph
-  tab's **Max steps** — now caps the turn instead of being ignored.
+- **The step budget is optional.** `comonad.maxSteps` — the Graph tab's **Max steps** — now caps
+  the turn instead of being ignored; it defaults to 0 (no limit), so a long tool loop never stops
+  on a step budget unless one is set.
 - **Stop actually stops** the turn, its process tree and its pending approval; background tasks stay
   independent.
 - **Shell calls** take a model-chosen timeout, keep loopback available when network is off, and never
@@ -29,6 +30,10 @@ Highlights are below; the full implementation notes are linked at the end. The u
   **Settings → Subagents** (`comonad.subagents`), intersected with the parent mode and the agent
   definition's `tools`. Full shell and plan writes are never granted; every file write a subagent
   makes is journaled under the parent chat and appears in its diff.
+- **Subagent conversations are watchable.** Each `agent` call creates a hidden child session; its
+  card gains **Open session** as soon as the child exists. The read-only overlay shows the
+  subagent's prompt, steps and tool results and follows the run live, without touching the parent
+  chat's stream or scroll. Removing the parent removes its children.
 - **Remote SSH, WSL and Dev Containers** are first-class; credentials stay client-side and model calls
   originate on the remote host.
 - **Images, `@` references and in-place prompt editing** make the chat a working surface, not just a

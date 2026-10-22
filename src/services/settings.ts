@@ -448,7 +448,7 @@ export class Settings extends Service {
 			confineRead: flag('confineRead', false),
 			confineWrite: flag('confineWrite', true),
 			planDirectory: typeof raw.planDirectory === 'string' ? raw.planDirectory : '',
-			maxSteps: count('maxSteps', 128, 1),
+			maxSteps: count('maxSteps', 0, 0),
 			graph: typeof raw.graph === 'string' ? raw.graph : DEFAULT_GRAPH_SOURCE,
 			model: typeof raw.model === 'string' ? raw.model : 'auto',
 			// An empty list means "nothing configured", which would leave the chat without a model, so

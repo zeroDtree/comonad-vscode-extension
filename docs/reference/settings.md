@@ -40,7 +40,7 @@ UI.
 | `comonad.allowFullAccess` | `true` | Offer the unrestricted preset |
 | `comonad.commandTimeout` | `60` | Fallback shell timeout in seconds |
 | `comonad.commandTimeoutOverride` | `false` | Always use that value and ignore the model's timeout |
-| `comonad.maxSteps` | `128` | Maximum graph steps per turn |
+| `comonad.maxSteps` | `0` (no limit) | Maximum graph steps per turn |
 | `comonad.filterSensitiveEnv` | `true` | Strip keys, tokens and passwords from command environments |
 | `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | Rule lists; see [Safety](/guide/safety#_2-rules) |
 | `comonad.subagents` | `{}` | Per-agent subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Built-in `implement` defaults to both; every other agent is read-only until granted. |

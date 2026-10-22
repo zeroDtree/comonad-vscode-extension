@@ -720,8 +720,8 @@
         },
         "comonad.maxSteps": {
           "type": "number",
-          "default": 128,
-          "description": "Maximum graph steps per turn."
+          "default": 0,
+          "markdownDescription": "Maximum graph steps per turn. `0` means no limit."
         },
         "comonad.planDirectory": {
           "type": "string",
@@ -749,6 +749,7 @@
               "keyEnv": "DEEPSEEK_API_KEY",
               "thinkingOff": "thinking",
               "includeUsage": true,
+              "contextWindow": 1048576,
               "pricingIn": 0.3,
               "pricingCachedIn": 0.006,
               "pricingOut": 1.2
@@ -761,6 +762,7 @@
               "keyEnv": "DEEPSEEK_API_KEY",
               "thinkingOff": "thinking",
               "includeUsage": true,
+              "contextWindow": 1048576,
               "pricingIn": 1.32,
               "pricingCachedIn": 0.044,
               "pricingOut": 3.96
@@ -777,7 +779,8 @@
                 "GOOGLE_API_KEY"
               ],
               "thinkingOff": "effort",
-              "includeUsage": true
+              "includeUsage": true,
+              "contextWindow": 1048576
             }
           ],
           "markdownDescription": "OpenAI-compatible endpoints to chat with. The model menu is read from each endpoint (`GET /models`), so a new model needs no configuration; a profile's `model` is what a bare profile id selects. Empty uses the shipped profiles (DeepSeek Flash first, so **Auto** runs on it). A key stored with **Comonad: Configure Model Provider** belongs to the endpoint and every profile with the same normalized `base` shares it; without a stored key, the variables in `keyEnv` are tried in order.",
@@ -840,6 +843,10 @@
               },
               "includeUsage": {
                 "type": "boolean"
+              },
+              "contextWindow": {
+                "type": "number",
+                "description": "The provider's input window in tokens, used for the chat's context budget and the model menu's `Auto (…)`."
               },
               "pricingIn": {
                 "type": "number",
@@ -999,7 +1006,7 @@
             "raw"
           ],
           "default": "rendered",
-          "markdownDescription": "What a chat sends back to the model: `rendered` trims long tool output, `token` sends only user/assistant text, `raw` sends the full record. New chats start here; the composer's Context pill changes it per chat."
+          "markdownDescription": "What a chat sends back to the model: `rendered` trims long tool output, `token` sends only user/assistant text, `raw` sends the full record. New chats start here; the composer's Context pill changes the current chat and saves the pick here."
         },
         "comonad.displayForm": {
           "type": "string",
@@ -1031,12 +1038,12 @@
             "high"
           ],
           "default": "auto",
-          "markdownDescription": "Thinking effort for models that support `reasoning_effort`. New chats start here; the model menu changes it per chat."
+          "markdownDescription": "Thinking effort for models that support `reasoning_effort`. New chats start here; the model menu changes the current chat and saves the pick here."
         },
         "comonad.contextWindow": {
           "type": "number",
           "default": 0,
-          "markdownDescription": "Overrides the model's input window in tokens. `0` uses the window on the model profile, falling back to 128K for a model that has none. The chat summarizes itself when the request no longer fits. New chats start here; the model menu changes it per chat."
+          "markdownDescription": "Overrides the model's input window in tokens. `0` uses the window on the model profile, falling back to 128K for a model that has none. The chat summarizes itself when the request no longer fits. New chats start here; the model menu changes the current chat and saves the pick here."
         },
         "comonad.budgetUsd": {
           "type": "number",

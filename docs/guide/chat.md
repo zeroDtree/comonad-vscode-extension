@@ -10,6 +10,8 @@ The title bar has three controls: **Recent Chats**, **Settings** and **New Sessi
 
 - A chat enters history after its first sent message.
 - **Recent chats** searches titles and message text; the matching line is shown under the title.
+- The list shows this workspace's chats by default. Its **This workspace** button switches to
+  **All workspaces**, so chats from another folder never mix into the current one by accident.
 - `Cmd+N` (`Ctrl+Alt+N` outside the chat) starts a clean session and focuses the composer.
 - Right-click a session in the **Comonad** Activity Bar view to rename, delete or fork it.
 - Forks are numbered (`Title (fork 1)`, …) and start with a fresh checkpoint identity.
@@ -38,6 +40,9 @@ Below the input:
 | **Network** | Network tools and network inside the shell |
 | **Tool cards** | How a tool card starts: collapsed (default), preview or open |
 
+Every pick is written back to the matching `comonad.*` setting, so a new chat starts with the same
+model, effort, context window and forms.
+
 **Tool cards** is the `comonad.toolCard` setting. Its three modes:
 
 | Mode | Card starts as |
@@ -62,6 +67,9 @@ its shape.
 - **Step timers** climb live and settle on the duration the extension measured.
 - **Turn footer** shows *Worked for 12s · 3 tools*, or *Working…* / *Stopped*, plus copy, fork and
   regenerate actions.
+- **A subagent call opens its conversation.** An `agent` card carries **Open session** as soon as the
+  child exists. It opens a read-only overlay with the subagent's prompt, steps and tool results, and
+  follows the run as it works; **← Back** returns to the parent chat unchanged.
 - **Display** switches the whole transcript: **Rendered** folds thoughts and draws tool cards,
   **Token** shows assistant text plus a call count, **Raw** shows the full record as plain text.
 

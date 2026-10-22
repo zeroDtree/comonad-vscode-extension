@@ -23,6 +23,8 @@
 	const chatsEl = $('chats');
 	const chatsList = $('chats-list');
 	const searchBox = $('search');
+	const scopeButton = $('chats-scope');
+	const jumpButton = $('jump-latest');
 	const tip = $('tip');
 
 	const FORMS = [
@@ -427,8 +429,14 @@
 	}
 
 	function updateModelPill() {
-		modelPill.trigger.querySelector('.pill-label').textContent = modelState.modelLabel;
-		modelPill.trigger.dataset.tip = 'Model — the model for new turns\nCurrent: ' + modelState.modelLabel;
+		// The pill reads out the two things the menu picks at a glance: which model, and how hard
+		// it is asked to think. The effort is secondary, so it is dimmed rather than merged into
+		// the model name.
+		const effort = choiceLabel(REASONING, modelState.reasoningEffort);
+		modelPill.trigger.querySelector('.pill-label').innerHTML =
+			esc(modelState.modelLabel) + '<span class="pill-effort">· ' + esc(effort) + '</span>';
+		modelPill.trigger.dataset.tip =
+			'Model — the model for new turns\nCurrent: ' + modelState.modelLabel + ' · Reasoning: ' + effort;
 		if (!modelPill.menu.hidden) {
 			renderModelMenu();
 		}
@@ -454,6 +462,13 @@
 	let pinned = true;
 	/** Tool step per call id, so a result can be written back into the step that asked for it. */
 	const toolCards = new Map();
+	/** The subagent conversation requested or on screen, if any. */
+	let subagentView = null;
+	let subagentWanted = null;
+	/** Tool cards opened in the overlay, so a step update does not fold them again. */
+	const subagentOpen = new Map();
+	/** The overlay always renders the full work process, whatever the chat's display form is. */
+	let subagentRendering = false;
 
 	/* ------------------------------------------------------------------ markdown */
 
@@ -888,15 +903,60 @@
 
 	/* ------------------------------------------------------------------ message bricks */
 
+	/** The transcript follows the newest output only while the reader is still at the end. */
 	function scroll(force) {
 		if (force || pinned) {
+			pinned = true;
 			messagesEl.scrollTop = messagesEl.scrollHeight;
 		}
+		paintJump();
+	}
+
+	/** The way back: shown exactly when the transcript has stopped following the end. */
+	function paintJump() {
+		jumpButton.hidden = pinned;
 	}
 
 	messagesEl.addEventListener('scroll', () => {
-		pinned = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 48;
+		// A few pixels of slack, not a screen line: reading the last lines while a reply streams is
+		// exactly when the transcript must stop moving under the pointer.
+		pinned = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 8;
+		paintJump();
 	});
+
+	// A wheel turned upward unpins before its scroll event lands, so a token painted in the same
+	// frame cannot snap the reader back to the bottom first.
+	messagesEl.addEventListener(
+		'wheel',
+		(event) => {
+			if (event.deltaY < 0) {
+				pinned = false;
+				paintJump();
+			}
+		},
+		{ passive: true },
+	);
+
+	let touchY = 0;
+	messagesEl.addEventListener(
+		'touchstart',
+		(event) => {
+			touchY = event.touches[0]?.clientY ?? 0;
+		},
+		{ passive: true },
+	);
+	messagesEl.addEventListener(
+		'touchmove',
+		(event) => {
+			const y = event.touches[0]?.clientY ?? 0;
+			if (y > touchY) {
+				pinned = false;
+				paintJump();
+			}
+			touchY = y;
+		},
+		{ passive: true },
+	);
 
 	function add(cls, html) {
 		const el = document.createElement('div');
@@ -969,6 +1029,9 @@
 	let editing = null;
 
 	function currentView() {
+		if (subagentRendering) {
+			return 'rendered';
+		}
 		return state && (state.display === 'token' || state.display === 'raw') ? state.display : 'rendered';
 	}
 
@@ -1436,6 +1499,10 @@
 		const state = step.result === undefined ? 'running' : failed ? 'error' : 'ok';
 		const title = shell ? oneLine(shellDescriptionOf(step), 120) || humanToolName(step.name) : humanToolName(step.name);
 		const summary = shell ? shellUtilities(command) || oneLine(command, 100) : argSummary(step, parsed);
+		const openSubagent =
+			step.name === 'agent' && step.subagentId
+				? '<button type="button" class="tool-open-subagent" data-subagent="' + esc(step.subagentId) + '" data-tip="Open the subagent session">Open session</button>'
+				: '';
 		const mode = toolCardMode();
 		// `collapsed` is header-only: the preview is not built at all, not merely hidden.
 		const preview = mode === 'collapsed' ? '' : previewOf(step);
@@ -1445,6 +1512,9 @@
 		card.dataset.status = state;
 		if (step.name) {
 			card.dataset.tool = step.name;
+		}
+		if (step.id) {
+			card.dataset.callId = step.id;
 		}
 
 		const details = document.createElement('details');
@@ -1466,6 +1536,7 @@
 			esc(title) +
 			'</span>' +
 			(summary ? '<span class="tool-summary">' + esc(summary) + '</span>' : '') +
+			openSubagent +
 			'<span class="timer tool-time"></span></span>' +
 			(preview ? '<span class="tool-preview"></span>' : '');
 		if (preview) {
@@ -1556,11 +1627,15 @@
 			const fold = document.createElement('details');
 			fold.className = 'thinking';
 			fold.innerHTML =
-				'<summary><span class="label">' + (busy ? 'Thinking…' : 'Thought') + '</span><span class="timer"></span></summary><div class="think"></div>';
+				'<summary><span class="label">' +
+				(busy ? 'Thinking…' : 'Thought') +
+				'</span><span class="timer"></span><span class="thought-tokens"></span></summary><div class="think"></div>';
 			fold.querySelector('.think').textContent = step.text || '';
 			step._think = fold.querySelector('.think');
 			step._summary = fold.querySelector('.label');
 			step._timer = fold.querySelector('.timer');
+			step._tokens = fold.querySelector('.thought-tokens');
+			paintThoughtTokens(step, false);
 			return fold;
 		}
 		if (step.kind === 'tool') {
@@ -1582,6 +1657,22 @@
 		}
 		step._body = body;
 		return wrap;
+	}
+
+	// The bytes-per-token fallback the kernel uses when no tokenizer is loaded; the host's count
+	// replaces this estimate the moment the turn settles.
+	const utf8 = new TextEncoder();
+	function estimateThoughtTokens(text) {
+		return text ? Math.ceil(utf8.encode(text).length / 3.35) : 0;
+	}
+
+	/** A thought's size beside its duration: counted live, then taken from the host at turn-end. */
+	function paintThoughtTokens(step, live) {
+		if (!step._tokens) {
+			return;
+		}
+		const tokens = step.tokens ?? (live ? estimateThoughtTokens(step.text || '') : undefined);
+		step._tokens.textContent = tokens ? tokens.toLocaleString() + ' tokens' : '';
 	}
 
 	/**
@@ -1738,7 +1829,7 @@
 	}
 
 	/** Builds the turn's frame: the prompt bubble, the step column and the footer. */
-	function turnEl(turn) {
+	function turnEl(turn, container = messagesEl, readOnly = false) {
 		const root = document.createElement('div');
 		root.className = 'turn';
 		turn._root = root;
@@ -1754,7 +1845,7 @@
 		}
 		if (!turn.command) {
 			const actions = [{ key: 'copy', icon: 'copy', tip: 'Copy message', run: (button) => copyAction(button, turn.prompt) }];
-			if (!turn.greeting && turn.prompt) {
+			if (!readOnly && !turn.greeting && turn.prompt) {
 				actions.push({ key: 'edit', icon: 'pencil', tip: 'Edit this prompt and run it again', run: () => beginEdit(turn) });
 			}
 			prompt.appendChild(actionRow(actions));
@@ -1780,7 +1871,7 @@
 		root.appendChild(reply);
 		turn._steps = steps;
 		turn._foot = foot;
-		messagesEl.appendChild(root);
+		container.appendChild(root);
 		return root;
 	}
 
@@ -1956,6 +2047,116 @@
 		scroll(true);
 	}
 
+	/* ------------------------------------------------------------- subagent overlay */
+
+	/** The chat behind the overlay is present but not reachable: the overlay is a modal dialog. */
+	function setSubagentOpen(open) {
+		for (const node of document.body.children) {
+			if (node.id !== 'subagent-view') {
+				node.inert = open;
+			}
+		}
+	}
+
+	/** A subagent's conversation, read-only: the parent chat keeps its place underneath. */
+	function renderSubagentTurns(message) {
+		if (!message || !message.id) {
+			return;
+		}
+		if (subagentWanted !== message.id && (!subagentView || subagentView.id !== message.id)) {
+			return;
+		}
+		if (subagentView && subagentView.id !== message.id) {
+			subagentOpen.clear();
+		}
+		subagentView = message;
+		subagentWanted = message.id;
+		const view = $('subagent-view');
+		if (!view) {
+			return;
+		}
+		const wasHidden = view.hidden;
+		view.hidden = false;
+		setSubagentOpen(true);
+		if (wasHidden) {
+			$('subagent-close')?.focus();
+		}
+		$('subagent-title').textContent = message.title || 'Subagent session';
+		$('subagent-status').textContent = message.done ? 'finished' : 'working…';
+		const root = $('subagent-messages');
+		const atBottom = root.scrollTop + root.clientHeight >= root.scrollHeight - 24;
+		const keepScroll = root.scrollTop;
+		root.innerHTML = '';
+		for (const turn of message.turns || []) {
+			for (const step of turn.steps || []) {
+				if (step.kind === 'tool' && step.id && subagentOpen.has(step.id)) {
+					step._open = subagentOpen.get(step.id);
+				}
+			}
+			turnEl(turn, root, true);
+			subagentRendering = true;
+			try {
+				renderSteps(turn);
+			} finally {
+				subagentRendering = false;
+			}
+			const foot = turn._foot;
+			if (!foot) {
+				continue;
+			}
+			const meta = document.createElement('span');
+			meta.className = 'foot-meta';
+			const tools = turnTools(turn);
+			const seconds = turn.startedAt && turn.endedAt ? Math.max(0, Math.round((turn.endedAt - turn.startedAt) / 1000)) : 0;
+			meta.textContent = message.done
+				? [seconds >= 1 ? 'Worked for ' + seconds + 's' : 'Worked', tools ? tools + (tools === 1 ? ' tool' : ' tools') : ''].filter(Boolean).join(' · ')
+				: 'Working…';
+			foot.appendChild(meta);
+		}
+		for (const node of root.querySelectorAll('.msg')) {
+			node.classList.add('no-anim');
+		}
+		root.scrollTop = atBottom ? root.scrollHeight : keepScroll;
+	}
+
+	/** A card already on screen (a repaint cleared the live step map) still gets its link. */
+	function attachSubagentLink(callId, id) {
+		if (!callId || !id) {
+			return;
+		}
+		const card = [...document.querySelectorAll('#messages .tool-card')].find((item) => item.dataset.callId === callId);
+		const head = card && card.querySelector('.tool-head-row');
+		if (!head || head.querySelector('.tool-open-subagent')) {
+			return;
+		}
+		const button = document.createElement('button');
+		button.type = 'button';
+		button.className = 'tool-open-subagent';
+		button.dataset.subagent = id;
+		button.dataset.tip = 'Open the subagent session';
+		button.textContent = 'Open session';
+		const timer = head.querySelector('.tool-time');
+		head.insertBefore(button, timer || null);
+	}
+
+	function closeSubagentView() {
+		if (!subagentView && !subagentWanted) {
+			return;
+		}
+		subagentView = null;
+		subagentWanted = null;
+		subagentOpen.clear();
+		const view = $('subagent-view');
+		if (view) {
+			view.hidden = true;
+		}
+		setSubagentOpen(false);
+		if (input) {
+			input.focus();
+		}
+		vscode.postMessage({ type: 'closeSubagent' });
+	}
+
 	/* ------------------------------------------------------------------ streaming */
 
 	// A live turn is a turn like any other: events push new steps into it, in order, so a thought
@@ -1970,6 +2171,7 @@
 			draft = true;
 			live = null;
 			input.value = '';
+			resizeInput();
 			return;
 		}
 		// A continue is not a turn of its own: its reply is written into the message it carries on, so
@@ -2034,6 +2236,7 @@
 		live.pending = false;
 		if (live.thought) {
 			live.thought._think.textContent = live.think;
+			paintThoughtTokens(live.thought, true);
 		}
 		if (live.text) {
 			live.text._body.innerHTML = md(live.text.text);
@@ -2170,6 +2373,7 @@
 			const report = settled[index];
 			if (report && report.kind === step.kind && (report.id ?? '') === (step.id ?? '')) {
 				step.ms = report.ms;
+				step.tokens = report.tokens;
 			}
 		});
 		const settledAt = Date.now();
@@ -2193,6 +2397,9 @@
 		for (const step of turn.steps) {
 			if (step._summary) {
 				step._summary.textContent = 'Thought';
+			}
+			if (step.kind === 'thought') {
+				paintThoughtTokens(step, false);
 			}
 		}
 		// Providers may stream empty thinking chunks; a blank fold is not a step on a replayed turn
@@ -2274,7 +2481,7 @@
 
 	function closeToolMenus() {
 		let closed = false;
-		for (const menu of messagesEl.querySelectorAll('.tool-menu')) {
+		for (const menu of document.querySelectorAll('#messages .tool-menu, #subagent-messages .tool-menu')) {
 			if (menu.hidden) {
 				continue;
 			}
@@ -2320,18 +2527,30 @@
 		}, 700);
 	}
 
-	messagesEl.addEventListener('click', (event) => {
+	/** The interactive bits a transcript and the subagent overlay share: links, copies, tool menus. */
+	function handleRichClick(event) {
+		const openSub = event.target.closest('button.tool-open-subagent');
+		if (openSub) {
+			event.preventDefault();
+			event.stopPropagation();
+			const id = openSub.dataset.subagent;
+			if (id) {
+				subagentWanted = id;
+				vscode.postMessage({ type: 'openSubagent', id });
+			}
+			return true;
+		}
 		const more = event.target.closest('button.tool-more');
 		if (more) {
 			event.stopPropagation();
 			toggleToolMenu(more);
-			return;
+			return true;
 		}
 		const copied = event.target.closest('.tool-menu button[data-copy]');
 		if (copied) {
 			event.stopPropagation();
 			copyToolPart(copied);
-			return;
+			return true;
 		}
 		closeToolMenus();
 		const copy = event.target.closest('button.copy');
@@ -2342,12 +2561,19 @@
 			setTimeout(() => {
 				copy.textContent = 'Copy';
 			}, 1200);
-			return;
+			return true;
 		}
 		const link = event.target.closest('a[data-url]');
 		if (link) {
 			event.preventDefault();
 			vscode.postMessage({ type: 'openUrl', url: link.dataset.url });
+			return true;
+		}
+		return false;
+	}
+
+	messagesEl.addEventListener('click', (event) => {
+		if (handleRichClick(event)) {
 			return;
 		}
 		const decision = event.target.closest('.approval button[data-d]');
@@ -2359,6 +2585,32 @@
 			card.classList.add('answered');
 			decision.classList.add('chosen');
 			vscode.postMessage({ type: 'approve', id: card.dataset.id, decision: decision.dataset.d });
+		}
+	});
+
+	const subagentMessagesEl = $('subagent-messages');
+	if (subagentMessagesEl) {
+		subagentMessagesEl.addEventListener('click', handleRichClick);
+		subagentMessagesEl.addEventListener(
+			'toggle',
+			(event) => {
+				const details = event.target.closest('.tool-details');
+				const card = details && details.closest('.tool-card');
+				if (details && card && card.dataset.callId) {
+					subagentOpen.set(card.dataset.callId, details.open);
+				}
+			},
+			true,
+		);
+	}
+	const subagentClose = $('subagent-close');
+	if (subagentClose) {
+		subagentClose.addEventListener('click', () => closeSubagentView());
+	}
+	document.addEventListener('keydown', (event) => {
+		if (event.key === 'Escape' && subagentView) {
+			event.preventDefault();
+			closeSubagentView();
 		}
 	});
 
@@ -2473,6 +2725,17 @@
 		renderChats();
 	}
 
+	/** The list's scope: this workspace, or every workspace the extension host has seen. */
+	function renderScope() {
+		const all = Boolean(state && state.historyScope === 'all');
+		scopeButton.textContent = all ? 'All workspaces' : 'This workspace';
+		scopeButton.dataset.tip = all
+			? 'Showing chats from every workspace — click to show only this one'
+			: 'Showing chats from this workspace — click to show every workspace';
+		scopeButton.classList.toggle('is-on', all);
+		scopeButton.setAttribute('aria-pressed', all ? 'true' : 'false');
+	}
+
 	function renderChats() {
 		chatsEl.hidden = !chatsOpen;
 		// The list is the whole header: with it closed the panel starts straight at the transcript.
@@ -2480,6 +2743,7 @@
 		if (!chatsOpen) {
 			return;
 		}
+		renderScope();
 		const items = (state && state.sessions) || [];
 		chatsList.innerHTML = '';
 		if (searchQuery) {
@@ -2496,6 +2760,12 @@
 		}
 		for (const item of chatsAll ? items : items.slice(0, 3)) {
 			chatsList.append(chatRow(item));
+		}
+		if (!items.length) {
+			const empty = document.createElement('p');
+			empty.className = 'muted';
+			empty.textContent = state && state.historyScope === 'all' ? 'No chats yet' : 'No chats in this workspace yet';
+			chatsList.append(empty);
 		}
 		if (items.length > 3 || chatsAll) {
 			const more = document.createElement('button');
@@ -2528,6 +2798,8 @@
 			// A query belongs to the session that was active when it was typed.
 			shownSession = state.sessionId;
 			closeMention();
+			// The overlay belongs to the chat it was opened from; a chat switch leaves it.
+			closeSubagentView();
 		}
 		renderChats();
 		fillPill(modePill, state.modes, state.mode, 'Work mode — what the agent may do');
@@ -2766,6 +3038,7 @@
 				// with the text, and its end stays in view.
 				if (draft) {
 					input.value += message.text || '';
+					resizeInput();
 					input.scrollTop = input.scrollHeight;
 				} else {
 					appendText(message.text);
@@ -2775,6 +3048,7 @@
 				// The finished impersonation as one piece of text, so nothing depends on how it streamed,
 				// with the caret where you edit it before sending.
 				input.value = message.text || '';
+				resizeInput();
 				input.scrollTop = input.scrollHeight;
 				input.focus();
 				break;
@@ -2786,6 +3060,30 @@
 				break;
 			case 'tool-result':
 				toolResult(message);
+				break;
+			case 'subagent-start': {
+				// The child exists while its call is still running: the live card gains its link now.
+				const step = toolCards.get(message.callId);
+				if (step) {
+					step.subagentId = message.id;
+					step.subagentName = message.name;
+					const card = step._card;
+					if (card) {
+						step._open = (step._details && step._details.open) || step._open === true;
+						card.replaceWith(toolCard(step));
+					}
+				} else {
+					attachSubagentLink(message.callId, message.id);
+				}
+				break;
+			}
+			case 'subagent-open':
+				// A webview reload reopens the overlay it had; this is the one unsolicited open.
+				subagentWanted = message.id;
+				renderSubagentTurns(message);
+				break;
+			case 'subagent':
+				renderSubagentTurns(message);
 				break;
 			case 'attachment':
 				attachmentReply(message);
@@ -3049,6 +3347,7 @@
 		const after = input.value.slice(mention.caret);
 		const suffix = /^\s/.test(after) ? '' : ' ';
 		input.setRangeText(item.token + suffix, mention.start, mention.caret, 'end');
+		resizeInput();
 		closeMention();
 		input.focus();
 	}
@@ -3119,6 +3418,7 @@
 		const at = input.value.length;
 		const lead = input.value && !/\s$/.test(input.value) ? ' ' : '';
 		input.setRangeText(lead + text + ' ', at, at, 'end');
+		resizeInput();
 		input.focus();
 		input.scrollTop = input.scrollHeight;
 	}
@@ -3242,6 +3542,17 @@
 
 	/* ------------------------------------------------------------------ outbound actions */
 
+	/** One line while empty, growing with the text: the box is as tall as what is in it. */
+	function resizeInput() {
+		if (!input.value) {
+			// `rows="1"` is the empty height; measuring would also measure a long placeholder.
+			input.style.height = '';
+			return;
+		}
+		input.style.height = 'auto';
+		input.style.height = Math.min(input.scrollHeight, Math.round(window.innerHeight * 0.4)) + 'px';
+	}
+
 	let submitting = false;
 	async function submit() {
 		if (running) {
@@ -3264,6 +3575,7 @@
 			closeMention();
 			const images = composerImages.map((image) => ({ name: image.name, data: image.dataUrl }));
 			input.value = '';
+			resizeInput();
 			composerImages.length = 0;
 			renderComposerImages();
 			vscode.postMessage({ type: 'send', text, images });
@@ -3289,6 +3601,7 @@
 		const text = trigger === 'quiet' ? input.value.trim() : '';
 		if (trigger === 'quiet') {
 			input.value = '';
+			resizeInput();
 		}
 		vscode.postMessage({ type: 'generate', trigger, text });
 		input.focus();
@@ -3364,6 +3677,9 @@
 			addImageFile(file);
 		}
 	});
+	input.addEventListener('input', resizeInput);
+	// A narrower panel re-wraps the same text; the height has to be measured again.
+	window.addEventListener('resize', resizeInput);
 	input.addEventListener('input', (event) => {
 		if (mention) {
 			updateMention();
@@ -3440,6 +3756,19 @@
 		searchQuery = '';
 		searchHits = { query: '', items: [] };
 		renderChats();
+	});
+	// The scope pill flips between this workspace and every workspace the host has seen.
+	scopeButton.addEventListener('click', () => {
+		const next = state && state.historyScope === 'all' ? 'workspace' : 'all';
+		vscode.postMessage({ type: 'setHistoryScope', scope: next });
+		// The hits on screen were counted in the old scope; ask again for the same query.
+		if (searchQuery) {
+			vscode.postMessage({ type: 'search', query: searchQuery });
+		}
+	});
+	jumpButton.addEventListener('click', () => {
+		pinned = true;
+		scroll(true);
 	});
 	networkChip.addEventListener('click', () => vscode.postMessage({ type: 'toggleNetwork' }));
 	changesToggle.addEventListener('click', () => {

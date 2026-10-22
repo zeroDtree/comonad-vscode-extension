@@ -224,7 +224,7 @@ export class Tools extends Service {
 		try {
 			// The context carries this execution's signal: a `tools/execute` wrapper that replaced it is
 			// the one the tool honours.
-			const output = await tool.execute(args, { ...ctx, signal: exec.signal });
+			const output = await tool.execute(args, { ...ctx, signal: exec.signal, callId: exec.callId });
 			return typeof output === 'string'
 				? { content: output, isError: false }
 				: { content: output.content, isError: false, images: output.images };

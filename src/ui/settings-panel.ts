@@ -273,7 +273,8 @@ export function settingsPanel(ctx: Context): void {
 			next.graph = graph === DEFAULT_GRAPH_SOURCE.trim() ? '' : graph;
 		}
 		if (Object.hasOwn(patch, 'maxSteps')) {
-			next.maxSteps = Math.max(1, Number(patch.maxSteps) || current.maxSteps);
+			const steps = Number(patch.maxSteps);
+			next.maxSteps = Number.isFinite(steps) ? Math.max(0, steps) : current.maxSteps;
 		}
 		if (Object.hasOwn(patch, 'allow') || Object.hasOwn(patch, 'ask') || Object.hasOwn(patch, 'deny')) {
 			next.permissions = {
@@ -1102,8 +1103,8 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       </div>
       <div class="field">
         <label for="steps">Max steps</label>
-        <p class="hint">Maximum graph steps per turn.</p>
-        <input id="steps" class="control" type="number" min="1" data-key="maxSteps" />
+        <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
+        <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
       </div>
     </div>
   </section>

@@ -44,6 +44,7 @@ import { Context, Service, type Plugin } from 'cordis';
 import {
 	createdInWorkspace,
 	createdPath,
+	inWorkspace,
 	isSummaryMessage,
 	markForRestore,
 	rebaseMarks,
@@ -57,6 +58,7 @@ import {
 	AGENT_KEYS,
 	CONFIG_KEYS,
 	DEFAULT_CONTEXT_WINDOW,
+	DEFAULT_PROFILES,
 	DEFAULT_SUBAGENT_GRANTS,
 	normalizeAgentPatch,
 	profileKeyEnvs,
@@ -387,6 +389,26 @@ suite('Comonad domain', () => {
 		};
 		const graph = compileGraphs(config, registry).get('agent')!;
 		await assert.rejects(() => runGraph(graph, {}, { maxSteps: 3 }), /exceeded maxSteps \(3\)/);
+	});
+
+	test('maxSteps 0 (the default) runs without a budget', async () => {
+		const config = parseGraphSource(`flowchart TD
+  %% start: loop
+  loop["loop"] -->|route: pick| loop
+  loop -->|route: pick| End
+`);
+		const registry = {
+			nodes: new Map<string, (state: { value: number }) => Promise<{ value: number }>>([
+				['loop', async (state) => ({ value: state.value + 1 })],
+			]),
+			routes: new Map<string, (state: { value: number }) => Promise<string>>([
+				['pick', async (state) => (state.value < 200 ? 'loop' : 'end')],
+			]),
+		};
+		const graph = compileGraphs(config, registry).get('agent')!;
+		const outcome = await runGraph(graph, { value: 0 });
+		assert.strictEqual(outcome.status, 'done');
+		assert.strictEqual(outcome.state.value, 200);
 	});
 
 	test('invalid graphs are rejected', () => {
@@ -2065,6 +2087,16 @@ suite('Comonad domain', () => {
 			'the code reads settings the manifest does not declare',
 		);
 	});
+
+	test('the shipped profiles in the manifest match the code defaults', () => {
+		// VS Code hands `comonad.profiles` its manifest default, so `DEFAULT_PROFILES` only applies
+		// when the setting is empty. A field missing here — the context window once was — silently
+		// drops the shipped model to the 128K fallback and the menu says `Auto (128K)`.
+		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+			contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
+		};
+		assert.deepStrictEqual(manifest.contributes.configuration.properties['comonad.profiles']?.default, DEFAULT_PROFILES);
+	});
 });
 
 suite('Cordis kernel', () => {
@@ -3608,6 +3640,53 @@ suite('Cordis kernel', () => {
 		} finally {
 			await kernel.dispose();
 		}
+	});
+
+	test('a chat remembers the workspace its history is scoped to', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'scoped');
+			assert.strictEqual(session.workspace, kernel.host.workspace());
+			assert.ok(inWorkspace(session, kernel.host.workspace()));
+			assert.ok(!inWorkspace(session, join(kernel.root, 'other')), 'another folder is another history');
+			// Chats written before the field fall back to the directory they ran in, subfolders included.
+			const legacy = { ...session, workspace: undefined };
+			assert.ok(inWorkspace(legacy, kernel.host.workspace()));
+			const nested = { ...legacy, policy: { ...legacy.policy, workingDirectory: join(kernel.host.workspace(), 'sub') } };
+			assert.ok(inWorkspace(nested, kernel.host.workspace()));
+			assert.ok(!inWorkspace(nested, join(kernel.root, 'other')));
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the webview carries the thought, history and composer controls', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		for (const needle of [
+			'thought-tokens',
+			'paintThoughtTokens',
+			'estimateThoughtTokens',
+			"type: 'setHistoryScope'",
+			"'chats-scope'",
+			'paintJump',
+			"'jump-latest'",
+			'resizeInput',
+		]) {
+			assert.ok(js.includes(needle), needle);
+		}
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		for (const needle of [
+			"tokens: step.kind === 'thought'",
+			"case 'setHistoryScope'",
+			'id="chats-scope"',
+			'id="jump-latest"',
+			'id="input" rows="1"',
+		]) {
+			assert.ok(panel.includes(needle), needle);
+		}
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.ok(css.includes('.thought-tokens') && css.includes('#chats-scope') && css.includes('#jump-latest'));
 	});
 
 	test('chat only runs a turn without offering the model any tool', async () => {
@@ -7703,6 +7782,10 @@ suite('Per-file checkpoints', () => {
 					return reply('done');
 				},
 			});
+			const starts: Array<{ callId?: string; id: string; name: string }> = [];
+			const changes: string[] = [];
+			kernel.ctx.on('agent/subagent-start', (_ref, info) => starts.push(info));
+			kernel.ctx.on('subagent/changed', (id) => changes.push(id));
 			await kernel.ctx.plugin(fsTools);
 			await kernel.ctx.plugin(agentTools);
 			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
@@ -7717,6 +7800,29 @@ suite('Per-file checkpoints', () => {
 			const toolResult = parent.transcript.find((message) => message.role === 'tool');
 			assert.match(toolResult?.content ?? '', /Files changed/);
 			assert.match(toolResult?.content ?? '', /made\.txt/);
+
+			// The parent's `agent` card links to a real, hidden child conversation.
+			const childId = parent.subagents?.delegate;
+			assert.ok(childId, 'the parent records the tool-call → child-session link');
+			const child = kernel.ctx.sessions.require(childId);
+			assert.strictEqual(child.parentId, parent.id, 'the child knows its parent');
+			assert.strictEqual(child.subagent, 'implement', 'and the agent that owns it');
+			assert.strictEqual(child.subagentDone, true, 'the finished run is marked done');
+			assert.ok(child.transcript.some((message) => message.role === 'user' && message.content.includes('write made.txt')), 'the child keeps the prompt');
+			assert.ok(
+				child.transcript.some((message) => message.role === 'assistant' && message.toolCalls?.some((call) => call.name === 'write_file')),
+				'the child keeps the model step',
+			);
+			assert.ok(child.transcript.some((message) => message.role === 'tool' && /wrote made\.txt/.test(message.content)), 'and the tool result');
+			assert.ok(!kernel.ctx.sessions.list().some((session) => session.id === childId), 'the child stays out of the ordinary history');
+			assert.strictEqual(starts.length, 1, 'one subagent start was announced');
+			assert.strictEqual(starts[0]?.callId, 'delegate');
+			assert.strictEqual(starts[0]?.id, childId);
+			assert.strictEqual(starts[0]?.name, 'implement');
+			assert.ok(changes.includes(childId), 'the child conversation announced its steps');
+
+			kernel.ctx.sessions.remove(parent.id);
+			assert.strictEqual(kernel.ctx.sessions.get(childId), undefined, 'removing the parent removes its child');
 		} finally {
 			await kernel.dispose();
 		}
@@ -8590,6 +8696,21 @@ suite('Explicit references', () => {
 		assert.ok(panel.includes('id="mention"'), 'the picker is in the document');
 		assert.ok(css.includes('.mention-menu') && css.includes('.ref-token'));
 		assert.ok(js.includes('mentionQuery') && js.includes('mentionResults') && js.includes('compositionstart'));
+	});
+
+	test('the chat carries a read-only subagent session overlay', () => {
+		const root = join(__dirname, '..', '..');
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		for (const id of ['subagent-view', 'subagent-head', 'subagent-title', 'subagent-status', 'subagent-messages', 'subagent-close']) {
+			assert.ok(panel.includes(`id="${id}"`), `the overlay has ${id}`);
+		}
+		for (const needle of ['renderSubagentTurns', 'openSubagent', 'closeSubagent', 'tool-open-subagent', 'subagent-start', 'subagentWanted']) {
+			assert.ok(js.includes(needle), needle);
+		}
+		assert.ok(css.includes('#subagent-view') && css.includes('.tool-open-subagent'), 'the overlay and its link are styled');
+		assert.ok(panel.includes("type: 'subagent'") && panel.includes("'subagent/changed'"), 'the host sends snapshots and follows the child');
 	});
 
 	test('the chat carries the remote and no-sandbox state', () => {

@@ -19,6 +19,9 @@
 
 `read_file` 还可以读取 PNG、JPEG、WebP 和 GIF（单张最多 4 MiB），并作为图像内容交给模型。
 
+`agent` 调用会创建一个隐藏的子会话。运行期间它的工具卡上会出现 **Open session**；只读覆盖层会显示
+子 Agent 的提示词、步骤和工具结果，并随执行过程更新。
+
 ## Shell 工具
 
 - `run_shell_readonly` 在只读沙箱中运行；`run_shell` 可在工作区内写入。

@@ -9,6 +9,8 @@ Secondary Side Bar。同样的会话也可以在 VS Code 内置聊天视图里�
 
 - 聊天在发送第一条消息后才进入历史。
 - **Recent chats** 会搜索标题和消息正文，并在标题下显示匹配行。
+- 列表默认只显示本工作区的聊天；搜索栏右侧的 **This workspace** 按钮可切到
+  **All workspaces**，避免其它文件夹的历史混进来。
 - `Cmd+N`（聊天外为 `Ctrl+Alt+N`）新建干净会话，并把焦点放进输入框。
 - 在 Activity Bar 的 **Comonad** 视图里右键会话，可重命名、删除或 fork。
 - Fork 的标题带编号（`Title (fork 1)`…），并使用新的检查点身份。
@@ -37,6 +39,9 @@ Secondary Side Bar。同样的会话也可以在 VS Code 内置聊天视图里�
 | **Network** | 网络工具与 shell 内的网络 |
 | **Tool cards** | 工具卡初始状态：collapsed（默认）、preview、open |
 
+这里的每个选择都会写回对应的 `comonad.*` 设置，所以新建聊天会沿用同样的模型、思考强度、
+上下文窗口和表单。
+
 **Tool cards** 就是 `comonad.toolCard` 设置，三档：
 
 | 模式 | 卡片初始状态 |
@@ -57,6 +62,9 @@ Secondary Side Bar。同样的会话也可以在 VS Code 内置聊天视图里�
   以及输出预览或完整命令与输出。悬停 `…` 菜单可复制命令/参数或输出。失败调用使用错误色描边。
 - **步骤计时** 运行时实时增长，结束后落在扩展测量的时长上。
 - **回合页脚** 显示 *Worked for 12s · 3 tools* 或 *Working…* / *Stopped*，以及复制、fork 和重新生成操作。
+- **子 Agent 的调用可以打开它的会话。** 子 Agent 一创建，`agent` 工具卡上就会出现 **Open session**；
+  点开后是只读覆盖层，显示子 Agent 的提示词、步骤和工具结果，并随执行过程更新；**← Back** 回到原聊天，
+  原聊天不受影响。
 - **Display** 切换整个转录：**Rendered** 折叠思考并绘制工具卡，**Token** 只显示 assistant 文本和调用数，
   **Raw** 以纯文本显示完整记录。
 

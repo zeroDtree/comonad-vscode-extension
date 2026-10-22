@@ -14,8 +14,9 @@ import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type Generat
 import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
 import { formatReference } from '../lib/references';
 import { isInside } from '../lib/sandbox';
+import { countRaw } from '../lib/tokens';
 import { ChatWebviewAssets, type ChatAssetSpec } from '../services/chat-assets';
-import { markForRestore, type Session } from '../services/sessions';
+import { inWorkspace, markForRestore, type Session } from '../services/sessions';
 import { explainDirty, restoreTo, unsavedPaths } from './journal-actions';
 import { REFERENCE_LIMITS, WorkspaceFileCache, mentionResults, resolveReferences, scopeOf } from './references';
 import { registerCommand } from './register';
@@ -86,6 +87,18 @@ export function chatPanel(ctx: Context): void {
 		resolve(answer: ApprovalDecision): void;
 	}
 	const approvals = new Map<string, PendingApproval>();
+	/** The subagent conversation each guest has open over the chat, if any. */
+	const subagentViews = new Map<vscode.Webview, string>();
+
+	/**
+	 * Which chats the recent-chats list shows: the folder this window has open, or every workspace on
+	 * the host. A session remembers the folder it was started in, so the scoped list cannot show a
+	 * chat from another project; the scope button widens it on demand.
+	 */
+	let historyScope: 'workspace' | 'all' = 'workspace';
+
+	const inHistory = (session: Session): boolean =>
+		historyScope === 'all' || inWorkspace(session, ctx.host.workspace());
 
 	// A chord pressed inside a webview is resolved against the workbench's *root* context, where the
 	// part-scoped keys (`auxiliaryBarFocus`, `focusedView`) are out of scope — that is why `Cmd+N`
@@ -141,6 +154,7 @@ export function chatPanel(ctx: Context): void {
 		clients.delete(webview);
 		readyClients.delete(webview);
 		focusedClients.delete(webview);
+		subagentViews.delete(webview);
 		syncFocus();
 		listeners.get(webview)?.dispose();
 		listeners.delete(webview);
@@ -155,7 +169,7 @@ export function chatPanel(ctx: Context): void {
 	const state = async (): Promise<Record<string, unknown>> => {
 		const config = ctx.settings.get();
 		const session = ctx.sessions.active();
-		const all = ctx.sessions.list();
+		const all = ctx.sessions.list().filter(inHistory);
 		const usage = session?.usage;
 		const tokens = usage ? usage.inputTokens + usage.outputTokens : 0;
 		return {
@@ -192,6 +206,7 @@ export function chatPanel(ctx: Context): void {
 			model: config.model,
 			modelLabel: ctx.llm.describe(config.model),
 			models: await ctx.llm.availableModels(),
+			historyScope,
 			sessionTotal: all.length,
 			tavern: tavernState(session),
 			sessions: all
@@ -232,7 +247,7 @@ export function chatPanel(ctx: Context): void {
 
 	// The transcript is sent as turns: one prompt plus the steps the agent took for it. The webview
 	// renders live turns and replayed turns with the same code, so the two always look the same.
-	const stepPayload = (step: Step): unknown => ({
+	const stepPayload = (step: Step, session?: Session): unknown => ({
 		kind: step.kind,
 		text: step.text === undefined ? undefined : clip(step.text, 40_000),
 		id: step.id,
@@ -242,6 +257,14 @@ export function chatPanel(ctx: Context): void {
 		description: shellDescription(step.name, step.args),
 		result: step.result === undefined ? undefined : clip(step.result, 30_000),
 		images: ctx.attachments.publicParts(step.images),
+		// A thought's length in tokens, counted with the model's tokenizer when one is warmed: the
+		// fold's summary reads it beside the duration, live and after a reload alike.
+		tokens: step.kind === 'thought' ? countRaw(step.text ?? '') : undefined,
+		// The conversation an `agent` call spawned, so its card can open the child view.
+		subagentId:
+			step.kind === 'tool' && step.id && session?.subagents && Object.hasOwn(session.subagents, step.id)
+				? session.subagents[step.id]
+				: undefined,
 		status: step.status,
 		ms: step.ms,
 		at: step.at,
@@ -278,7 +301,7 @@ export function chatPanel(ctx: Context): void {
 				at: turn.at,
 				startedAt: turn.startedAt,
 				endedAt: turn.endedAt,
-				steps: turn.steps.map(stepPayload),
+				steps: turn.steps.map((step) => stepPayload(step, session)),
 			}));
 	};
 
@@ -287,7 +310,7 @@ export function chatPanel(ctx: Context): void {
 		const turns = turnsOf(session?.transcript ?? []);
 		const last = turns[turns.length - 1];
 		return last
-			? { steps: last.steps.map(stepPayload), startedAt: last.startedAt, endedAt: last.endedAt, files: restorePossible(session, last) }
+			? { steps: last.steps.map((step) => stepPayload(step, session)), startedAt: last.startedAt, endedAt: last.endedAt, files: restorePossible(session, last) }
 			: { steps: [] };
 	};
 
@@ -298,6 +321,22 @@ export function chatPanel(ctx: Context): void {
 	const publishTurns = (session: Session | undefined): void => {
 		published = session ? { id: session.id, length: session.transcript.length } : null;
 		post({ type: 'turns', turns: history(session) });
+	};
+
+	/** A subagent's conversation as the overlay draws it; `undefined` when it is gone. */
+	const subagentSnapshot = (id: string): Record<string, unknown> | undefined => {
+		const session = ctx.sessions.get(id);
+		if (!session?.parentId) {
+			return undefined;
+		}
+		return {
+			type: 'subagent',
+			id,
+			title: session.title,
+			subagent: session.subagent,
+			done: session.subagentDone === true,
+			turns: history(session),
+		};
 	};
 
 	// A contribution changes the document itself (scripts/styles), and a webview's HTML cannot be
@@ -471,6 +510,24 @@ export function chatPanel(ctx: Context): void {
 	ctx.on('agent/notice', (ref, text) => {
 		if (ref.surface === SURFACE) {
 			post({ type: 'notice', text });
+		}
+	});
+	// The card gains its "Open session" link as soon as the child exists, while the call still runs.
+	ctx.on('agent/subagent-start', (ref, info) => {
+		if (ref.surface === SURFACE) {
+			post({ type: 'subagent-start', ...info });
+		}
+	});
+	// A watched subagent gained a step, finished or failed: repaint the open overlay only.
+	ctx.on('subagent/changed', (id) => {
+		for (const [client, viewed] of subagentViews) {
+			if (viewed !== id) {
+				continue;
+			}
+			const snapshot = subagentSnapshot(id);
+			if (snapshot) {
+				post(snapshot, client);
+			}
 		}
 	});
 	// One refresh answers a burst of events: a content save moves `tavern/changed`, and the settings
@@ -979,6 +1036,16 @@ export function chatPanel(ctx: Context): void {
 					for (const token of pendingReferences.splice(0)) {
 						post({ type: 'insertReference', token }, source);
 					}
+					// A reloaded guest forgot its overlay: hand it back, marked as an unsolicited open.
+					{
+						const viewed = subagentViews.get(source);
+						const snapshot = viewed ? subagentSnapshot(viewed) : undefined;
+						if (snapshot) {
+							post({ ...snapshot, type: 'subagent-open' }, source);
+						} else if (viewed) {
+							subagentViews.delete(source);
+						}
+					}
 					break;
 				case 'focusState':
 					if (message.focused === true) {
@@ -1027,9 +1094,27 @@ export function chatPanel(ctx: Context): void {
 					ctx.sessions.setActive(String(message.id ?? ''));
 					postPendingApprovals();
 					break;
+				case 'setHistoryScope':
+					historyScope = message.scope === 'all' ? 'all' : 'workspace';
+					refresh();
+					break;
+				case 'openSubagent': {
+					const id = String(message.id ?? '');
+					const snapshot = subagentSnapshot(id);
+					if (!snapshot) {
+						post({ type: 'notice', text: 'That subagent session is no longer available.' }, source);
+						break;
+					}
+					subagentViews.set(source, id);
+					post(snapshot, source);
+					break;
+				}
+				case 'closeSubagent':
+					subagentViews.delete(source);
+					break;
 				case 'search': {
 					const query = String(message.query ?? '');
-					post({ type: 'search', query, items: ctx.sessions.search(query) });
+					post({ type: 'search', query, items: ctx.sessions.search(query, 40, inHistory) });
 					break;
 				}
 				case 'mentionQuery': {
@@ -1108,12 +1193,16 @@ export function chatPanel(ctx: Context): void {
 					}
 					break;
 				case 'setContext': {
+					// The control is the chat's, but the pick is also the default for the next chat:
+					// a setting changed here outlives the session it was made in.
+					const form = asForm(message.context);
 					const session = ctx.sessions.active();
 					if (session) {
-						session.contextForm = asForm(message.context);
+						session.contextForm = form;
 						ctx.sessions.save(session);
 						ctx.sessions.changed(session.id);
 					}
+					await ctx.settings.update('contextForm', form);
 					break;
 				}
 				case 'setDisplay':
@@ -1121,21 +1210,27 @@ export function chatPanel(ctx: Context): void {
 					await ctx.settings.update('displayForm', asForm(message.display));
 					break;
 				case 'setReasoningEffort': {
+					// Persist the pick as well: a new chat starts from the settings, so the effort
+					// chosen here carries over instead of snapping back to `auto`.
+					const effort = asReasoningEffort(message.effort);
 					const session = ctx.sessions.active();
 					if (session) {
-						session.reasoningEffort = asReasoningEffort(message.effort);
+						session.reasoningEffort = effort;
 						ctx.sessions.save(session);
 						ctx.sessions.changed(session.id);
 					}
+					await ctx.settings.update('reasoningEffort', effort);
 					break;
 				}
 				case 'setContextWindow': {
+					const window = Math.max(0, Number(message.window) || 0);
 					const session = ctx.sessions.active();
 					if (session) {
-						session.contextWindow = Math.max(0, Number(message.window) || 0);
+						session.contextWindow = window;
 						ctx.sessions.save(session);
 						ctx.sessions.changed(session.id);
 					}
+					await ctx.settings.update('contextWindow', window);
 					break;
 				}
 				case 'toggleNetwork':
@@ -1412,12 +1507,22 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 			<div id="chats-search">
 				<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4"/><path d="M10 10l3.4 3.4"/></svg>
 				<input id="search" type="search" placeholder="Search recent chats" spellcheck="false" autocomplete="off" />
+				<button id="chats-scope" type="button" aria-pressed="false">This workspace</button>
 			</div>
 			<div id="chats-list"></div>
 		</div>
 	</div>
 </header>
 <main id="messages"></main>
+<!-- A subagent's own conversation: the parent chat stays underneath, untouched. -->
+<div id="subagent-view" hidden role="dialog" aria-modal="true" aria-label="Subagent session">
+	<div id="subagent-head">
+		<button id="subagent-close" type="button" class="ghost" data-tip="Back to the chat">← Back</button>
+		<span id="subagent-title"></span>
+		<span id="subagent-status" aria-live="polite"></span>
+	</div>
+	<div id="subagent-messages"></div>
+</div>
 <footer>
 	<div id="todos" hidden></div>
 	<div id="changes-panel" hidden>
@@ -1434,11 +1539,13 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 	</div>
 	<div id="editor">
 		<div id="composer-images" class="composer-images" hidden></div>
-		<textarea id="input" rows="3" placeholder="Ask Comonad…  Enter to send · Shift+Enter for a new line · @ to reference code · paste or drop images · /help for commands"></textarea>
+		<textarea id="input" rows="1" placeholder="Ask Comonad…  Enter to send · Shift+Enter for a new line · @ to reference code · paste or drop images · /help for commands"></textarea>
 		<div id="mention" class="mention-menu" role="listbox" aria-label="Reference a workspace item" hidden>
 			<div id="mention-head" class="mention-head" hidden></div>
 			<div id="mention-list"></div>
 		</div>
+		<!-- Floats above the composer whenever the transcript is following a reply from behind. -->
+		<button id="jump-latest" type="button" hidden data-tip="Jump to the newest message">↓ Latest</button>
 		<div id="controls">
 			<div class="pill" data-control="model">
 				<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="pill-label"></span><span class="chev">▾</span></button>

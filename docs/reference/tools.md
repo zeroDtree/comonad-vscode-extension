@@ -20,6 +20,9 @@ Every tool declares a **capability**, whether it needs **network**, and whether 
 `read_file` also reads PNG, JPEG, WebP and GIF images (up to 4 MiB each) and hands them to the model
 as image content.
 
+An `agent` call creates a hidden child session. Its card carries **Open session** while it runs; the
+read-only overlay shows the subagent's prompt, steps and tool results and follows the run live.
+
 ## Shell tools
 
 - `run_shell_readonly` runs in a read-only sandbox; `run_shell` can write inside the workspace.

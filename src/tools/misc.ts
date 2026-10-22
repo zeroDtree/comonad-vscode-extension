@@ -57,7 +57,7 @@ export const agentTools = toolset([
 				background?: boolean;
 				fork?: boolean;
 			};
-			return ctx.spawnAgent({ prompt, description, agent, background, fork, signal: ctx.signal });
+			return ctx.spawnAgent({ prompt, description, agent, background, fork, callId: ctx.callId, signal: ctx.signal });
 		},
 	},
 ]);

@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
 import { asImagePart } from '../lib/images';
 import { WORKSPACE_BOUNDARY, asApproval, asWorkMode } from '../lib/policy';
+import { isInside } from '../lib/sandbox';
 import type { ContextForm } from '../lib/prompt';
 import { turnsOf } from '../lib/turns';
 import type { ImagePart, Message, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
@@ -92,12 +93,30 @@ export interface Cursor {
 	state: unknown;
 }
 
+/**
+ * Whether a chat belongs to `workspace`: the folder recorded when it was created; for a chat
+ * written before that field existed, the directory it ran in, which may be a folder inside the
+ * workspace when `comonad.workingDirectory` was narrowed.
+ */
+export function inWorkspace(session: Session, workspace: string): boolean {
+	if (session.workspace !== undefined) {
+		return session.workspace === workspace;
+	}
+	const home = session.policy.workingDirectory ?? '';
+	return workspace ? home === workspace || isInside(workspace, home) : home === '';
+}
+
 export interface Session {
 	id: string;
 	title: string;
 	createdAt: number;
 	updatedAt: number;
 	policy: SessionPolicy;
+	/**
+	 * The workspace folder the chat was started in. The recent-chats list shows only this workspace
+	 * by default, so chats from another folder stay in their own history.
+	 */
+	workspace?: string;
 	/** How much of the transcript this chat sends back (new chats start from the Context setting). */
 	contextForm?: ContextForm;
 	/** Thinking effort for this chat (new chats start from the Reasoning effort setting). */
@@ -120,6 +139,14 @@ export interface Session {
 	created?: string[];
 	/** The resolved workspace `created` paths are relative to. */
 	createdRoot?: string;
+	/** The chat that spawned this one; a subagent session is hidden from the ordinary history. */
+	parentId?: string;
+	/** The subagent definition that owns this session. */
+	subagent?: string;
+	/** The subagent run has finished. */
+	subagentDone?: boolean;
+	/** Tool call id → subagent session id: what lets an `agent` card open the child conversation. */
+	subagents?: Record<string, string>;
 	usage: SessionUsage;
 	/**
 	 * The prompt size the provider reported for the last request, in tokens. It is the only exact
@@ -188,6 +215,30 @@ export function createdInWorkspace(session: Session, workspace: string): Readonl
 		return new Set();
 	}
 	return new Set(session.created ?? []);
+}
+
+/** A parent's tool-call → child-session map, sanitised: it is read back from an untrusted JSON file. */
+const MAX_SUBAGENT_LINKS = 256;
+function sanitizeSubagentLinks(value: unknown): Record<string, string> | undefined {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return undefined;
+	}
+	const out: Record<string, string> = {};
+	for (const [rawCall, rawSession] of Object.entries(value as Record<string, unknown>).slice(-MAX_SUBAGENT_LINKS)) {
+		const call = rawCall.trim();
+		if (!call || call.length > 200 || call === '__proto__' || call === 'prototype' || call === 'constructor') {
+			continue;
+		}
+		if (typeof rawSession !== 'string' || rawSession.length > 200) {
+			continue;
+		}
+		try {
+			out[call] = safeId(rawSession);
+		} catch {
+			// A hand-edited link must not become a path.
+		}
+	}
+	return Object.keys(out).length ? out : undefined;
 }
 
 function uniqueCreated(paths: string[]): string[] {
@@ -271,7 +322,7 @@ export class SessionStore {
 	build(
 		policy: SessionPolicy,
 		id: string = newSessionId(),
-		defaults: { contextForm?: ContextForm; reasoningEffort?: ReasoningEffort; contextWindow?: number } = {},
+		defaults: { contextForm?: ContextForm; reasoningEffort?: ReasoningEffort; contextWindow?: number; workspace?: string } = {},
 	): Session {
 		const now = Date.now();
 		return {
@@ -280,6 +331,7 @@ export class SessionStore {
 			createdAt: now,
 			updatedAt: now,
 			policy: { ...policy },
+			workspace: defaults.workspace,
 			contextForm: defaults.contextForm ?? 'rendered',
 			reasoningEffort: defaults.reasoningEffort ?? 'auto',
 			contextWindow: defaults.contextWindow ?? 0,
@@ -388,6 +440,9 @@ export class SessionStore {
 				workMode: asWorkMode(session.policy?.workMode),
 				approval: asApproval(session.policy?.approval),
 			},
+			// Only a string is a workspace; a hand-edited value falls back to the directory the chat ran
+			// in, which is what the history uses for sessions written before the field existed.
+			workspace: typeof session.workspace === 'string' ? session.workspace : undefined,
 			// Image references are checked too: a hand-edited id must never become a path, and a media
 			// type is derived from the id rather than trusted.
 			transcript: (session.transcript ?? []).map((message) => {
@@ -407,6 +462,10 @@ export class SessionStore {
 					.filter((path): path is string => path !== undefined),
 			).slice(-MAX_CREATED_PATHS),
 			createdRoot: typeof session.createdRoot === 'string' ? session.createdRoot : undefined,
+			parentId: typeof session.parentId === 'string' ? session.parentId : undefined,
+			subagent: typeof session.subagent === 'string' ? session.subagent : undefined,
+			subagentDone: session.subagentDone === true,
+			subagents: sanitizeSubagentLinks(session.subagents),
 			usage: session.usage ?? emptyUsage(),
 			instructions: session.instructions ?? [],
 		};
@@ -455,9 +514,12 @@ export class Sessions extends Service {
 		this.ctx.emit('sessions/changed', id);
 	}
 
-	/** The history: chats that have been used. An unused draft is not part of it. */
+	/**
+	 * The history: chats that have been used. An unused draft is not part of it, and neither is a
+	 * subagent session — it is reached from the `agent` card that spawned it, not from the chat list.
+	 */
 	list(): Session[] {
-		return this.store.list();
+		return this.store.list().filter((session) => !session.parentId);
 	}
 
 	get(id: string): Session | undefined {
@@ -483,14 +545,24 @@ export class Sessions extends Service {
 		}
 	}
 
-	/** Chats whose title or transcript mentions `query`, most recently updated first. */
-	search(query: string, limit = 40): { id: string; title: string; updatedAt: number; snippet?: string }[] {
+	/**
+	 * Chats whose title or transcript mentions `query`, most recently updated first. `where` filters
+	 * before the limit, so a scoped search still fills its page from the scope it names.
+	 */
+	search(
+		query: string,
+		limit = 40,
+		where?: (session: Session) => boolean,
+	): { id: string; title: string; updatedAt: number; snippet?: string }[] {
 		const needle = query.trim().toLowerCase();
 		if (!needle) {
 			return [];
 		}
 		const hits: { id: string; title: string; updatedAt: number; snippet?: string }[] = [];
 		for (const session of this.list()) {
+			if (where && !where(session)) {
+				continue;
+			}
 			const snippet = matchSnippet(session, needle);
 			if (!snippet && !session.title.toLowerCase().includes(needle)) {
 				continue;
@@ -505,7 +577,9 @@ export class Sessions extends Service {
 
 	active(): Session | undefined {
 		if (!this._activeId) {
-			this._activeId = this.list()[0]?.id ?? null;
+			// Start on this workspace's newest chat. Reaching into another folder's history here would
+			// put a foreign conversation in the composer before the reader asked for it.
+			this._activeId = this.list().find((session) => inWorkspace(session, this.ctx.host.workspace()))?.id ?? null;
 		}
 		return this._activeId ? this.get(this._activeId) : undefined;
 	}
@@ -530,10 +604,33 @@ export class Sessions extends Service {
 			contextForm: config.contextForm,
 			reasoningEffort: config.reasoningEffort,
 			contextWindow: config.contextWindow,
+			workspace: this.ctx.host.workspace(),
 		});
 		this._draft = session;
 		this._activeId = session.id;
 		this.changed(session.id);
+		return session;
+	}
+
+	/**
+	 * A subagent's own conversation: persisted immediately, hidden from the history, and never the
+	 * active chat. Its parent records the tool-call link that opens it.
+	 */
+	createChild(policy: SessionPolicy, id: string, init: { title: string; parentId: string; subagent: string; transcript: Message[] }): Session {
+		const config = this.ctx.settings.get();
+		const session = this.store.build(policy, id, {
+			contextForm: config.contextForm,
+			reasoningEffort: config.reasoningEffort,
+			contextWindow: config.contextWindow,
+			workspace: this.ctx.host.workspace(),
+		});
+		session.title = init.title;
+		session.parentId = init.parentId;
+		session.subagent = init.subagent;
+		session.subagentDone = false;
+		session.transcript = [...init.transcript];
+		session.turnIndex = init.transcript.some((message) => message.role === 'user') ? 1 : 0;
+		this.store.save(session);
 		return session;
 	}
 
@@ -572,6 +669,8 @@ export class Sessions extends Service {
 	}
 
 	remove(id: string): void {
+		// A subagent's conversation has no life of its own: removing its parent removes it too.
+		this.removeChildren(id);
 		if (this._draft?.id === id) {
 			this._draft = null;
 		} else {
@@ -584,6 +683,14 @@ export class Sessions extends Service {
 		this.changed(id);
 	}
 
+	/** Removes a session's descendants, deepest first: a removed chat cannot leave a child behind. */
+	private removeChildren(id: string): void {
+		for (const child of this.store.list().filter((session) => session.parentId === id)) {
+			this.removeChildren(child.id);
+			this.store.remove(child.id);
+		}
+	}
+
 	/** Every attachment id a stored chat mentions, including the state of a suspended turn. */
 	attachmentIds(): Set<string> {
 		const ids = new Set<string>();
@@ -594,7 +701,8 @@ export class Sessions extends Service {
 				}
 			}
 		};
-		for (const session of this.list()) {
+		// Every stored chat, hidden subagent sessions included: their images are still in use.
+		for (const session of this.store.list()) {
 			collect(session.transcript);
 			const state = session.cursor?.state as { messages?: Message[]; transcript?: Message[] } | undefined;
 			collect(state?.messages);

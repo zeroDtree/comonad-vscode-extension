@@ -89,14 +89,17 @@ export interface ResumeCursor {
 	step: number;
 }
 
-export interface RunOptions {
+export interface RunOptions<S = unknown> {
 	maxSteps?: number;
 	choose?: GraphRuntime['choose'];
 	resume?: ResumeCursor;
 	signal?: AbortSignal;
+	/** Called after each node settles, with the state it produced: a child run persists its progress. */
+	onStep?: (state: S, step: number) => void;
 }
 
-export const DEFAULT_MAX_STEPS = 128;
+/** `0` is no budget: the graph runs until it ends or is aborted, which is the default. */
+export const DEFAULT_MAX_STEPS = 0;
 
 export class GraphError extends Error {
 	constructor(message: string) {
@@ -214,7 +217,7 @@ function compileNode<S>(
 	return { run: implementation, exit };
 }
 
-export async function runGraph<S>(graph: CompiledGraph<S>, state: S, options: RunOptions = {}): Promise<Outcome<S>> {
+export async function runGraph<S>(graph: CompiledGraph<S>, state: S, options: RunOptions<S> = {}): Promise<Outcome<S>> {
 	const maxSteps = options.maxSteps ?? graph.maxSteps;
 	const signal = options.signal ?? new AbortController().signal;
 	let step = options.resume?.step ?? 0;
@@ -224,7 +227,7 @@ export async function runGraph<S>(graph: CompiledGraph<S>, state: S, options: Ru
 		if (signal.aborted) {
 			return { status: 'aborted', state, step };
 		}
-		if (step >= maxSteps) {
+		if (maxSteps > 0 && step >= maxSteps) {
 			throw new GraphError(`graph exceeded maxSteps (${maxSteps})`);
 		}
 		const node = graph.nodes.get(current);
@@ -263,6 +266,7 @@ export async function runGraph<S>(graph: CompiledGraph<S>, state: S, options: Ru
 		if (signal.aborted) {
 			return { status: 'aborted', state, step };
 		}
+		options.onStep?.(state, step);
 		step += 1;
 		if (signal.aborted) {
 			return { status: 'aborted', state, step };

@@ -39,7 +39,7 @@
 | `comonad.allowFullAccess` | `true` | 提供 unrestricted 预设 |
 | `comonad.commandTimeout` | `60` | shell 超时回退值（秒） |
 | `comonad.commandTimeoutOverride` | `false` | 始终使用该值，忽略模型选择的超时 |
-| `comonad.maxSteps` | `128` | 每回合最大图步数 |
+| `comonad.maxSteps` | `0`（无限制） | 每回合最大图步数 |
 | `comonad.filterSensitiveEnv` | `true` | 从命令环境中移除 key、token 与密码 |
 | `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | 规则列表；见[安全](/zh/guide/safety#_2-规则) |
 | `comonad.subagents` | `{}` | 子 Agent 的逐 Agent 授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。内置 `implement` 默认两者都有；其它 Agent 默认只读。 |

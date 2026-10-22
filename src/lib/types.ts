@@ -155,6 +155,8 @@ export interface AgentSpawnRequest {
 	background?: boolean;
 	/** Share the parent conversation context instead of starting fresh. */
 	fork?: boolean;
+	/** The parent's tool call, so its card can link to the child session. */
+	callId?: string;
 	signal: AbortSignal;
 }
 
@@ -162,6 +164,8 @@ export type AgentSpawnFunction = (request: AgentSpawnRequest) => Promise<string>
 
 export interface ToolContext {
 	sessionId: string;
+	/** The tool call being dispatched, when known; a spawned subagent links its session to it. */
+	callId?: string;
 	workspace: string;
 	policy: SessionPolicy;
 	signal: AbortSignal;

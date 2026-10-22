@@ -17,6 +17,10 @@ declare module 'cordis' {
 		'agent/tool-result'(ref: TurnRef, call: ToolCall, output: string, images?: ImagePart[]): void;
 		'agent/notice'(ref: TurnRef, text: string): void;
 		'agent/turn-end'(ref: TurnRef): void;
+		/** A subagent created its own conversation; the parent card links to it. */
+		'agent/subagent-start'(ref: TurnRef, info: { callId?: string; id: string; name: string; description?: string }): void;
+		/** A subagent session gained a step, finished, or failed: an open child view repaints. */
+		'subagent/changed'(id: string): void;
 		/** Waterfall: surfaces answer for their own `surface` id and delegate the rest. */
 		'approval/request'(request: ApprovalRequest, next: () => ApprovalDecision | Promise<ApprovalDecision>): ApprovalDecision | Promise<ApprovalDecision>;
 		'sessions/changed'(id?: string): void;
