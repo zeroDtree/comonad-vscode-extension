@@ -663,7 +663,7 @@
             "pl"
           ],
           "default": "sw",
-          "markdownDescription": "Tool capabilities. `chat` no tools at all · `ro` read files, read-only shell · `sw` write files, read-only shell · `aw` write files, full shell · `pl` read files, read-only shell, plan files only."
+          "markdownDescription": "Tool capabilities. `chat` no tools at all · `ro` read files, read-only shell · `sw` write files, run tests in a scratch shell · `aw` write files, full shell · `pl` read files, read-only shell, plan files only."
         },
         "comonad.approval": {
           "type": "string",
@@ -889,6 +889,27 @@
             }
           },
           "description": "Permission rules such as `run_shell(npm run test:*)`, `read_file(./.env)`, `fetch_url(domain:example.com)`."
+        },
+        "comonad.subagents": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "files": {
+                "type": "boolean",
+                "default": false,
+                "description": "Grant the tracked file-write tools (write_file, apply_patch, apply_edits)."
+              },
+              "test": {
+                "type": "boolean",
+                "default": false,
+                "description": "Grant run_shell_test: the workspace stays read-only and only the scratch directory is writable."
+              }
+            },
+            "additionalProperties": false
+          },
+          "markdownDescription": "Per-agent capability grants for subagents, keyed by agent name. `files` enables the tracked file-write tools; `test` enables the scratch-only test shell. Read-only tools are always available; full shell (`run_shell`, `start_shell`) and plan writes are never granted to a subagent. The agent's own `tools` list still selects which tools it uses, and the parent mode still has to allow the capability. Built-in `implement` defaults to both; every other agent defaults to read-only. Example: `{ \"implement\": { \"files\": true, \"test\": true } }`."
         },
         "comonad.instructions": {
           "type": "boolean",

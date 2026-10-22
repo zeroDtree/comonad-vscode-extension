@@ -43,6 +43,27 @@ UI.
 | `comonad.maxSteps` | `128` | Maximum graph steps per turn |
 | `comonad.filterSensitiveEnv` | `true` | Strip keys, tokens and passwords from command environments |
 | `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | Rule lists; see [Safety](/guide/safety#_2-rules) |
+| `comonad.subagents` | `{}` | Per-agent subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Built-in `implement` defaults to both; every other agent is read-only until granted. |
+
+## Subagents
+
+`comonad.subagents` maps an agent name to its grants:
+
+```json
+{
+  "comonad.subagents": {
+    "implement": { "files": true, "test": true },
+    "review": { "test": true },
+    "my-writer": { "files": true }
+  }
+}
+```
+
+Read-only tools are always available. `files` and `test` are the only grants; `run_shell`,
+`start_shell` and plan writes are never granted to a subagent. The agent definition must also list a
+tool using the capability; a definition without a `tools` list is read-only. The parent mode still
+has to allow the capability. Built-in `implement` defaults to both grants; every other built-in and
+every custom agent is read-only until configured. See [Safety](/guide/safety#subagents).
 
 ## Checkpoints
 

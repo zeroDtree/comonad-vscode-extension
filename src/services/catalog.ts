@@ -59,6 +59,27 @@ export const BUILTIN_AGENTS: AgentDefinition[] = [
 		tools: ['list_dir', 'read_file', 'grep_files', 'find_files', 'find_symbols', 'get_diagnostics', 'git_diff', 'run_shell_readonly'],
 		builtin: true,
 	},
+	{
+		name: 'implement',
+		description: 'Implement a focused change and verify it with tests. Writes through the tracked file tools only.',
+		prompt:
+			'You implement the delegated change. Every project change goes through write_file, apply_patch or apply_edits: never use a shell command to write project files. Run tests, builds and linters with run_shell_test; that shell keeps the workspace read-only and can write only to the scratch directory ($COMONAD_SCRATCH). Report the files you changed and the test results.',
+		tools: [
+			'list_dir',
+			'read_file',
+			'grep_files',
+			'find_files',
+			'find_symbols',
+			'get_diagnostics',
+			'git_diff',
+			'write_file',
+			'apply_patch',
+			'apply_edits',
+			'run_shell_readonly',
+			'run_shell_test',
+		],
+		builtin: true,
+	},
 ];
 
 declare module 'cordis' {

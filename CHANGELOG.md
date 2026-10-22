@@ -24,6 +24,11 @@ Highlights are below; the full implementation notes are linked at the end. The u
   endpoint.
 - **The workspace boundary** is enforced where the panel says it is, with a writable scratch
   directory for confined shells and a narrow exemption for cleaning up the agent's own files.
+- **Subagents can implement and test.** A new `run_shell_test` keeps the workspace read-only and
+  writes only a private scratch tree. Subagent capabilities are granted per agent in
+  **Settings → Subagents** (`comonad.subagents`), intersected with the parent mode and the agent
+  definition's `tools`. Full shell and plan writes are never granted; every file write a subagent
+  makes is journaled under the parent chat and appears in its diff.
 - **Remote SSH, WSL and Dev Containers** are first-class; credentials stay client-side and model calls
   originate on the remote host.
 - **Images, `@` references and in-place prompt editing** make the chat a working surface, not just a

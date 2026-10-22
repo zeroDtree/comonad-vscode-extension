@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { randomUUID } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Service, type Context } from 'cordis';
 import { abortable, linkAbort } from '../lib/cancel';
 import type { TurnRef } from '../lib/types';
@@ -31,7 +31,7 @@ import {
 import { instructionBody, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, type Completion } from '../lib/openai';
-import { callTarget, gateCalls, MODE_LABELS, suggestAllowRule } from '../lib/policy';
+import { callTarget, gateCalls, isShellCapability, MODE_LABELS, suggestAllowRule } from '../lib/policy';
 import { creationTargets, rmTargets } from '../lib/shell';
 import {
 	COMONAD_BLOCK,
@@ -61,7 +61,7 @@ import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { agentIndex, agentLines, allowedToolsFor, skillLines } from './catalog';
 import type { JournalApi } from '../lib/journal';
-import { DEFAULT_CONTEXT_WINDOW } from './settings';
+import { DEFAULT_CONTEXT_WINDOW, subagentGrant } from './settings';
 import {
 	canRewrite,
 	createdInWorkspace,
@@ -166,6 +166,12 @@ interface Turn {
 interface RunState {
 	ref: TurnRef;
 	sessionId: string;
+	/** The chat whose journal, provenance and review collect this run's writes. */
+	rootSessionId: string;
+	/** The subagent's name, for the audit trail; absent on the main agent. */
+	agentName?: string;
+	/** Workspace-relative files this run wrote through the tracked file tools. */
+	writes: Set<string>;
 	policy: SessionPolicy;
 	/** The model this turn already had to send without images (a reset, not a capability verdict). */
 	imagesOff?: string;
@@ -203,8 +209,15 @@ interface RunState {
 
 const MAX_SUBAGENT_DEPTH = 2;
 
-/** The capabilities a subagent may use. Anything that writes — files, shell, plans — is never offered. */
-const SUBAGENT_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>(['ro', 'shell_ro']);
+/**
+ * The capabilities a subagent may ever hold. Full shell writes and plan writes are never among
+ * them: a subagent's project changes go through tracked file tools, and its shell writes only the
+ * scratch directory. The settings grant can narrow this set, never widen it.
+ */
+const SUBAGENT_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>(['ro', 'shell_ro', 'rw', 'shell_test']);
+
+/** The two capabilities a grant controls; a definition must also name a tool using one. */
+const SUBAGENT_WRITE_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>(['rw', 'shell_test']);
 
 /** What a continue says as the user when the preset has no `continue_nudge_prompt` of its own. */
 /**
@@ -268,6 +281,8 @@ export class Agent extends Service {
 	/** Sessions already told that their stored model profile is gone. */
 	private readonly warned = new Set<string>();
 	private activeSubagents = 0;
+	/** The write-capable subagent currently running, if any: file writes are serialised. */
+	private writingSubagent: string | null = null;
 	private compiledSource = '';
 	private compiled: CompiledGraph<RunState> | null = null;
 
@@ -603,6 +618,8 @@ export class Agent extends Service {
 			const state: RunState = {
 				ref,
 				sessionId: session.id,
+				rootSessionId: session.id,
+				writes: new Set(),
 				policy: session.policy,
 				transcript: seeded,
 				messages,
@@ -1347,9 +1364,7 @@ export class Agent extends Service {
 			// A silent generation (an impersonation or a quiet turn) writes nothing down and is offered no
 			// tools at all: a tool it called would run for real, and its reply is thrown away afterwards.
 			// A preset whose Tools entry is off offers none either, for the whole turn.
-			const offered = this.ctx.tools
-				.visible(state.policy)
-				.filter((tool) => !state.filter || (SUBAGENT_CAPABILITIES.has(tool.capability) && (!state.filter.allow || state.filter.allow.includes(tool.name))));
+			const offered = this.ctx.tools.visible(state.policy).filter((tool) => this.subagentToolAllowed(state, tool));
 			const visible = SILENT_TRIGGERS.has(state.trigger) || state.toolsEnabled === false ? [] : offered;
 			const live = this.turnSession(state.sessionId);
 			const session = live ?? this.ctx.sessions.get(state.sessionId);
@@ -1373,6 +1388,7 @@ export class Agent extends Service {
 					kind: 'assistant',
 					text: clip(message.content, 2_000),
 					tools: message.toolCalls?.map((call) => call.name),
+					...(state.agentName ? { subagent: state.agentName, root: state.rootSessionId } : {}),
 				});
 			}
 			if (message.content || message.toolCalls?.length || message.reasoning) {
@@ -1423,9 +1439,9 @@ export class Agent extends Service {
 					return;
 				}
 				// The second line of defence: a subagent's call is refused if the tool is not on its list, or
-				// if the tool writes, whatever the model asked for.
-				const capability = this.ctx.tools.get(call.name)?.capability;
-				if (state.filter && (!state.filter.allow?.includes(call.name) || (capability !== undefined && !SUBAGENT_CAPABILITIES.has(capability)))) {
+				// if it exceeds the capabilities a subagent may hold, whatever the model asked for.
+				const tool = this.ctx.tools.get(call.name);
+				if (state.filter && (!tool || !this.subagentToolAllowed(state, tool))) {
 					results[index] = { role: 'tool', toolCallId: call.id, content: `Error: tool ${call.name} is not available to this subagent`, at: Date.now() };
 					return;
 				}
@@ -1522,6 +1538,7 @@ export class Agent extends Service {
 					arguments: clip(args, 500),
 					output: clip(outcome.content, 500),
 					images: imageNotes(images),
+					...(state.agentName ? { subagent: state.agentName, root: state.rootSessionId } : {}),
 				});
 				results[index] = { role: 'tool', toolCallId: call.id, content: outcome.content, images, at: Date.now() };
 			};
@@ -1570,6 +1587,18 @@ export class Agent extends Service {
 				state.gateReason = `tool ${off.name} is switched off in Prompts`;
 				return 'reject';
 			}
+			// A subagent may only call what its grant and definition offered it; a call invented for a
+			// hidden tool is refused here, before the gate has a chance to read a rule for it.
+			if (state.filter) {
+				const unavailable = state.toolCalls.find((call) => {
+					const tool = this.ctx.tools.get(call.name);
+					return !tool || !this.subagentToolAllowed(state, tool);
+				});
+				if (unavailable) {
+					state.gateReason = `tool ${unavailable.name} is not available to this subagent`;
+					return 'reject';
+				}
+			}
 			const workspace = state.policy.workingDirectory;
 			const created = new Set(this.createdInSession(state));
 			if (process.platform !== 'win32' && workspace.trim()) {
@@ -1577,7 +1606,7 @@ export class Agent extends Service {
 				// absent now: the creation form will make it, and rm cannot delete a user's file.
 				for (const call of state.toolCalls) {
 					const tool = this.ctx.tools.get(call.name);
-					if (!tool || (tool.capability !== 'shell_ro' && tool.capability !== 'shell_rw')) {
+					if (!tool || !isShellCapability(tool.capability)) {
 						continue;
 					}
 					const command = callTarget(call, tool);
@@ -1617,9 +1646,14 @@ export class Agent extends Service {
 				return 'tools';
 			}
 			// A subagent runs inside a pre-approved, filtered tool set: ordinary confirmations are
-			// resolved by delegation. An escalated one — no sandbox, unsandboxed tool, dangerous
-			// command — needs the user, so it falls through to the surface.
-			if (gate.decision === 'confirm' && state.filter && !gate.escalated) {
+			// resolved by delegation. An escalated one — no sandbox, an unsandboxed tool, a dangerous
+			// command, or a rule the user wrote to ask about — needs the user, and a subagent cannot
+			// ask, so it is refused rather than parked on a surface that will never answer it.
+			if (gate.decision === 'confirm' && state.filter) {
+				if (gate.escalated) {
+					state.gateReason = `${gate.reason}; a subagent cannot ask you`;
+					return 'reject';
+				}
 				return 'tools';
 			}
 			if (gate.decision === 'reject') {
@@ -1660,12 +1694,25 @@ export class Agent extends Service {
 		return parts.length ? parts : undefined;
 	}
 
+	/** Whether a subagent's model may see or run this tool; the main agent is unfiltered here. */
+	private subagentToolAllowed(state: RunState, tool: ToolSpec): boolean {
+		if (!state.filter) {
+			return true;
+		}
+		if (!SUBAGENT_CAPABILITIES.has(tool.capability)) {
+			return false;
+		}
+		return !state.filter.allow || state.filter.allow.includes(tool.name);
+	}
+
 	private toolContext(state: RunState, signal: AbortSignal): ToolContext {
 		return {
 			sessionId: state.sessionId,
 			workspace: state.policy.workingDirectory,
 			policy: state.policy,
 			signal,
+			// One scratch tree per chat, shared by its subagents so the main agent can read their reports.
+			scratchDirectory: join(this.ctx.host.storage.tmp, 'shell', state.rootSessionId),
 			log: (text) => this.notice(state.ref, text),
 			ask: (question, options, multi) => this.ctx.host.ask(question, options, multi),
 			todos: (items) => {
@@ -1691,16 +1738,21 @@ export class Agent extends Service {
 	 */
 	private async journalEdit(state: RunState, path: string, write: () => Promise<void>): Promise<void> {
 		const workspace = state.policy.workingDirectory;
-		// The turn saves its own copy of the session when it ends. A mark written to any other copy is
-		// overwritten by that save, so the mark goes on the live object the turn is running with.
-		const session = this.turnSession(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const inside = Boolean(workspace) && isInside(workspace, path);
+		const rel = inside ? relative(resolve(workspace), resolve(path)).split(sep).join('/') : '';
+		// A subagent's writes belong to the chat that spawned it: the same journal, provenance and
+		// review as the main agent's own writes.
+		const session = this.turnSession(state.rootSessionId) ?? this.ctx.sessions.get(state.rootSessionId);
 		// The journal is a feature of its own, not a part of the agent: without its plugin (or with
 		// checkpoints switched off) a write is simply a write, and nothing is recorded.
 		const journal = this.ctx.get('checkpoints') as JournalApi | undefined;
-		if (!workspace || !session || !journal || !this.ctx.settings.get().checkpoints || !isInside(workspace, path)) {
-			return write();
+		if (!workspace || !session || !journal || !this.ctx.settings.get().checkpoints || !inside) {
+			await write();
+			if (rel) {
+				state.writes.add(rel);
+			}
+			return;
 		}
-		const rel = relative(resolve(workspace), resolve(path)).split(sep).join('/');
 		let before: string | null;
 		try {
 			// The turn's restore point is taken before its first write: restoring to it undoes the whole
@@ -1716,17 +1768,20 @@ export class Agent extends Service {
 				});
 				this.ctx.sessions.save(session);
 			}
-			before = await journal.store(workspace, state.sessionId, rel);
+			before = await journal.store(workspace, state.rootSessionId, rel);
 		} catch (error) {
 			// A shadow repository that cannot be reached (git missing, storage gone) must not keep the
 			// agent from writing: with nothing recorded, this write is what a disabled journal leaves.
 			this.ctx.log.message(`journal: not recording (${describe(error)}); writing without an entry`);
-			return write();
+			await write();
+			state.writes.add(rel);
+			return;
 		}
 		await write();
+		state.writes.add(rel);
 		try {
-			const after = await journal.store(workspace, state.sessionId, rel);
-			await journal.record(workspace, state.sessionId, session.turnIndex, rel, before, after);
+			const after = await journal.store(workspace, state.rootSessionId, rel);
+			await journal.record(workspace, state.rootSessionId, session.turnIndex, rel, before, after);
 		} catch (error) {
 			// The write already happened; a failure to record it is said, not thrown back over it.
 			this.ctx.log.message(`journal: the write landed but was not recorded (${describe(error)})`);
@@ -1777,12 +1832,12 @@ export class Agent extends Service {
 
 	/** The provenance the gate may use, bound to the workspace it was recorded under. */
 	private createdInSession(state: RunState): ReadonlySet<string> {
-		const session = this.turnSession(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const session = this.turnSession(state.rootSessionId) ?? this.ctx.sessions.get(state.rootSessionId);
 		return session ? createdInWorkspace(session, state.policy.workingDirectory) : new Set();
 	}
 
 	private noteCreated(state: RunState, path: string): void {
-		const session = this.turnSession(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const session = this.turnSession(state.rootSessionId) ?? this.ctx.sessions.get(state.rootSessionId);
 		const workspace = state.policy.workingDirectory;
 		if (!session || !workspace.trim()) {
 			return;
@@ -1805,7 +1860,7 @@ export class Agent extends Service {
 	}
 
 	private noteDeleted(state: RunState, path: string): void {
-		const session = this.turnSession(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		const session = this.turnSession(state.rootSessionId) ?? this.ctx.sessions.get(state.rootSessionId);
 		const workspace = state.policy.workingDirectory;
 		if (!session || !workspace.trim()) {
 			return;
@@ -1836,14 +1891,47 @@ export class Agent extends Service {
 		// The unnamed spawn is the `explore` agent, by name: `agents[0]` is whatever sorts first once
 		// a user has agents of their own, and that would silently make one of them the default.
 		const agent = definition ?? this.ctx.catalog.agent('explore');
-		const policy: SessionPolicy = { ...parent.policy, model: agent?.model || parent.policy.model };
-		// A subagent never writes: only read-only capabilities are offered, whatever its definition lists.
-		const visible = this.ctx.tools
+		// A subagent's writes belong to the chat that spawned it, and never reach outside the workspace.
+		const policy: SessionPolicy = {
+			...parent.policy,
+			model: agent?.model || parent.policy.model,
+			confinement: { ...parent.policy.confinement, write: true },
+		};
+		const grant = subagentGrant(this.ctx.settings.get(), agent?.name ?? 'explore', agent?.builtin === true);
+		// The settings grant is the authorization; the definition's tools are the selection. Both, plus
+		// the parent's own allow list (for a nested spawn), and the hard subagent cap.
+		const listed = this.ctx.tools
 			.visible(policy)
 			.filter((tool) => SUBAGENT_CAPABILITIES.has(tool.capability))
+			.filter((tool) => !parent.filter?.allow || parent.filter.allow.includes(tool.name))
+			.filter((tool) => tool.capability !== 'rw' || (grant.files && tool.trackedWrite === true))
+			.filter((tool) => tool.capability !== 'shell_test' || grant.test)
 			.map((tool) => tool.name)
 			.filter((name) => name !== 'agent' || depth + 1 < MAX_SUBAGENT_DEPTH);
-		const allow = agent ? allowedToolsFor(agent, visible) : visible;
+		// No explicit tools list means read-only: a definition opts into writing by naming the tool.
+		const allow = agent?.tools?.length
+			? allowedToolsFor(agent, listed)
+			: listed.filter((name) => {
+					const capability = this.ctx.tools.get(name)?.capability;
+					return capability === undefined || !SUBAGENT_WRITE_CAPABILITIES.has(capability);
+				});
+		const writeCapable = allow.some((name) => SUBAGENT_WRITE_CAPABILITIES.has(this.ctx.tools.get(name)?.capability ?? 'ro'));
+		// A background run has no live turn to journal against and nobody to review its diff.
+		if (request.background && writeCapable) {
+			return 'Error: a write-capable subagent must run in the foreground; background subagents are read-only';
+		}
+		// Two writers would race on the same files and on the same journal mark.
+		if (writeCapable && this.writingSubagent) {
+			return `Error: another write-capable subagent is already running (${this.writingSubagent}); wait for it to finish`;
+		}
+		if (writeCapable) {
+			this.writingSubagent = request.description ?? agent?.name ?? 'subagent';
+		}
+		const releaseWriter = (): void => {
+			if (writeCapable) {
+				this.writingSubagent = null;
+			}
+		};
 		const run = async (): Promise<string> => {
 			this.activeSubagents += 1;
 			const subId = `sub-${randomUUID()}`;
@@ -1854,6 +1942,7 @@ export class Agent extends Service {
 				const system = [
 					`You are the ${agent?.name ?? 'explore'} subagent of Comonad.`,
 					agent?.prompt ?? 'Complete the delegated task and return a concise report.',
+					'Project files may be changed only with the file tools offered to you; never use a shell command to write a project file. run_shell_test can write only its scratch directory. If a tool you need is not offered, report that instead of working around it.',
 					agentIndex(this.ctx.catalog.agents),
 				].join('\n\n');
 				const parentSession = request.fork ? this.ctx.sessions.get(parent.sessionId) : undefined;
@@ -1863,6 +1952,9 @@ export class Agent extends Service {
 				const state: RunState = {
 					ref: { sessionId: subId },
 					sessionId: subId,
+					rootSessionId: parent.rootSessionId,
+					agentName: agent?.name ?? 'explore',
+					writes: new Set(),
 					policy,
 					transcript: subTranscript,
 					messages: [{ role: 'system', content: system }, ...inherited, { role: 'user', content: request.prompt }],
@@ -1892,7 +1984,8 @@ export class Agent extends Service {
 						signal: abort.signal,
 						choose: (soft: SoftRequest) => this.ctx.llm.choose(policy.model, soft, abort.signal),
 					});
-					return outcome.status === 'aborted' ? '(stopped)' : (lastAssistant(outcome.state.transcript)?.content ?? '(no report)');
+					const report = outcome.status === 'aborted' ? '(stopped)' : (lastAssistant(outcome.state.transcript)?.content ?? '(no report)');
+					return state.writes.size ? `${report}\n\nFiles changed:\n${[...state.writes].map((path) => `- ${path}`).join('\n')}` : report;
 				} finally {
 					unlink();
 					this.backgroundSubagents.delete(abort);
@@ -1908,13 +2001,16 @@ export class Agent extends Service {
 					this.pushContext(parent.sessionId, `Subagent "${request.description ?? agent?.name ?? 'task'}" finished:\n${clip(text, 4_000)}`);
 					this.ctx.host.notify(`Subagent ${request.description ?? agent?.name ?? ''} finished`);
 				})
-				.catch((error) => this.ctx.log.message(`subagent failed: ${describe(error)}`));
+				.catch((error) => this.ctx.log.message(`subagent failed: ${describe(error)}`))
+				.finally(releaseWriter);
 			return `Started in the background: ${request.description ?? request.prompt.slice(0, 60)}`;
 		}
 		try {
 			return await run();
 		} catch (error) {
 			return `Error: ${describe(error)}`;
+		} finally {
+			releaseWriter();
 		}
 	}
 

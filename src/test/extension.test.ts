@@ -24,7 +24,7 @@ import {
 } from '../lib/prompt';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, ModelRequestError, toOpenAiMessages } from '../lib/openai';
 import { MAX_IMAGE_BYTES, asImagePart, estimateImageTokens, sniffImage } from '../lib/images';
-import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, loginShellArgv, mergePath, parseLoginPath, PathEscapeError, resolveInside, sandboxEnv, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
+import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, loginShellArgv, mergePath, parseLoginPath, PathEscapeError, resolveInside, sandboxEnv, sandboxKind, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
 import { applyHunk, diffLines, editForHunk, revertHunk } from '../lib/line-diff';
 import { listEndpointModels, openAiChat } from '../lib/openai';
@@ -53,7 +53,16 @@ import {
 } from '../services/sessions';
 import { creationTargets, deletionTargetsAreOwned, rmInvocations } from '../lib/shell';
 import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
-import { AGENT_KEYS, CONFIG_KEYS, DEFAULT_CONTEXT_WINDOW, normalizeAgentPatch, profileKeyEnvs } from '../services/settings';
+import {
+	AGENT_KEYS,
+	CONFIG_KEYS,
+	DEFAULT_CONTEXT_WINDOW,
+	DEFAULT_SUBAGENT_GRANTS,
+	normalizeAgentPatch,
+	profileKeyEnvs,
+	sanitizeSubagentGrants,
+	subagentGrant,
+} from '../services/settings';
 import { toolset } from '../services/tools';
 import { promptText } from '../services/agent';
 import { PLUGINS, ROWS } from '../app';
@@ -141,10 +150,12 @@ const shellTool: ToolSpec = { ...readTool, name: 'run_shell', capability: 'shell
 
 const readonlyShellTool: ToolSpec = { ...readTool, name: 'run_shell_readonly', capability: 'shell_ro' };
 
+const testShellTool: ToolSpec = { ...readTool, name: 'run_shell_test', capability: 'shell_test' };
+
 const unsandboxedTool: ToolSpec = { ...readTool, name: 'run_shell_unsandboxed', capability: 'shell_rw' };
 
 const lookup = (name: string): ToolSpec | undefined =>
-	[readTool, writeTool, shellTool, readonlyShellTool, unsandboxedTool].find((tool) => tool.name === name);
+	[readTool, writeTool, shellTool, readonlyShellTool, testShellTool, unsandboxedTool].find((tool) => tool.name === name);
 
 const gateEnv = (
 	sandbox: SandboxKind = 'bwrap',
@@ -289,12 +300,12 @@ suite('Comonad domain', () => {
 		const caps = (mode: WorkMode) => [...MODE_CAPS[mode]].sort();
 		assert.deepStrictEqual(caps('chat'), [], 'chat only has no tools at all');
 		assert.deepStrictEqual(caps('ro'), ['ro', 'shell_ro']);
-		assert.deepStrictEqual(caps('sw'), ['ro', 'rw', 'shell_ro']);
-		assert.deepStrictEqual(caps('aw'), ['ro', 'rw', 'shell_ro', 'shell_rw']);
+		assert.deepStrictEqual(caps('sw'), ['ro', 'rw', 'shell_ro', 'shell_test']);
+		assert.deepStrictEqual(caps('aw'), ['ro', 'rw', 'shell_ro', 'shell_rw', 'shell_test']);
 		assert.deepStrictEqual(caps('pl'), ['ro', 'rw_plan', 'shell_ro']);
 		assert.match(MODE_LABELS.chat, /Chat Only — no tools/);
 		assert.match(MODE_LABELS.ro, /Read-Only — read files, read-only shell/);
-		assert.match(MODE_LABELS.sw, /Semi-Write — write files, read-only shell/);
+		assert.match(MODE_LABELS.sw, /Semi-Write — write files, run tests in a scratch shell/);
 		assert.match(MODE_LABELS.aw, /Full Access — write files, full shell/);
 		assert.match(MODE_LABELS.pl, /Plan — read files, read-only shell, writes plan files only/);
 	});
@@ -514,26 +525,35 @@ suite('Comonad domain', () => {
 		});
 
 		test('the macOS profile applies each boundary flag', () => {
-			const base: SandboxOptions = { writable: true, confinement: { read: false, write: false }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+			const base: SandboxOptions = { writeScope: 'all', confinement: { read: false, write: false }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
 			const open = buildSbpl('/ws', base);
 			assert.ok(!open.includes('(deny file-write*)'));
 			assert.ok(!open.includes('(allow file-write* (subpath "/ws"))'));
 			assert.ok(!open.includes('(deny file-read*)'));
 
-			const writes = buildSbpl('/ws', { ...base, confinement: { read: false, write: true } });
+			const writes = buildSbpl('/ws', { ...base, writeScope: 'workspace', confinement: { read: false, write: true } });
 			assert.ok(writes.includes('(allow file-write* (subpath "/ws"))'));
 			// SBPL is last-match-wins, so the allow alone confines nothing: the deny must come first.
 			assert.ok(writes.includes('(deny file-write*)'));
 			assert.ok(writes.indexOf('(deny file-write*)') < writes.indexOf('(allow file-write* (subpath "/ws"))'));
 			assert.ok(!writes.includes('(deny file-read*)'));
 
-			const both = buildSbpl('/ws', { ...base, confinement: { read: true, write: true } });
+			const both = buildSbpl('/ws', { ...base, writeScope: 'workspace', confinement: { read: true, write: true } });
 			assert.ok(both.includes('(deny file-read*)'));
 			assert.ok(both.includes('(allow file-read* (subpath "/ws"))'));
 
-			const readonly = buildSbpl('/ws', { ...base, writable: false, confinement: { read: true, write: true } });
+			const readonly = buildSbpl('/ws', { ...base, writeScope: 'none', confinement: { read: true, write: true } });
 			assert.ok(readonly.includes('(deny file-write*)'));
 			assert.ok(!readonly.includes('(allow file-write* (subpath "/ws"))'));
+
+			// The test shell denies every write, then reopens only the scratch tree; the workspace,
+			// which is allowed for reading, is never allowed for writing.
+			const scratch = buildSbpl('/ws', { ...base, writeScope: 'scratch', confinement: { read: true, write: true }, scratch: '/scratch' });
+			assert.ok(scratch.includes('(deny file-write*)'));
+			assert.ok(scratch.includes('(allow file-write* (subpath "/scratch"))'));
+			assert.ok(!scratch.includes('(allow file-write* (subpath "/ws"))'));
+			assert.ok(scratch.indexOf('(deny file-write*)') < scratch.indexOf('(allow file-write* (subpath "/scratch"))'));
+			assert.ok(scratch.includes('(allow file-read* (subpath "/scratch"))'), 'test output stays readable when reads are confined');
 
 			// Network off still leaves loopback for test servers and IPC, never the outside.
 			assert.ok(open.includes('(deny network*)'));
@@ -546,7 +566,7 @@ suite('Comonad domain', () => {
 		});
 
 		test('the bwrap mounts follow the boundary flags', () => {
-			const base: SandboxOptions = { writable: true, confinement: { read: true, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+			const base: SandboxOptions = { writeScope: 'workspace', confinement: { read: true, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
 			const confined = bwrapArguments('bwrap', ['ls'], '/ws', base).join(' ');
 			assert.ok(!confined.includes('--ro-bind / /'));
 			assert.ok(confined.includes('--ro-bind /usr /usr'));
@@ -561,16 +581,25 @@ suite('Comonad domain', () => {
 			assert.ok(reads.includes('--bind /ws /ws'));
 			assert.ok(reads.includes('--remount-ro /tmp'));
 
-			const open = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, confinement: { read: false, write: false } }).join(' ');
+			const open = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, writeScope: 'all', confinement: { read: false, write: false } }).join(' ');
 			assert.ok(open.includes('--bind / /'));
+			assert.ok(open.includes('--bind /ws /ws'), 'the workspace stays writable when the whole host is');
 			// Writes open: /tmp is a private, writable tmpfs.
 			assert.ok(open.includes('--tmpfs /tmp'));
 			assert.ok(!open.includes('--remount-ro /tmp'));
 
-			const readonly = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, writable: false }).join(' ');
+			const readonly = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, writeScope: 'none' }).join(' ');
 			assert.ok(readonly.includes('--ro-bind /ws /ws'));
 			assert.ok(!readonly.includes('--bind /ws /ws'));
 			assert.ok(readonly.includes('--remount-ro /tmp'));
+
+			// The test shell: the workspace is read-only, the scratch is a writable hole, and the
+			// private /tmp stays writable for the test runner's own temp files.
+			const scratch = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, writeScope: 'scratch', scratch: '/scratch' }).join(' ');
+			assert.ok(scratch.includes('--ro-bind /ws /ws'));
+			assert.ok(scratch.includes('--bind /scratch /scratch'));
+			assert.ok(scratch.indexOf('--ro-bind /ws /ws') < scratch.indexOf('--bind /scratch /scratch'));
+			assert.ok(!scratch.includes('--remount-ro /tmp'));
 
 			// A workspace at /tmp is supplied by its own bind; a tmpfs would shadow (or a remount
 			// would undo) that bind.
@@ -587,7 +616,7 @@ suite('Comonad domain', () => {
 		});
 
 		test('the sandbox mounts the real workspace path, not a symlink', () => {
-			const base: SandboxOptions = { writable: true, confinement: { read: false, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+			const base: SandboxOptions = { writeScope: 'workspace', confinement: { read: false, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
 			const root = mkdtempSync(join(tmpdir(), 'comonad-link-'));
 			try {
 				const real = join(root, 'real');
@@ -631,16 +660,16 @@ suite('Comonad domain', () => {
 		const root = mkdtempSync(join(tmpdir(), 'comonad-env-'));
 		const ws = join(root, 'ws');
 		mkdirSync(ws, { recursive: true });
-		const scratch = join(realpathSync(ws), '.comonad', 'tmp');
-		const base: SandboxOptions = { writable: true, confinement: { read: false, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+		const workspaceScratch = join(realpathSync(ws), '.comonad', 'tmp');
+		const base: SandboxOptions = { writeScope: 'workspace', confinement: { read: false, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
 
 		const bwrap = sandboxEnv(base, 'bwrap', '/login/bin:/usr/bin', ws);
-		assert.strictEqual(bwrap?.TMPDIR, scratch, 'a write-confined bwrap shell writes temp files inside the workspace');
-		assert.ok(existsSync(scratch), 'the scratch directory exists before the command starts');
+		assert.strictEqual(bwrap?.TMPDIR, workspaceScratch, 'a write-confined bwrap shell writes temp files inside the workspace');
+		assert.ok(existsSync(workspaceScratch), 'the scratch directory exists before the command starts');
 		assert.ok(bwrap?.PATH?.startsWith('/login/bin:/usr/bin'), bwrap?.PATH);
-		assert.strictEqual(sandboxEnv(base, 'macos', '/login/bin', ws)?.TMPDIR, scratch, 'macOS uses the same workspace scratch directory');
+		assert.strictEqual(sandboxEnv(base, 'macos', '/login/bin', ws)?.TMPDIR, workspaceScratch, 'macOS uses the same workspace scratch directory');
 
-		const open: SandboxOptions = { ...base, confinement: { read: false, write: false } };
+		const open: SandboxOptions = { ...base, writeScope: 'all', confinement: { read: false, write: false } };
 		assert.strictEqual(sandboxEnv(open, 'bwrap', '/login/bin', ws)?.TMPDIR, '/tmp', 'bwrap keeps its private /tmp when writes are open');
 		assert.strictEqual(
 			sandboxEnv(open, 'macos', '/login/bin', ws)?.TMPDIR,
@@ -648,13 +677,25 @@ suite('Comonad domain', () => {
 			'macOS keeps the host temp directory when writes are open',
 		);
 		assert.strictEqual(
-			sandboxEnv({ ...base, writable: false }, 'macos', '/login/bin', ws)?.TMPDIR,
+			sandboxEnv({ ...base, writeScope: 'none' }, 'macos', '/login/bin', ws)?.TMPDIR,
 			process.env.TMPDIR,
 			'a read-only shell gets no writable scratch space',
 		);
 		const direct = sandboxEnv({ ...base, mode: 'direct' }, 'bwrap', '/login/bin', ws);
 		assert.strictEqual(direct?.TMPDIR, process.env.TMPDIR, 'a direct command is not inside bwrap');
 		assert.strictEqual(sandboxEnv({ ...base, filterEnv: false }, 'macos', undefined), undefined, 'inheriting is preserved');
+
+		// The test shell gets its own hermetic tree: every place a test runner would write is
+		// redirected there, and the tree exists before the command starts.
+		const testScratch = join(root, 'test-scratch');
+		const testEnv = sandboxEnv({ ...base, writeScope: 'scratch', scratch: testScratch }, 'macos', '/login/bin', ws);
+		assert.strictEqual(testEnv?.TMPDIR, join(testScratch, 'tmp'));
+		assert.strictEqual(testEnv?.TMP, join(testScratch, 'tmp'));
+		assert.strictEqual(testEnv?.TEMP, join(testScratch, 'tmp'));
+		assert.strictEqual(testEnv?.HOME, join(testScratch, 'home'));
+		assert.strictEqual(testEnv?.XDG_CACHE_HOME, join(testScratch, 'cache'));
+		assert.strictEqual(testEnv?.COMONAD_SCRATCH, testScratch);
+		assert.ok(existsSync(join(testScratch, 'tmp')), 'the test scratch tree exists before the command starts');
 		rmSync(root, { recursive: true, force: true });
 	});
 
@@ -708,6 +749,39 @@ suite('Comonad domain', () => {
 				'allowUnsandboxedShell',
 			],
 		);
+	});
+
+	test('subagent grants are sanitized, defaulted and scoped to built-ins', () => {
+		// Only booleans are believed; names are lowercase slugs; prototype keys are dropped.
+		assert.deepStrictEqual(
+			sanitizeSubagentGrants({
+				Implement: { files: true, test: 'yes' },
+				'writer': { files: 1, test: true },
+				'__proto__': { files: true },
+				'bad name': { files: true },
+				'nope': 'not an object',
+			}),
+			{
+				implement: { files: true, test: false },
+				writer: { files: false, test: true },
+			},
+		);
+		assert.deepStrictEqual(sanitizeSubagentGrants(null), {});
+		assert.deepStrictEqual(sanitizeSubagentGrants([]), {});
+
+		const config = { subagents: sanitizeSubagentGrants({}) };
+		// The built-in implementer writes and tests out of the box; every other agent is read-only.
+		assert.deepStrictEqual(subagentGrant(config, 'implement', true), DEFAULT_SUBAGENT_GRANTS.implement);
+		assert.deepStrictEqual(subagentGrant(config, 'explore', true), { files: false, test: false });
+		assert.deepStrictEqual(subagentGrant(config, 'my-writer', false), { files: false, test: false });
+		// A project file that shadows a built-in name does not inherit its default.
+		assert.deepStrictEqual(subagentGrant(config, 'implement', false), { files: false, test: false });
+
+		// An explicit entry overrides the default outright, including turning it off.
+		const off = { subagents: sanitizeSubagentGrants({ implement: {} }) };
+		assert.deepStrictEqual(subagentGrant(off, 'implement', true), { files: false, test: false });
+		const custom = { subagents: sanitizeSubagentGrants({ 'my-writer': { files: true } }) };
+		assert.deepStrictEqual(subagentGrant(custom, 'my-writer', false), { files: true, test: false });
 	});
 
 	test('the turn policy carries the configured step budget', async () => {
@@ -951,7 +1025,7 @@ suite('Comonad domain', () => {
 		assert.strictEqual(unowned.decision, 'confirm');
 		assert.strictEqual(unowned.escalated, true);
 		assert.match(unowned.reason, /dangerous/);
-		// An ask rule still asks; an owned rm no longer makes that confirmation escalated.
+		// An ask rule always asks, and is escalated so a subagent cannot answer it by delegation.
 		const asked = gateCalls(
 			[call('run_shell', { command: 'rm -f a.txt' })],
 			lookup,
@@ -960,7 +1034,7 @@ suite('Comonad domain', () => {
 			gateEnv('bwrap', false, created),
 		);
 		assert.strictEqual(asked.decision, 'confirm');
-		assert.strictEqual(asked.escalated, undefined);
+		assert.strictEqual(asked.escalated, true);
 	});
 
 	test('created paths are sanitized, persisted, and bound to their workspace', () => {
@@ -1061,7 +1135,7 @@ suite('Comonad domain', () => {
 		const kernel = await createTestKernel();
 		try {
 			await kernel.ctx.plugin(shellTools);
-			for (const name of ['run_shell', 'run_shell_readonly']) {
+			for (const name of ['run_shell', 'run_shell_readonly', 'run_shell_test']) {
 				const spec = kernel.ctx.tools.get(name);
 				assert.ok(spec, name);
 				const properties = spec.parameters.properties as Record<string, { type?: string; minimum?: number; maximum?: number; description?: string }>;
@@ -1078,6 +1152,32 @@ suite('Comonad domain', () => {
 			assert.ok(background);
 			assert.deepStrictEqual(background.parameters.required, ['command', 'description'], 'start_shell takes a title too');
 			assert.ok(!('timeout' in background.parameters.properties), 'start_shell has no deadline');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('run_shell_test writes only its scratch directory', async () => {
+		if (sandboxKind() === 'none') {
+			return; // the tool refuses on such a host; the gate test covers that path
+		}
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(shellTools);
+			const workspace = kernel.host.workspace();
+			const scratch = join(kernel.host.storage.tmp, 'shell', 'test');
+			const context = { ...directToolContext(kernel), scratchDirectory: scratch };
+			const command = (text: string): ToolCall => ({ id: 't', name: 'run_shell_test', arguments: JSON.stringify({ command: text, description: 'test' }) });
+
+			const wrote = await kernel.ctx.tools.invoke(command('printf hi > "$COMONAD_SCRATCH/out.txt"'), context);
+			assert.strictEqual(wrote.isError, false, wrote.content);
+			assert.match(wrote.content, /exit_code: 0/);
+			assert.match(wrote.content, /scratch: /, 'the model is told where the output went');
+			assert.strictEqual(readFileSync(join(scratch, 'out.txt'), 'utf8'), 'hi');
+
+			const denied = await kernel.ctx.tools.invoke(command(`printf no > ${JSON.stringify(join(workspace, 'blocked.txt'))}`), context);
+			assert.match(denied.content, /exit_code: [1-9]/);
+			assert.ok(!existsSync(join(workspace, 'blocked.txt')), 'the workspace stayed read-only');
 		} finally {
 			await kernel.dispose();
 		}
@@ -1235,6 +1335,11 @@ suite('Comonad domain', () => {
 			assert.match(result.reason, /no OS sandbox/, name);
 			assert.strictEqual(result.escalated, true, name);
 		}
+		// The test shell is different: without a sandbox its contract cannot be enforced at all,
+		// so it is refused rather than confirmed.
+		const testShell = gateCalls([call('run_shell_test', { command: 'npm test' })], lookup, accepted, rules, gateEnv('none'));
+		assert.strictEqual(testShell.decision, 'reject');
+		assert.match(testShell.reason, /needs an OS sandbox/);
 		// Only shell capabilities escalate; a read keeps the policy's decision.
 		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, accepted, rules, gateEnv('none')).decision, 'allow');
 		// The explicit opt-out restores the quiet path, and a sandboxed host was never affected.
@@ -1267,6 +1372,39 @@ suite('Comonad domain', () => {
 		const result = gateCalls([call('write_file', { path: 'a.ts' })], lookup, policy(), { allow: [], ask: [], deny: [] }, gateEnv());
 		assert.strictEqual(result.decision, 'confirm');
 		assert.strictEqual(result.escalated, undefined);
+	});
+
+	test('the test shell is gated like a write and never runs without an OS sandbox', () => {
+		const rules = { allow: [], ask: [], deny: [] };
+		const testCall = call('run_shell_test', { command: 'npm test' });
+		// sw grants it; ro does not.
+		assert.strictEqual(
+			gateCalls([testCall], lookup, policy({ workMode: 'sw', approval: 'universal_accept' }), rules, gateEnv()).decision,
+			'allow',
+		);
+		assert.strictEqual(
+			gateCalls([testCall], lookup, policy({ workMode: 'ro', approval: 'universal_accept' }), rules, gateEnv()).decision,
+			'reject',
+		);
+		// It is not a read-only default: the whitelist asks, the blacklist rejects, and an explicit
+		// allow rule is what makes it run without a prompt.
+		assert.strictEqual(gateCalls([testCall], lookup, policy({ workMode: 'sw', approval: 'whitelist_accept' }), rules, gateEnv()).decision, 'confirm');
+		assert.strictEqual(gateCalls([testCall], lookup, policy({ workMode: 'sw', approval: 'blacklist_reject' }), rules, gateEnv()).decision, 'reject');
+		assert.strictEqual(
+			gateCalls([testCall], lookup, policy({ workMode: 'sw', approval: 'whitelist_accept' }), parseRules({ allow: ['run_shell_test(npm test:*)'] }), gateEnv())
+				.decision,
+			'allow',
+		);
+		// A rule the user wrote to ask about is escalated so a subagent cannot answer it by delegation.
+		const asked = gateCalls([testCall], lookup, policy({ workMode: 'sw', approval: 'universal_accept' }), parseRules({ ask: ['run_shell_test'] }), gateEnv());
+		assert.strictEqual(asked.decision, 'confirm');
+		assert.strictEqual(asked.escalated, true);
+		// The sandbox check cannot be turned off by a setting or a rule.
+		assert.strictEqual(
+			gateCalls([testCall], lookup, policy({ workMode: 'sw', approval: 'universal_accept' }), parseRules({ allow: ['run_shell_test'] }), gateEnv('none'))
+				.decision,
+			'reject',
+		);
 	});
 
 	test('loopback model endpoints are recognized', () => {
@@ -3124,6 +3262,12 @@ suite('Cordis kernel', () => {
 			assert.deepStrictEqual(scripts, ['settings.js', 'worldinfo.js', 'persona.js', 'content.js', 'st.js'], 'the host’s client comes first, and the pane’s last');
 			assert.match(document, /id="plugins-install"/, 'and the host’s own tabs are still there');
 			assert.match(document, /id="timeout-override"[^>]*data-key="commandTimeoutOverride"/, 'including the timeout override');
+			assert.match(document, /data-tab="subagents"/, 'the subagents tab is a core tab');
+			assert.match(document, /<section data-pane="subagents" hidden>/, 'with its own section');
+			assert.match(document, /id="subagent-rows"/, 'holding the grant matrix');
+			const hostScript = readFileSync(join(root, 'resources', 'settings.js'), 'utf8');
+			assert.match(hostScript, /function renderSubagents\(/, 'the client draws the matrix');
+			assert.match(hostScript, /type: 'saveSubagents'/, 'and saves a grant');
 
 			// A tab and its markup are the pane's own strings, so they are escaped rather than trusted.
 			const hostile = { ...pane, id: 'x"><script>alert(1)</script>', label: '<b>no</b>', title: '" onload="alert(1)' };
@@ -7523,6 +7667,175 @@ suite('Per-file checkpoints', () => {
 			assert.ok(!subagentOffered.includes('apply_patch'), 'apply_patch is not offered either');
 			assert.ok(/not available to this subagent/.test(subagentResult), `a forced write is refused: ${subagentResult}`);
 			assert.strictEqual(readFileSync(join(workspace, 'guarded.txt'), 'utf8'), 'original\n', 'the file was not written');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a granted subagent writes through the tracked file tools into the parent journal', async () => {
+		const kernel = await createTestKernel({ config: { checkpoints: true, mode: 'sw', approval: 'universal_accept' } });
+		try {
+			const workspace = kernel.host.workspace();
+			let subagentSaw = '';
+			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
+				message: { role: 'assistant' as const, content, toolCalls },
+				toolCalls,
+				usage: { input: 1, output: 1 },
+			});
+			kernel.ctx.llm.use({
+				name: 'implementer',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('subagent of Comonad')) {
+						const last = request.messages[request.messages.length - 1];
+						if (last?.role !== 'tool') {
+							return reply('', [{ id: 'w1', name: 'write_file', arguments: JSON.stringify({ path: 'made.txt', content: 'made\n' }) }]);
+						}
+						subagentSaw = last.content;
+						return reply('wrote it');
+					}
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						return reply('', [
+							{ id: 'delegate', name: 'agent', arguments: JSON.stringify({ agent: 'implement', prompt: 'write made.txt', description: 'write' }) },
+						]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.plugin(agentTools);
+			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
+
+			assert.strictEqual(readFileSync(join(workspace, 'made.txt'), 'utf8'), 'made\n', 'the subagent wrote the file');
+			assert.match(subagentSaw, /wrote made\.txt/, 'the write tool ran in the subagent');
+			const root = kernel.ctx.sessions.active();
+			assert.ok(root, 'the parent chat exists');
+			const pending = await kernel.ctx.checkpoints.pending(workspace, root.id);
+			assert.ok(pending.files.some((file) => file.path === 'made.txt'), 'the parent journal records the subagent write');
+			const parent = kernel.ctx.sessions.require(root.id);
+			const toolResult = parent.transcript.find((message) => message.role === 'tool');
+			assert.match(toolResult?.content ?? '', /Files changed/);
+			assert.match(toolResult?.content ?? '', /made\.txt/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a subagent without a grant is read-only even when its definition lists write tools', async () => {
+		const kernel = await createTestKernel({ config: { checkpoints: true, mode: 'sw', approval: 'universal_accept' } });
+		try {
+			const workspace = kernel.host.workspace();
+			const agents = join(workspace, '.comonad', 'agents');
+			mkdirSync(agents, { recursive: true });
+			writeFileSync(join(agents, 'writer.md'), '---\nname: writer\ndescription: writes\ntools: [read_file, write_file]\n---\nWrite the file.\n');
+			await kernel.ctx.catalog.reload();
+			let offered: string[] = [];
+			let refused = '';
+			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
+				message: { role: 'assistant' as const, content, toolCalls },
+				toolCalls,
+				usage: { input: 1, output: 1 },
+			});
+			kernel.ctx.llm.use({
+				name: 'ungranted',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('subagent of Comonad')) {
+						offered = (request.tools ?? []).map((tool) => tool.name);
+						const last = request.messages[request.messages.length - 1];
+						if (last?.role !== 'tool') {
+							return reply('', [{ id: 'forced', name: 'write_file', arguments: JSON.stringify({ path: 'forced.txt', content: 'no\n' }) }]);
+						}
+						refused = last.content;
+						return reply('stopped');
+					}
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						return reply('', [{ id: 'delegate', name: 'agent', arguments: JSON.stringify({ agent: 'writer', prompt: 'try to write', description: 'write' }) }]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.plugin(agentTools);
+			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
+
+			assert.ok(offered.includes('read_file'), `read tools are offered: ${offered.join(', ')}`);
+			assert.ok(!offered.includes('write_file'), `write_file is not offered without a grant: ${offered.join(', ')}`);
+			assert.match(refused, /not available to this subagent/);
+			assert.ok(!existsSync(join(workspace, 'forced.txt')), 'the forced write did not land');
+
+			// The same definition, granted in settings, now receives the tracked write tool.
+			kernel.host.values.subagents = { writer: { files: true } };
+			offered = [];
+			refused = '';
+			await kernel.ctx.agent.runTurn({ text: 'delegate again', surface: 'test' });
+			assert.ok(offered.includes('write_file'), `the grant makes the write tool available: ${offered.join(', ')}`);
+			assert.strictEqual(readFileSync(join(workspace, 'forced.txt'), 'utf8'), 'no\n', 'and the write lands');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a subagent never receives the full shell, and a write-capable one cannot run in the background', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept', subagents: { runner: { files: true, test: true } } } });
+		try {
+			const workspace = kernel.host.workspace();
+			const agents = join(workspace, '.comonad', 'agents');
+			mkdirSync(agents, { recursive: true });
+			writeFileSync(
+				join(agents, 'runner.md'),
+				'---\nname: runner\ndescription: runs\ntools: [read_file, write_file, run_shell_test, run_shell, start_shell]\n---\nDo the task.\n',
+			);
+			await kernel.ctx.catalog.reload();
+			let offered: string[] = [];
+			let backgroundRuns = 0;
+			let foreground = false;
+			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
+				message: { role: 'assistant' as const, content, toolCalls },
+				toolCalls,
+				usage: { input: 1, output: 1 },
+			});
+			kernel.ctx.llm.use({
+				name: 'runner',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('subagent of Comonad')) {
+						offered = (request.tools ?? []).map((tool) => tool.name);
+						if (!foreground) {
+							backgroundRuns += 1;
+						}
+						return reply('done');
+					}
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						const args = foreground
+							? { agent: 'runner', prompt: 'run it', description: 'fg' }
+							: { agent: 'runner', prompt: 'write it', description: 'bg', background: true };
+						return reply('', [{ id: 'delegate', name: 'agent', arguments: JSON.stringify(args) }]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.plugin(shellTools);
+			await kernel.ctx.plugin(agentTools);
+			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
+
+			assert.strictEqual(backgroundRuns, 0, 'the background write-capable subagent never started');
+			const parent = kernel.ctx.sessions.active();
+			assert.ok(parent);
+			const tool = parent.transcript.find((message) => message.role === 'tool');
+			assert.match(tool?.content ?? '', /must run in the foreground/);
+
+			// Foreground now: the grant and the definition are honoured, but the full shell is not.
+			foreground = true;
+			await kernel.ctx.agent.runTurn({ text: 'delegate again', surface: 'test' });
+			assert.ok(offered.includes('write_file'), `the granted tracked write is offered: ${offered.join(', ')}`);
+			assert.ok(offered.includes('run_shell_test'), `the granted test shell is offered: ${offered.join(', ')}`);
+			assert.ok(!offered.includes('run_shell'), `the full shell is never offered: ${offered.join(', ')}`);
+			assert.ok(!offered.includes('start_shell'), 'and neither is its background form');
 		} finally {
 			await kernel.dispose();
 		}

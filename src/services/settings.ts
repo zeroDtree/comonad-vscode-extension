@@ -128,6 +128,67 @@ export interface PermissionsConfig {
 	deny: string[];
 }
 
+/** What a subagent may be granted. Read-only tools are always available; these add the write paths. */
+export interface SubagentGrant {
+	/** The tracked file-write tools (`write_file`, `apply_patch`, `apply_edits`). */
+	files: boolean;
+	/** The scratch-only test shell (`run_shell_test`). */
+	test: boolean;
+}
+
+export type SubagentGrants = Record<string, SubagentGrant>;
+
+export const READ_ONLY_GRANT: Readonly<SubagentGrant> = { files: false, test: false };
+
+/**
+ * The shipped subagent grants. Only the built-in implementer may write by default; every other
+ * built-in and every custom agent stays read-only until the user grants it in Settings → Subagents.
+ * The lookup is gated on `AgentDefinition.builtin`, so a project file that shadows a built-in name
+ * does not inherit the default.
+ */
+export const DEFAULT_SUBAGENT_GRANTS: Readonly<Record<string, SubagentGrant>> = {
+	implement: { files: true, test: true },
+};
+
+const SUBAGENT_NAME = /^[a-z0-9][a-z0-9._-]*$/;
+const MAX_SUBAGENT_GRANTS = 64;
+
+/** A user's `comonad.subagents` object, sanitised: names are slugs, values are booleans. */
+export function sanitizeSubagentGrants(value: unknown): SubagentGrants {
+	const out: SubagentGrants = {};
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return out;
+	}
+	for (const [rawName, rawGrant] of Object.entries(value as Record<string, unknown>).slice(0, MAX_SUBAGENT_GRANTS)) {
+		const name = rawName.trim().toLowerCase();
+		if (!SUBAGENT_NAME.test(name) || name.length > 64) {
+			continue;
+		}
+		if (name === '__proto__' || name === 'prototype' || name === 'constructor') {
+			continue;
+		}
+		if (!rawGrant || typeof rawGrant !== 'object' || Array.isArray(rawGrant)) {
+			continue;
+		}
+		const grant = rawGrant as Record<string, unknown>;
+		out[name] = { files: grant.files === true, test: grant.test === true };
+	}
+	return out;
+}
+
+/**
+ * The effective grant of one agent: an explicit entry wins outright, then the built-in default for a
+ * genuine built-in, then read-only. A custom agent that reuses a built-in name gets nothing.
+ */
+export function subagentGrant(config: Pick<Config, 'subagents'>, name: string, builtin: boolean): SubagentGrant {
+	const key = name.trim().toLowerCase();
+	if (Object.hasOwn(config.subagents, key)) {
+		return { ...config.subagents[key]! };
+	}
+	const shipped = builtin ? DEFAULT_SUBAGENT_GRANTS[key] : undefined;
+	return shipped ? { ...shipped } : { ...READ_ONLY_GRANT };
+}
+
 export interface McpServerSettings {
 	command?: string;
 	args?: string[];
@@ -163,6 +224,8 @@ export interface Config {
 	profiles: Profile[];
 	mcpServers: Record<string, McpServerSettings>;
 	permissions: PermissionsConfig;
+	/** Per-agent capability grants for subagents; see `SubagentGrant`. */
+	subagents: SubagentGrants;
 	instructions: boolean;
 	skills: boolean;
 	memory: boolean;
@@ -213,6 +276,7 @@ export const CONFIG_KEYS = [
 	'profiles',
 	'mcpServers',
 	'permissions',
+	'subagents',
 	'instructions',
 	'skills',
 	'memory',
@@ -399,6 +463,7 @@ export class Settings extends Service {
 							deny: Array.isArray(permissions.deny) ? permissions.deny.map(String) : [],
 						}
 					: { allow: [], ask: [], deny: [] },
+			subagents: sanitizeSubagentGrants(raw.subagents),
 			instructions: flag('instructions', true),
 			skills: flag('skills', true),
 			memory: flag('memory', true),

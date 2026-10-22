@@ -59,6 +59,7 @@ export const planTools = toolset([
 		name: 'write_plan',
 		description: 'Write a plan file by name. Use it to record the implementation plan before editing code.',
 		capability: 'rw_plan',
+		trackedWrite: true,
 		needsNetwork: false,
 		needsWorkspace: true,
 		parameters: objectSchema({ name: { type: 'string' }, content: { type: 'string' } }, ['name', 'content']),

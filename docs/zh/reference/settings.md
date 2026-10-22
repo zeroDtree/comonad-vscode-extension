@@ -42,6 +42,26 @@
 | `comonad.maxSteps` | `128` | 每回合最大图步数 |
 | `comonad.filterSensitiveEnv` | `true` | 从命令环境中移除 key、token 与密码 |
 | `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | 规则列表；见[安全](/zh/guide/safety#_2-规则) |
+| `comonad.subagents` | `{}` | 子 Agent 的逐 Agent 授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。内置 `implement` 默认两者都有；其它 Agent 默认只读。 |
+
+## 子 Agent
+
+`comonad.subagents` 把 Agent 名称映射到它的授权：
+
+```json
+{
+  "comonad.subagents": {
+    "implement": { "files": true, "test": true },
+    "review": { "test": true },
+    "my-writer": { "files": true }
+  }
+}
+```
+
+只读工具始终可用。只有 `files` 和 `test` 两种授权；`run_shell`、`start_shell` 和计划写入永远不会授予
+子 Agent。Agent 定义还必须列出使用该能力的工具；没有 `tools` 列表的定义视为只读。父模式仍需允许该
+能力。内置 `implement` 默认获得两种授权；其它内置和所有自定义 Agent 默认只读，需显式配置。见
+[安全](/zh/guide/safety#子-agent)。
 
 ## 检查点
 

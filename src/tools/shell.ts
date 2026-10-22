@@ -2,7 +2,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { formatResult, runCommand, shellArgv, sandboxKind, type SandboxKind } from '../lib/sandbox';
+import { formatResult, runCommand, shellArgv, sandboxKind, type SandboxKind, type WriteScope } from '../lib/sandbox';
 import { creationTargets, rmTargets } from '../lib/shell';
 import { objectSchema, type Confinement, type SessionPolicy, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
@@ -73,13 +73,14 @@ export function shellTimeoutSeconds(
 		: Math.min(MAX_SHELL_TIMEOUT_SECONDS, Math.max(MIN_SHELL_TIMEOUT_SECONDS, asked));
 }
 
-async function run(ctx: ToolContext, command: string, writable: boolean, requestedTimeout?: unknown): Promise<string> {
+async function run(ctx: ToolContext, command: string, writeScope: WriteScope, requestedTimeout?: unknown): Promise<string> {
 	const workspace = ctx.policy.workingDirectory;
-	const track = process.platform !== 'win32' && Boolean(workspace.trim());
+	// A test shell cannot create workspace files, so its redirections must not become provenance.
+	const track = process.platform !== 'win32' && Boolean(workspace.trim()) && writeScope !== 'scratch';
 	const creates = track ? creationTargets(command, workspace) : [];
 	const removals = track ? rmTargets(command, workspace) : [];
 	const before = await Promise.all(creates.map(presence));
-	const result = await runCommand(shellArgv(command), workspace, shellOptions(ctx, writable, requestedTimeout));
+	const result = await runCommand(shellArgv(command), workspace, shellOptions(ctx, writeScope, requestedTimeout));
 	for (let index = 0; index < creates.length; index += 1) {
 		const path = creates[index]!;
 		if (before[index] === 'absent' && (await createdFile(path))) {
@@ -93,14 +94,22 @@ async function run(ctx: ToolContext, command: string, writable: boolean, request
 			ctx.noteDeleted?.(path);
 		}
 	}
-	return formatResult(result);
+	const output = formatResult(result);
+	// The model has to know where it may put a report; the path is the same inside the sandbox.
+	return writeScope === 'scratch' && ctx.scratchDirectory ? `scratch: ${ctx.scratchDirectory}\n${output}` : output;
+}
+
+/** A full shell writes the workspace when confined, and the host when the boundary is off. */
+function shellScope(policy: SessionPolicy): WriteScope {
+	return policy.confinement.write ? 'workspace' : 'all';
 }
 
 /** The boundary a shell tool runs under, from the session policy. */
-function shellOptions(ctx: ToolContext, writable: boolean, requestedTimeout?: unknown) {
+function shellOptions(ctx: ToolContext, writeScope: WriteScope, requestedTimeout?: unknown) {
 	const workspace = ctx.policy.workingDirectory;
 	return {
-		writable,
+		writeScope,
+		scratch: ctx.scratchDirectory,
 		confinement: ctx.policy.confinement,
 		network: ctx.policy.network,
 		denyReadPaths: deniedFiles(workspace, ctx.policy.denyReadPaths),
@@ -190,7 +199,7 @@ export const shellTools = toolset([
 	{
 		name: 'run_shell_readonly',
 		description:
-			'Run a shell command in a read-only sandbox of the workspace. Use for inspection: git, ls, tests that do not write. Pass timeout (seconds) to give a slow command more time; the maximum is 300.',
+			'Run a shell command in a read-only sandbox of the workspace. Use for inspection: git, ls, tests that do not write. For a test or build that needs temp space, use run_shell_test. Pass timeout (seconds) to give a slow command more time; the maximum is 300.',
 		capability: 'shell_ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -200,7 +209,31 @@ export const shellTools = toolset([
 		),
 		execute(args, ctx) {
 			const { command, timeout } = args as { command: string; timeout?: unknown };
-			return run(ctx, command, false, timeout);
+			return run(ctx, command, 'none', timeout);
+		},
+	},
+	{
+		name: 'run_shell_test',
+		description:
+			'Run a command with the workspace read-only and only the scratch directory writable. Use for tests, linters and builds; TMPDIR, HOME, XDG_CACHE_HOME and COMONAD_SCRATCH already point into that directory. Writes to the workspace fail. Pass timeout (seconds) for a slow command; the maximum is 300.',
+		capability: 'shell_test',
+		needsNetwork: false,
+		needsWorkspace: true,
+		parameters: objectSchema(
+			{ command: { type: 'string' }, description: descriptionParameter, timeout: timeoutParameter },
+			['command', 'description'],
+		),
+		async execute(args, ctx) {
+			const { command, timeout } = args as { command: string; timeout?: unknown };
+			// The sandbox is the capability's whole contract. Without one the command would run
+			// unconfined, so this refuses even when a gate or a direct caller let the call through.
+			if (sandboxKind() === 'none') {
+				return 'Error: run_shell_test needs an OS sandbox (sandbox-exec on macOS, bwrap on Linux); none is available';
+			}
+			if (!ctx.scratchDirectory?.trim()) {
+				return 'Error: no scratch directory is configured for this session';
+			}
+			return run(ctx, command, 'scratch', timeout);
 		},
 	},
 	{
@@ -216,7 +249,7 @@ export const shellTools = toolset([
 		),
 		execute(args, ctx) {
 			const { command, timeout } = args as { command: string; timeout?: unknown };
-			return run(ctx, command, true, timeout);
+			return run(ctx, command, shellScope(ctx.policy), timeout);
 		},
 	},
 	{
@@ -229,7 +262,7 @@ export const shellTools = toolset([
 		parameters: objectSchema({ command: { type: 'string' }, description: descriptionParameter }, ['command', 'description']),
 		async execute(args, ctx) {
 			const { command } = args as { command: string };
-			const task = await ctx.tasks.start(command, ctx.policy.workingDirectory, shellOptions(ctx, true));
+			const task = await ctx.tasks.start(command, ctx.policy.workingDirectory, shellOptions(ctx, shellScope(ctx.policy)));
 			return `started task ${task.id}: ${command}`;
 		},
 	},
@@ -248,7 +281,7 @@ export const shellTools = toolset([
 	{
 		name: 'stop_shell',
 		description: 'Stop a background task started with start_shell.',
-		capability: 'ro',
+		capability: 'shell_rw',
 		needsNetwork: false,
 		needsWorkspace: false,
 		parameters: objectSchema({ id: { type: 'string' } }, ['id']),

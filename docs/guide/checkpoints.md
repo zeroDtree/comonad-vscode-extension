@@ -29,6 +29,10 @@ change switches it back to the pending files.
 A file you edited since the agent last wrote it, or one open with unsaved text, is never overwritten
 silently: the review asks, or refuses until you save.
 
+A subagent's file-tool writes are journaled under the **parent chat**, not under a session of their
+own. They appear in the same pending list, the same diff and the same restore points as the main
+agent's writes.
+
 ## Restoring a turn
 
 Editing a prompt with the pencil and resending it offers **Restore files too** when the agent wrote
@@ -42,6 +46,8 @@ without the result that answers it.
 
 - **Changes made by shell commands (`run_shell`) are not tracked.** Review those with git. A shell
   can change any file, and the journal only knows what the agent's own write tools wrote.
+  `run_shell_test` is the exception in the other direction: it can write only its scratch directory,
+  so it never changes a project file to begin with.
 - Shadow stores from the earlier snapshot design are removed when the journal is mounted. Their
   sessions keep their transcripts, but cannot be restored to an earlier file state.
 

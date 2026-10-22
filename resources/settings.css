@@ -1061,6 +1061,47 @@ td.mono {
 	font-family: var(--st-mono);
 }
 
+/* Subagents: one grant matrix, with the definition's own tool list beside it. */
+#subagent-rows td {
+	vertical-align: top;
+}
+
+#subagent-rows .subagent-name {
+	font-weight: 600;
+}
+
+#subagent-rows .subagent-check {
+	width: 58px;
+	text-align: center;
+}
+
+#subagent-rows input[type='checkbox'] {
+	width: 15px;
+	height: 15px;
+	accent-color: var(--st-accent);
+	cursor: pointer;
+}
+
+#subagent-rows input[type='checkbox']:disabled {
+	cursor: default;
+	opacity: 0.45;
+}
+
+#subagent-rows .subagent-note {
+	margin-top: 3px;
+	font-weight: 400;
+	font-size: var(--st-small);
+	color: var(--st-muted);
+}
+
+#subagent-rows .subagent-tools {
+	font-family: var(--st-mono);
+	font-size: var(--st-small);
+	color: var(--st-muted);
+	max-width: 260px;
+	overflow-wrap: anywhere;
+}
+
 /* ---------------------------------------------------- plugin dependency table */
 
 #pg-deps {

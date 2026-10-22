@@ -8,7 +8,7 @@
 | 分组 | 工具 |
 | --- | --- |
 | 文件 | `list_dir`、`read_file`、`grep_files`、`write_file`、`apply_patch` |
-| Shell | `run_shell_readonly`、`run_shell`、`start_shell`、`shell_output`、`stop_shell` |
+| Shell | `run_shell_readonly`、`run_shell_test`、`run_shell`、`start_shell`、`shell_output`、`stop_shell` |
 | 计划 | `list_plans`、`read_plan`、`write_plan` |
 | 待办 | `todo_write` |
 | 数学 | `calculate`、`describe_numbers`、`percentile`、`convert_units` |
@@ -22,6 +22,8 @@
 ## Shell 工具
 
 - `run_shell_readonly` 在只读沙箱中运行；`run_shell` 可在工作区内写入。
+- `run_shell_test` 保持工作区只读，只写私有 scratch 目录（`COMONAD_SCRATCH`，且 `TMPDIR`、`HOME`、
+  `XDG_CACHE_HOME` 都指向其中）。它需要 OS 沙箱，没有沙箱时直接拒绝。
 - `start_shell` 启动长时间运行的命令；用 `shell_output` 读取，用 `stop_shell` 停止。
 - 前台调用可带 `timeout`（秒），限制在 1–300。
 - 有 OS 沙箱时，每个 shell 都在沙箱中运行。见[安全](/zh/guide/safety)。

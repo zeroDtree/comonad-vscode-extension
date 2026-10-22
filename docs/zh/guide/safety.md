@@ -25,7 +25,7 @@ flowchart LR
 | --- | --- |
 | Chat Only（`chat`） | 没有工具；纯对话 |
 | Read-Only（`ro`） | 读文件、只读 shell |
-| Semi-Write（`sw`） | + 写文件；shell 仍只读 |
+| Semi-Write（`sw`） | + 写文件，+ 测试 shell（工作区只读、仅 scratch 可写） |
 | Full Access（`aw`） | + 工作区内完整 shell |
 | Plan（`pl`） | 读文件、只读 shell，仅写计划文件 |
 
@@ -73,11 +73,49 @@ shell 命令运行在：
 - `comonad.confineWrite`（默认开启）把写入限制在工作目录内。
 - `comonad.confineRead`（默认关闭）对读取做同样限制。
 - 两者同时作用于文件工具和 shell 沙箱；符号链接在检查前解析。
-- 写受限的 shell 会得到 `<working directory>/.comonad/tmp` 作为临时目录，`TMPDIR` 指向它。
+- 写受限的完整 shell 会得到 `<working directory>/.comonad/tmp` 作为临时目录，`TMPDIR` 指向它。
+- 测试 shell 改用扩展存储中的独立私有目录，见下文。
 - `.env` 读写都被拒绝；文件工具永远不能写 `.git`。
 - 除非关闭 `comonad.filterSensitiveEnv`，密钥、token、密码会从命令环境中移除。
 
 关闭网络时，沙箱内仍可使用回环 TCP/UDP，因此本地测试服务器可用；只有离开本机的流量被阻断。
+
+### 测试 shell
+
+`run_shell_test`（能力 `shell_test`，在 `sw` 与 `aw` 中可用）保持工作区只读，只打开一个私有 scratch
+目录：
+
+- **macOS：** `sandbox-exec` 先拒绝所有写入，再放行 scratch 路径。
+- **Linux：** `bwrap` 以只读方式挂载工作区，以读写方式挂载 scratch，并给命令一个私有的 `/tmp`
+  （永远不是宿主机的 `/tmp`）。
+- `TMPDIR`、`TMP`、`TEMP`、`HOME`、`XDG_CACHE_HOME`、`PYTHONPYCACHEPREFIX` 和
+  `COMONAD_SCRATCH` 都指向该目录，测试框架和构建工具因此不会写进仓库。
+- 没有 OS 沙箱时工具直接拒绝；`comonad.allowUnsandboxedShell` 和 allow 规则都不能覆盖这一点 ——
+  没有沙箱就无法兑现这个能力的承诺。
+
+## 子 Agent
+
+子 Agent 的有效工具是四层交集：
+
+1. 父会话模式的能力；
+2. `comonad.subagents` 中的 per-agent 授权（**Settings → Subagents**）；
+3. Agent 定义中的 `tools` 列表；
+4. 子 Agent 的硬上限。
+
+硬上限保证子 Agent **永远**拿不到 `shell_rw` 和 `rw_plan`：
+
+- `files` 只授予可跟踪的文件工具（`write_file`、`apply_patch`、`apply_edits`）。
+- `test` 授予 `run_shell_test`。
+- 只读工具始终可用。
+- 没有 `tools` 列表的定义视为只读。
+- 内置 `implement` 默认获得 **files + test**；其它内置和所有自定义 Agent 默认只读，需显式授权。
+- 项目里同名覆盖内置 Agent 的文件不会继承该默认授权。
+- 子 Agent 的文件写入记在**主会话**的 journal 中，因此会出现在主会话的 review、inline diff 和
+  Git Changes 里。
+- 可写子 Agent 只在前台运行，且同一时间只允许一个。后台子 Agent 只读。
+- `ask` 规则会升级，而子 Agent 无法代替用户回答，因此该调用被拒绝，而不是被自动批准。
+- 在 `manual` 下，批准 `agent` 这次调用就等于批准该子 Agent 列出的工具。要拦住子 Agent 内部的某次
+  具体调用，请使用 `deny`（或 `ask`）规则。
 
 ## 命令超时
 

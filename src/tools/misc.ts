@@ -35,7 +35,7 @@ export const agentTools = toolset([
 	{
 		name: 'agent',
 		description:
-			'Delegate a focused task to a subagent that runs in its own context window and reports back a summary. Use for exploration, planning or review.',
+			'Delegate a focused task to a subagent that runs in its own context window and reports back a summary. Use for exploration, planning, review or implementation.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -43,7 +43,7 @@ export const agentTools = toolset([
 			{
 				prompt: { type: 'string', description: 'The task for the subagent.' },
 				description: { type: 'string', description: 'Short label shown in the transcript.' },
-				agent: { type: 'string', description: 'Agent name: explore, plan, review, or a custom agent.' },
+				agent: { type: 'string', description: 'Agent name: explore, plan, review, implement, or a custom agent.' },
 				background: { type: 'boolean' },
 				fork: { type: 'boolean', description: 'Give the subagent a copy of this conversation for extra context.' },
 			},

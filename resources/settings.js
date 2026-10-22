@@ -271,6 +271,12 @@
 			const group = title.nextElementSibling;
 			title.hidden = Boolean(query) && (!group || group.hidden);
 		}
+		// The Subagents tab is a table, not a stack of `.field` rows.
+		for (const row of document.querySelectorAll('section[data-pane="subagents"] #subagent-rows tr')) {
+			if (!row.querySelector('th')) {
+				row.hidden = Boolean(query) && !row.textContent.toLowerCase().includes(query);
+			}
+		}
 	}
 	if (search) {
 		search.addEventListener('input', () => {
@@ -368,6 +374,99 @@
 			const sandbox = environment.sandbox === 'none' ? 'no OS sandbox' : `sandbox: ${environment.sandbox}`;
 			note.textContent = `${where} · ${sandbox}${environment.sandbox === 'none' ? ' — shell commands ask before running unless allowed above.' : ''}`;
 		}
+	}
+
+	/** The Subagents tab: one row per catalog agent, with the grant each capability needs. */
+	function renderSubagents() {
+		const data = state.subagents;
+		const table = $('subagent-rows');
+		if (!data || !table) {
+			return;
+		}
+		table.innerHTML = '';
+		const head = document.createElement('tr');
+		for (const label of ['Agent', 'Source', 'Read', 'Files', 'Test', 'Tools']) {
+			const th = document.createElement('th');
+			th.textContent = label;
+			head.append(th);
+		}
+		const thead = document.createElement('thead');
+		thead.append(head);
+		const tbody = document.createElement('tbody');
+		table.append(thead, tbody);
+		for (const agent of data.agents || []) {
+			const row = document.createElement('tr');
+			const name = document.createElement('td');
+			name.className = 'subagent-name';
+			name.textContent = agent.name;
+			const description = document.createElement('div');
+			description.className = 'subagent-note';
+			description.textContent = agent.description || 'No description.';
+			name.append(description);
+			const notes = [];
+			if (agent.files && !agent.canFiles) {
+				notes.push('Files is granted, but no tracked write tool is available.');
+			}
+			if (agent.test && !agent.canTest) {
+				notes.push('Test is granted, but run_shell_test is not available.');
+			}
+			if (!agent.files && agent.canFiles) {
+				notes.push('Write tools are listed but not granted.');
+			}
+			if (!agent.test && agent.canTest) {
+				notes.push('run_shell_test is listed but not granted.');
+			}
+			if (notes.length) {
+				const note = document.createElement('div');
+				note.className = 'subagent-note';
+				note.textContent = notes.join(' ');
+				name.append(note);
+			}
+			const source = document.createElement('td');
+			source.textContent = agent.builtin ? 'built-in' : 'custom';
+			const read = document.createElement('td');
+			read.className = 'subagent-check';
+			read.textContent = '✓';
+			row.append(name, source, read);
+			for (const [key, allowed] of [
+				['files', agent.canFiles],
+				['test', agent.canTest],
+			]) {
+				const cell = document.createElement('td');
+				cell.className = 'subagent-check';
+				const box = document.createElement('input');
+				box.type = 'checkbox';
+				box.checked = Boolean(agent[key]);
+				// A grant that has no matching tool can still be turned off; only turning one on is
+				// blocked until the definition names the tool.
+				box.disabled = !allowed && !agent[key];
+				box.title = allowed ? '' : key === 'files' ? 'No tracked write tool is available to this agent.' : 'run_shell_test is not available to this agent.';
+				box.addEventListener('change', () => saveSubagent(agent, key, box.checked));
+				cell.append(box);
+				row.append(cell);
+			}
+			const tools = document.createElement('td');
+			tools.className = 'subagent-tools';
+			tools.textContent = (agent.tools || []).join(', ') || '—';
+			row.append(tools);
+			tbody.append(row);
+		}
+	}
+
+	/** Writes one agent's grant; the whole override map is sent so unknown entries survive. */
+	function saveSubagent(agent, key, value) {
+		if (!state.subagents) {
+			return;
+		}
+		const grants = { ...(state.subagents.grants || {}) };
+		const name = agent.name.toLowerCase();
+		const current = { files: agent.files, test: agent.test, ...(grants[name] || {}) };
+		current[key] = value;
+		grants[name] = current;
+		// Optimistic local copy: a second click before the state push must build on this one.
+		state.subagents.grants = grants;
+		state.subagents.agents = state.subagents.agents.map((entry) => (entry.name === agent.name ? { ...entry, [key]: value } : entry));
+		post({ type: 'saveSubagents', subagents: grants });
 	}
 
 	/** The tabs the Save button owns: a state push leaves them alone while the form is dirty. */
@@ -1243,6 +1342,9 @@
 			case 'agent':
 				// Live controls are always safe to redraw: a focused field is left alone by put().
 				renderAgentForm();
+				break;
+			case 'subagents':
+				renderSubagents();
 				break;
 			case 'graph':
 				renderGraphInfo();

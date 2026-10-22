@@ -139,8 +139,17 @@ export async function guardPath(workspace: string, input: string, options: Guard
 	return target;
 }
 
+/**
+ * What a command may write. `scratch` is the test shell: the workspace stays read-only and only the
+ * session's scratch directory is writable. `workspace` follows `confinement.write`; `all` is the
+ * explicit opt-out the full-access preset uses.
+ */
+export type WriteScope = 'none' | 'scratch' | 'workspace' | 'all';
+
 export interface SandboxOptions {
-	writable: boolean;
+	writeScope: WriteScope;
+	/** The absolute scratch directory a `scratch` scope may write, and every scope may read. */
+	scratch?: string;
 	/** How far outside the working directory reads and writes may reach. */
 	confinement: Confinement;
 	network: boolean;
@@ -381,29 +390,62 @@ export function sandboxEnv(
 	cwd?: string,
 ): NodeJS.ProcessEnv | undefined {
 	const sandboxed = kind !== 'none' && options.mode !== 'direct';
-	const scratch =
-		sandboxed && options.writable && options.confinement.write && cwd?.trim()
+	// A test shell gets a hermetic home: every place a test runner or build tool would write outside
+	// the workspace is redirected into the scratch tree. A workspace-writable shell keeps the older
+	// `.comonad/tmp` convention, since it may write the workspace itself.
+	const testScratch = sandboxed && options.writeScope === 'scratch' && options.scratch?.trim()
+		? canonicalPath(options.scratch)
+		: undefined;
+	const workspaceScratch =
+		sandboxed && options.writeScope === 'workspace' && options.confinement.write && cwd?.trim()
 			? workspaceTempDir(cwd)
 			: undefined;
 	const wantsTmp = kind === 'bwrap' && options.mode !== 'direct';
-	if (options.filterEnv === false && !loginPath && !wantsTmp && !scratch) {
+	// The command's temp directory must exist before it starts: bwrap cannot bind a missing source,
+	// and every shell would otherwise fail its first `mktemp`.
+	if (sandboxed && options.scratch?.trim()) {
+		createScratch(testScratch ?? options.scratch, Boolean(testScratch));
+	}
+	if (workspaceScratch) {
+		createScratch(workspaceScratch, false);
+	}
+	if (options.filterEnv === false && !loginPath && !wantsTmp && !workspaceScratch && !testScratch) {
 		return undefined;
 	}
 	const env = options.filterEnv === false ? { ...process.env } : sanitizedEnv();
 	if (loginPath) {
 		env.PATH = mergePath(loginPath, env.PATH);
 	}
-	if (scratch) {
-		env.TMPDIR = scratch;
-		try {
-			mkdirSync(scratch, { recursive: true });
-		} catch {
-			// An unwritable workspace is the command's failure to report, not this helper's to pre-empt.
-		}
+	if (testScratch) {
+		const tmp = join(testScratch, 'tmp');
+		env.TMPDIR = tmp;
+		env.TMP = tmp;
+		env.TEMP = tmp;
+		env.HOME = join(testScratch, 'home');
+		env.XDG_CACHE_HOME = join(testScratch, 'cache');
+		env.PYTHONPYCACHEPREFIX = join(testScratch, 'pycache');
+		env.COMONAD_SCRATCH = testScratch;
+	} else if (workspaceScratch) {
+		env.TMPDIR = workspaceScratch;
 	} else if (wantsTmp) {
 		env.TMPDIR = '/tmp';
 	}
 	return env;
+}
+
+/** The scratch tree a test shell uses; created before the command starts so the sandbox can bind it. */
+function createScratch(root: string, withHome: boolean): void {
+	try {
+		mkdirSync(root, { recursive: true });
+		if (!withHome) {
+			return;
+		}
+		for (const name of ['tmp', 'home', 'cache', 'pycache']) {
+			mkdirSync(join(root, name), { recursive: true });
+		}
+	} catch {
+		// An unwritable scratch is the command's failure to report, not this helper's to pre-empt.
+	}
 }
 
 /** The argv that runs `argv` under the OS sandbox, or `null` when there is none to apply. */
@@ -613,14 +655,19 @@ function quote(path: string): string {
 
 export function buildSbpl(workspace: string, options: SandboxOptions): string {
 	const root = canonicalPath(workspace);
+	const scratch = options.scratch?.trim() ? canonicalPath(options.scratch) : undefined;
 	const lines = ['(version 1)', '(allow default)'];
 	// SBPL is last-match-wins: an allow for the workspace does not close writes outside it, so the
 	// deny has to come first. Without it, confineWrite did nothing on macOS.
-	if (!options.writable || options.confinement.write) {
+	if (options.writeScope !== 'all') {
 		lines.push('(deny file-write*)');
 	}
-	if (options.writable && options.confinement.write) {
+	if (options.writeScope === 'workspace') {
 		lines.push(`(allow file-write* (subpath "${quote(root)}"))`);
+	}
+	// The test shell: the workspace above stays read-only; only the scratch tree opens for writing.
+	if (options.writeScope === 'scratch' && scratch) {
+		lines.push(`(allow file-write* (subpath "${quote(scratch)}"))`);
 	}
 	lines.push('(allow file-write* (literal "/dev/null"))');
 	if (options.confinement.read) {
@@ -628,6 +675,10 @@ export function buildSbpl(workspace: string, options: SandboxOptions): string {
 		lines.push('(deny file-read*)');
 	}
 	lines.push(`(allow file-read* (subpath "${quote(root)}"))`);
+	// Test output is meant to be read back, even when reads are confined to the workspace.
+	if (scratch) {
+		lines.push(`(allow file-read* (subpath "${quote(scratch)}"))`);
+	}
 	for (const denyPath of options.denyReadPaths) {
 		if (denyPath && denyPath.includes('/')) {
 			const denied = canonicalPath(denyPath);
@@ -665,13 +716,17 @@ const SYSTEM_BIND_PREFIXES = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc',
 export function bwrapArguments(bwrap: string, command: string[], cwd: string, options: SandboxOptions): string[] {
 	const root = canonicalPath(cwd);
 	const tmpRoot = canonicalPath('/tmp');
-	const openWrite = options.writable && !options.confinement.write;
+	const scratch = options.scratch?.trim() ? canonicalPath(options.scratch) : undefined;
+	const openWrite = options.writeScope === 'all';
+	const workspaceWrite = options.writeScope === 'workspace';
+	const scratchWrite = options.writeScope === 'scratch';
 	const args = [bwrap, '--die-with-parent'];
 	if (!options.network) {
 		args.push('--unshare-net');
 	}
 	// The base view goes on first: a later mount wins over an earlier one for the same destination,
-	// so everything below it — the special mounts and the workspace — is what the shell actually sees.
+	// so everything below it — the special mounts, the workspace and the scratch — is what the shell
+	// actually sees.
 	const openRead = !options.confinement.read;
 	if (openWrite) {
 		args.push('--bind', '/', '/');
@@ -690,18 +745,24 @@ export function bwrapArguments(bwrap: string, command: string[], cwd: string, op
 		}
 	}
 	args.push('--proc', '/proc', '--dev', '/dev');
-	// A private /tmp, never the host's: writable only when writes are open, otherwise remounted
+	// A private /tmp, never the host's. It stays writable for `scratch` (a test runner's own temp
+	// files are as harmless as the scratch tree) and for open writes; otherwise it is remounted
 	// read-only after the workspace bind, so a workspace under /tmp keeps its own writable mount.
 	if (root !== tmpRoot) {
 		args.push('--tmpfs', '/tmp');
 	}
-	args.push(options.writable ? '--bind' : '--ro-bind', root, root);
+	args.push(openWrite || workspaceWrite ? '--bind' : '--ro-bind', root, root);
+	// The scratch bind comes after the workspace so it can carve a writable hole out of a read-only
+	// workspace; it is mounted read-only for every scope that does not write it.
+	if (scratch && scratch !== root) {
+		args.push(scratchWrite ? '--bind' : '--ro-bind', scratch, scratch);
+	}
 	for (const denyPath of options.denyReadPaths) {
 		if (existsSync(denyPath)) {
 			args.push('--ro-bind', '/dev/null', canonicalPath(denyPath));
 		}
 	}
-	if (root !== tmpRoot && !openWrite) {
+	if (root !== tmpRoot && !openWrite && !scratchWrite) {
 		args.push('--remount-ro', '/tmp');
 	}
 	args.push('--chdir', root, '--', ...(options.network ? command : loopbackCommand(command)));

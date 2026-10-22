@@ -25,7 +25,7 @@ The mode decides which capabilities exist at all.
 | --- | --- |
 | Chat Only (`chat`) | No tools; plain conversation |
 | Read-Only (`ro`) | Read files, read-only shell |
-| Semi-Write (`sw`) | + write files; the shell stays read-only |
+| Semi-Write (`sw`) | + write files, + test shell (workspace read-only, scratch writable) |
 | Full Access (`aw`) | + full shell inside the workspace |
 | Plan (`pl`) | Read files, read-only shell, writes plan files only |
 
@@ -75,14 +75,54 @@ Shell commands run under:
 - `comonad.confineWrite` (on by default) keeps writes inside the working directory.
 - `comonad.confineRead` (off by default) does the same for reads.
 - Both apply to file tools and the shell sandbox; symlinks are resolved before the check.
-- A write-confined shell gets a scratch directory at `<working directory>/.comonad/tmp` with
+- A write-confined full shell gets a scratch directory at `<working directory>/.comonad/tmp` with
   `TMPDIR` pointing at it.
+- The test shell uses a separate, private tree in the extension's storage instead; see below.
 - `.env` files are denied to reading and writing; `.git` is never writable by file tools.
 - Secrets (keys, tokens, passwords) are stripped from the environment unless
   `comonad.filterSensitiveEnv` is off.
 
 With network off, loopback TCP/UDP stays available inside the sandbox, so local test servers work;
 only traffic that leaves the machine is blocked.
+
+### The test shell
+
+`run_shell_test` (capability `shell_test`, available in `sw` and `aw`) keeps the workspace
+read-only and opens only a private scratch tree:
+
+- **macOS:** `sandbox-exec` denies every write, then allows the scratch path.
+- **Linux:** `bwrap` mounts the workspace read-only, the scratch read-write, and gives the command a
+  private `/tmp` of its own (never the host's).
+- `TMPDIR`, `TMP`, `TEMP`, `HOME`, `XDG_CACHE_HOME`, `PYTHONPYCACHEPREFIX` and `COMONAD_SCRATCH`
+  point into that tree, so test runners and build tools write there instead of the repository.
+- Without an OS sandbox the tool is refused outright. `comonad.allowUnsandboxedShell` and allow
+  rules do not override this: the capability's promise cannot be kept without one.
+
+## Subagents
+
+A subagent's effective tools are the intersection of four things:
+
+1. the parent mode's capabilities;
+2. the per-agent grant in `comonad.subagents` (**Settings → Subagents**);
+3. the agent definition's `tools` list;
+4. the hard subagent cap.
+
+The hard cap means a subagent **never** gets `shell_rw` or `rw_plan`:
+
+- `files` grants only tracked file tools (`write_file`, `apply_patch`, `apply_edits`).
+- `test` grants `run_shell_test`.
+- Read-only tools are always available.
+- A definition with no `tools` list is read-only.
+- Built-in `implement` defaults to **files + test**; every other built-in and every custom agent
+  defaults to read-only until granted.
+- A project file that shadows a built-in name does not inherit that built-in's default grant.
+- A subagent's file writes are journaled under the **parent chat**, so they appear in its review,
+  inline diff and Git Changes.
+- Write-capable subagents run in the foreground, one at a time. A background subagent is read-only.
+- An `ask` rule is escalated, and a subagent cannot answer it, so the call is refused rather than
+  auto-approved.
+- Under `manual`, approving the `agent` call is the approval for that subagent's listed tools. Use
+  `deny` (or `ask`) rules to stop a specific call inside a subagent.
 
 ## Command timeout
 

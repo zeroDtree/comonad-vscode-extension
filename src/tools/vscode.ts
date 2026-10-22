@@ -99,6 +99,7 @@ export const vscodeTools = toolset([
 		description:
 			'Apply line/column text edits to one workspace file through the editor, so the user can undo them. Prefer this tool for precise, localized changes; use write_file for new files or full rewrites.',
 		capability: 'rw',
+		trackedWrite: true,
 		needsNetwork: false,
 		needsWorkspace: true,
 		parameters: objectSchema(
@@ -175,7 +176,7 @@ export const vscodeTools = toolset([
 		async execute(args, ctx) {
 			const { staged } = args as { staged?: boolean };
 			const options = {
-				writable: false,
+				writeScope: 'none' as const,
 				confinement: ctx.policy.confinement,
 				network: false,
 				denyReadPaths: [] as string[],

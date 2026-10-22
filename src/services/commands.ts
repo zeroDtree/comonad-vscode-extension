@@ -115,7 +115,7 @@ export class Commands extends Service {
 	private sandboxOptions(): SandboxOptions {
 		const config = this.ctx.settings.get();
 		return {
-			writable: true,
+			writeScope: config.confineWrite ? 'workspace' : 'all',
 			confinement: { read: config.confineRead, write: config.confineWrite },
 			network: config.network,
 			denyReadPaths: [...config.denyReadPaths],

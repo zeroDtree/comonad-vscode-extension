@@ -141,10 +141,37 @@ in trusted workspaces, and exit code 2 blocks.
 | Instructions | `COMONAD.md`, `AGENTS.md`, `.comonad/instructions.md` | Hierarchical; trusted workspaces only |
 | Rules | `.comonad/rules/*.md` | Loaded into the system prompt |
 | Skills | `.comonad/skills/<name>/SKILL.md` | Listed in the prompt, loaded on demand |
-| Subagents | `.comonad/agents/*.md` | Frontmatter: `tools`, `disallowedTools`, `model`, `maxTurns` |
+| Subagents | `.comonad/agents/*.md` + `comonad.subagents` | Frontmatter selects the tools; settings grant the writes |
 | Commands | `.comonad/commands/*.md` | Custom slash commands |
 | MCP | `comonad.mcpServers` | stdio or streamable HTTP; per-server capability and overrides |
 | Memory | Agent-owned `MEMORY.md` | Loaded into the prompt, edited with the `memory` tool |
+
+### Subagents
+
+A subagent is a Markdown file under `.comonad/agents/` or `~/.comonad/agents/`:
+
+```markdown
+---
+name: writer
+description: Implement a focused change.
+tools: [read_file, grep_files, write_file, apply_patch, run_shell_test]
+maxTurns: 20
+---
+Implement the change. Use the file tools for every project write; run_shell_test writes only its
+scratch directory.
+```
+
+The frontmatter **selects** tools. Writes also need a **grant** in `comonad.subagents` (Settings →
+Subagents):
+
+```json
+{ "comonad.subagents": { "writer": { "files": true, "test": true } } }
+```
+
+Read-only tools need no grant. `files` enables only tracked file tools (`write_file`, `apply_patch`,
+`apply_edits`); `test` enables `run_shell_test`. `run_shell`, `start_shell` and plan writes are never
+granted to a subagent. A definition without a `tools` list is read-only. The parent mode must allow
+the capability too. See [Safety](/guide/safety#subagents).
 
 ### MCP
 

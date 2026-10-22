@@ -8,18 +8,23 @@ import type { Approval, Capability, Confinement, SessionPolicy, ToolCall, ToolSp
 export const MODE_CAPS: Record<WorkMode, ReadonlySet<Capability>> = {
 	chat: new Set(),
 	ro: new Set(['ro', 'shell_ro']),
-	sw: new Set(['ro', 'rw', 'shell_ro']),
-	aw: new Set(['ro', 'rw', 'shell_ro', 'shell_rw']),
+	sw: new Set(['ro', 'rw', 'shell_ro', 'shell_test']),
+	aw: new Set(['ro', 'rw', 'shell_ro', 'shell_test', 'shell_rw']),
 	pl: new Set(['ro', 'shell_ro', 'rw_plan']),
 };
 
 export const MODE_LABELS: Record<WorkMode, string> = {
 	chat: 'Chat Only — no tools, plain conversation',
 	ro: 'Read-Only — read files, read-only shell',
-	sw: 'Semi-Write — write files, read-only shell',
+	sw: 'Semi-Write — write files, run tests in a scratch shell',
 	aw: 'Full Access — write files, full shell',
 	pl: 'Plan — read files, read-only shell, writes plan files only',
 };
+
+/** Every capability that runs a command. Kept in one place so the gate, rules and the parser agree. */
+export function isShellCapability(capability: Capability | undefined): boolean {
+	return capability === 'shell_ro' || capability === 'shell_test' || capability === 'shell_rw';
+}
 
 export const APPROVAL_LABELS: Record<Approval, string> = {
 	manual: 'Ask — confirm every tool call',
@@ -85,7 +90,7 @@ const DEFAULT_WHITELIST: ReadonlySet<Capability> = new Set(['ro', 'shell_ro', 'r
  * The blacklist's built-in contents: everything that can write. `comonad.permissions.deny` adds to
  * this list, and — unlike the built-in defaults — those deny rules reject in every policy.
  */
-const DEFAULT_BLACKLIST: ReadonlySet<Capability> = new Set(['rw', 'shell_rw', 'rw_plan']);
+const DEFAULT_BLACKLIST: ReadonlySet<Capability> = new Set(['rw', 'shell_test', 'shell_rw', 'rw_plan']);
 
 export function whitelistedByDefault(capability: Capability): boolean {
 	return DEFAULT_WHITELIST.has(capability);
@@ -132,7 +137,7 @@ export function callTarget(call: ToolCall, tool: ToolSpec | undefined): string {
 		return call.arguments;
 	}
 	const string = (key: string) => (typeof args[key] === 'string' ? (args[key] as string) : undefined);
-	if (tool?.capability === 'shell_ro' || tool?.capability === 'shell_rw') {
+	if (isShellCapability(tool?.capability)) {
 		return string('command') ?? '';
 	}
 	return string('url') ?? string('path') ?? string('file_path') ?? string('file') ?? call.arguments;
@@ -244,14 +249,20 @@ export function gateCalls(
 		if (policy.approval === 'universal_reject') {
 			return { decision: 'reject', reason: 'approval policy rejects all calls' };
 		}
+		// The test shell's whole contract is an OS-enforced read-only workspace. Without a sandbox
+		// there is nothing to enforce it with, so no rule and no policy can turn it on.
+		if (tool.capability === 'shell_test' && env.sandbox === 'none') {
+			return { decision: 'reject', reason: `${call.name} needs an OS sandbox to keep the workspace read-only; none is available` };
+		}
 		const denied = rules.deny.find((rule) => ruleMatches(rule, call, tool));
 		if (denied) {
 			return { decision: 'reject', reason: `deny rule ${ruleText(denied)} blocks ${call.name}` };
 		}
 		// What would make this call unsafe to answer by delegation, whichever confirmation it ends
-		// up with: no sandbox for a shell command, a tool that names itself unsandboxed, or a
-		// dangerous command. An explicit allow rule — including "Always allow" — remains consent.
-		const shell = tool.capability === 'shell_ro' || tool.capability === 'shell_rw';
+		// up with: no sandbox for a shell command, a tool that names itself unsandboxed, a dangerous
+		// command, or a rule the user wrote to ask about. An explicit allow rule — including "Always
+		// allow" — remains consent.
+		const shell = isShellCapability(tool.capability);
 		const unconfined = !env.allowUnsandboxedShell && env.sandbox === 'none' && shell;
 		const outside = tool.name.endsWith('_unsandboxed');
 		const dangerous = isDangerous(
@@ -263,7 +274,7 @@ export function gateCalls(
 		);
 		if (rules.ask.some((rule) => ruleMatches(rule, call, tool))) {
 			confirm ||= `ask rule matches ${call.name}`;
-			escalated ||= unconfined || outside || dangerous;
+			escalated = true;
 			continue;
 		}
 		if (rules.allow.some((rule) => ruleMatches(rule, call, tool))) {
@@ -322,6 +333,7 @@ const CAP_SHORT: Record<Capability, string> = {
 	ro: 'read files',
 	rw: 'write files',
 	shell_ro: 'read-only shell',
+	shell_test: 'test shell (scratch only)',
 	shell_rw: 'full shell',
 	rw_plan: 'plan files',
 };
@@ -339,7 +351,8 @@ export function modeCapabilities(): string[] {
  * Mermaid source for the tool-call gate, generated from the tables above so the diagram shown in
  * the settings panel's Flow tab cannot drift from `gateCalls`.
  *
- * Shape: the mode / network / workspace checks and the reject-all short-circuit first, then two
+ * Shape: the mode / network / workspace checks, the test-shell sandbox check and the reject-all
+ * short-circuit first, then two
  * frames — the user's rules and the remaining approval policies, with the built-in no-sandbox /
  * unsandboxed / dangerous-command escalation between them. Every gate ends in **its own**
  * `Rejected` / `Asks you` / `Runs` node directly below it: sharing one sink per outcome made every
@@ -360,7 +373,9 @@ export function gateFlow(): string {
 		'  net -- no --> netNo(["Rejected"])',
 		'  net --> ws{{"workspace ok?"}}',
 		'  ws -- no --> wsNo(["Rejected"])',
-		'  ws --> rejectAllQ{{"approval policy universal_reject?"}}',
+		'  ws --> testShellQ{{"test shell without an OS sandbox?"}}',
+		'  testShellQ -- yes --> testShellNo(["Rejected"])',
+		'  testShellQ -- no --> rejectAllQ{{"approval policy universal_reject?"}}',
 		'  rejectAllQ -- yes --> rejectAll(["Rejected"])',
 		'  rejectAllQ -- no --> deny',
 		'',
@@ -407,7 +422,7 @@ export function gateFlow(): string {
 		'  classDef reject fill:#6d2f2f,stroke:#c26060,color:#ffffff',
 		'  classDef confirm fill:#6d5620,stroke:#d5a33a,color:#ffffff',
 		'  classDef run fill:#1e5c39,stroke:#43b581,color:#ffffff',
-		'  class modeNo,netNo,wsNo,denyReject,rejectAll,blacklistReject reject',
+		'  class modeNo,netNo,wsNo,testShellNo,denyReject,rejectAll,blacklistReject reject',
 		'  class askConfirm,sandboxConfirm,dangerConfirm,manualConfirm,whitelistConfirm confirm',
 		'  class allowRun,runAll,whitelistRun,blacklistRun run',
 	].join('\n');
@@ -434,7 +449,7 @@ export interface DeletionContext {
 
 /** Flags shell commands that deserve an explicit prompt even when the policy auto-approves. */
 export function isDangerous(call: ToolCall, tool: ToolSpec | undefined, deletion?: DeletionContext): boolean {
-	if (tool?.capability !== 'shell_ro' && tool?.capability !== 'shell_rw') {
+	if (!isShellCapability(tool?.capability)) {
 		return false;
 	}
 	const command = callTarget(call, tool);
@@ -454,7 +469,7 @@ export function suggestAllowRule(call: ToolCall, tool: ToolSpec | undefined): st
 	} catch {
 		return name;
 	}
-	if (tool?.capability === 'shell_ro' || tool?.capability === 'shell_rw') {
+	if (isShellCapability(tool?.capability)) {
 		const command = typeof args.command === 'string' ? args.command.trim() : '';
 		const tokens = command.split(/\s+/).filter((token) => token && !token.startsWith('-'));
 		if (tokens.length >= 2) {

@@ -13,7 +13,7 @@ export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high';
 
 export type Preset = 'ask' | 'plan' | 'auto' | 'readonly' | 'full';
 
-export type Capability = 'ro' | 'rw' | 'rw_plan' | 'shell_ro' | 'shell_rw';
+export type Capability = 'ro' | 'rw' | 'rw_plan' | 'shell_ro' | 'shell_test' | 'shell_rw';
 
 export interface ToolCall {
 	id: string;
@@ -171,6 +171,8 @@ export interface ToolContext {
 	todos(items?: TodoItem[]): TodoItem[];
 	tasks: TaskApi;
 	spawnAgent: AgentSpawnFunction;
+	/** The session's private scratch directory: the only place a test shell may write. */
+	scratchDirectory?: string;
 	/** Remove secret-shaped environment variables from spawned commands. Defaults to true. */
 	sensitiveEnv?: boolean;
 	/**
@@ -198,6 +200,12 @@ export interface ToolSpec {
 	capability: Capability;
 	needsNetwork: boolean;
 	needsWorkspace: boolean;
+	/**
+	 * Its writes go through `ToolContext.edit`, so the journal records them. A subagent is offered a
+	 * write tool only when this is true; a plugin tool that writes without the seam is not tracked and
+	 * therefore not delegated.
+	 */
+	trackedWrite?: boolean;
 	execute(args: unknown, ctx: ToolContext): Promise<string | ToolResult>;
 }
 

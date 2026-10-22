@@ -15,7 +15,7 @@ import { type ContextForm } from '../lib/prompt';
 import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
-import { asList, normalizeAgentPatch, profileKeyEnvs, type Profile, type ToolCardMode } from '../services/settings';
+import { asList, normalizeAgentPatch, profileKeyEnvs, sanitizeSubagentGrants, subagentGrant, type Profile, type ToolCardMode } from '../services/settings';
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
@@ -371,6 +371,26 @@ export function settingsPanel(ctx: Context): void {
 				graph,
 				permissions: config.permissions,
 			},
+			subagents: {
+				grants: config.subagents,
+				agents: ctx.catalog.agents.map((agent) => {
+					const grant = subagentGrant(config, agent.name, agent.builtin === true);
+					const listed = agent.tools ?? [];
+					return {
+						name: agent.name,
+						description: agent.description,
+						builtin: agent.builtin === true,
+						tools: listed,
+						canFiles: listed.some((name) => {
+							const tool = ctx.tools.get(name);
+							return tool?.capability === 'rw' && tool.trackedWrite === true;
+						}),
+						canTest: listed.some((name) => ctx.tools.get(name)?.capability === 'shell_test'),
+						files: grant.files,
+						test: grant.test,
+					};
+				}),
+			},
 			// Each pane's own slices travel under its id: the panel has no content code of its own, and a
 			// pane that is not registered is simply a tab that is not there.
 			panes: Object.fromEntries([...controllers].map(([id, controller]) => [id, controller.state()])),
@@ -576,6 +596,9 @@ export function settingsPanel(ctx: Context): void {
 					// draft tabs. The state push after the write redraws the Agent controls.
 					await apply((message.config ?? {}) as Record<string, unknown>);
 					break;
+				case 'saveSubagents':
+					await ctx.settings.update('subagents', sanitizeSubagentGrants(message.subagents));
+					break;
 				case 'configureModel':
 					await vscode.commands.executeCommand('comonad.configureModel');
 					break;
@@ -694,6 +717,7 @@ export function settingsPanel(ctx: Context): void {
 	ctx.on('settings/changed', schedulePush);
 	ctx.on('tools/changed', schedulePush);
 	ctx.on('plugins/changed', schedulePush);
+	ctx.on('catalog/changed', schedulePush);
 	// A saved key changes both the no-key markers and the lists each endpoint can now report.
 	ctx.on('llm/keys-changed', () => {
 		schedulePush();
@@ -870,6 +894,9 @@ const TAB_ICONS = {
 	agent: tabIcon(
 		'<rect x="3" y="5" width="10" height="7" rx="2"/><path d="M8 2.3v2.7M5.7 8.1h.01M10.3 8.1h.01M6.2 11.9v1.6M9.8 11.9v1.6"/>',
 	),
+	subagents: tabIcon(
+		'<rect x="2.5" y="4" width="4.2" height="4.2" rx="1"/><rect x="9.3" y="4" width="4.2" height="4.2" rx="1"/><rect x="2.5" y="9.8" width="4.2" height="4.2" rx="1"/><path d="M9.4 10.1h4M11.4 8.1v4"/>',
+	),
 	graph: tabIcon(
 		'<circle cx="4" cy="4" r="1.5"/><circle cx="12" cy="5" r="1.5"/><circle cx="7" cy="12" r="1.5"/><path d="M5.4 4.4l5.1.5M4.8 5.4l1.6 5.1M10.9 6.3l-2.6 4.2"/>',
 	),
@@ -922,6 +949,7 @@ ${paneStyles.map((src) => `<link rel="stylesheet" href="${src}" />`).join('\n')}
     <input id="search" class="control" type="search" placeholder="Search settings" spellcheck="false" autocomplete="off" />
     <nav id="tabs" role="tablist" aria-orientation="vertical" aria-label="Comonad settings">
 ${tabButton('agent', 'Agent', 'Agent — model, policy, workspace', TAB_ICONS.agent)}
+${tabButton('subagents', 'Subagents', 'Subagents — per-agent capability grants', TAB_ICONS.subagents)}
 ${tabButton('graph', 'Graph', 'Graph — the Mermaid agent loop', TAB_ICONS.graph)}
 ${paneTabs}
 ${tabButton('rules', 'Rules', 'Rules — allow, ask and deny rules for tool calls', TAB_ICONS.rules)}
@@ -1040,9 +1068,15 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <p class="hint">When no sandbox is available, shell commands run unconfined without the extra confirmation. Tools named <code>*_unsandboxed</code> still ask.</p>
         <label class="check"><input type="checkbox" id="allow-unsandboxed" data-key="allowUnsandboxedShell" /></label>
       </div>
-      <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. A write-confined shell still gets a writable scratch directory at <code>.comonad/tmp</code>, so <code>mktemp</code> and test runners keep working. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
+      <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. A write-confined full shell still gets a writable scratch directory at <code>.comonad/tmp</code>. The test shell (<code>run_shell_test</code>) keeps the workspace read-only and writes to the extension's own temp folder instead, exposed as <code>$COMONAD_SCRATCH</code> with <code>TMPDIR</code>, <code>HOME</code> and <code>XDG_CACHE_HOME</code> pointing there. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
       <p class="group-note" id="environment-note"></p>
     </div>
+  </section>
+
+  <section data-pane="subagents" hidden>
+    <h1 class="page-title">Subagents</h1>
+    <p class="group-note">Read-only tools are always available. <b>Files</b> grants the tracked write tools (<code>write_file</code>, <code>apply_patch</code>, <code>apply_edits</code>); <b>Test</b> grants <code>run_shell_test</code>, whose workspace is read-only and whose only writable place is the scratch directory. Full shell and plan writes are never granted to a subagent. The agent's own <code>tools</code> list still selects which tools it uses, and the parent mode must allow the capability too. Changes apply to the next spawn.</p>
+    <table id="subagent-rows"></table>
   </section>
 
   <section data-pane="graph" hidden>

@@ -8,7 +8,7 @@ Every tool declares a **capability**, whether it needs **network**, and whether 
 | Group | Tools |
 | --- | --- |
 | Files | `list_dir`, `read_file`, `grep_files`, `write_file`, `apply_patch` |
-| Shell | `run_shell_readonly`, `run_shell`, `start_shell`, `shell_output`, `stop_shell` |
+| Shell | `run_shell_readonly`, `run_shell_test`, `run_shell`, `start_shell`, `shell_output`, `stop_shell` |
 | Plans | `list_plans`, `read_plan`, `write_plan` |
 | Todos | `todo_write` |
 | Math | `calculate`, `describe_numbers`, `percentile`, `convert_units` |
@@ -23,6 +23,9 @@ as image content.
 ## Shell tools
 
 - `run_shell_readonly` runs in a read-only sandbox; `run_shell` can write inside the workspace.
+- `run_shell_test` keeps the workspace read-only and writes only to a private scratch tree, exposed
+  as `COMONAD_SCRATCH` (with `TMPDIR`, `HOME` and `XDG_CACHE_HOME` pointing into it). It needs an OS
+  sandbox and is refused without one.
 - `start_shell` starts a long-running command; read it with `shell_output`, stop it with `stop_shell`.
 - Foreground calls take an optional `timeout` in seconds, clamped to 1–300.
 - Every shell runs under the OS sandbox when one is available. See [Safety](/guide/safety).

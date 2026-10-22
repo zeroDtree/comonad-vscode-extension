@@ -41,6 +41,17 @@
   touch the host temp directory, on macOS and on bwrap alike. The boundary is unchanged: nothing
   outside the workspace becomes writable, and a read-only shell still gets no writable temp space.
 
+- **Subagents can implement and test without a writable shell.** A new `run_shell_test` capability
+  keeps the workspace read-only and opens only a private scratch tree (with `TMPDIR`, `HOME`,
+  `XDG_CACHE_HOME` and `COMONAD_SCRATCH` redirected into it); it refuses outright when no OS sandbox
+  exists. The new `comonad.subagents` setting grants `files` (only tools that write through
+  `ctx.edit`) and `test` per agent; the agent definition's `tools` list still selects among them, and
+  the parent mode still gates both. Built-in `implement` defaults to `files` + `test`, every other
+  agent is read-only, and `shell_rw`/`rw_plan` are never offered to a subagent. A subagent's file
+  writes are journaled under the parent chat, appear in its diff, and a write-capable subagent runs
+  in the foreground, one at a time. `ask` rules are escalated, so a subagent cannot silently answer
+  them; no-sandbox and dangerous-command escalations are refused for the same reason.
+
 - **Loopback stays open when network is off.** A shell with network disabled can still bind and
   connect over `localhost`, so test servers that listen on `127.0.0.1` work. macOS gets explicit
   `network-bind`/`network-inbound`/`network-outbound` rules for `localhost`, and bwrap brings `lo`
