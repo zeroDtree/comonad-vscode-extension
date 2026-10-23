@@ -3759,7 +3759,7 @@ suite('Cordis kernel', () => {
 		assert.match(String(binding.when), /editorHasSelection/);
 	});
 
-	test('the rule lists the Rules tab edits are the ones the gate uses', async () => {
+	test('the rule lists the Agent tab edits are the ones the gate uses', async () => {
 		const kernel = await createTestKernel();
 		try {
 			// What the panel writes: three string lists, validated with `parseRule`.

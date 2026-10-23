@@ -32,9 +32,9 @@
 		node.textContent = text || '';
 		node.className = isError ? 'error' : '';
 	};
-	// Save owns the draft tabs only (Graph, Rules, ST): the Agent and UI tabs save themselves, and
-	// Prompts and MCP have their own buttons. With nothing pending it is disabled, so it never looks
-	// like a no-op command.
+	// Save owns the draft tabs only (Graph, ST): the Agent and UI tabs save themselves, and Prompts
+	// and MCP have their own buttons. With nothing pending it is disabled, so it never looks like a
+	// no-op command.
 	const markDirty = () => {
 		dirty = true;
 		$('save').classList.add('is-dirty');
@@ -480,17 +480,11 @@
 		put($('graph'), config.graph);
 	}
 
-	/** One rule (or path) per line. */
-	const lines = (node) => node.value.split('\n').map((line) => line.trim()).filter(Boolean);
-
 	/** What the Save button owns: the draft tabs. The Agent tab saves itself. */
 	function collectDraft() {
 		const config = {
 			maxSteps: Number($('steps').value) || 0,
 			graph: $('graph').value,
-			allow: lines($('rules-allow')),
-			ask: lines($('rules-ask')),
-			deny: lines($('rules-deny')),
 		};
 		// A pane owns its own keys: it contributes the ones its tab holds, and nothing else.
 		for (const handlers of panes.values()) {
@@ -1349,8 +1343,6 @@
 				break;
 			case 'graph':
 				renderGraphInfo();
-				break;
-			case 'rules':
 				break;
 			case 'mcp':
 			case 'tools':

@@ -14,5 +14,6 @@
     "comonad.contextWindow": 262144,
     "comonad.reasoningEffort": "medium",
     "comonad.network": true,
-    "comonad.commandTimeoutOverride": false
+    "comonad.commandTimeoutOverride": false,
+    "comonad.allowUnsandboxedShell": false
 }

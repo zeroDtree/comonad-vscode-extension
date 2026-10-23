@@ -41,7 +41,7 @@ read_file(./.env)
 fetch_url(domain:example.com)
 ```
 
-Edit them in **Comonad: Open Settings → Rules**, one rule per line. A deny rule always wins; an allow
+Edit them in **Comonad: Open Settings → Agent → Tool rules**, one rule per line. A deny rule always wins; an allow
 rule always runs without asking. Without a matching rule, the approval policy decides.
 
 ## 3. Approval policy

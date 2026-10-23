@@ -157,7 +157,7 @@ export function settingsPanel(ctx: Context): void {
 		}
 	};
 
-	/** The rule lists from the Rules tab, rejecting anything `parseRule` cannot read. */
+	/** The rule lists from the Agent tab, rejecting anything `parseRule` cannot read. */
 	const ruleList = (value: unknown, key: string): string[] => {
 		const rules = asList(value);
 		for (const rule of rules) {
@@ -906,9 +906,6 @@ const TAB_ICONS = {
 	graph: tabIcon(
 		'<circle cx="4" cy="4" r="1.5"/><circle cx="12" cy="5" r="1.5"/><circle cx="7" cy="12" r="1.5"/><path d="M5.4 4.4l5.1.5M4.8 5.4l1.6 5.1M10.9 6.3l-2.6 4.2"/>',
 	),
-	rules: tabIcon(
-		'<path d="M8 2l4.8 1.9v3.8c0 2.8-2 4.8-4.8 5.8-2.8-1-4.8-3-4.8-5.8V3.9z"/><path d="M5.9 7.9l1.4 1.4 2.8-2.8"/>',
-	),
 	mcp: tabIcon(
 		'<path d="M6 2.4v3M10 2.4v3"/><path d="M4.4 5.4h7.2v2.2a3.6 3.6 0 0 1-7.2 0z"/><path d="M8 11.2v2.4"/>',
 	),
@@ -959,7 +956,6 @@ ${tabButton('ui', 'UI', 'UI — how the conversation is displayed', TAB_ICONS.ui
 ${tabButton('subagents', 'Subagents', 'Subagents — per-agent capability grants', TAB_ICONS.subagents)}
 ${tabButton('graph', 'Graph', 'Graph — the Mermaid agent loop', TAB_ICONS.graph)}
 ${paneTabs}
-${tabButton('rules', 'Rules', 'Rules — allow, ask and deny rules for tool calls', TAB_ICONS.rules)}
 ${tabButton('mcp', 'MCP', 'MCP — servers and their status', TAB_ICONS.mcp)}
 ${tabButton('tools', 'Tools', 'Tools — what a turn may run', TAB_ICONS.tools)}
 ${tabButton('prompts', 'Prompts', 'Prompts — Comonad blocks and tool definitions', TAB_ICONS.prompts)}
@@ -969,7 +965,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     <div id="side-foot">
       <div id="status"></div>
       <div class="row">
-        <button class="primary" id="save" type="button" title="Save — write the draft tabs (Graph, Rules, ST) to this workspace"><span class="btn-icon" aria-hidden="true">✓</span><span class="btn-label">Save</span></button>
+        <button class="primary" id="save" type="button" title="Save — write the draft tabs (Graph, ST) to this workspace"><span class="btn-icon" aria-hidden="true">✓</span><span class="btn-label">Save</span></button>
         <button class="secondary" id="close" type="button" title="Close — unsaved edits are dropped"><span class="btn-icon" aria-hidden="true">✕</span><span class="btn-label">Close</span></button>
       </div>
     </div>
@@ -1065,6 +1061,24 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. A write-confined full shell still gets a writable scratch directory at <code>.comonad/tmp</code>. The test shell (<code>run_shell_test</code>) keeps the workspace read-only and writes to the extension's own temp folder instead, exposed as <code>$COMONAD_SCRATCH</code> with <code>TMPDIR</code>, <code>HOME</code> and <code>XDG_CACHE_HOME</code> pointing there. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
       <p class="group-note" id="environment-note"></p>
     </div>
+    <h2 class="group-title">Tool rules</h2>
+    <div class="group">
+      <div class="field">
+        <label for="rules-deny">Deny</label>
+        <p class="hint">Rejected in every policy, before anything else — the deny rules win over the rest.</p>
+        <textarea id="rules-deny" class="control" data-key="deny" spellcheck="false" rows="3" placeholder="run_shell(rm:*)"></textarea>
+      </div>
+      <div class="field">
+        <label for="rules-ask">Ask</label>
+        <p class="hint">Always confirmed before they run, even under an accept policy.</p>
+        <textarea id="rules-ask" class="control" data-key="ask" spellcheck="false" rows="3" placeholder="run_shell(git push:*)"></textarea>
+      </div>
+      <div class="field">
+        <label for="rules-allow">Allow</label>
+        <p class="hint">Run without asking, even under Ask. One rule per line: <code>tool</code> or <code>tool(pattern)</code> — <code>run_shell(npm run test:*)</code>, <code>read_file(./.env)</code>, <code>fetch_url(domain:example.com)</code>. “Always allow” in the approval prompt appends here.</p>
+        <textarea id="rules-allow" class="control" data-key="allow" spellcheck="false" rows="3" placeholder="run_shell(npm run test:*)"></textarea>
+      </div>
+    </div>
   </section>
 
   <section data-pane="ui" hidden>
@@ -1121,28 +1135,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
 
 
 ${paneSections}
-
-  <section data-pane="rules" hidden>
-    <h1 class="page-title">Rules</h1>
-    <h2 class="group-title">Tool rules</h2>
-    <div class="group">
-      <div class="field">
-        <label for="rules-deny">Deny</label>
-        <p class="hint">Rejected in every policy, before anything else — the deny rules win over the rest.</p>
-        <textarea id="rules-deny" class="control" data-key="permissions" spellcheck="false" rows="3" placeholder="run_shell(rm:*)"></textarea>
-      </div>
-      <div class="field">
-        <label for="rules-ask">Ask</label>
-        <p class="hint">Always confirmed before they run, even under an accept policy.</p>
-        <textarea id="rules-ask" class="control" data-key="permissions" spellcheck="false" rows="3" placeholder="run_shell(git push:*)"></textarea>
-      </div>
-      <div class="field">
-        <label for="rules-allow">Allow</label>
-        <p class="hint">Run without asking, even under Ask. One rule per line: <code>tool</code> or <code>tool(pattern)</code> — <code>run_shell(npm run test:*)</code>, <code>read_file(./.env)</code>, <code>fetch_url(domain:example.com)</code>. “Always allow” in the approval prompt appends here.</p>
-        <textarea id="rules-allow" class="control" data-key="permissions" spellcheck="false" rows="3" placeholder="run_shell(npm run test:*)"></textarea>
-      </div>
-    </div>
-  </section>
 
   <section data-pane="prompts" hidden>
     <h1 class="page-title">Prompts</h1>

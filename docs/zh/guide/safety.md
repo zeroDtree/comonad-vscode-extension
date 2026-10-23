@@ -41,7 +41,7 @@ read_file(./.env)
 fetch_url(domain:example.com)
 ```
 
-在 **Comonad: Open Settings → Rules** 中编辑，一行一条。deny 规则永远优先；allow 规则永远不询问。
+在 **Comonad: Open Settings → Agent → Tool rules** 中编辑，一行一条。deny 规则永远优先；allow 规则永远不询问。
 没有匹配规则时，由审批策略决定。
 
 ## 3. 审批策略
