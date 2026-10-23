@@ -13,5 +13,6 @@
     "comonad.model": "deepseek:deepseek-flash",
     "comonad.contextWindow": 262144,
     "comonad.reasoningEffort": "medium",
-    "comonad.network": true
+    "comonad.network": true,
+    "comonad.commandTimeoutOverride": false
 }

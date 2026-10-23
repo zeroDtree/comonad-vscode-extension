@@ -32,9 +32,9 @@
 		node.textContent = text || '';
 		node.className = isError ? 'error' : '';
 	};
-	// Save owns the draft tabs only (Graph, Rules, ST): the Agent tab saves itself, and Prompts and
-	// MCP have their own buttons. With nothing pending it is disabled, so it never looks like a
-	// no-op command.
+	// Save owns the draft tabs only (Graph, Rules, ST): the Agent and UI tabs save themselves, and
+	// Prompts and MCP have their own buttons. With nothing pending it is disabled, so it never looks
+	// like a no-op command.
 	const markDirty = () => {
 		dirty = true;
 		$('save').classList.add('is-dirty');
@@ -343,8 +343,8 @@
 		}
 	}
 
-	/** The Agent tab is live: it saves itself, so it is redrawn on every state push. */
-	function renderAgentForm() {
+	/** The live tabs (Agent, UI) save themselves, so they are redrawn on every state push. */
+	function renderLiveForm() {
 		const config = state.config;
 		fillSelect($('mode'), state.labels.modes, config.mode);
 		fillSelect($('approval'), state.labels.approvals, config.approval);
@@ -501,13 +501,13 @@
 		return config;
 	}
 
-	/** The Agent tab's live save: one control, one key, no draft. */
+	/** The Agent and UI tabs' live save: one control, one key, no draft. */
 	function saveAgent(key, value) {
 		post({ type: 'saveAgent', config: { [key]: value } });
 	}
 
 	for (const node of document.querySelectorAll('[data-key]')) {
-		const live = node.closest('section[data-pane="agent"]') !== null;
+		const live = node.closest('section[data-pane="agent"], section[data-pane="ui"]') !== null;
 		const draft = () => {
 			markDirty();
 			if (node.dataset.key === 'graph') {
@@ -1340,8 +1340,9 @@
 		}
 		switch (activeTab) {
 			case 'agent':
+			case 'ui':
 				// Live controls are always safe to redraw: a focused field is left alone by put().
-				renderAgentForm();
+				renderLiveForm();
 				break;
 			case 'subagents':
 				renderSubagents();

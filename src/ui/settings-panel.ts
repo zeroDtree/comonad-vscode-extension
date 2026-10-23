@@ -897,6 +897,9 @@ const TAB_ICONS = {
 	agent: tabIcon(
 		'<rect x="3" y="5" width="10" height="7" rx="2"/><path d="M8 2.3v2.7M5.7 8.1h.01M10.3 8.1h.01M6.2 11.9v1.6M9.8 11.9v1.6"/>',
 	),
+	ui: tabIcon(
+		'<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M2.5 6h11M6 6v7"/>',
+	),
 	subagents: tabIcon(
 		'<rect x="2.5" y="4" width="4.2" height="4.2" rx="1"/><rect x="9.3" y="4" width="4.2" height="4.2" rx="1"/><rect x="2.5" y="9.8" width="4.2" height="4.2" rx="1"/><path d="M9.4 10.1h4M11.4 8.1v4"/>',
 	),
@@ -952,6 +955,7 @@ ${paneStyles.map((src) => `<link rel="stylesheet" href="${src}" />`).join('\n')}
     <input id="search" class="control" type="search" placeholder="Search settings" spellcheck="false" autocomplete="off" />
     <nav id="tabs" role="tablist" aria-orientation="vertical" aria-label="Comonad settings">
 ${tabButton('agent', 'Agent', 'Agent — model, policy, workspace', TAB_ICONS.agent)}
+${tabButton('ui', 'UI', 'UI — how the conversation is displayed', TAB_ICONS.ui)}
 ${tabButton('subagents', 'Subagents', 'Subagents — per-agent capability grants', TAB_ICONS.subagents)}
 ${tabButton('graph', 'Graph', 'Graph — the Mermaid agent loop', TAB_ICONS.graph)}
 ${paneTabs}
@@ -1010,19 +1014,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <label class="check"><input type="checkbox" id="network" data-key="network" /></label>
       </div>
     </div>
-    <h2 class="group-title">Conversation</h2>
-    <div class="group">
-      <div class="field">
-        <label for="display">Display</label>
-        <p class="hint">How the context sent with a turn is shown in the chat.</p>
-        <select id="display" class="control" data-key="displayForm"></select>
-      </div>
-      <div class="field">
-        <label for="toolCard">Tool cards</label>
-        <p class="hint">How a tool call starts out: folded to the header alone (the default), folded with a preview of its output, or open with the command and output.</p>
-        <select id="toolCard" class="control" data-key="toolCard"></select>
-      </div>
-    </div>
     <h2 class="group-title">Workspace</h2>
     <div class="group">
       <div class="field">
@@ -1073,6 +1064,23 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       </div>
       <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. A write-confined full shell still gets a writable scratch directory at <code>.comonad/tmp</code>. The test shell (<code>run_shell_test</code>) keeps the workspace read-only and writes to the extension's own temp folder instead, exposed as <code>$COMONAD_SCRATCH</code> with <code>TMPDIR</code>, <code>HOME</code> and <code>XDG_CACHE_HOME</code> pointing there. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
       <p class="group-note" id="environment-note"></p>
+    </div>
+  </section>
+
+  <section data-pane="ui" hidden>
+    <h1 class="page-title">UI</h1>
+    <h2 class="group-title">Conversation</h2>
+    <div class="group">
+      <div class="field">
+        <label for="display">Display</label>
+        <p class="hint">How the context sent with a turn is shown in the chat.</p>
+        <select id="display" class="control" data-key="displayForm"></select>
+      </div>
+      <div class="field">
+        <label for="toolCard">Tool cards</label>
+        <p class="hint">How a tool call starts out: folded to the header alone (the default), folded with a preview of its output, or open with the command and output.</p>
+        <select id="toolCard" class="control" data-key="toolCard"></select>
+      </div>
     </div>
   </section>
 
