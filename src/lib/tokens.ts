@@ -15,8 +15,8 @@
  * Pure module: no `vscode`, no `cordis`.
  */
 
-import { estimateImages } from './images';
-import type { ImagePart } from './types';
+import { estimateImageTokens } from './images';
+import type { AttachmentPart } from './types';
 
 /** Upstream's `BYTES_PER_TOKEN`, used by its `guesstimate` fallback. */
 export const BYTES_PER_TOKEN = 3.35;
@@ -83,15 +83,30 @@ export function estimateTokens(text: string): number {
 	return countRaw(text) + MESSAGE_OVERHEAD;
 }
 
+/** What the typed content beside a message's prose costs. */
+export function estimateAttachments(attachments?: readonly AttachmentPart[]): number {
+	let total = 0;
+	for (const part of attachments ?? []) {
+		if (part.kind === 'text') {
+			total += countRaw(part.text);
+		} else if (part.kind === 'image') {
+			total += estimateImageTokens(part);
+		} else {
+			total += countRaw(part.text ?? '');
+		}
+	}
+	return total;
+}
+
 /** A message list counted the way upstream's `countTokensOpenAI(…, full)` does. */
 export function estimateMessages(
-	messages: readonly { content?: string; toolCalls?: unknown; images?: readonly ImagePart[] }[],
+	messages: readonly { content?: string; toolCalls?: unknown; attachments?: readonly AttachmentPart[] }[],
 ): number {
 	let total = 0;
 	for (const message of messages) {
 		total += TOKENS_PER_MESSAGE;
 		total += countRaw(message.content ?? '');
-		total += estimateImages(message.images);
+		total += estimateAttachments(message.attachments);
 		if (message.toolCalls !== undefined) {
 			total += countRaw(JSON.stringify(message.toolCalls));
 		}

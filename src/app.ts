@@ -20,6 +20,7 @@ import { pluginHost, type PluginRow } from './services/plugins';
 import { sessionsPlugin } from './services/sessions';
 import { settingsPlugin } from './services/settings';
 import { tasksPlugin } from './services/tasks';
+import { referencesPlugin } from './services/references';
 import { tokenizersPlugin } from './services/tokenizers';
 import { toolsPlugin } from './services/tools';
 import { usagePlugin } from './services/usage';
@@ -33,6 +34,7 @@ import { vscodeTools } from './tools/vscode';
 import { webTools } from './tools/web';
 import { chatPanel } from './ui/chat-panel';
 import { gitView } from './ui/git-view';
+import { referenceProviders } from './ui/reference-providers';
 import { inline } from './ui/inline';
 import { palette } from './ui/palette';
 import { participant } from './ui/participant';
@@ -69,6 +71,7 @@ export const PLUGINS: Record<string, Plugin> = {
 	audit: auditPlugin,
 	sessions: sessionsPlugin,
 	attachments: attachmentsPlugin,
+	references: referencesPlugin,
 	checkpoints: checkpointsPlugin,
 	usage: usagePlugin,
 	tasks: tasksPlugin,
@@ -102,6 +105,7 @@ export const PLUGINS: Record<string, Plugin> = {
 	'ui-git': gitView,
 	'ui-settings': settingsPanel,
 	'ui-inline': inline,
+	'ui-reference-providers': referenceProviders,
 	'ui-chat': chatPanel,
 	'ui-participant': participant,
 	reactions,
@@ -121,6 +125,9 @@ export const ROWS: PluginRow[] = [
 	// Image bytes live outside the session JSON; the store is what both the read tool and the composer
 	// hand their pictures to.
 	{ id: 'attachments', group: 'kernel' },
+	// Explicit `@` references: guards, type recognition and budgets. The VS Code text/symbol half is
+	// a UI row below, so the kernel itself stays headless.
+	{ id: 'references', group: 'kernel' },
 	// The change journal: on by default, because an irreversible write is a worse default than a
 	// shadow repository. One row for the journal and its review surface — off, and a write is just
 	// a write again.
@@ -165,6 +172,7 @@ export const ROWS: PluginRow[] = [
 	{ id: 'ui-git', group: 'ui' },
 	{ id: 'ui-settings', group: 'ui' },
 	{ id: 'ui-inline', group: 'ui' },
+	{ id: 'ui-reference-providers', group: 'ui' },
 	{ id: 'ui-chat', group: 'ui' },
 	{ id: 'ui-participant', group: 'ui' },
 

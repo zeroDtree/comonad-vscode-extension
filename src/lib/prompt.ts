@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { estimateImages } from './images';
-import { countRaw, estimateMessages } from './tokens';
-import type { Message } from './types';
+import { createHash } from 'node:crypto';
+import { countRaw, estimateAttachments, estimateMessages } from './tokens';
+import type { AttachmentPart, Message, ModelContext } from './types';
 
 /** How much of the recorded transcript is sent back to the model. Pure module. */
 export type ContextForm = 'rendered' | 'token' | 'raw';
@@ -19,9 +19,9 @@ export function applyContextForm(transcript: Message[], form: ContextForm, toolL
 		// turn back whenever a request carries tools, and the agent loop always sends tools.
 		return transcript
 			.filter((message) => message.role === 'user' || message.role === 'assistant')
-			// A prompt's images are part of the prompt, not tool traffic: an image-only message must not
-			// become an empty one just because this form drops everything else.
-			.map((message) => ({ role: message.role, content: message.content, reasoning: message.reasoning, images: message.images }) as Message);
+			// A prompt's attachments are part of the prompt, not tool traffic: an image-only message must
+			// not become an empty one just because this form drops everything else.
+			.map((message) => ({ role: message.role, content: message.content, reasoning: message.reasoning, attachments: message.attachments }) as Message);
 	}
 	if (form === 'raw') {
 		return transcript.map((message) => ({ ...message }));
@@ -31,6 +31,49 @@ export function applyContextForm(transcript: Message[], form: ContextForm, toolL
 			? { ...message, content: `${message.content.slice(0, toolLimit)}\n[...trimmed]` }
 			: { ...message },
 	);
+}
+
+/** The derived system message a compacted conversation travels with. Never stored in the canonical log. */
+export function modelSummaryMessage(summary: string): Message {
+	return { role: 'system', content: `Conversation summary (compacted):\n\n${summary}`, summarized: true };
+}
+
+/**
+ * The model history for one request: the derived summary first, then the tail after `covers`,
+ * filtered by the Context form. The summary is added after filtering so `token` cannot drop it.
+ */
+export function buildModelHistory(
+	transcript: readonly Message[],
+	modelContext: ModelContext | undefined,
+	form: ContextForm,
+	toolLimit = TOOL_LIMIT,
+): Message[] {
+	const from = Math.max(0, Math.min(modelContext?.covers ?? 0, transcript.length));
+	const tail = applyContextForm(transcript.slice(from) as Message[], form, toolLimit);
+	return modelContext?.summary ? [modelSummaryMessage(modelContext.summary), ...tail] : tail;
+}
+
+/** A stable projection of a transcript prefix: edits change it, ordinary appends do not. */
+export function modelContextDigest(messages: readonly Message[]): string {
+	const projection = messages
+		.map((message) =>
+			[
+				message.role,
+				message.content,
+				message.at ?? '',
+				message.toolCallId ?? '',
+				(message.toolCalls ?? []).map((call) => `${call.id}\u0002${call.name}\u0002${call.arguments}`).join('\u0003'),
+				(message.attachments ?? [])
+					.map((part) =>
+						part.kind === 'text'
+							? `text\u0002${part.source.path ?? ''}\u0002${part.text}`
+							: `${part.kind}\u0002${part.id}`,
+					)
+					.join('\u0003'),
+			].join('\u0000'),
+		)
+		.join('\u0001');
+	return createHash('sha256').update(projection).digest('hex').slice(0, 16);
 }
 
 /** How one request's input budget is made up. */
@@ -98,11 +141,13 @@ export function elideToolResults(messages: Message[], limit: number): { messages
 	// untouched here: what the user attached is not a tool result.
 	for (let index = 0; index < out.length && total > limit; index += 1) {
 		const message = out[index]!;
-		if (message.role !== 'tool' || !message.images?.length) {
+		const images = message.attachments?.filter((part) => part.kind === 'image');
+		if (message.role !== 'tool' || !images?.length) {
 			continue;
 		}
-		total -= estimateImages(message.images);
-		out[index] = { ...message, images: undefined };
+		total -= estimateAttachments(images);
+		const rest = message.attachments?.filter((part) => part.kind !== 'image');
+		out[index] = { ...message, attachments: rest?.length ? rest : undefined };
 		changed = true;
 	}
 	for (let index = 0; index < out.length && total > limit; index += 1) {
@@ -132,28 +177,38 @@ export function elideToolResults(messages: Message[], limit: number): { messages
 }
 
 /** Whether any message carries an image. */
-export function hasImages(messages: readonly Message[]): boolean {
-	return messages.some((message) => Boolean(message.images?.length));
+export function hasImageAttachments(messages: readonly Message[]): boolean {
+	return messages.some((message) => message.attachments?.some((part) => part.kind === 'image'));
 }
 
 /**
- * The same messages without images, for a model that refused them. A message that was only an image
- * keeps a line saying what was left out, so the request never contains an empty prompt.
+ * The same messages without images, for a model that refused them. Text and document attachments
+ * stay: they are content the model can still read. A message that was only an image keeps a line
+ * saying what was left out, so the request never contains an empty prompt.
  */
-export function stripImages(messages: readonly Message[], fallback = '[image omitted: this model does not accept images]'): Message[] {
-	return messages.map((message) =>
-		message.images?.length
-			? { ...message, images: undefined, content: message.content || fallback }
-			: message,
-	);
+export function stripImageAttachments(
+	messages: readonly Message[],
+	fallback = '[image omitted: this model does not accept images]',
+): Message[] {
+	return messages.map((message) => {
+		if (!message.attachments?.some((part) => part.kind === 'image')) {
+			return message;
+		}
+		const rest = message.attachments.filter((part) => part.kind !== 'image');
+		return {
+			...message,
+			attachments: rest.length ? rest : undefined,
+			content: message.content || fallback,
+		};
+	});
 }
 
 /**
- * The last resort for a request that still does not fit after tool output has been elided: drop images
- * from older prompts, keeping the newest prompt intact while `keepLastUser` is set. An image-only
- * message keeps a marker so its turn does not turn into an empty user message.
+ * The last resort for a request that still does not fit after tool output has been elided: drop
+ * images and documents from older prompts, keeping text references and the newest prompt intact
+ * while `keepLastUser` is set.
  */
-export function dropPromptImages(messages: Message[], keepLastUser = true): { messages: Message[]; changed: boolean } {
+export function dropPromptAttachments(messages: Message[], keepLastUser = true): { messages: Message[]; changed: boolean } {
 	let lastUser = -1;
 	if (keepLastUser) {
 		for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -165,11 +220,17 @@ export function dropPromptImages(messages: Message[], keepLastUser = true): { me
 	}
 	let changed = false;
 	const out = messages.map((message, index) => {
-		if (message.role !== 'user' || !message.images?.length || index === lastUser) {
+		const media = message.attachments?.some((part) => part.kind !== 'text');
+		if (message.role !== 'user' || !media || index === lastUser) {
 			return message;
 		}
 		changed = true;
-		return { ...message, images: undefined, content: message.content || '[image omitted to fit the model’s window]' };
+		const rest: AttachmentPart[] = message.attachments!.filter((part) => part.kind === 'text');
+		return {
+			...message,
+			attachments: rest.length ? rest : undefined,
+			content: message.content || (rest.length ? message.content : '[attachments omitted to fit the model’s window]'),
+		};
 	});
 	return { messages: out, changed };
 }
@@ -184,25 +245,31 @@ export function turnStarts(messages: readonly Message[]): number[] {
 /** Which messages a compaction folds into a summary, and which it keeps verbatim. */
 export interface CompactionPlan {
 	/** Folded into the summary. */
+	/** First message this plan may cover; messages before it are already summarized. */
+	from: number;
+	/** Absolute first message kept verbatim. */
+	cut: number;
+	/** Newly covered by this plan: `messages.slice(from, cut)`. */
 	older: Message[];
 	/** Kept word for word, newest last. */
 	recent: Message[];
 }
 
 /**
- * Chooses the cut for a compaction: the earliest turn boundary whose tail still fits the budget once
- * `reserve` is set aside for the summary itself. Keeping the longest tail that fits is what makes the
- * newest turns survive word for word. When not even the current turn fits, it is kept anyway — the
- * alternative is sending nothing, and the request will not shrink below one turn by folding.
+ * Chooses the cut for a compaction: the earliest turn boundary at or after `from` whose tail still
+ * fits the budget once `reserve` is set aside for the summary itself. Keeping the longest tail that
+ * fits is what makes the newest turns survive word for word. When not even the current turn fits, it
+ * is kept anyway — the alternative is sending nothing.
  */
-export function planCompaction(messages: Message[], budget: number, reserve = 0): CompactionPlan {
-	const starts = turnStarts(messages);
+export function planCompaction(messages: readonly Message[], budget: number, reserve = 0, from = 0): CompactionPlan {
+	const start = Math.max(0, Math.min(from, messages.length));
+	const starts = turnStarts(messages).filter((index) => index >= start);
 	for (const cut of starts) {
 		const recent = messages.slice(cut);
 		if (estimateMessages(recent) + reserve <= budget) {
-			return { older: messages.slice(0, cut), recent };
+			return { from: start, cut, older: messages.slice(start, cut), recent };
 		}
 	}
-	const cut = starts[starts.length - 1] ?? 0;
-	return { older: messages.slice(0, cut), recent: messages.slice(cut) };
+	const cut = starts[starts.length - 1] ?? start;
+	return { from: start, cut, older: messages.slice(start, cut), recent: messages.slice(cut) };
 }

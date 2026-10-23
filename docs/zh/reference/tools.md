@@ -17,7 +17,9 @@
 | Agent | `ask_user`、`agent`（子代理）、`skill`、`memory` |
 | MCP | 每个服务器暴露的 `server__tool` |
 
-`read_file` 还可以读取 PNG、JPEG、WebP 和 GIF（单张最多 4 MiB），并作为图像内容交给模型。
+`read_file` 还可以读取 PNG、JPEG、WebP 和 GIF（单张最多 4 MiB），并作为图像内容交给模型。安装
+**PDF documents** 插件后，它可以把 PDF 读成带页码的文本；用 `pages`（如 `"1-5"`）选择页范围。未安装
+插件时返回安装提示，不会把字节当成 UTF-8 文本。
 
 `agent` 调用会创建一个隐藏的子会话。运行期间它的工具卡上会出现 **Open session**；只读覆盖层会显示
 子 Agent 的提示词、步骤和工具结果，并随执行过程更新。

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { isImageAttachment, renderAttachments } from './attachments';
 import type { CompletionUsage, ImagePart, Message, ToolCall, ToolSpec } from './types';
 
 /** OpenAI-compatible chat completions over SSE, with tool-call delta assembly. Pure module. */
@@ -369,9 +370,9 @@ export function toOpenAiMessages(messages: readonly Message[], bypass?: Record<s
 	for (const message of messages) {
 		if (message.role === 'tool') {
 			out.push({ role: 'tool', content: message.content, tool_call_id: message.toolCallId });
-			for (const image of message.images ?? []) {
-				if (image.dataUrl) {
-					pending.push(image);
+			for (const part of message.attachments ?? []) {
+				if (part.kind === 'image' && part.dataUrl) {
+					pending.push(part);
 				}
 			}
 			continue;
@@ -383,15 +384,20 @@ export function toOpenAiMessages(messages: readonly Message[], bypass?: Record<s
 	return out;
 }
 
-/** A message's content: a string when it has no images, content parts when it does. */
+/**
+ * A message's content: framed references and prose as one text part, images as image parts. A
+ * message with neither returns its prose unchanged, which is the common case.
+ */
 function wireContent(message: Message): string | unknown[] {
-	const images = (message.images ?? []).filter((image) => image.dataUrl);
+	const references = renderAttachments(message.attachments);
+	const text = [references, message.content].filter(Boolean).join('\n\n');
+	const images = (message.attachments ?? []).filter(isImageAttachment).filter((part) => part.dataUrl);
 	if (!images.length) {
-		return message.content;
+		return text || message.content;
 	}
 	const parts: unknown[] = [];
-	if (message.content) {
-		parts.push({ type: 'text', text: message.content });
+	if (text) {
+		parts.push({ type: 'text', text });
 	}
 	for (const image of images) {
 		parts.push({ type: 'image_url', image_url: { url: image.dataUrl, detail: 'high' } });

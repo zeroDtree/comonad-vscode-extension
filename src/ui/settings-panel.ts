@@ -999,6 +999,16 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <p class="hint">How a tool call is gated before it runs, on top of the mode.</p>
         <select id="approval" class="control" data-key="approval"></select>
       </div>
+      <div class="field">
+        <label for="context">Context</label>
+        <p class="hint">What the model actually receives: rendered text, token counts or raw form.</p>
+        <select id="context" class="control" data-key="contextForm"></select>
+      </div>
+      <div class="field">
+        <label for="network">Network</label>
+        <p class="hint">Network tools and network access inside the shell sandbox. Loopback stays available when this is off.</p>
+        <label class="check"><input type="checkbox" id="network" data-key="network" /></label>
+      </div>
     </div>
     <h2 class="group-title">Conversation</h2>
     <div class="group">
@@ -1011,16 +1021,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <label for="toolCard">Tool cards</label>
         <p class="hint">How a tool call starts out: folded to the header alone (the default), folded with a preview of its output, or open with the command and output.</p>
         <select id="toolCard" class="control" data-key="toolCard"></select>
-      </div>
-      <div class="field">
-        <label for="context">Context</label>
-        <p class="hint">What the model actually receives: rendered text, token counts or raw form.</p>
-        <select id="context" class="control" data-key="contextForm"></select>
-      </div>
-      <div class="field">
-        <label for="network">Network</label>
-        <p class="hint">Network tools and network access inside the shell sandbox. Loopback stays available when this is off.</p>
-        <label class="check"><input type="checkbox" id="network" data-key="network" /></label>
       </div>
     </div>
     <h2 class="group-title">Workspace</h2>

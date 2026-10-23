@@ -11,6 +11,7 @@ import { settingsPlugin } from '../services/settings';
 import { auditPlugin } from '../services/audit';
 import { sessionsPlugin } from '../services/sessions';
 import { attachmentsPlugin } from '../services/attachments';
+import { referencesPlugin } from '../services/references';
 import { Checkpoints } from '../services/checkpoints';
 import { usagePlugin } from '../services/usage';
 import { tasksPlugin } from '../services/tasks';
@@ -134,6 +135,7 @@ export async function createTestKernel(
 		'settings',
 		'sessions',
 		'attachments',
+		'references',
 		'checkpoints',
 		'tools',
 		'llm',
@@ -158,6 +160,7 @@ export async function createTestKernel(
 		child.plugin(auditPlugin);
 		child.plugin(sessionsPlugin);
 		child.plugin(attachmentsPlugin);
+		child.plugin(referencesPlugin);
 		if (!skipped.has('checkpoints')) {
 			child.plugin(Checkpoints);
 		}

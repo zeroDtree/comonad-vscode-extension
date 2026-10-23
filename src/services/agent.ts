@@ -7,17 +7,20 @@ import { abortable, linkAbort } from '../lib/cancel';
 import type { TurnRef } from '../lib/types';
 import {
 	DEFAULT_OUTPUT_RESERVE,
-	applyContextForm,
-	dropPromptImages,
+	buildModelHistory,
+	dropPromptAttachments,
 	elideToolResults,
-	hasImages,
+	hasImageAttachments,
+	modelSummaryMessage,
 	planCompaction,
 	resolveBudget,
-	stripImages,
+	stripImageAttachments,
 	type Budget,
+	type ContextForm,
 } from '../lib/prompt';
-import { MAX_IMAGES_PER_MESSAGE, estimateImages } from '../lib/images';
-import { estimateMessages, estimateTokens } from '../lib/tokens';
+import { MAX_IMAGES_PER_MESSAGE } from '../lib/images';
+import { attachmentNotes, imageParts } from '../lib/attachments';
+import { estimateAttachments, estimateMessages, estimateTokens } from '../lib/tokens';
 import {
 	compileGraphs,
 	runGraph,
@@ -46,9 +49,11 @@ import {
 import { applyPromptLayout } from '../lib/prompt-layout';
 import type {
 	AgentSpawnRequest,
+	AttachmentPart,
 	Capability,
-	ImagePart,
+	ImageAttachment,
 	Message,
+	ModelContext,
 	SessionPolicy,
 	TodoItem,
 	ToolCall,
@@ -67,15 +72,13 @@ import {
 	canRewrite,
 	createdInWorkspace,
 	createdPath,
-	isSummaryMessage,
 	MAX_CREATED_PATHS,
-	summaryMessage,
 	threadTitle,
 	type Session,
-	type SessionSummary,
 	type SwipeCarry,
 } from './sessions';
 import type { ComposeResult, TavernApi } from 'comonad-plugin-tavern';
+import { scopeOf, type ResolveResult } from './references';
 
 /** Room held back for the summary a compaction adds, so the fit it plans survives its own output. */
 const SUMMARY_RESERVE = 1_024;
@@ -83,46 +86,21 @@ const SUMMARY_RESERVE = 1_024;
 /** How many characters of the older turns one summary is allowed to read. */
 const SUMMARY_SOURCE_LIMIT = 120_000;
 
+/** A summary larger than this is clipped; it is model context, not a second transcript. */
+const SUMMARY_TEXT_LIMIT = 8_000;
+
 /** The reply a continue extends: the last thing the model said, when nothing came after it. */
 function continuationIndex(transcript: readonly Message[]): number | undefined {
 	const at = lastReplyIndex(transcript);
 	return at >= 0 && at === transcript.length - 1 ? at : undefined;
 }
 
-/** What an audit record may say about images: type, shape and id, never the bytes. */
-function imageNotes(images?: readonly ImagePart[]): string[] | undefined {
-	return images?.length
-		? images.map((image) => `${image.mime} ${image.width ?? '?'}x${image.height ?? '?'} ${image.id}`)
-		: undefined;
-}
-
-/** The record a fold leaves: the summary, then whatever stood after the stretch it folded. */
-function foldedRecord(summary: Message, source: readonly Message[], covers: number): Message[] {
-	return [summary, ...source.slice(covers)];
-}
-
-/** Where an index into a transcript lands once `covers` messages at its head became one summary. */
-function rebaseIndex(index: number | undefined, covers: number): number | undefined {
-	return index === undefined || index < covers ? undefined : index - covers + 1;
-}
-
-/** What one fold did, so a caller can move its own indices and copies with the transcript. */
-interface FoldResult {
-	/** The message that now stands for the folded stretch. */
-	summary: Message;
-	/** How many messages of the transcript it folded. */
-	covers: number;
-	/** The transcript as the fold leaves it. */
-	folded: Message[];
-}
-
 export interface TurnInput {
 	/** The prompt. Empty for a continue, a swipe or a regenerate, which re-run what is already there. */
 	text: string;
-	/** Images to send with this prompt; already stored, so only their metadata travels. */
-	images?: ImagePart[];
+	/** Typed context to send with this prompt; already stored, so only metadata travels. */
+	attachments?: AttachmentPart[];
 	sessionId?: string;
-	systemContext?: string;
 	policy?: Partial<SessionPolicy>;
 	/** Identifies the calling surface; events and approvals are routed by it. */
 	surface?: string;
@@ -140,12 +118,11 @@ export interface TurnInput {
 	 */
 	prepareRewrite?: (session: Session) => Promise<boolean>;
 	/**
-	 * Builds the Context block for this turn. Called after hooks and after a rewrite has cut the
-	 * transcript, with the prompt actually being run (replayed, rewritten, or typed). It must not
-	 * throw; a surface that resolves @ references reads files here, so a blocked hook or a refused
-	 * rewrite never pays for the read.
+	 * Native references a surface already holds (VS Code's `request.references`). Called after hooks
+	 * and a rewrite cut, so a blocked prompt never pays for the read. `@` tokens are resolved by the
+	 * agent itself; this hook is only for references that are not spelled as tokens.
 	 */
-	resolveSystemContext?: (session: Session, text: string) => Promise<string | undefined>;
+	resolveAttachments?: (session: Session, signal: AbortSignal) => Promise<ResolveResult | undefined>;
 }
 
 export interface TurnResult {
@@ -178,6 +155,12 @@ interface RunState {
 	imagesOff?: string;
 	transcript: Message[];
 	messages: Message[];
+	/** The Context form used to build `messages`, so a rebuild applies the same filtering. */
+	contextForm: ContextForm;
+	/** Request-only messages appended after the history (the ask for a continue/impersonation). */
+	trailer: Message[];
+	/** The model-context version `messages` was built from; a resume rebuilds when it moved. */
+	modelContextVersion?: number;
 	toolCalls: ToolCall[];
 	gateReason: string;
 	confirmed: boolean | null;
@@ -264,7 +247,7 @@ declare module 'cordis' {
  * `ctx.agent.runTurn()` and watch `agent/*` events.
  */
 export class Agent extends Service {
-	static inject = ['host', 'settings', 'sessions', 'attachments', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
+	static inject = ['host', 'settings', 'sessions', 'attachments', 'references', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'log'];
 
 	private readonly turns = new Map<string, Turn>();
 	/** Background subagents outlive their turn; they are aborted only when the agent unloads. */
@@ -387,21 +370,21 @@ export class Agent extends Service {
 		// dropped here, and the variants it had are handed to `finish` so none of them is lost. What
 		// the turn replaced is kept too: a stopped generation puts that exchange back.
 		let swipes: SwipeCarry | undefined;
-		let images = input.images;
+		let attachments = input.attachments;
 		let restore: Message[] | undefined;
 		if (replay) {
 			swipes = target ? this.ctx.sessions.swipeCarry(target) : undefined;
 			const replayed = target ? this.ctx.sessions.replayLast(target) : { text: '', replaced: [] };
-			if (!replayed.text && !replayed.images?.length) {
+			if (!replayed.text && !replayed.attachments?.length) {
 				return { sessionId: target, text: 'There is nothing to generate again yet.' };
 			}
 			text = replayed.text;
-			// A replayed prompt brings its pictures back; an explicit new set wins.
-			images = input.images?.length ? input.images : replayed.images;
+			// A replayed prompt brings its attachments back; an explicit new set wins.
+			attachments = input.attachments?.length ? input.attachments : replayed.attachments;
 			restore = replayed.replaced;
 		}
 		const session = input.sessionId ? (this.ctx.sessions.get(input.sessionId) ?? this.ctx.sessions.ensureActive(this.policyFor())) : this.ctx.sessions.ensureActive(this.policyFor());
-		if (!text && !images?.length && trigger !== 'continue' && trigger !== 'impersonate') {
+		if (!text && !attachments?.length && !input.resolveAttachments && trigger !== 'continue' && trigger !== 'impersonate') {
 			return { sessionId: session.id, text: '' };
 		}
 		// A continuation is written into the reply it carries on, so there has to be one: in a chat
@@ -437,7 +420,7 @@ export class Agent extends Service {
 		// a compaction in the middle of this turn cannot make it look like a later message.
 		const askedAt = Date.now();
 		const seed = (): Message[] =>
-			prompted ? [...session.transcript, { role: 'user', content: text, images, at: askedAt } as Message] : [...session.transcript];
+			prompted ? [...session.transcript, { role: 'user', content: text, attachments, at: askedAt } as Message] : [...session.transcript];
 		// Whether the rewrite has cut the transcript, and whether the seeded prompt has been saved.
 		// The catch below uses them to leave a stopped turn in a state a reload can reproduce.
 		let cut = false;
@@ -446,6 +429,9 @@ export class Agent extends Service {
 			// A surface can stop the turn before the first await; nothing below should start.
 			turn.signal.throwIfAborted();
 			session.policy = { ...session.policy, ...this.policyFor(), ...(input.policy ?? {}) };
+			if (session.modelContext && !this.ctx.sessions.verifyModelContext(session)) {
+				this.notice(ref, 'The stored summary no longer matches the chat; it was dropped from the model context.');
+			}
 			if (!this.ctx.llm.known(session.policy.model) && !this.warned.has(session.id)) {
 				// The chat remembers a model that no longer exists; say which one runs instead, once.
 				this.warned.add(session.id);
@@ -454,8 +440,8 @@ export class Agent extends Service {
 					`model profile "${session.policy.model}" is gone — using ${this.ctx.llm.describe('auto')}. Pick one from the model menu.`,
 				);
 			}
-			if (session.title === 'New session' && (text || images?.length)) {
-				session.title = text ? threadTitle(text) : 'Image prompt';
+			if (session.title === 'New session' && (text || attachments?.length)) {
+				session.title = text ? threadTitle(text) : 'Attachment prompt';
 			}
 			const config = this.ctx.settings.get();
 			const contexts: string[] = [];
@@ -479,6 +465,7 @@ export class Agent extends Service {
 			// An edit cuts the transcript only after the prompt hook accepted the turn, so a blocked edit
 			// leaves the old prompt in place. The surface restores files and announces the turn here; a
 			// refusal from it cancels the whole operation.
+			const previous = input.rewriteAt !== undefined ? session.transcript[input.rewriteAt] : undefined;
 			if (input.rewriteAt !== undefined) {
 				// A restore is not raced: abandoning it halfway would leave the workspace inconsistent.
 				if (input.prepareRewrite && !(await input.prepareRewrite(session))) {
@@ -487,10 +474,10 @@ export class Agent extends Service {
 				// The cut follows the restore without an abort check: once files are rolled back, leaving
 				// the later turns in the chat would make the transcript disagree with the workspace. A
 				// stop from here ends the reply, and the catch below keeps the edited prompt.
-				// The edited prompt replaces the old one text for text; its pictures stay unless the editor
-				// supplied a new set. Read them before the cut removes the message.
-				if (!input.images?.length) {
-					images = session.transcript[input.rewriteAt]?.images;
+				// The edited prompt replaces the old one text for text; its attachments stay unless the
+				// editor supplied a new set. Read them before the cut removes the message.
+				if (!input.attachments?.length) {
+					attachments = previous?.attachments;
 				}
 				const problem = this.ctx.sessions.rewriteAt(session, input.rewriteAt);
 				if (problem) {
@@ -498,23 +485,71 @@ export class Agent extends Service {
 				}
 				cut = true;
 			}
-			// References are read after the cut and the policy merge: an edit that restored files reads
-			// the restored content, and a fixed systemContext (the participant's native references) and a
-			// resolved one can coexist. The block stays last, so the static prefix keeps caching.
-			if (input.systemContext) {
-				contexts.push(input.systemContext);
-			}
-			if (input.resolveSystemContext && text.trim()) {
-				try {
-					const resolved = await abortable(turn.signal, input.resolveSystemContext(session, text));
-					if (resolved) {
-						contexts.push(resolved);
+			// User references are resolved after the cut and the policy merge, then seeded into the user
+			// message. Hooks' contexts stay in the system block; a replay reuses the stored snapshot and
+			// never reads a file again.
+			if (prompted && !replay) {
+				const samePrompt = input.rewriteAt !== undefined && previous !== undefined && text === previous.content;
+				if (samePrompt) {
+					if (input.attachments?.length) {
+						attachments = [
+							...input.attachments,
+							...(previous.attachments ?? []).filter((part) => part.origin === 'reference'),
+						];
 					}
-				} catch (error) {
-					if (turn.signal.aborted) {
-						throw error;
+				} else {
+					const base = input.rewriteAt !== undefined
+						? (input.attachments?.length ? input.attachments : (previous?.attachments ?? []).filter((part) => part.origin === 'user'))
+						: (input.attachments ?? []);
+					let resolved: ResolveResult = { attachments: [] };
+					let native: ResolveResult | undefined;
+					try {
+						if (text.trim()) {
+							resolved = await abortable(turn.signal, this.ctx.references.resolve(text, scopeOf(session.policy), turn.signal));
+						}
+					} catch (error) {
+						if (turn.signal.aborted) {
+							throw error;
+						}
+						this.ctx.log.message(`references: ${describe(error)}`);
 					}
-					this.ctx.log.message(`references: ${describe(error)}`);
+					try {
+						if (input.resolveAttachments) {
+							native = await abortable(turn.signal, input.resolveAttachments(session, turn.signal));
+						}
+					} catch (error) {
+						if (turn.signal.aborted) {
+							throw error;
+						}
+						this.ctx.log.message(`references: ${describe(error)}`);
+					}
+					attachments = [...base, ...resolved.attachments, ...(native?.attachments ?? [])];
+					for (const notice of [...(resolved.notices ?? []), ...(native?.notices ?? [])]) {
+						this.notice(ref, notice);
+					}
+					for (const error of [...(resolved.errors ?? []), ...(native?.errors ?? [])]) {
+						this.notice(ref, `reference ${error.token}: ${error.message}`);
+					}
+				}
+				if (attachments?.length) {
+					const completed: AttachmentPart[] = [];
+					for (const part of attachments) {
+						try {
+							completed.push(
+								part.kind === 'document' && part.text === undefined && !part.textUnavailable
+									? await abortable(turn.signal, this.ctx.references.completeDocument(part, turn.signal))
+									: part,
+							);
+						} catch (error) {
+							if (turn.signal.aborted) {
+								throw error;
+							}
+							this.ctx.log.message(`references: ${describe(error)}`);
+							completed.push(part);
+						}
+					}
+					attachments = completed;
+					this.ctx.emit('agent/attachments', ref, attachments);
 				}
 			}
 			turn.signal.throwIfAborted();
@@ -566,30 +601,16 @@ export class Agent extends Service {
 			// A silent generation is offered no tools, so its budget is measured without them.
 			const tools = SILENT_TRIGGERS.has(trigger) ? [] : this.ctx.tools.visible(session.policy);
 			const budget = this.budgetFor(session.policy, session.contextWindow, system, tools);
-			let history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
-			// A conversation that no longer fits is summarized before it is sent, not after the endpoint
-			// refuses it. The whole older stretch becomes one summary, so the newest turn is still answered
-			// in full — and because the summary replaces those turns in the chat itself, nothing is lost
-			// quietly.
+			const form = session.contextForm ?? config.contextForm;
+			let history = buildModelHistory(seeded, session.modelContext, form);
+			// Compaction only changes the model context: the canonical transcript (and every index into
+			// it, including prior/restore/continueInto) stays exactly where it was.
 			if (estimateMessages(history) > budget.input) {
-				// The conversation no longer fits, so it is summarized before it is sent rather than after the
-				// endpoint refuses it. The summary replaces those turns in the chat itself, so nothing is lost
-				// quietly — and the prompt this turn is answering survives word for word.
 				this.notice(ref, 'Summarizing the conversation — it no longer fits the model’s window.');
 				try {
-					const fold = await this.fold(session, session.transcript, budget.input, undefined, turn.signal);
-					if (fold) {
-						seeded = seed();
-						history = applyContextForm(seeded, session.contextForm ?? config.contextForm);
-						// The fold rewrote the record the turn is running on, so the turn's own view of it moves
-						// too: the record a quiet trigger restores at the end of the turn, and the reply a
-						// continue extends — which has a new index in the folded transcript, or none at all when
-						// the fold took it with the rest.
-						prior = foldedRecord(fold.summary, prior, fold.covers);
-						// The stopped-swipe record is folded with the same cut, so putting it back cannot
-						// resurrect turns the summary just replaced.
-						restore = restore ? foldedRecord(fold.summary, restore, fold.covers) : undefined;
-						continueInto = trigger === 'continue' ? continuationIndex(seeded) : undefined;
+					const context = await this.compactContext(session, seeded, budget.input, undefined, turn.signal);
+					if (context) {
+						history = buildModelHistory(seeded, context, form);
 					}
 				} catch (error) {
 					if (turn.signal.aborted) {
@@ -611,10 +632,13 @@ export class Agent extends Service {
 			// built-in default collection. Only an absent or disabled layer keeps the agent's own shape.
 			const composed = tavern?.takeover === true;
 			const messages = composed ? [...tavern!.messages] : [{ role: 'system', content: system } as Message, ...history];
-			// The ask goes last whenever the request would end in the model's own turn — which is what a
-			// continue and an impersonation look like until something is said as the user.
+			// Request-only messages live outside the rebuilt history: a continue or an impersonation may
+			// append an ask, and a rebuild must not silently drop it.
+			const trailer: Message[] = [];
 			if (ask && messages[messages.length - 1]?.role !== 'user') {
-				messages.push({ role: 'user', content: ask, at: Date.now() } as Message);
+				const message = { role: 'user', content: ask, at: Date.now() } as Message;
+				messages.push(message);
+				trailer.push(message);
 			}
 			// The Tools entry gates the whole request in both shapes: the preset's row under ST, the core
 			// layout's block when the agent composes its own prompt.
@@ -633,6 +657,9 @@ export class Agent extends Service {
 				policy: session.policy,
 				transcript: seeded,
 				messages,
+				contextForm: form,
+				trailer,
+				modelContextVersion: session.modelContext?.version,
 				toolCalls: [],
 				gateReason: '',
 				confirmed: null,
@@ -649,7 +676,7 @@ export class Agent extends Service {
 			session.transcript = seeded;
 			committed = true;
 			this.ctx.sessions.save(session);
-			this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000), images: imageNotes(images) });
+			this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000), images: attachmentNotes(attachments) });
 			return await this.execute(session, state, turn);
 		} catch (error) {
 			if (turn.signal.aborted) {
@@ -663,6 +690,7 @@ export class Agent extends Service {
 				}
 				if (keep) {
 					session.transcript = keep;
+					this.ctx.sessions.invalidateModelContext(session, keep.length);
 					this.ctx.sessions.save(session);
 					this.ctx.sessions.changed(session.id);
 				}
@@ -702,6 +730,18 @@ export class Agent extends Service {
 			}
 			state.policy = session.policy;
 			state.ref.surface = options.surface ?? state.ref.surface;
+			this.ctx.sessions.verifyModelContext(session);
+			// A manual summary may have moved the model context while the turn was suspended. Rebuild
+			// the model-facing messages from the canonical transcript; the suspended work is untouched.
+			if (state.modelContextVersion !== session.modelContext?.version) {
+				const systems = state.messages.filter((message) => message.role === 'system' && !message.summarized);
+				state.messages = [
+					...systems,
+					...buildModelHistory(state.transcript, session.modelContext, state.contextForm ?? this.ctx.settings.get().contextForm),
+					...(state.trailer ?? []),
+				];
+				state.modelContextVersion = session.modelContext?.version;
+			}
 			session.cursor = null;
 			this.ctx.sessions.save(session);
 			return await this.execute(session, state, turn, {
@@ -725,11 +765,16 @@ export class Agent extends Service {
 	 * only the turns after the last prompt: what a reader asking for this wants is the conversation
 	 * folded now, not the longest tail that happens to fit.
 	 */
-	async compact(sessionId: string, instructions?: string): Promise<string> {
+	async compact(sessionId: string, instructions?: string, rebuild = false): Promise<string> {
 		const session = this.ctx.sessions.require(sessionId);
-		const before = session.transcript.length;
-		const folded = await this.fold(session, session.transcript, 0, instructions);
-		return folded ? `Compacted ${before} messages into a summary.` : 'Nothing to compact yet.';
+		const before = session.modelContext?.covers ?? 0;
+		const context = await this.compactContext(session, session.transcript, 0, instructions, undefined, rebuild);
+		if (!context) {
+			return 'Nothing to compact yet.';
+		}
+		return rebuild
+			? `Rebuilt the model summary from ${context.covers} messages (the full chat is kept).`
+			: `Summarized ${Math.max(0, context.covers - before)} more messages for the model context (${context.covers} total).`;
 	}
 
 		/** The input budget of one request: the window, less the reply's share, less the fixed part. */
@@ -768,63 +813,45 @@ export class Agent extends Service {
 	}
 
 	/**
-	 * Folds the turns before the newest one into a single summary, in the chat itself, and answers with
-	 * what it folded. The plan keeps the newest turn word for word and a previous summary is extended
-	 * rather than replaced; a failure propagates so the caller can leave the transcript alone, because a
-	 * chat that cannot be summarized is still a chat and losing the record would be worse than sending a
-	 * request that may be refused.
+	 * Summarizes the canonical prefix, extending the previous summary unless `rebuild` is set. The
+	 * transcript, marks and cursor are untouched; the caller rebuilds only its model messages.
 	 */
-	private async fold(
+	private async compactContext(
 		session: Session,
-		transcript: Message[],
+		source: readonly Message[],
 		budget: number,
 		instructions?: string,
 		signal?: AbortSignal,
-	): Promise<FoldResult | null> {
-		const plan = planCompaction(transcript, budget, SUMMARY_RESERVE);
-		if (!plan.older.length) {
+		rebuild = false,
+	): Promise<ModelContext | null> {
+		const previous = session.modelContext;
+		const from = rebuild ? 0 : previous?.covers ?? 0;
+		// The summary itself is part of the body budget; reserve what the existing one costs, and let
+		// SUMMARY_RESERVE cover the new summary's growth.
+		const summaryTokens = previous ? estimateTokens(modelSummaryMessage(previous.summary).content) : 0;
+		const plan = planCompaction(source, Math.max(0, budget - summaryTokens), SUMMARY_RESERVE, from);
+		let cut = Math.min(plan.cut, source.length);
+		if (rebuild && previous) {
+			cut = Math.max(cut, previous.covers);
+		}
+		if (cut <= from && !rebuild) {
 			return null;
 		}
-		const text = await this.summaryText(session.policy.model, plan.older, session.summary, instructions, signal);
+		const older = source.slice(rebuild ? 0 : from, cut);
+		if (!older.length) {
+			return null;
+		}
+		const text = await this.summaryText(
+			session.policy.model,
+			older,
+			rebuild ? undefined : previous?.summary,
+			instructions,
+			signal,
+		);
 		if (!text) {
 			return null;
 		}
-		return this.record(session, text, plan.older.length, transcript);
-	}
-
-	/**
-	 * Writes a compaction down: the summary replaces the turns it covers, here and in the chat record,
-	 * and the restore points inside those turns go with them. Answers with the transcript the fold
-	 * leaves, which is what a caller hands on as the request's history.
-	 *
-	 * `covers` counts messages of `source` — the transcript the plan was made from — while the record
-	 * only holds the head of it when a turn is still running, so the same cut comes off both: the
-	 * record's own messages are a prefix of the request's. A summary that is extended stands in for
-	 * everything it covered before, plus the turns this fold adds to it — the previous summary was one
-	 * message of the folded stretch — which is why `covers` is carried over rather than restarted.
-	 */
-	private record(session: Session, text: string, covers: number, source: readonly Message[]): FoldResult {
-		const summary = summaryMessage(text);
-		const previous = isSummaryMessage(source[0]) ? session.summary : undefined;
-		this.ctx.sessions.compacted(
-			session,
-			{ text, covers: (previous?.covers ?? 0) + covers - (previous ? 1 : 0), at: Date.now() },
-			foldedRecord(summary, session.transcript, covers),
-			covers,
-		);
-		return { summary, covers, folded: foldedRecord(summary, source, covers) };
-	}
-
-	/**
-	 * The run state after a fold the turn made mid-flight: the transcript becomes the folded one, and
-	 * the indices and copies the state keeps — the reply a continue extends, and the record a quiet
-	 * trigger restores at the end of the turn — move with it.
-	 */
-	private rebaseState(state: RunState, fold: FoldResult): void {
-		state.transcript = fold.folded;
-		state.continueInto = rebaseIndex(state.continueInto, fold.covers);
-		state.prior = foldedRecord(fold.summary, state.prior, fold.covers);
-		state.restore = state.restore ? foldedRecord(fold.summary, state.restore, fold.covers) : undefined;
+		return this.ctx.sessions.recordModelContext(session, text, cut, session.policy.model) ?? null;
 	}
 
 	/**
@@ -842,11 +869,11 @@ export class Agent extends Service {
 		signal: AbortSignal,
 	): Promise<{ messages: Message[]; transcript?: Message[] }> {
 		const budget = this.budgetFor(state.policy, session?.contextWindow, this.systemText(state.messages), tools);
-		// The budget's input already has the system prompt and the tool definitions taken off, so the
-		// body is what has to fit. Measuring the whole message list against it counted the system
-		// messages twice — a rounding error before a preset could place twenty blocks, and a real one now.
-		const body = state.messages.filter((message) => message.role !== 'system');
-		const fixed = estimateMessages(state.messages) - estimateMessages(body);
+		// The primary system prompt and the tool definitions are fixed overhead; the derived summary is
+		// body, not overhead, or it would be invisible to this budget and to /context.
+		const systems = state.messages.filter((message) => message.role === 'system' && !message.summarized);
+		const body = state.messages.filter((message) => message.role !== 'system' || message.summarized);
+		const fixed = estimateMessages(systems);
 		if (estimateMessages(body) <= budget.input) {
 			return { messages: state.messages };
 		}
@@ -855,38 +882,25 @@ export class Agent extends Service {
 		if (elided.changed) {
 			this.notice(state.ref, 'Trimmed older tool output to fit the model’s window.');
 		}
-		const elidedBody = elided.messages.filter((message) => message.role !== 'system');
+		const elidedBody = elided.messages.filter((message) => message.role !== 'system' || message.summarized);
 		if (estimateMessages(elidedBody) <= budget.input || !state.foldable || !session) {
 			return { messages: elided.messages };
 		}
-		const plan = planCompaction(state.transcript, budget.input, SUMMARY_RESERVE);
-		if (!plan.older.length) {
-			return { messages: elided.messages };
-		}
 		this.notice(state.ref, 'Summarizing the conversation — this turn outgrew the model’s window.');
-		let text: string;
 		try {
-			text = await this.summaryText(state.policy.model, plan.older, session.summary, undefined, signal);
+			const context = await this.compactContext(session, state.transcript, budget.input, undefined, signal);
+			if (!context) {
+				return { messages: elided.messages };
+			}
+			state.modelContextVersion = context.version;
+			const history = buildModelHistory(state.transcript, context, state.contextForm ?? this.ctx.settings.get().contextForm);
+			return { messages: [...systems, ...history, ...(state.trailer ?? [])] };
 		} catch (error) {
 			signal.throwIfAborted();
 			// The turn still has to be answered, so a summary that failed is reported and not fatal.
 			this.ctx.log.message(`summarize failed mid-turn: ${describe(error)}`);
 			return { messages: elided.messages };
 		}
-		if (!text) {
-			return { messages: elided.messages };
-		}
-		const fold = this.record(session, text, plan.older.length, state.transcript);
-		// The fold moves the transcript under the turn, so the state's own view of it moves too: the
-		// reply a continue extends has a new index, and the record a quiet trigger restores was folded
-		// with it. The request is then rebuilt from the folded transcript whole — that is what keeps the
-		// request and the chat record from drifting apart, and it needs no arithmetic about which
-		// messages were this turn's own.
-		this.rebaseState(state, fold);
-		return {
-			messages: [...elided.messages.filter((message) => message.role === 'system'), ...fold.folded],
-			transcript: fold.folded,
-		};
 	}
 
 	/**
@@ -938,18 +952,18 @@ export class Agent extends Service {
 		// images off for this turn: the next turn gets to try again.
 		const refusedModel = this.imagesOff.get(state.sessionId);
 		const off = refusedModel === state.policy.model || state.imagesOff === state.policy.model;
-		let messages = off ? stripImages(state.messages) : state.messages;
+		let messages = off ? stripImageAttachments(state.messages) : state.messages;
 		let completion: Completion;
 		try {
 			completion = await attempt(messages);
 		} catch (error) {
-			if (isImageUnsupported(error) && hasImages(messages) && !off) {
+			if (isImageUnsupported(error) && hasImageAttachments(messages) && !off) {
 				this.imagesOff.set(state.sessionId, state.policy.model);
 				state.imagesOff = state.policy.model;
 				this.notice(state.ref, 'The selected model does not accept images; resending this request as text.');
-				messages = stripImages(state.messages);
+				messages = stripImageAttachments(state.messages);
 				completion = await attempt(messages);
-			} else if (isTransportFailure(error) && !streamed && hasImages(messages) && !off) {
+			} else if (isTransportFailure(error) && !streamed && hasImageAttachments(messages) && !off) {
 				// The usual cause is a stale keep-alive socket; one repeat can succeed. If it does not,
 				// the endpoint cannot take the picture and the text is still worth answering.
 				this.notice(state.ref, `The connection ended while sending images (${describe(error)}); retrying once.`);
@@ -961,7 +975,7 @@ export class Agent extends Service {
 					}
 					state.imagesOff = state.policy.model;
 					this.notice(state.ref, 'Images could not be sent to this endpoint; resending the request as text.');
-					messages = stripImages(state.messages);
+					messages = stripImageAttachments(state.messages);
 					completion = await attempt(messages);
 				}
 			} else if (!isContextOverflow(error)) {
@@ -1001,29 +1015,25 @@ export class Agent extends Service {
 	 * to give, which is the endpoint's answer to keep.
 	 */
 	private async emergencyFit(state: RunState, session: Session | undefined, signal: AbortSignal): Promise<Message[] | null> {
-		const system = state.messages.filter((message) => message.role === 'system');
+		const system = state.messages.filter((message) => message.role === 'system' && !message.summarized);
 		// Tool output goes to its markers first; older prompts' pictures go next, keeping the newest
 		// prompt intact so the question being answered still has what it was asked about.
 		const elided = elideToolResults(state.messages, 0).messages;
-		const dropped = dropPromptImages(elided, true);
-		const body = (dropped.changed ? dropped.messages : elided).filter((message) => message.role !== 'system');
+		const dropped = dropPromptAttachments(elided, true);
+		const body = (dropped.changed ? dropped.messages : elided).filter(
+			(message) => message.role !== 'system' || message.summarized,
+		);
 		if (!session || !state.foldable) {
 			return estimateMessages(body) < estimateMessages(state.messages) ? [...system, ...body] : null;
 		}
-		const plan = planCompaction(state.transcript, 0);
-		if (!plan.older.length) {
-			return null;
-		}
 		try {
-			const text = await this.summaryText(state.policy.model, plan.older, session.summary, undefined, signal);
-			if (!text) {
+			const context = await this.compactContext(session, state.transcript, 0, undefined, signal);
+			if (!context) {
 				return null;
 			}
-			const fold = this.record(session, text, plan.older.length, state.transcript);
-			// The retry carries the folded request, and the rest of the turn goes on from the folded
-			// transcript: the reply a continue extends and the record a quiet trigger restores move with it.
-			this.rebaseState(state, fold);
-			return [...system, ...fold.folded];
+			state.modelContextVersion = context.version;
+			const history = buildModelHistory(state.transcript, context, state.contextForm ?? this.ctx.settings.get().contextForm);
+			return [...system, ...history, ...(state.trailer ?? [])];
 		} catch (error) {
 			signal.throwIfAborted();
 			this.ctx.log.message(`emergency summarize failed: ${describe(error)}`);
@@ -1033,8 +1043,9 @@ export class Agent extends Service {
 
 	/** The system prompt of a message list, as the budget's fixed part measures it. */
 	private systemText(messages: Message[]): string {
+		// The derived summary is body context, not part of the fixed system prompt.
 		return messages
-			.filter((message) => message.role === 'system')
+			.filter((message) => message.role === 'system' && !message.summarized)
 			.map((message) => message.content)
 			.join('\n');
 	}
@@ -1048,13 +1059,17 @@ export class Agent extends Service {
 	private async summaryText(
 		model: string,
 		older: Message[],
-		previous?: SessionSummary,
+		previous?: string,
 		instructions?: string,
 		signal?: AbortSignal,
 	): Promise<string> {
-		const lines = older.map((message) => `${message.role}: ${clip(message.content, 2_000)}`);
+		const lines = older.map((message) => {
+			const notes = attachmentNotes(message.attachments);
+			const suffix = notes?.length ? ` [attachments: ${notes.join('; ')}]` : '';
+			return `${message.role}: ${clip(message.content, 2_000)}${suffix}`;
+		});
 		let head = 0;
-		let used = previous ? previous.text.length : 0;
+		let used = previous ? previous.length : 0;
 		while (head < lines.length && used + lines[head]!.length < SUMMARY_SOURCE_LIMIT / 4) {
 			used += lines[head]!.length;
 			head += 1;
@@ -1069,11 +1084,11 @@ export class Agent extends Service {
 			tail.unshift(line);
 		}
 		const omitted = lines.length - head - tail.length;
-		return this.ctx.llm.complete(
+		const text = await this.ctx.llm.complete(
 			model,
 			this.summaryInstruct(instructions),
 			[
-				previous ? `It was summarized once before; extend that summary rather than starting over:\n\n${previous.text}` : '',
+				previous ? `It was summarized once before; extend that summary rather than starting over:\n\n${previous}` : '',
 				`The earliest turns:\n\n${lines.slice(0, head).join('\n\n')}`,
 				omitted > 0 ? `[...${omitted} messages between these were left out of this request]` : '',
 				`The most recent turns:\n\n${tail.join('\n\n')}`,
@@ -1082,6 +1097,9 @@ export class Agent extends Service {
 				.join('\n\n'),
 			{ signal },
 		);
+		return text.length <= SUMMARY_TEXT_LIMIT
+			? text
+			: `${text.slice(0, SUMMARY_TEXT_LIMIT)}\n[... summary truncated, ${text.length - SUMMARY_TEXT_LIMIT} chars]`;
 	}
 
 	private summaryInstruct(instructions?: string): string {
@@ -1123,13 +1141,25 @@ export class Agent extends Service {
 			return 'No active session.';
 		}
 		const config = this.ctx.settings.get();
+		const form = session.contextForm ?? config.contextForm;
+		this.ctx.sessions.verifyModelContext(session);
+		const modelHistory = buildModelHistory(session.transcript, session.modelContext, form);
 		const sum = (role: Message['role']) =>
-			session.transcript
+			modelHistory
 				.filter((message) => message.role === role)
-				.reduce((total, message) => total + estimateTokens(message.content) + estimateImages(message.images), 0);
+				.reduce((total, message) => total + estimateTokens(message.content) + estimateAttachments(message.attachments), 0);
 		const user = sum('user');
 		const assistant = sum('assistant');
 		const tool = sum('tool');
+		const attachments = modelHistory.flatMap((message) => message.attachments ?? []);
+		const attachmentTokens = (kind: AttachmentPart['kind']) =>
+			attachments.filter((part) => part.kind === kind).reduce((total, part) => total + estimateAttachments([part]), 0);
+		const attachmentLine = attachments.length
+			? `- attachments in model context: ${attachmentTokens('text')} text · ${attachmentTokens('image')} image · ${attachmentTokens('document')} document tokens`
+			: '';
+		const canonicalTokens = estimateMessages(session.transcript);
+		const modelTokens = estimateMessages(modelHistory);
+		const summaryTokens = session.modelContext ? estimateTokens(modelSummaryMessage(session.modelContext.summary).content) : 0;
 		// A composed turn whose Tools entry was off carried no tool overhead; report that turn, not
 		// the policy list that would have been offered without the preset.
 		const visible = this.toolModes.get(session.id) === false ? [] : this.ctx.tools.visible(session.policy);
@@ -1149,12 +1179,14 @@ export class Agent extends Service {
 			used === undefined
 				? '- last request: none yet, so the numbers below are estimates'
 				: `- last request: ${used} tokens, as the provider counted them`,
-			`- transcript: ${user + assistant + tool} tokens (user ${user} · assistant ${assistant} · tool ${tool})`,
+			`- canonical transcript: ${session.transcript.length} messages, ${canonicalTokens} tokens (the full chat is kept)`,
+			`- model context: ${modelTokens} tokens = ${summaryTokens} summary + ${user + assistant + tool} messages (user ${user} · assistant ${assistant} · tool ${tool})`,
+			...(attachmentLine ? [attachmentLine] : []),
 			`- instruction files: ${files.length}${files.length ? ` — ${files.slice(0, 5).map((file) => file.split('/').pop()).join(', ')}` : ''}`,
-			`- context form: ${config.contextForm}`,
-			session.summary
-				? `- summarized: ${session.summary.covers} earlier messages stand behind one summary`
-				: '- not summarized yet: past the window, the older turns are folded into one',
+			`- context form: ${form}`,
+			session.modelContext
+				? `- summary: covers ${session.modelContext.covers} messages, version ${session.modelContext.version}${session.modelContext.model ? `, by ${session.modelContext.model}` : ''}`
+				: '- not summarized yet: past the window, the older turns are folded into a model context',
 		].join('\n');
 	}
 
@@ -1353,6 +1385,7 @@ export class Agent extends Service {
 		}
 		session.cursor = null;
 		session.policy = state.policy;
+		this.ctx.sessions.invalidateModelContext(session, session.transcript.length);
 		this.ctx.sessions.save(session);
 		if (!SILENT_TRIGGERS.has(state.trigger)) {
 			this.ctx.audit.write(session.id, { kind: 'turn-end', turn: session.turnIndex });
@@ -1554,24 +1587,24 @@ export class Agent extends Service {
 				}
 				// The bytes become a stored reference before the message is written; the transcript never
 				// carries base64, and the model still sees the picture on the next step.
-				const images = await this.rememberImages(state, call, outcome.images);
-				if (outcome.images?.length && !images?.length) {
+				const attachments = await this.rememberAttachments(state, call, outcome.images);
+				if (outcome.images?.length && !attachments?.length) {
 					const why =
 						this.imagesOff.get(state.sessionId) === state.policy.model || state.imagesOff === state.policy.model
 							? 'this model does not accept images'
 							: 'the image could not be attached';
 					outcome = { ...outcome, content: `${outcome.content}\n\n[image output omitted: ${why}]` };
 				}
-				this.ctx.emit('agent/tool-result', state.ref, { ...call, arguments: args }, outcome.content, images);
+				this.ctx.emit('agent/tool-result', state.ref, { ...call, arguments: args }, outcome.content, imageParts(attachments));
 				this.ctx.audit.write(state.sessionId, {
 					kind: 'tool',
 					tool: call.name,
 					arguments: clip(args, 500),
 					output: clip(outcome.content, 500),
-					images: imageNotes(images),
+					images: attachmentNotes(attachments),
 					...(state.agentName ? { subagent: state.agentName, root: state.rootSessionId } : {}),
 				});
-				results[index] = { role: 'tool', toolCallId: call.id, content: outcome.content, images, at: Date.now() };
+				results[index] = { role: 'tool', toolCallId: call.id, content: outcome.content, attachments, at: Date.now() };
 			};
 			// Read-only calls run in small parallel batches; writes, tasks and questions stay ordered.
 			const parallel: number[] = [];
@@ -1707,15 +1740,16 @@ export class Agent extends Service {
 	 * Stores what a tool handed back and returns the references the message keeps. A model that already
 	 * refused images gets none; a store failure is reported and the tool text stands on its own.
 	 */
-	private async rememberImages(state: RunState, call: ToolCall, images?: ToolImage[]): Promise<ImagePart[] | undefined> {
+	private async rememberAttachments(state: RunState, call: ToolCall, images?: ToolImage[]): Promise<ImageAttachment[] | undefined> {
 		if (!images?.length || this.imagesOff.get(state.sessionId) === state.policy.model || state.imagesOff === state.policy.model) {
 			return undefined;
 		}
-		const parts: ImagePart[] = [];
+		const parts: ImageAttachment[] = [];
 		let dropped = 0;
 		for (const image of images.slice(0, MAX_IMAGES_PER_MESSAGE)) {
 			try {
-				parts.push(await this.ctx.attachments.put(image.data, image.name));
+				const stored = await this.ctx.attachments.putImage(image.data, image.name);
+				parts.push({ ...stored, origin: 'tool' });
 			} catch (error) {
 				dropped += 1;
 				this.ctx.log.message(`dropped image from ${call.name}: ${describe(error)}`);
@@ -1749,6 +1783,7 @@ export class Agent extends Service {
 			signal,
 			// One scratch tree per chat, shared by its subagents so the main agent can read their reports.
 			scratchDirectory: join(this.ctx.host.storage.tmp, 'shell', state.rootSessionId),
+			resolveReference: (path, options) => this.ctx.references.resolvePath(path, scopeOf(state.policy), signal, options),
 			log: (text) => this.notice(state.ref, text),
 			ask: (question, options, multi) => this.ctx.host.ask(question, options, multi),
 			todos: (items) => {
@@ -2053,6 +2088,8 @@ export class Agent extends Service {
 					policy,
 					transcript: subTranscript,
 					messages: [{ role: 'system', content: system }, ...inherited, { role: 'user', content: request.prompt }],
+					contextForm: this.ctx.settings.get().contextForm,
+					trailer: [],
 					toolCalls: [],
 					gateReason: '',
 					confirmed: null,

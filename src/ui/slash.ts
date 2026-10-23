@@ -16,7 +16,7 @@ const HELP = [
 	'| --- | --- |',
 	'| `/plan [task]` | research read-only, then write a plan |',
 	'| `/review [focus]` | review pending changes without editing |',
-	'| `/summarize [notes]` | summarize the conversation to free up context (`/compress` and `/compact` are aliases) |',
+	'| `/summarize [notes] [--rebuild]` | summarize the model context; `--rebuild` rewrites it from the full chat (`/compress` and `/compact` are aliases) |',
 	'| `/clear` `/new` | start a fresh session |',
 	'| `/fork` | fork this session and keep exploring |',
 	'| `/context` | token budget breakdown for this session |',
@@ -79,9 +79,11 @@ export function slashCommands(ctx: Context): void {
 			surface.markdown('No active session yet.');
 			return { done: true };
 		}
-		surface.progress('Summarizing…');
+		const rebuild = /(^|\s)--rebuild(\s|$)/.test(args);
+		const notes = args.replaceAll('--rebuild', '').trim() || undefined;
+		surface.progress(rebuild ? 'Rebuilding the summary from the full chat…' : 'Summarizing…');
 		try {
-			surface.markdown(await ctx.agent.compact(session.id, args.trim() || undefined));
+			surface.markdown(await ctx.agent.compact(session.id, notes, rebuild));
 		} catch (error) {
 			surface.markdown(`Summarizing failed: ${error instanceof Error ? error.message : String(error)}`);
 		}

@@ -1039,6 +1039,10 @@
 
 	let turns = [];
 	let live = null;
+	/** The current model-context summary, as sent by the host; `null` when the chat has none. */
+	let summaryInfo = null;
+	/** The loaded page: where it starts, how many turns exist, and whether older turns remain. */
+	let pageInfo = { firstTurnIndex: undefined, totalTurns: 0, hasMore: false };
 	/** An impersonation is being written into the composer rather than into a turn of the chat. */
 	let draft = false;
 	/** The open prompt editor's restore function, if one is open. */
@@ -1465,16 +1469,59 @@
 	}
 
 	function imageThumbs(parts) {
-		if (!Array.isArray(parts) || !parts.length) {
+		const images = Array.isArray(parts) ? parts.filter((part) => !part.kind || part.kind === 'image') : [];
+		if (!images.length) {
 			return null;
 		}
 		// A span, not a div: a tool card keeps its pictures inside the <summary>.
 		const box = document.createElement('span');
 		box.className = 'thumbs';
-		for (const part of parts) {
+		for (const part of images) {
 			box.appendChild(imageThumb(part));
 		}
 		return box;
+	}
+
+	/** Resolved text and document references, as compact chips beside the prompt. */
+	function referenceChips(parts) {
+		const refs = Array.isArray(parts) ? parts.filter((part) => part.kind === 'text' || part.kind === 'document') : [];
+		if (!refs.length) {
+			return null;
+		}
+		const box = document.createElement('div');
+		box.className = 'refs';
+		for (const part of refs) {
+			const chip = document.createElement('span');
+			chip.className = 'ref' + (part.form === 'error' ? ' error' : '');
+			if (part.kind === 'document') {
+				const pages = part.pages ? ' · p.' + part.pages.start + (part.pages.end === part.pages.start ? '' : '-' + part.pages.end) : '';
+				const total = part.pageCount ? '/' + part.pageCount : '';
+				chip.textContent = '📄 ' + (part.name || 'PDF') + pages + total;
+			} else {
+				const source = part.source || {};
+				const range = source.range ? ':' + source.range.start + (source.range.end === source.range.start ? '' : '-' + source.range.end) : '';
+				chip.textContent = (part.form === 'folder' ? '📁 ' : part.form === 'symbol' ? 'ƒ ' : '') + (source.symbol || source.path || part.form) + range;
+			}
+			if (part.text) {
+				chip.title = part.text.slice(0, 2_000);
+			}
+			box.appendChild(chip);
+		}
+		return box;
+	}
+
+	function renderPromptAttachments(turn) {
+		if (!turn || !turn._bubble) {
+			return;
+		}
+		const old = turn._bubble.querySelector('.refs');
+		if (old) {
+			old.remove();
+		}
+		const chips = referenceChips(turn.promptAttachments);
+		if (chips) {
+			turn._bubble.appendChild(chips);
+		}
 	}
 
 	/** One attachment's bytes, for every thumbnail that is already waiting on it. */
@@ -1855,10 +1902,11 @@
 		prompt.className = 'msg user';
 		prompt.innerHTML = '<div class="bubble">' + renderPromptHtml(turn.prompt) + '</div>';
 		turn._bubble = prompt.querySelector('.bubble');
-		const promptThumbs = imageThumbs(turn.promptImages);
+		const promptThumbs = imageThumbs(turn.promptAttachments);
 		if (promptThumbs) {
 			turn._bubble.appendChild(promptThumbs);
 		}
+		renderPromptAttachments(turn);
 		if (!turn.command) {
 			const actions = [{ key: 'copy', icon: 'copy', tip: 'Copy message', run: (button) => copyAction(button, turn.prompt) }];
 			if (!readOnly && !turn.greeting && turn.prompt) {
@@ -1869,7 +1917,7 @@
 		if (turn.greeting) {
 			// A character's opening line has no prompt behind it: the bubble would be empty.
 			root.classList.add('greeting');
-		} else if (turn.prompt || (turn.promptImages && turn.promptImages.length)) {
+		} else if (turn.prompt || (turn.promptAttachments && turn.promptAttachments.length)) {
 			// A continuation, an impersonation and a quiet turn have no prompt of their own either —
 			// the host sends them with no text, and an empty bubble is not a message. An image-only
 			// prompt is a message even though its text is empty.
@@ -2023,7 +2071,7 @@
 		for (const button of messagesEl.querySelectorAll('.msg.user .act[data-act="edit"]')) {
 			const turn = button.closest('.turn')?._turn;
 			// An image-only prompt has no text but is still a prompt that can be run again.
-		const prompted = Boolean(turn && (turn.prompt || (turn.promptImages && turn.promptImages.length)));
+		const prompted = Boolean(turn && (turn.prompt || (turn.promptAttachments && turn.promptAttachments.length)));
 		button.hidden = running || suspended || !turn || Boolean(turn.greeting) || Boolean(turn.command) || !prompted;
 		}
 	}
@@ -2042,14 +2090,189 @@
 	}
 
 	/** Draws a whole transcript: the one path used by a reload, a chat switch and a display change. */
-	function renderTurns(list, sessionId) {
+	function summaryTitle(summary) {
+		const messages = Number(summary && summary.covers) || 0;
+		const covered = Number(summary && summary.coveredTurns) || 0;
+		const scope = messages ? messages + ' message' + (messages === 1 ? '' : 's') : 'earlier history';
+		return 'Conversation summary · ' + scope + (covered ? ' · ' + covered + ' turn' + (covered === 1 ? '' : 's') : '');
+	}
+
+	function summaryCard(summary) {
+		const card = document.createElement('section');
+		card.className = 'summary-card';
+		const head = document.createElement('div');
+		head.className = 'summary-head';
+		const title = document.createElement('span');
+		title.className = 'summary-title';
+		title.textContent = summaryTitle(summary);
+		const actions = document.createElement('span');
+		actions.className = 'summary-actions';
+		const rebuild = document.createElement('button');
+		rebuild.type = 'button';
+		rebuild.className = 'summary-btn';
+		rebuild.textContent = 'Rebuild';
+		rebuild.title = 'Rebuild this summary from the full conversation';
+		rebuild.addEventListener('click', () => {
+			rebuild.disabled = true;
+			vscode.postMessage({ type: 'rebuildSummary', sessionId: state && state.sessionId });
+		});
+		actions.appendChild(rebuild);
+		head.append(title, actions);
+		const body = document.createElement('div');
+		body.className = 'summary-body';
+		body.innerHTML = md(String(summary && summary.text ? summary.text : ''));
+		card.append(head, body);
+		return card;
+	}
+
+	function summaryDetails() {
+		const details = document.createElement('details');
+		details.className = 'summary-originals';
+		const head = document.createElement('summary');
+		head.textContent = 'Show original messages';
+		details.appendChild(head);
+		return details;
+	}
+
+	/** Move loaded turns in and out of the summary details as coverage changes. */
+	function updateSummaryDetails(summary) {
+		const details = messagesEl.querySelector('.summary-originals');
+		if (!details) {
+			return;
+		}
+		const covers = summary ? Number(summary.covers) || 0 : 0;
+		for (const turn of turns) {
+			if (!turn._root) {
+				continue;
+			}
+			if (summary && turn.at <= covers) {
+				if (turn._root.parentElement !== details) {
+					details.appendChild(turn._root);
+				}
+			} else if (turn._root.parentElement === details) {
+				const firstUncovered = turns.find((other) => other !== turn && other._root && other._root.parentElement === messagesEl);
+				messagesEl.insertBefore(turn._root, firstUncovered ? firstUncovered._root : null);
+			}
+		}
+		const count = details.querySelectorAll('.turn').length;
+		details.querySelector('summary').textContent = 'Show original messages' + (count ? ' (' + count + ')' : '');
+	}
+
+	function renderLoadOlder() {
+		const old = messagesEl.querySelector('.load-older');
+		if (old) {
+			old.remove();
+		}
+		if (!pageInfo.hasMore || pageInfo.firstTurnIndex === undefined) {
+			return;
+		}
+		const box = document.createElement('div');
+		box.className = 'load-older';
+		const button = document.createElement('button');
+		button.type = 'button';
+		button.textContent = 'Load older messages';
+		button.addEventListener('click', () => {
+			button.disabled = true;
+			vscode.postMessage({ type: 'loadOlder', before: pageInfo.firstTurnIndex, sessionId: state && state.sessionId });
+		});
+		box.appendChild(button);
+		const details = messagesEl.querySelector('.summary-originals');
+		const anchor = details ? details.nextSibling : messagesEl.firstChild;
+		messagesEl.insertBefore(box, anchor);
+	}
+
+	function updateSummary(summary) {
+		summaryInfo = summary || null;
+		const card = messagesEl.querySelector('.summary-card');
+		const details = messagesEl.querySelector('.summary-originals');
+		if (!summaryInfo) {
+			if (details) {
+				for (const turn of turns) {
+					if (turn._root && turn._root.parentElement === details) {
+						messagesEl.insertBefore(turn._root, details);
+					}
+				}
+			}
+			if (card) {
+				card.remove();
+			}
+			if (details) {
+				details.remove();
+			}
+			renderLoadOlder();
+			return;
+		}
+		if (!card) {
+			const next = messagesEl.firstChild;
+			messagesEl.insertBefore(summaryCard(summaryInfo), next);
+			messagesEl.insertBefore(summaryDetails(), next);
+		} else {
+			card.querySelector('.summary-title').textContent = summaryTitle(summaryInfo);
+			card.querySelector('.summary-body').innerHTML = md(String(summaryInfo.text || ''));
+		}
+		if (!messagesEl.querySelector('.summary-originals')) {
+			messagesEl.insertBefore(summaryDetails(), card.nextSibling);
+		}
+		updateSummaryDetails(summaryInfo);
+		renderLoadOlder();
+	}
+
+	function prependTurns(message) {
+		const list = message.turns || [];
+		if (!list.length) {
+			return;
+		}
+		const oldHeight = messagesEl.scrollHeight;
+		const oldTop = messagesEl.scrollTop;
+		const fragment = document.createDocumentFragment();
+		for (const turn of list) {
+			turnEl(turn, fragment);
+			renderSteps(turn);
+			renderFoot(turn);
+		}
+		const anchor = Array.from(messagesEl.children).find((child) => child.classList.contains('turn')) || null;
+		messagesEl.insertBefore(fragment, anchor);
+		turns = [...list, ...turns];
+		summaryInfo = message.summary || summaryInfo;
+		pageInfo = {
+			firstTurnIndex: message.firstTurnIndex,
+			totalTurns: message.totalTurns,
+			hasMore: message.hasMore === true,
+		};
+		if (summaryInfo) {
+			updateSummary(summaryInfo);
+		}
+		renderLoadOlder();
+		for (const messageEl of messagesEl.querySelectorAll('.msg')) {
+			messageEl.classList.add('no-anim');
+		}
+		if (pinned) {
+			scroll(true);
+		} else {
+			messagesEl.scrollTop = oldTop + (messagesEl.scrollHeight - oldHeight);
+		}
+	}
+
+	function renderTurns(list, sessionId, summary, page) {
 		turns = list || [];
+		summaryInfo = summary || null;
+		pageInfo = page || {
+			firstTurnIndex: turns[0] ? turns[0].index : undefined,
+			totalTurns: turns.length,
+			hasMore: Boolean(turns[0] && turns[0].index > 0),
+		};
 		live = null;
 		editing = null;
 		toolCards.clear();
 		messagesEl.innerHTML = '';
+		if (summaryInfo) {
+			messagesEl.appendChild(summaryCard(summaryInfo));
+			messagesEl.appendChild(summaryDetails());
+		}
 		if (!turns.length) {
-			welcome();
+			if (!summaryInfo) {
+				welcome();
+			}
 		} else {
 			for (const turn of turns) {
 				turnEl(turn);
@@ -2058,6 +2281,10 @@
 			}
 			refreshActions();
 		}
+		if (summaryInfo) {
+			updateSummaryDetails(summaryInfo);
+		}
+		renderLoadOlder();
 		// The whole transcript is drawn at once on open and on a chat switch: the rise animation
 		// belongs to a message arriving during a turn, not to a replay of what was already there.
 		for (const message of messagesEl.querySelectorAll('.msg')) {
@@ -2268,7 +2495,7 @@
 			sessionId: message.sessionId,
 			// A swipe or a regenerate re-runs the same prompt, and the host sends no text with it.
 			prompt: message.text || replacing?.prompt || '',
-			promptImages: message.images || replacing?.promptImages || [],
+			promptAttachments: message.attachments || replacing?.promptAttachments || [],
 			steps: [],
 			at: 0,
 			startedAt: Date.now(),
@@ -2912,7 +3139,7 @@
 					}
 				}
 			}
-			renderTurns(turns);
+			renderTurns(turns, state && state.sessionId, summaryInfo, pageInfo);
 		}
 		shownView = currentView();
 		if (!running && !live) {
@@ -3072,7 +3299,18 @@
 				renderChanges(message.files || [], message.reviewed || []);
 				break;
 			case 'turns':
-				renderTurns(message.turns || [], message.sessionId);
+				if (message.prepend) {
+					prependTurns(message);
+				} else {
+					renderTurns(message.turns || [], message.sessionId, message.summary, {
+						firstTurnIndex: message.firstTurnIndex,
+						totalTurns: message.totalTurns,
+						hasMore: message.hasMore === true,
+					});
+				}
+				break;
+			case 'summary':
+				updateSummary(message.summary);
 				break;
 			case 'search':
 				// Only the surface that asked renders these hits.
@@ -3146,6 +3384,12 @@
 				break;
 			case 'tool-start':
 				toolStart(message);
+				break;
+			case 'attachments':
+				if (live) {
+					live.turn.promptAttachments = Array.isArray(message.attachments) ? message.attachments : [];
+					renderPromptAttachments(live.turn);
+				}
 				break;
 			case 'tool-result':
 				toolResult(message);
@@ -3514,34 +3758,43 @@
 
 	/* ------------------------------------------------------------------ composer images */
 
-	// The composer holds the pictures locally as data URLs, shows them as chips, and sends them once.
-	// The host stores the bytes and returns ids; the transcript then loads them back on demand.
+	// The composer holds attachments locally as data URLs, shows them as chips, and sends them once.
+	// The host stores the bytes and returns ids; the transcript then loads images back on demand.
 	const MAX_COMPOSER_IMAGES = 6;
 	const MAX_COMPOSER_BYTES = 4 * 1024 * 1024;
+	const MAX_COMPOSER_DOCUMENT_BYTES = 20 * 1024 * 1024;
 	const composerImages = [];
 	const pendingReads = new Set();
 
 	function renderComposerImages() {
 		composerImagesEl.innerHTML = '';
 		composerImagesEl.hidden = composerImages.length === 0;
-		composerImages.forEach((image, index) => {
+		composerImages.forEach((attachment, index) => {
 			const chip = document.createElement('div');
 			chip.className = 'composer-image';
-			const img = document.createElement('img');
-			img.src = image.dataUrl;
-			img.alt = image.name || 'image';
-			img.title = image.name || 'image';
 			const remove = document.createElement('button');
 			remove.type = 'button';
 			remove.className = 'composer-image-remove';
 			remove.textContent = '×';
-			remove.title = 'Remove this image';
+			remove.title = 'Remove this attachment';
 			remove.addEventListener('click', () => {
 				composerImages.splice(index, 1);
 				renderComposerImages();
 				input.focus();
 			});
-			chip.append(img, remove);
+			if (attachment.kind === 'document') {
+				const label = document.createElement('span');
+				label.className = 'composer-doc';
+				label.textContent = '📄 ' + (attachment.name || 'PDF');
+				label.title = attachment.name || 'PDF';
+				chip.append(label, remove);
+			} else {
+				const img = document.createElement('img');
+				img.src = attachment.dataUrl;
+				img.alt = attachment.name || 'image';
+				img.title = attachment.name || 'image';
+				chip.append(img, remove);
+			}
 			composerImagesEl.appendChild(chip);
 		});
 	}
@@ -3553,6 +3806,15 @@
 		const type = String(file.type || '').toLowerCase();
 		const name = String(file.name || '');
 		return /^image\/(png|jpeg|jpg|gif|webp)$/.test(type) || (!type && /\.(png|jpe?g|gif|webp)$/i.test(name));
+	}
+
+	function isPdfFile(file) {
+		if (!file) {
+			return false;
+		}
+		const type = String(file.type || '').toLowerCase();
+		const name = String(file.name || '');
+		return type === 'application/pdf' || (!type && /\.pdf$/i.test(name));
 	}
 
 	const MAX_COMPOSER_SIDE = 1568;
@@ -3599,30 +3861,40 @@
 		});
 	}
 
-	function addImageFile(file) {
-		if (!isImageFile(file)) {
+	function addAttachmentFile(file) {
+		const image = isImageFile(file);
+		const pdf = isPdfFile(file);
+		if (!image && !pdf) {
 			return;
 		}
 		if (composerImages.length >= MAX_COMPOSER_IMAGES) {
-			addNotice('Only ' + MAX_COMPOSER_IMAGES + ' images can be attached to one message.');
+			addNotice('Only ' + MAX_COMPOSER_IMAGES + ' attachments can be added to one message.');
 			return;
 		}
-		if (file.size > MAX_COMPOSER_BYTES) {
+		if (image && file.size > MAX_COMPOSER_BYTES) {
 			addNotice('An image is over the 4 MiB limit and was not attached.');
+			return;
+		}
+		if (pdf && file.size > MAX_COMPOSER_DOCUMENT_BYTES) {
+			addNotice('A PDF is over the 20 MiB limit and was not attached.');
 			return;
 		}
 		const read = (async () => {
 			try {
 				const dataUrl = await readDataUrl(file);
-				const prepared = await downscaled(dataUrl);
-				const name =
-					prepared === dataUrl
-						? file.name || 'image'
-						: 'image.' + (prepared.startsWith('data:image/webp') ? 'webp' : 'jpg');
-				composerImages.push({ name, dataUrl: prepared });
+				if (pdf) {
+					composerImages.push({ kind: 'document', name: file.name || 'document.pdf', dataUrl });
+				} else {
+					const prepared = await downscaled(dataUrl);
+					const name =
+						prepared === dataUrl
+							? file.name || 'image'
+							: 'image.' + (prepared.startsWith('data:image/webp') ? 'webp' : 'jpg');
+					composerImages.push({ kind: 'image', name, dataUrl: prepared });
+				}
 				renderComposerImages();
 			} catch {
-				addNotice('An image could not be read.');
+				addNotice(pdf ? 'A PDF could not be read.' : 'An image could not be read.');
 			}
 		})();
 		pendingReads.add(read);
@@ -3662,12 +3934,12 @@
 				return;
 			}
 			closeMention();
-			const images = composerImages.map((image) => ({ name: image.name, data: image.dataUrl }));
+			const attachments = composerImages.map((attachment) => ({ kind: attachment.kind, name: attachment.name, data: attachment.dataUrl }));
 			input.value = '';
 			resizeInput();
 			composerImages.length = 0;
 			renderComposerImages();
-			vscode.postMessage({ type: 'send', text, images });
+			vscode.postMessage({ type: 'send', text, attachments });
 			input.focus();
 		} finally {
 			submitting = false;
@@ -3735,7 +4007,7 @@
 				continue;
 			}
 			const file = item.getAsFile();
-			if (file && isImageFile(file)) {
+			if (file && (isImageFile(file) || isPdfFile(file))) {
 				files.push(file);
 			}
 		}
@@ -3744,7 +4016,7 @@
 		}
 		event.preventDefault();
 		for (const file of files) {
-			addImageFile(file);
+			addAttachmentFile(file);
 		}
 	});
 	const editorEl = $('editor');
@@ -3757,13 +4029,13 @@
 		event.dataTransfer.dropEffect = 'copy';
 	});
 	editorEl.addEventListener('drop', (event) => {
-		const files = Array.from(event.dataTransfer?.files ?? []).filter(isImageFile);
+		const files = Array.from(event.dataTransfer?.files ?? []).filter((file) => isImageFile(file) || isPdfFile(file));
 		if (!files.length) {
 			return;
 		}
 		event.preventDefault();
 		for (const file of files) {
-			addImageFile(file);
+			addAttachmentFile(file);
 		}
 	});
 	input.addEventListener('input', resizeInput);

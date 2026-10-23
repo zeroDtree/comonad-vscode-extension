@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import type { ApprovalDecision, ApprovalRequest, ImagePart, ToolCall, TurnRef } from './lib/types';
+import type { ApprovalDecision, ApprovalRequest, AttachmentPart, ImagePart, ToolCall, TurnRef } from './lib/types';
 import type { PostToolDecision, PreToolDecision, ToolExecution, ToolOutcome } from './services/tools';
 
 /**
@@ -15,6 +15,8 @@ declare module 'cordis' {
 		'agent/tool-delta'(ref: TurnRef, call: ToolCall): void;
 		'agent/tool-start'(ref: TurnRef, call: ToolCall): void;
 		'agent/tool-result'(ref: TurnRef, call: ToolCall, output: string, images?: ImagePart[]): void;
+		/** The turn's resolved references and prompt attachments, before the first model step. */
+		'agent/attachments'(ref: TurnRef, attachments: AttachmentPart[]): void;
 		'agent/notice'(ref: TurnRef, text: string): void;
 		'agent/turn-end'(ref: TurnRef): void;
 		/** A subagent created its own conversation; the parent card links to it. */

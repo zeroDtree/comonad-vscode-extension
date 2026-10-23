@@ -12,6 +12,16 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 ### Highlights
 
+- **Compaction no longer rewrites the chat.** The canonical transcript is kept in full; a summary
+  card and model-context coverage live beside it. Original turns expand from the card, older turns
+  page in on demand, and restore points no longer move. `/summarize --rebuild` can rewrite the
+  summary from the complete history.
+- **References are typed attachments.** `@` references (text, images, PDFs) resolve into the user
+  message and persist there as a snapshot instead of a turn-only system block. Text is framed with a
+  content-derived nonce; images are image parts. PDFs ship as the optional `comonad-plugin-pdf`
+  resolver (page-marked text, `@file.pdf:1-5` ranges, no OCR), and `read_file` can read PDF pages.
+  The mechanism stays in core; only format parsers are pluggable. Old sessions that stored `images`
+  no longer render those images — there is no compatibility layer.
 - **Tool cards** now carry the model's one-line description, the command utilities, an optional
   preview and a copy menu; `comonad.toolCard` starts them collapsed (the default), preview or open.
 - **The step budget is optional.** `comonad.maxSteps` — the Graph tab's **Max steps** — now caps

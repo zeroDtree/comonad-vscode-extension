@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
-import { sniffImage } from '../lib/images';
 import { clip, describe, preview } from '../lib/util';
-import type { ApprovalDecision } from '../lib/types';
-import { resolveReferences, scopeOf } from './references';
+import type { ApprovalDecision, TextAttachment } from '../lib/types';
+import { scopeOf } from '../services/references';
 
 /** `@comonad` inside VS Code's chat view. The standalone panel lives in chat-panel.ts. */
 
@@ -14,26 +13,18 @@ export function participant(ctx: Context): void {
 	const created = vscode.chat.createChatParticipant('comonad', async (request, _context, response, token) => {
 		const surface = `participant:${++seq}`;
 		let text = request.prompt.trim();
-		const pieces: string[] = [];
+		// Native references are resolved after hooks, inside the turn. A description is already the
+		// content the editor chose to show; a bare URI goes through the same guards as an `@` token.
+		const notes: TextAttachment[] = [];
+		const uris: vscode.Uri[] = [];
 		for (const reference of request.references) {
 			const description = typeof reference.modelDescription === 'string' ? reference.modelDescription : '';
 			if (description.trim()) {
-				pieces.push(description.trim());
+				notes.push({ kind: 'text', origin: 'user', form: 'note', source: {}, text: description.trim().slice(0, 80_000) });
 			} else if (reference.value instanceof vscode.Uri) {
-				try {
-					const bytes = await vscode.workspace.fs.readFile(reference.value);
-					const image = sniffImage(bytes);
-					pieces.push(
-						image
-							? `File ${reference.value.fsPath} is a ${image.mime} image; use read_file to view it.`
-							: `File ${reference.value.fsPath}:\n${Buffer.from(bytes).toString('utf8').slice(0, 20_000)}`,
-					);
-				} catch {
-					// ignore unreadable references
-				}
+				uris.push(reference.value);
 			}
 		}
-		const systemContext = pieces.length ? pieces.join('\n\n').slice(0, 80_000) : undefined;
 		const form = ctx.settings.get().displayForm;
 		const limit = form === 'raw' ? 4_000 : 700;
 		let streamed = false;
@@ -117,11 +108,13 @@ export function participant(ctx: Context): void {
 				const result = await ctx.agent.runTurn({
 					text,
 					sessionId: ctx.sessions.active()?.id,
-					systemContext,
+					attachments: notes.length ? notes : undefined,
 					policy: handled.policy,
 					surface,
 					signal: controller.signal,
-					resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
+					resolveAttachments: uris.length
+						? (live, signal) => ctx.references.resolveUris(uris, scopeOf(live.policy), signal)
+						: undefined,
 				});
 				if (result.text.startsWith('Error:') || result.text.startsWith('Blocked by hook')) {
 					response.markdown(result.text);

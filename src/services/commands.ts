@@ -137,9 +137,9 @@ function stripSlash(prompt: string): string {
 }
 
 /**
- * Expands `$ARGUMENTS` and `` !`shell` `` snippets. `@` references are not expanded here: the chat
- * surfaces resolve them from the effective prompt with the session policy (`ui/references`), so a
- * command template and a typed prompt use the same richer grammar.
+ * Expands `$ARGUMENTS` and `` !`shell` `` snippets. `@` references are not expanded here: the agent
+ * resolves them from the effective prompt with the session policy (`ctx.references`), so a command
+ * template and a typed prompt use the same richer grammar.
  */
 async function expandCommand(command: CustomCommand, args: string, workspace: string, options: SandboxOptions): Promise<string> {
 	let output = command.template.replaceAll('$ARGUMENTS', args);

@@ -3,13 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
+import { asAttachments, attachmentIdOf } from '../lib/attachments';
 import { asReasoningEffort } from '../lib/effort';
-import { asImagePart } from '../lib/images';
 import { WORKSPACE_BOUNDARY, asApproval, asWorkMode } from '../lib/policy';
 import { isInside } from '../lib/sandbox';
-import type { ContextForm } from '../lib/prompt';
+import { modelContextDigest, type ContextForm } from '../lib/prompt';
 import { turnsOf } from '../lib/turns';
-import type { ImagePart, Message, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
+import type { AttachmentPart, Message, ModelContext, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
 
 /** Session persistence and the active-session pointer. One JSON document per chat. */
 
@@ -37,39 +37,6 @@ export interface Mark {
 }
 
 /**
- * The record of a compaction. `covers` is how many messages of the conversation the text stands in
- * for — counted in the conversation, not in the transcript the summary now heads, so a summary that is
- * extended reports everything it covers — which is what lets the next compaction carry on from it and
- * what `/context` tells the reader.
- */
-export interface SessionSummary {
-	text: string;
-	covers: number;
-	at: number;
-}
-
-/** The message a compaction leaves at the head of the transcript. */
-export function summaryMessage(text: string): Message {
-	return { role: 'system', content: `Conversation summary (compacted):\n\n${text}`, summarized: true };
-}
-
-/** Whether a message is a compaction's summary, which is how a transcript says what its head stands for. */
-export function isSummaryMessage(message: Message | undefined): boolean {
-	return message?.summarized === true;
-}
-
-/**
- * Moves the restore points when `removed` messages were folded into one summary at the head. A mark
- * inside the folded stretch cannot be honoured any more — those messages are gone — so it is dropped;
- * the rest shift by what was removed, plus the summary that now sits in front of them.
- */
-export function rebaseMarks(marks: readonly Mark[], removed: number): Mark[] {
-	return marks
-		.filter((mark) => mark.length >= removed)
-		.map((mark) => ({ ...mark, length: mark.length - removed + 1 }));
-}
-
-/**
  * The restore point for an edited prompt: the first turn at or after it that wrote. Every turn that
  * writes records a mark at its own prompt index, so when the edited turn wrote nothing the first
  * later mark's `entryCount` is exactly the journal position at the edited prompt.
@@ -83,8 +50,7 @@ export function canRewrite(session: Session, index: number): boolean {
 	if (session.cursor || !Number.isInteger(index) || index < 0) {
 		return false;
 	}
-	const message = session.transcript[index];
-	return message?.role === 'user' && !isSummaryMessage(message);
+	return session.transcript[index]?.role === 'user';
 }
 
 export interface Cursor {
@@ -127,8 +93,8 @@ export interface Session {
 	 * switching models re-resolves it. It overrides the model's window, it does not cap history.
 	 */
 	contextWindow?: number;
-	/** The last compaction: what it covers, so the next one extends it instead of starting over. */
-	summary?: SessionSummary;
+	/** The model-facing summary and coverage; the canonical transcript below is never rewritten by it. */
+	modelContext?: ModelContext;
 	transcript: Message[];
 	turnIndex: number;
 	cursor: Cursor | null;
@@ -262,7 +228,7 @@ export function forkBase(title: string): string {
  * character, its book and the greeting still in place.
  */
 export function unusedChat(session: Session): boolean {
-	return !session.transcript.length && !session.usage.requests && session.title === UNTITLED;
+	return !session.transcript.length && !session.modelContext?.summary && !session.usage.requests && session.title === UNTITLED;
 }
 
 /** The newest message that mentions `needle`, as a one-line excerpt. */
@@ -431,8 +397,16 @@ export class SessionStore {
 	}
 
 	private normalize(session: Session): Session {
+		// A summary message at the head belongs to the old destructive model; the canonical transcript
+		// never holds one. Keep the text as model context, then remove the message.
+		const stored = Array.isArray(session.transcript) ? session.transcript.filter((message) => message && typeof message === 'object') : [];
+		const legacyHead = stored.find((message) => message?.summarized === true);
+		const transcript = sanitizeMessages(stored).filter((message) => message?.summarized !== true);
+		const legacy = (session as Session & { summary?: { text?: unknown; at?: unknown } }).summary;
+		const modelContext = normalizeModelContext(session.modelContext, transcript) ?? legacyModelContext(legacy, legacyHead);
+		const { summary: _legacy, ...rest } = session as Session & { summary?: unknown };
 		return {
-			...session,
+			...rest,
 			title: session.title || UNTITLED,
 			// A session on disk is untrusted input like any other: a stale or hand-edited policy that
 			// names a mode or approval the gates do not know falls back to the safe pair.
@@ -447,17 +421,12 @@ export class SessionStore {
 			// Levels come from a menu in one build and from a JSON file the next: an unknown value must
 			// not travel to an endpoint. A session without one keeps inheriting the setting.
 			reasoningEffort: session.reasoningEffort === undefined ? undefined : asReasoningEffort(session.reasoningEffort),
-			// Image references are checked too: a hand-edited id must never become a path, and a media
-			// type is derived from the id rather than trusted.
-			transcript: (session.transcript ?? []).map((message) => {
-				if (!message.images?.length) {
-					return message;
-				}
-				const images = message.images.map(asImagePart).filter((image): image is ImagePart => image !== undefined);
-				return { ...message, images: images.length ? images : undefined };
-			}),
+			// Attachment references are checked too: a hand-edited id must never become a path, and a
+			// media type is derived from the id rather than trusted.
+			transcript,
+			modelContext,
 			turnIndex: session.turnIndex ?? 0,
-			cursor: session.cursor ?? null,
+			cursor: sanitizeCursor(session.cursor ?? null),
 			// Marks from the shadow-snapshot era have no journal to restore to, so they are dropped.
 			marks: (session.marks ?? []).filter((mark) => typeof mark.entryCount === 'number'),
 			created: uniqueCreated(
@@ -474,6 +443,84 @@ export class SessionStore {
 			instructions: session.instructions ?? [],
 		};
 	}
+}
+
+/** A stored message list with its attachments validated; a hand-edited file is untrusted input. */
+function sanitizeMessages(messages: unknown): Message[] {
+	if (!Array.isArray(messages)) {
+		return [];
+	}
+	return messages.map((value) => {
+		if (!value || typeof value !== 'object') {
+			return value as Message;
+		}
+		const message = value as Message;
+		const attachments = asAttachments((value as { attachments?: unknown }).attachments);
+		return { ...message, attachments };
+	});
+}
+
+/** A stored model context is untrusted too: coverage must be a real turn boundary. */
+function normalizeModelContext(value: unknown, transcript: readonly Message[]): ModelContext | undefined {
+	if (!value || typeof value !== 'object') {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	const summary = typeof record.summary === 'string' ? record.summary.trim() : '';
+	const covers = record.covers;
+	const version = record.version;
+	const at = record.at;
+	if (!summary || !Number.isInteger(covers) || (covers as number) < 0 || (covers as number) > transcript.length) {
+		return undefined;
+	}
+	if (!Number.isInteger(version) || (version as number) < 1 || typeof at !== 'number') {
+		return undefined;
+	}
+	const count = covers as number;
+	if (count > 0 && count < transcript.length && transcript[count]?.role !== 'user') {
+		return undefined;
+	}
+	const context: ModelContext = { summary, covers: count, version: version as number, at };
+	if (typeof record.model === 'string' && record.model.trim()) {
+		context.model = record.model.trim().slice(0, 200);
+	}
+	if (typeof record.hash === 'string' && /^[a-f0-9]{16,64}$/.test(record.hash)) {
+		context.hash = record.hash;
+	}
+	return context;
+}
+
+/** The old `summary` field and its head message, kept as context with no recoverable originals. */
+function legacyModelContext(
+	legacy: { text?: unknown; at?: unknown } | undefined,
+	head: Message | undefined,
+): ModelContext | undefined {
+	const fromField = typeof legacy?.text === 'string' ? legacy.text.trim() : '';
+	const fromHead = head?.summarized
+		? head.content.replace(/^Conversation summary \(compacted\):\s*/i, '').trim()
+		: '';
+	const summary = fromField || fromHead;
+	if (!summary) {
+		return undefined;
+	}
+	const at = typeof legacy?.at === 'number' ? legacy.at : typeof head?.at === 'number' ? head.at : Date.now();
+	return { summary, covers: 0, version: 1, at };
+}
+
+/** A suspended turn's graph state may carry messages; those attachments are session input too. */
+function sanitizeCursor(cursor: Cursor | null): Cursor | null {
+	if (!cursor || !cursor.state || typeof cursor.state !== 'object') {
+		return cursor;
+	}
+	const state = cursor.state as Record<string, unknown>;
+	const next = { ...state };
+	if (Array.isArray(state.messages)) {
+		next.messages = sanitizeMessages(state.messages);
+	}
+	if (Array.isArray(state.transcript)) {
+		next.transcript = sanitizeMessages(state.transcript);
+	}
+	return { ...cursor, state: next };
 }
 
 declare module 'cordis' {
@@ -493,6 +540,8 @@ export class Sessions extends Service {
 	private _activeId: string | null = null;
 	/** A chat that has been created but never used yet: it stays in memory until its first turn. */
 	private _draft: Session | null = null;
+	/** Sessions whose model context hash this process already checked against the covered prefix. */
+	private readonly verified = new WeakSet<Session>();
 
 	constructor(ctx: Context) {
 		super(ctx, 'sessions');
@@ -700,8 +749,11 @@ export class Sessions extends Service {
 		const ids = new Set<string>();
 		const collect = (messages: readonly Message[] | undefined): void => {
 			for (const message of messages ?? []) {
-				for (const image of message.images ?? []) {
-					ids.add(image.id);
+				for (const part of message.attachments ?? []) {
+					const id = attachmentIdOf(part);
+					if (id) {
+						ids.add(id);
+					}
 				}
 			}
 		};
@@ -724,7 +776,9 @@ export class Sessions extends Service {
 	truncate(id: string, length: number): void {
 		const session = this.require(id);
 		session.transcript = session.transcript.slice(0, length);
+		session.marks = session.marks.filter((mark) => mark.length <= session.transcript.length);
 		session.cursor = null;
+		this.invalidateModelContext(session, session.transcript.length);
 		this.save(session);
 		this.changed(id);
 	}
@@ -743,6 +797,7 @@ export class Sessions extends Service {
 		}
 		session.transcript = session.transcript.slice(0, index);
 		session.marks = session.marks.filter((mark) => mark.length < index);
+		this.invalidateModelContext(session, session.transcript.length);
 		this.save(session);
 		this.changed(session.id);
 	}
@@ -767,7 +822,7 @@ export class Sessions extends Service {
 	 * an image-only message is still something to replay. The transcript it replaced travels with the
 	 * prompt, so a stopped generation can put the turn back instead of losing it.
 	 */
-	replayLast(id: string): { text: string; images?: ImagePart[]; replaced: Message[] } {
+	replayLast(id: string): { text: string; attachments?: AttachmentPart[]; replaced: Message[] } {
 		const session = this.require(id);
 		if (session.cursor) {
 			return { text: '', replaced: [] };
@@ -780,8 +835,10 @@ export class Sessions extends Service {
 			return { text: '', replaced: [] };
 		}
 		const message = session.transcript[at]!;
-		const replay = { text: message.content, images: message.images, replaced: [...session.transcript] };
+		const replay = { text: message.content, attachments: message.attachments, replaced: [...session.transcript] };
 		session.transcript = session.transcript.slice(0, at);
+		session.marks = session.marks.filter((mark) => mark.length <= session.transcript.length);
+		this.invalidateModelContext(session, session.transcript.length);
 		this.save(session);
 		return replay;
 	}
@@ -839,6 +896,7 @@ export class Sessions extends Service {
 		message.swipes = swipes;
 		message.swipeId = index;
 		message.content = swipes[index]!;
+		this.invalidateModelContext(session, at);
 		this.save(session);
 		this.changed(id);
 		return true;
@@ -855,6 +913,8 @@ export class Sessions extends Service {
 			return false;
 		}
 		session.transcript = [{ role: 'assistant', content, greeting: true, at: Date.now() }];
+		session.modelContext = undefined;
+		this.verified.delete(session);
 		session.greetingIndex = index;
 		this.save(session);
 		this.changed(id);
@@ -867,22 +927,61 @@ export class Sessions extends Service {
 	}
 
 	/**
-	 * Writes a compaction down: the summary replaces the turns it covers in the chat record, and the
-	 * restore points that sat inside those turns move with it. `removed` is how many messages the
-	 * record itself loses, which is not `summary.covers` once a summary is extended. The caller has
-	 * already decided what the summary says; this only keeps the record and the marks consistent.
-	 *
-	 * It takes the caller's own session object rather than an id, because a turn holds one live copy
-	 * while it runs — reading the chat back from disk here would return a second copy, and whichever of
-	 * the two was saved last would silently win.
+	 * Records a summary of the canonical transcript's prefix. The transcript, marks and cursor are
+	 * left alone: compaction is a model-context operation, not a chat edit.
 	 */
-	compacted(session: Session, summary: SessionSummary, transcript: Message[], removed: number): void {
-		session.summary = summary;
-		session.marks = rebaseMarks(session.marks, removed);
-		session.transcript = transcript;
-		session.cursor = null;
+	recordModelContext(session: Session, text: string, covers: number, model?: string): ModelContext | undefined {
+		const summary = text.trim();
+		if (!summary || !Number.isInteger(covers) || covers < 0 || covers > session.transcript.length) {
+			return undefined;
+		}
+		if (session.modelContext && covers < session.modelContext.covers) {
+			return undefined;
+		}
+		if (covers > 0 && covers < session.transcript.length && session.transcript[covers]?.role !== 'user') {
+			return undefined;
+		}
+		const context: ModelContext = {
+			summary,
+			covers,
+			version: (session.modelContext?.version ?? 0) + 1,
+			at: Date.now(),
+			...(model ? { model } : {}),
+			hash: modelContextDigest(session.transcript.slice(0, covers)),
+		};
+		session.modelContext = context;
+		this.verified.add(session);
 		this.save(session);
 		this.changed(session.id);
+		return context;
+	}
+
+	/** A cut below the summarized prefix makes the summary stale; the caller saves the session. */
+	invalidateModelContext(session: Session, cutLength: number): void {
+		if (session.modelContext && cutLength < session.modelContext.covers) {
+			session.modelContext = undefined;
+			this.verified.delete(session);
+		}
+	}
+
+	/**
+	 * Checks a stored summary against the canonical prefix once per live session object. A hand-edited
+	 * covered message makes it stale; the summary is dropped and the next turn can compact again.
+	 */
+	verifyModelContext(session: Session): boolean {
+		const context = session.modelContext;
+		if (!context || !context.hash || this.verified.has(session)) {
+			return true;
+		}
+		if (modelContextDigest(session.transcript.slice(0, context.covers)) === context.hash) {
+			this.verified.add(session);
+			return true;
+		}
+		session.modelContext = undefined;
+		this.verified.delete(session);
+		this.save(session);
+		this.changed(session.id);
+		return false;
 	}
 }
 

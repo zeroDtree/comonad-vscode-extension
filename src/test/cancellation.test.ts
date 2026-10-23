@@ -136,7 +136,7 @@ suite('Cancellation', () => {
 			const turn = kernel.ctx.agent.runTurn({
 				text: 'go',
 				surface: 'test',
-				resolveSystemContext: async () => {
+				resolveAttachments: async () => {
 					entered();
 					await new Promise(() => undefined);
 					return undefined;
@@ -168,23 +168,13 @@ suite('Cancellation', () => {
 				{ role: 'assistant', content: 'hi', at: 2, swipes: ['hi'], swipeId: 0 },
 			];
 			kernel.ctx.sessions.save(session);
-			let entered!: () => void;
-			const building = new Promise<void>((resolvePromise) => {
-				entered = resolvePromise;
-			});
 			const turn = kernel.ctx.agent.runTurn({
 				text: '',
 				trigger: 'swipe',
 				sessionId: 'swipe-stop',
 				surface: 'test',
-				resolveSystemContext: async () => {
-					entered();
-					await new Promise(() => undefined);
-					return undefined;
-				},
 			});
-			await building;
-			assert.strictEqual(kernel.ctx.agent.stop(), true);
+			assert.strictEqual(kernel.ctx.agent.stop(), true, 'the turn is owned as soon as runTurn starts');
 			const result = await within(turn);
 			assert.strictEqual(result.stopped, true);
 			const after = kernel.ctx.sessions.require('swipe-stop').transcript;

@@ -113,12 +113,31 @@ Select code in an editor and press `Cmd+L` (`Ctrl+L`) to append its token to the
 resolved when the turn runs, with numbered lines, read confinement and deny rules applied. A missing
 or denied reference becomes an error note instead of failing the turn.
 
-## Images
+Resolved references are **part of that user message**: they are kept in the transcript, survive a
+reload, and are reused by swipe/regenerate/edit. They are a snapshot — a later turn does not re-read
+the file. Ask the agent to use `read_file` when you want the current contents.
+
+A file token can name an image or a PDF too. Images become image content; PDFs become page-marked
+text when the optional **PDF documents** plugin is installed (see [Images and PDFs](#images-and-pdfs)).
+
+## Summary and full history
+
+When a chat is compacted, a summary card heads the transcript. The original turns are still in the
+chat record and sit folded under **Show original messages**; **Load older messages** pages further
+back through the canonical transcript. **Rebuild** or `/summarize --rebuild` rewrites the summary from
+the full history. Compaction never deletes chat messages or moves restore points.
+
+## Images and PDFs
 
 `read_file` reads PNG, JPEG, WebP and GIF images and sends them to the model (up to 4 MiB each).
 Prompts and tool results show thumbnails in the transcript. Image bytes live in a content-addressed
 store; the session keeps only the reference. A model that refuses images is remembered for that chat,
 and the request is retried as text.
+
+The composer accepts PDFs by `@`, drag or paste. `comonad-plugin-pdf` extracts their text page by page
+and `@file.pdf:1-5` reads a page range. Scanned PDFs have no extractable text and say so; OCR is not
+part of the plugin. Install it from **Settings → Plugins → Install… → PDF documents**. Without it, a
+PDF reference gets an installation hint instead of being decoded as text.
 
 ## Next
 

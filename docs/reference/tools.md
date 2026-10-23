@@ -18,7 +18,9 @@ Every tool declares a **capability**, whether it needs **network**, and whether 
 | MCP | `server__tool` for every tool the server exposes |
 
 `read_file` also reads PNG, JPEG, WebP and GIF images (up to 4 MiB each) and hands them to the model
-as image content.
+as image content. With the **PDF documents** plugin it reads PDFs as page-marked text; pass `pages`
+(such as `"1-5"`) to choose a range. Without the plugin it returns an installation hint rather than
+decoding the bytes as UTF-8.
 
 An `agent` call creates a hidden child session. Its card carries **Open session** while it runs; the
 read-only overlay shows the subagent's prompt, steps and tool results and follows the run live.

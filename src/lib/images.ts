@@ -7,7 +7,7 @@
  * shape, which is all the budget and the UI ask of an image.
  */
 
-import type { ImageMime, ImagePart } from './types';
+import type { ImageMime } from './types';
 
 /** One image, raw. The store's cap applies to these bytes, not to the base64 the wire carries. */
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
@@ -181,46 +181,4 @@ export function estimateImageTokens(image: { width?: number; height?: number }):
 		h = Math.max(1, Math.round(h * scale));
 	}
 	return 85 + 170 * Math.ceil(w / 512) * Math.ceil(h / 512);
-}
-
-/** What a list of images costs in a message budget. */
-export function estimateImages(images?: readonly ImagePart[]): number {
-	let total = 0;
-	for (const image of images ?? []) {
-		total += estimateImageTokens(image);
-	}
-	return total;
-}
-
-/**
- * One image read from a session file. Sessions are untrusted input: the id decides the type, and
- * sizes and names are clamped to what the UI and the budget can use.
- */
-export function asImagePart(value: unknown): ImagePart | undefined {
-	if (!value || typeof value !== 'object') {
-		return undefined;
-	}
-	const record = value as Record<string, unknown>;
-	const id = typeof record.id === 'string' ? record.id : '';
-	const mime = mimeFromImageId(id);
-	if (!mime) {
-		return undefined;
-	}
-	const part: ImagePart = { id, mime };
-	if (typeof record.name === 'string' && record.name.trim()) {
-		part.name = record.name.trim().slice(0, 120);
-	}
-	const width = dimension(record.width);
-	const height = dimension(record.height);
-	if (width !== undefined) {
-		part.width = width;
-	}
-	if (height !== undefined) {
-		part.height = height;
-	}
-	return part;
-}
-
-function dimension(value: unknown): number | undefined {
-	return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 100_000 ? value : undefined;
 }

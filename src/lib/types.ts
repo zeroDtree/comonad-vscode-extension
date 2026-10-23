@@ -32,6 +32,7 @@ export interface ToolCall {
 
 /** The image formats the readers and the OpenAI-compatible wire understand. */
 export type ImageMime = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+export type AttachmentMime = ImageMime | 'application/pdf';
 
 /**
  * An image attached to a message. The bytes live in the content-addressed attachment store, named
@@ -46,6 +47,73 @@ export interface ImagePart {
 	height?: number;
 	dataUrl?: string;
 }
+
+/** A line range for text, or a page range for a document. */
+export interface SourceRange {
+	start: number;
+	end: number;
+	unit: 'line' | 'page';
+}
+
+/** Text resolved from a reference. `origin` decides whether an edit re-resolves it. */
+export interface TextAttachment {
+	kind: 'text';
+	origin: 'user' | 'reference';
+	form: 'file' | 'folder' | 'symbol' | 'note' | 'error';
+	source: { path?: string; range?: SourceRange; symbol?: string; hash?: string };
+	text: string;
+	truncated?: boolean;
+}
+
+/** An image attachment: composer input (`user`), an `@` reference, or a tool result. */
+export interface ImageAttachment extends ImagePart {
+	kind: 'image';
+	origin: 'user' | 'reference' | 'tool';
+}
+
+/** PDF bytes with the text extracted for the selected pages. */
+export interface DocumentAttachment {
+	kind: 'document';
+	origin: 'user' | 'reference';
+	id: string;
+	mime: 'application/pdf';
+	name?: string;
+	pageCount?: number;
+	pages?: SourceRange;
+	text?: string;
+	textUnavailable?: boolean;
+	truncated?: boolean;
+}
+
+export type AttachmentPart = TextAttachment | ImageAttachment | DocumentAttachment;
+
+/**
+ * The model-facing view of a compacted conversation. It never lives in the canonical transcript:
+ * the agent derives a summary message from it and sends the tail after `covers`.
+ */
+export interface ModelContext {
+	summary: string;
+	/** How many messages at the head of the canonical transcript the summary represents. */
+	covers: number;
+	version: number;
+	at: number;
+	model?: string;
+	/** A stable digest of the covered prefix, for diagnostics and lazy staleness checks. */
+	hash?: string;
+}
+
+/** A resolved reference, in the shape a tool needs without importing the reference service. */
+export interface ReferenceResolution {
+	attachments: AttachmentPart[];
+	notices?: string[];
+	errors?: { token: string; message: string }[];
+}
+
+/** What a resolver produces; the core stamps `origin` before placing it. */
+export type ResolvedPart =
+	| Omit<TextAttachment, 'origin'>
+	| Omit<ImageAttachment, 'origin'>
+	| Omit<DocumentAttachment, 'origin'>;
 
 /** Raw bytes a tool hands back; the attachment store sniffs the real type. */
 export interface ToolImage {
@@ -63,8 +131,8 @@ export interface ToolResult {
 export interface Message {
 	role: 'system' | 'user' | 'assistant' | 'tool';
 	content: string;
-	/** Images the message carries: a prompt's attachments, or what a tool read. */
-	images?: ImagePart[];
+	/** Typed context the message carries: resolved references, prompt images, or tool images. */
+	attachments?: AttachmentPart[];
 	reasoning?: string;
 	toolCalls?: ToolCall[];
 	toolCallId?: string;
@@ -74,7 +142,7 @@ export interface Message {
 	startedAt?: number;
 	/** A character's opening line: the one assistant message that has no prompt behind it. */
 	greeting?: true;
-	/** A compaction's summary, which heads the transcript it stands in for. */
+	/** A derived model-context summary; it never lives in the canonical transcript. */
 	summarized?: true;
 	/** A reply that continues the one before it (`/continue`) rather than answering a new prompt. */
 	continued?: true;
@@ -180,6 +248,8 @@ export interface ToolContext {
 	spawnAgent: AgentSpawnFunction;
 	/** The session's private scratch directory: the only place a test shell may write. */
 	scratchDirectory?: string;
+	/** Resolve a path through the same guards and format resolvers `@` uses. */
+	resolveReference?(path: string, options?: { range?: SourceRange }): Promise<ReferenceResolution | undefined>;
 	/** Remove secret-shaped environment variables from spawned commands. Defaults to true. */
 	sensitiveEnv?: boolean;
 	/**

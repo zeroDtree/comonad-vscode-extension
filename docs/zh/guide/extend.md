@@ -60,6 +60,32 @@ export function apply(ctx, config) {
 - **配置就是插件自己的 schema。** 导出 `Config`（schemastery schema），`apply` 前会校验。
 - **坏行会被报告，不会拖垮整棵树。** 其余插件照常加载。
 
+## 引用 resolver
+
+插件可以给 `@` 增加一种文件类型，不需要改输入区、消息模型或 wire：
+
+```js
+export const inject = ['references']
+
+export function apply(ctx) {
+  ctx.effect(() => ctx.references.register({
+    id: 'my-format',
+    priority: 10,
+    mimes: ['application/x-my-format'],
+    extensions: ['.myf'],
+    claim: ({ head }) => head[0] === 0x25 && head[1] === 0x4d && head[2] === 0x59 && head[3] === 0x46, // "%MYF"
+    resolve: async (input) => {
+      const bytes = await input.readBytes(input.limits.maxDocumentBytes)
+      return [{ kind: 'text', form: 'file', source: { path: input.displayPath }, text: parse(bytes) }]
+    },
+  }))
+}
+```
+
+`ctx.references` 负责路径守卫、读取隔离、去重、预算，以及把 part 放到用户消息上的标记。resolver 只负责
+识别格式并返回类型化内容；认领后失败会变成错误提示，不会回退成 UTF-8。`comonad-plugin-pdf` 是文档
+resolver 的完整示例。
+
 ## 安装与管理
 
 **Settings → Plugins → Install…** 按名字提供 Comonad 自带的插件，也接受你自己的文件夹。安装会把文件夹

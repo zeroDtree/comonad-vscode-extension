@@ -20,6 +20,16 @@ async function exportSession(ctx: Context): Promise<void> {
 		return;
 	}
 	const lines = [`# ${session.title}`, '', `- session: ${session.id}`, `- created: ${new Date(session.createdAt).toISOString()}`, ''];
+	if (session.modelContext) {
+		lines.push(
+			'## model summary',
+			'',
+			session.modelContext.summary,
+			'',
+			`- covers ${session.modelContext.covers} messages · version ${session.modelContext.version}${session.modelContext.model ? ` · ${session.modelContext.model}` : ''}`,
+			'',
+		);
+	}
 	for (const message of session.transcript) {
 		if (message.role === 'tool') {
 			lines.push('<details><summary>tool result</summary>', '', '```', message.content.slice(0, 4_000), '```', '', '</details>', '');

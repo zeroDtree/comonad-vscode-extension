@@ -4,13 +4,14 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { MAX_DOCUMENT_BYTES, publicImages } from '../lib/attachments';
 import { asReasoningEffort } from '../lib/effort';
 import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES } from '../lib/images';
 import { APPROVAL_LABELS, MODE_LABELS } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { turnsOf, type Step, type Turn } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
-import type { Approval, ApprovalDecision, ImagePart, WorkMode } from '../lib/types';
+import type { Approval, ApprovalDecision, AttachmentPart, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
 import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
 import { formatReference } from '../lib/references';
@@ -19,7 +20,8 @@ import { countRaw } from '../lib/tokens';
 import { ChatWebviewAssets, type ChatAssetSpec } from '../services/chat-assets';
 import { inWorkspace, markForRestore, type Session } from '../services/sessions';
 import { explainDirty, restoreTo, unsavedPaths } from './journal-actions';
-import { REFERENCE_LIMITS, WorkspaceFileCache, mentionResults, resolveReferences, scopeOf } from './references';
+import { WorkspaceFileCache, mentionResults } from './mentions';
+import { REFERENCE_LIMITS, scopeOf } from '../services/references';
 import { registerCommand } from './register';
 
 /**
@@ -262,7 +264,7 @@ export function chatPanel(ctx: Context): void {
 		command: shellCommand(step.name, step.args),
 		description: shellDescription(step.name, step.args),
 		result: step.result === undefined ? undefined : clip(step.result, 30_000),
-		images: ctx.attachments.publicParts(step.images),
+		images: publicImages(step.images),
 		// A thought's length in tokens, counted with the model's tokenizer when one is warmed: the
 		// fold's summary reads it beside the duration, live and after a reload alike.
 		tokens: step.kind === 'thought' ? countRaw(step.text ?? '') : undefined,
@@ -287,16 +289,35 @@ export function chatPanel(ctx: Context): void {
 				markForRestore(session.marks, turn.promptAt),
 		);
 
-	const history = (session: Session | undefined): unknown[] => {
-		if (!session) {
-			return [];
+	const summaryMeta = (session: Session | undefined): Record<string, unknown> | undefined => {
+		if (!session?.modelContext) {
+			return undefined;
 		}
-		return turnsOf(session.transcript)
-			.slice(-60)
-			.map((turn) => ({
+		const coveredTurns = turnsOf(session.transcript).filter((turn) => turn.at <= session.modelContext!.covers).length;
+		return {
+			text: session.modelContext.summary,
+			covers: session.modelContext.covers,
+			version: session.modelContext.version,
+			at: session.modelContext.at,
+			model: session.modelContext.model,
+			coveredTurns,
+		};
+	};
+
+	const history = (session: Session | undefined, before?: number, limit = 60) => {
+		if (!session) {
+			return { turns: [] as unknown[], summary: undefined, firstTurnIndex: undefined, totalTurns: 0, hasMore: false };
+		}
+		const all = turnsOf(session.transcript);
+		const found = before === undefined ? all.length : all.findIndex((turn) => turn.index >= before);
+		const end = found < 0 ? all.length : found;
+		const page = Math.max(1, Math.min(limit, 200));
+		const start = Math.max(0, end - page);
+		return {
+			turns: all.slice(start, end).map((turn) => ({
 				index: turn.index,
 				prompt: turn.prompt,
-				promptImages: ctx.attachments.publicParts(turn.promptImages),
+				promptAttachments: ctx.attachments.publicAttachments(turn.promptAttachments),
 				greeting: turn.greeting,
 				// The reply variants and which one is showing: the webview draws `‹ n/m ›` from these.
 				swipes: turn.swipes,
@@ -308,7 +329,12 @@ export function chatPanel(ctx: Context): void {
 				startedAt: turn.startedAt,
 				endedAt: turn.endedAt,
 				steps: turn.steps.map((step) => stepPayload(step, session)),
-			}));
+			})),
+			summary: summaryMeta(session),
+			firstTurnIndex: all[start]?.index,
+			totalTurns: all.length,
+			hasMore: start > 0,
+		};
 	};
 
 	/** The turn that just finished, so a live turn settles on the same numbers as a replayed one. */
@@ -324,18 +350,18 @@ export function chatPanel(ctx: Context): void {
 	 * The transcript each panel was last handed: which chat, and how much of it. Per client, so a
 	 * second panel opening or a hidden view resyncing cannot redraw a live turn in another one.
 	 */
-	const published = new Map<vscode.Webview, { id: string; length: number }>();
+	const published = new Map<vscode.Webview, { id: string; length: number; modelContextVersion?: number }>();
 
-	/** The one place a panel is handed a transcript: a reload, a chat switch, and every rewrite. */
+	/** The one place a panel is handed a transcript page: a reload, a chat switch, and every rewrite. */
 	const publishTurns = (session: Session | undefined, only?: vscode.Webview): void => {
 		for (const client of only ? [only] : clients) {
 			if (session) {
-				published.set(client, { id: session.id, length: session.transcript.length });
+				published.set(client, { id: session.id, length: session.transcript.length, modelContextVersion: session.modelContext?.version });
 			} else {
 				published.delete(client);
 			}
 		}
-		post({ type: 'turns', sessionId: session?.id, turns: history(session) }, only);
+		post({ type: 'turns', sessionId: session?.id, ...history(session) }, only);
 	};
 
 	/** A subagent's conversation as the overlay draws it; `undefined` when it is gone. */
@@ -350,7 +376,7 @@ export function chatPanel(ctx: Context): void {
 			title: session.title,
 			subagent: session.subagent,
 			done: session.subagentDone === true,
-			turns: history(session),
+			turns: history(session).turns,
 		};
 	};
 
@@ -436,8 +462,14 @@ export function chatPanel(ctx: Context): void {
 			const seen = published.get(client);
 			const moved = seen?.id !== session.id;
 			const cut = !running && seen?.id === session.id && session.transcript.length < seen.length;
-			if (moved || cut) {
+			const summaryChanged = seen?.id === session.id && seen.modelContextVersion !== session.modelContext?.version;
+			if (moved || cut || (!running && summaryChanged)) {
 				publishTurns(session, client);
+			} else if (running && summaryChanged) {
+				// Never wipe a live stream for a summary card. The guest moves covered turns and updates the
+				// card in place; the regular repaint after the turn settles the rest.
+				post({ type: 'summary', summary: summaryMeta(session) }, client);
+				published.set(client, { ...seen!, modelContextVersion: session.modelContext?.version });
 			}
 		}
 		// After a repaint, not before it: a card the guest already holds is deduped by id.
@@ -523,7 +555,12 @@ export function chatPanel(ctx: Context): void {
 	});
 	ctx.on('agent/tool-result', (ref, call, output, images) => {
 		if (ref.surface === SURFACE) {
-			post({ type: 'tool-result', id: call.id, output: clip(output, 30_000), images: ctx.attachments.publicParts(images) });
+			post({ type: 'tool-result', id: call.id, output: clip(output, 30_000), images: publicImages(images) });
+		}
+	});
+	ctx.on('agent/attachments', (ref, attachments) => {
+		if (ref.surface === SURFACE) {
+			post({ type: 'attachments', attachments: ctx.attachments.publicAttachments(attachments) });
 		}
 	});
 	ctx.on('agent/notice', (ref, text) => {
@@ -628,42 +665,66 @@ export function chatPanel(ctx: Context): void {
 	 * Turns the composer's data URLs into stored references. The webview is not trusted: the bytes are
 	 * sniffed again by the store, and the types, count and sizes are checked here.
 	 */
-	const ingestImages = async (value: unknown): Promise<{ images: ImagePart[]; problem?: string }> => {
+	const ingestAttachments = async (value: unknown): Promise<{ attachments: AttachmentPart[]; problem?: string }> => {
 		if (!Array.isArray(value) || value.length === 0) {
-			return { images: [] };
+			return { attachments: [] };
 		}
-		const images: ImagePart[] = [];
+		const attachments: AttachmentPart[] = [];
 		const problems: string[] = [];
-		let total = 0;
+		let imageBytes = 0;
+		let documentBytes = 0;
+		let pdfHint = false;
 		for (const entry of value.slice(0, MAX_IMAGES_PER_MESSAGE)) {
-			const image = entry as { data?: unknown; name?: unknown };
-			const dataUrl = typeof image.data === 'string' ? image.data : '';
-			const match = /^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
-			if (!match) {
-				problems.push('an attachment was not a supported image');
+			const item = entry as { data?: unknown; name?: unknown };
+			const dataUrl = typeof item.data === 'string' ? item.data : '';
+			const name = typeof item.name === 'string' ? item.name : undefined;
+			const pdf = /^data:application\/pdf;base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
+			const image = pdf ? null : /^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
+			if (!pdf && !image) {
+				problems.push('an attachment was not a supported image or PDF');
 				continue;
 			}
-			const base64 = match[2]!.replace(/\s+/g, '');
-			if (base64.length > Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 64) {
-				problems.push('an image is over the 4 MiB limit');
+			const base64 = (pdf ? pdf[1] : image![2])!.replace(/\s+/g, '');
+			const limit = pdf ? MAX_DOCUMENT_BYTES : MAX_IMAGE_BYTES;
+			if (base64.length > Math.ceil((limit * 4) / 3) + 64) {
+				problems.push(pdf ? 'a PDF is over the 20 MiB limit' : 'an image is over the 4 MiB limit');
 				continue;
 			}
 			const data = Buffer.from(base64, 'base64');
-			if (total + data.byteLength > MAX_TOTAL_IMAGE_BYTES) {
+			if (pdf) {
+				if (documentBytes + data.byteLength > MAX_DOCUMENT_BYTES * 2) {
+					problems.push('the PDFs together are over the 40 MiB limit');
+					break;
+				}
+				try {
+					const stored = await ctx.attachments.putDocument(data, name);
+					attachments.push({ ...stored, origin: 'user' });
+					documentBytes += data.byteLength;
+					if (!pdfHint && !ctx.references.supports('pdf')) {
+						pdfHint = true;
+						problems.push('PDF text extraction needs the PDF documents plugin');
+					}
+				} catch (error) {
+					problems.push(describe(error));
+				}
+				continue;
+			}
+			if (imageBytes + data.byteLength > MAX_TOTAL_IMAGE_BYTES) {
 				problems.push('the images together are over the 12 MiB limit');
 				break;
 			}
 			try {
-				images.push(await ctx.attachments.put(data, typeof image.name === 'string' ? image.name : undefined));
-				total += data.byteLength;
+				const stored = await ctx.attachments.putImage(data, name);
+				attachments.push({ ...stored, origin: 'user' });
+				imageBytes += data.byteLength;
 			} catch (error) {
 				problems.push(describe(error));
 			}
 		}
 		if (value.length > MAX_IMAGES_PER_MESSAGE) {
-			problems.push(`only ${MAX_IMAGES_PER_MESSAGE} images are sent at a time`);
+			problems.push(`only ${MAX_IMAGES_PER_MESSAGE} attachments are sent at a time`);
 		}
-		return { images, problem: problems.length ? `Image(s) skipped: ${problems.join('; ')}.` : undefined };
+		return { attachments, problem: problems.length ? `Attachment(s) skipped: ${problems.join('; ')}.` : undefined };
 	};
 
 	const send = async (text: string, incoming?: unknown, source?: vscode.Webview): Promise<void> => {
@@ -683,18 +744,18 @@ export function chatPanel(ctx: Context): void {
 		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
 		try {
 			const input = text.trim();
-			const { images, problem } = await ingestImages(incoming);
+			const { attachments, problem } = await ingestAttachments(incoming);
 			if (turnController.signal.aborted) {
 				return;
 			}
 			if (problem) {
 				post({ type: 'notice', text: problem }, source);
 			}
-			if (!input && !images.length) {
+			if (!input && !attachments.length) {
 				return;
 			}
 			started = true;
-			post({ type: 'turn-start', text: input, sessionId: turnSession, images: ctx.attachments.publicParts(images) });
+			post({ type: 'turn-start', text: input, sessionId: turnSession, attachments: ctx.attachments.publicAttachments(attachments) });
 			// A command answers through the surface, and a redraw — `/compact` replaces the transcript —
 			// would wipe an answer that was already on screen. The answers are held back until the
 			// command is through; its progress is shown as it goes.
@@ -709,6 +770,7 @@ export function chatPanel(ctx: Context): void {
 				progress: (markdown: string) => post({ type: 'notice', text: markdown }),
 			};
 			const before = ctx.sessions.active()?.transcript.length ?? 0;
+			const beforeSummary = ctx.sessions.active()?.modelContext?.version;
 			const handled = await ctx.commands.handle(undefined, input, surface);
 			// A Stop during command handling ends the turn here; the slash command itself is not
 			// cancellable, so the turn waits for it but never starts the model afterwards.
@@ -717,20 +779,19 @@ export function chatPanel(ctx: Context): void {
 			}
 			if (handled.done) {
 				handledByCommand = true;
-				// A command can rewrite the chat itself: `/compact` swaps the transcript for a summary.
-				// A chat that still holds what the panel is drawing has to be handed the new transcript,
-				// before its own answer, which the redraw would wipe.
+				// A command can rewrite the chat itself, or move only the model context (`/compact`).
+				// Either way the panel is handed the new page before the command's own answer.
 				const active = ctx.sessions.active();
 				turnSession = active?.id ?? turnSession;
-				if (active && active.transcript.length !== before) {
+				if (active && (active.transcript.length !== before || active.modelContext?.version !== beforeSummary)) {
 					publishTurns(active);
 				}
 				flush();
 				if (handled.result && !streamed) {
 					post({ type: 'command', text: handled.result });
 				}
-				if (images.length) {
-					post({ type: 'notice', text: 'Commands do not use images; the attachment(s) were not sent.' }, source);
+				if (attachments.length) {
+					post({ type: 'notice', text: 'Commands do not use attachments; the attachment(s) were not sent.' }, source);
 				}
 				return;
 			}
@@ -739,13 +800,12 @@ export function chatPanel(ctx: Context): void {
 			flush();
 			const result = await ctx.agent.runTurn({
 				text: handled.text ?? input,
-				images,
+				attachments,
 				sessionId: ctx.sessions.active()?.id,
 				policy: handled.policy,
 				trigger: handled.trigger,
 				surface: SURFACE,
 				signal: turnController.signal,
-				resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
 			});
 			turnSession = result.sessionId;
 			stopped ||= result.stopped === true;
@@ -821,8 +881,8 @@ export function chatPanel(ctx: Context): void {
 			replaces,
 			continues,
 			draft: trigger === 'impersonate',
-			// A swipe or a regenerate replaces the reply in place; the prompt's pictures stay with it.
-			images: ctx.attachments.publicParts(replaces !== undefined ? last?.promptImages : undefined),
+			// A swipe or a regenerate replaces the reply in place; the prompt's attachments stay with it.
+			attachments: ctx.attachments.publicAttachments(replaces !== undefined ? last?.promptAttachments : undefined),
 		});
 		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
 		try {
@@ -832,7 +892,6 @@ export function chatPanel(ctx: Context): void {
 				trigger,
 				surface: SURFACE,
 				signal: turnController.signal,
-				resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
 			});
 			stopped ||= result.stopped === true;
 			settled = result.stopped && !result.text ? null : deliver(trigger, result.text);
@@ -957,7 +1016,6 @@ export function chatPanel(ctx: Context): void {
 				surface: SURFACE,
 				signal: turnController.signal,
 				rewriteAt: promptAt,
-				resolveSystemContext: (live, effective) => resolveReferences(effective, scopeOf(live.policy)),
 				prepareRewrite: async (live) => {
 					const mark = restoreFiles ? markForRestore(live.marks, promptAt) : undefined;
 					const workspace = live.policy.workingDirectory;
@@ -978,14 +1036,18 @@ export function chatPanel(ctx: Context): void {
 					// The webview is about to draw the cut. Every panel already holds this much of the
 					// transcript, so the `sessions/changed` this rewrite emits cannot repaint the live turn.
 					for (const client of clients) {
-						published.set(client, { id: live.id, length: promptAt });
+						published.set(client, {
+							id: live.id,
+							length: promptAt,
+							modelContextVersion: live.modelContext?.version,
+						});
 					}
 					post({
 						type: 'turn-start',
 						text: input,
 						sessionId: session.id,
 						replacesFrom: turnIndex,
-						images: ctx.attachments.publicParts(turn.promptImages),
+						attachments: ctx.attachments.publicAttachments(turn.promptAttachments),
 					});
 					started = true;
 					return true;
@@ -1087,7 +1149,7 @@ export function chatPanel(ctx: Context): void {
 					syncFocus();
 					break;
 				case 'send':
-					await send(String(message.text ?? ''), message.images, source);
+					await send(String(message.text ?? ''), message.attachments, source);
 					break;
 				case 'attachment': {
 					const id = String(message.id ?? '');
@@ -1148,6 +1210,34 @@ export function chatPanel(ctx: Context): void {
 					post({ type: 'search', query, items: ctx.sessions.search(query, 40, inHistory) });
 					break;
 				}
+				case 'loadOlder': {
+					const session = ctx.sessions.active();
+					const before = Number(message.before);
+					if (!session || !Number.isFinite(before)) {
+						break;
+					}
+					if (message.sessionId && String(message.sessionId) !== session.id) {
+						break;
+					}
+					post({ type: 'turns', sessionId: session.id, ...history(session, before), prepend: true }, source);
+					break;
+				}
+				case 'rebuildSummary': {
+					if (running) {
+						post({ type: 'notice', text: 'A turn is already running in this chat — wait for it to finish.' }, source);
+						break;
+					}
+					const session = ctx.sessions.active();
+					if (!session) {
+						break;
+					}
+					if (message.sessionId && String(message.sessionId) !== session.id) {
+						break;
+					}
+					const answer = await ctx.agent.compact(session.id, undefined, true);
+					post({ type: 'notice', text: answer }, source);
+					break;
+				}
 				case 'mentionQuery': {
 					// The picker asks only the webview that is typing; other panels must not repaint.
 					const id = Number(message.id) || 0;
@@ -1158,6 +1248,11 @@ export function chatPanel(ctx: Context): void {
 					const query = String(message.query ?? '').slice(0, REFERENCE_LIMITS.queryChars);
 					const policy = ctx.sessions.active()?.policy ?? ctx.agent.policyFor();
 					const result = await mentionResults(kind, query, scopeOf(policy), mentionFiles);
+					if (kind === 'file' && !ctx.references.supports('pdf')) {
+						result.items = result.items.map((item) =>
+							item.badge === 'pdf' ? { ...item, description: `${item.description} · PDF plugin not installed` } : item,
+						);
+					}
 					post({ type: 'mentionResults', id, kind, query, ...result }, source);
 					break;
 				}
@@ -1473,7 +1568,7 @@ export function chatPanel(ctx: Context): void {
 		if (editor.selection.end.character === 0 && editor.selection.end.line > editor.selection.start.line) {
 			end -= 1;
 		}
-		const token = formatReference({ kind: 'file', path, lines: { start, end: Math.max(start, end) } });
+		const token = formatReference({ kind: 'file', path, range: { start, end: Math.max(start, end) } });
 		await openChat();
 		insertReference(token);
 	};

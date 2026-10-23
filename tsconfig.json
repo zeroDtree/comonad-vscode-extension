@@ -32,6 +32,12 @@
             ],
             "comonad-plugin-math/*": [
                 "./packages/comonad-plugin-math/src/*"
+            ],
+            "comonad-plugin-pdf": [
+                "./packages/comonad-plugin-pdf/src/index.ts"
+            ],
+            "comonad-plugin-pdf/*": [
+                "./packages/comonad-plugin-pdf/src/*"
             ]
         },
         "sourceMap": true,

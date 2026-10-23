@@ -10,7 +10,7 @@ commands currently registered, including plugin commands.
 | `/help` | List commands |
 | `/plan [task]` | Research read-only, then write a plan |
 | `/review [focus]` | Review pending changes without editing |
-| `/summarize [notes]` | Summarize the conversation to free up context (`/compress`, `/compact`) |
+| `/summarize [notes] [--rebuild]` | Extend the model-context summary; `--rebuild` rewrites it from the full chat (`/compress`, `/compact`) |
 | `/clear`, `/new` | Start a fresh session |
 | `/fork` | Fork this session and keep exploring |
 | `/context` | Window, budget breakdown and the last request's usage |

@@ -64,6 +64,33 @@ export function apply(ctx, config) {
   config is validated before `apply`.
 - **A broken row is reported, not fatal.** The rest of the tree loads anyway.
 
+## Reference resolvers
+
+A plugin can teach `@` a new file type without touching the composer, the message model or the wire:
+
+```js
+export const inject = ['references']
+
+export function apply(ctx) {
+  ctx.effect(() => ctx.references.register({
+    id: 'my-format',
+    priority: 10,
+    mimes: ['application/x-my-format'],
+    extensions: ['.myf'],
+    claim: ({ head }) => head[0] === 0x25 && head[1] === 0x4d && head[2] === 0x59 && head[3] === 0x46, // "%MYF"
+    resolve: async (input) => {
+      const bytes = await input.readBytes(input.limits.maxDocumentBytes)
+      return [{ kind: 'text', form: 'file', source: { path: input.displayPath }, text: parse(bytes) }]
+    },
+  }))
+}
+```
+
+`ctx.references` owns path guards, read confinement, deduplication, budgets and the stamp that puts a
+part on the user message. A resolver only recognizes a format and returns typed parts; a part that
+claims a file and then fails becomes an error note, not a UTF-8 fallback. `comonad-plugin-pdf` is the
+worked example for a document resolver.
+
 ## Install and manage
 
 **Settings → Plugins → Install…** offers the plugins that ship with Comonad by name, or a folder of

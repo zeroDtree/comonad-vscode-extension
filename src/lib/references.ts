@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
  * Explicit @ references: the token grammar, its canonical formatter, and the ordering the mention
- * picker uses. Pure — no `vscode`, no `cordis`. Resolution lives in `ui/references`, which knows the
- * workspace and the session policy.
+ * picker uses. Pure — no `vscode`, no `cordis`. Resolution lives in `services/references`, which
+ * knows the workspace and the session policy; the picker lives in `ui/mentions`.
  *
  * Grammar:
  *   @path                     whole file
@@ -24,7 +24,8 @@ export interface ParsedReference {
 	kind: ReferenceKind;
 	/** Workspace-relative or absolute, unquoted, with the trailing slash removed for folders. */
 	path: string;
-	lines?: LineRange;
+	/** Numeric range: lines for text, pages for a document; the resolver decides. */
+	range?: LineRange;
 	/** Symbol name, dotted through its containers (`Auth.method`). */
 	name?: string;
 	/** Offset of the `@`. */
@@ -88,10 +89,10 @@ export function formatReference(reference: Omit<ParsedReference, 'start' | 'end'
 		return `@symbol:${path}:${reference.name ?? ''}`;
 	}
 	const slash = reference.kind === 'folder' ? '/' : '';
-	const lines = reference.lines
-		? `:${reference.lines.start}${reference.lines.end === reference.lines.start ? '' : `-${reference.lines.end}`}`
+	const range = reference.range
+		? `:${reference.range.start}${reference.range.end === reference.range.start ? '' : `-${reference.range.end}`}`
 		: '';
-	return `@${path}${slash}${lines}`;
+	return `@${path}${slash}${range}`;
 }
 
 /** Whether a failed reference is worth reporting (a decorator or prose mention is not). */
@@ -333,8 +334,8 @@ function parseToken(raw: string): Omit<ParsedReference, 'start' | 'end'> | null 
 		if (!after.startsWith(':')) {
 			return null;
 		}
-		const lines = parseRange(after.slice(1));
-		return lines ? { kind: 'file', path: read.value, lines } : null;
+		const parsedRange = parseRange(after.slice(1));
+		return parsedRange ? { kind: 'file', path: read.value, range: parsedRange } : null;
 	}
 	let path = raw;
 	let lines: LineRange | undefined;
@@ -353,7 +354,7 @@ function parseToken(raw: string): Omit<ParsedReference, 'start' | 'end'> | null 
 		path = path.replace(/\/+$/, '');
 		return path ? { kind: 'folder', path } : null;
 	}
-	return path ? { kind: 'file', path, lines } : null;
+	return path ? { kind: 'file', path, range: lines } : null;
 }
 
 function parseRange(text: string): LineRange | undefined {

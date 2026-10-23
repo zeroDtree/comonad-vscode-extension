@@ -5,21 +5,29 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Service, type Context } from 'cordis';
 import {
-	IMAGE_ID,
-	MAX_IMAGE_BYTES,
-	extensionForImage,
-	mimeFromImageId,
-	sniffImage,
-} from '../lib/images';
-import type { ImageMime, ImagePart, Message } from '../lib/types';
+	ATTACHMENT_ID,
+	MAX_DOCUMENT_BYTES,
+	mimeFromAttachmentId,
+	publicAttachments as publicAttachmentMeta,
+	sniffDocument,
+} from '../lib/attachments';
+import { MAX_IMAGE_BYTES, extensionForImage, sniffImage } from '../lib/images';
+import type {
+	AttachmentMime,
+	AttachmentPart,
+	DocumentAttachment,
+	ImageAttachment,
+	Message,
+} from '../lib/types';
 
 /**
- * Images the agent has read and images the user has attached.
+ * Bytes the agent or the user attached: images and PDFs.
  *
- * The bytes are content-addressed (`<sha256>.<ext>`), so reading the same screenshot twice costs one
- * file, and a session stores only the id, size and media type. Requests resolve ids to data URLs at
- * the `Llm.chat` boundary; the webview asks for one id at a time, so a chat with several clients never
- * broadcasts the bytes it does not use.
+ * The store is content-addressed (`<sha256>.<ext>`), so reading the same screenshot twice costs one
+ * file, and a session stores only the id and metadata. Requests resolve ids to data URLs at the
+ * `Llm.chat` boundary; the webview asks for one id at a time, so a chat with several clients never
+ * broadcasts bytes it does not use. PDF bytes are kept for a future renderer; the extracted text is
+ * what travels today.
  */
 
 declare module 'cordis' {
@@ -28,17 +36,20 @@ declare module 'cordis' {
 	}
 }
 
-/** How many resolved data URLs are kept in memory; an image is immutable, so a cache is always right. */
+/** How many resolved image data URLs are kept in memory; an image is immutable, so a cache is always right. */
 const CACHE_LIMIT = 8;
 
 /** How long an unreferenced attachment is kept before a sweep may remove it. */
 const SWEEP_AGE_MS = 24 * 60 * 60_000;
 
+type StoredImage = Omit<ImageAttachment, 'origin'>;
+type StoredDocument = Omit<DocumentAttachment, 'origin'>;
+
 export class Attachments extends Service {
 	static inject = ['host'];
 
 	private readonly dir: string;
-	/** id → data URL, in insertion order, so the oldest entry is the one to drop. */
+	/** id → image data URL, in insertion order, so the oldest entry is the one to drop. */
 	private readonly urls = new Map<string, string>();
 
 	constructor(ctx: Context) {
@@ -47,10 +58,10 @@ export class Attachments extends Service {
 	}
 
 	/**
-	 * Stores one image and returns its reference. The bytes decide the format; a caller's media type is
-	 * only a hint and is not trusted. The original file name never becomes part of the path.
+	 * Stores one image and returns its reference. The bytes decide the format; a caller's media type
+	 * is only a hint and is not trusted. The original file name never becomes part of the path.
 	 */
-	async put(data: Uint8Array, name?: string): Promise<ImagePart> {
+	async putImage(data: Uint8Array, name?: string): Promise<StoredImage> {
 		if (!data.byteLength) {
 			throw new Error('the image is empty');
 		}
@@ -61,17 +72,28 @@ export class Attachments extends Service {
 		if (data.byteLength > MAX_IMAGE_BYTES) {
 			throw new Error(`the image is ${(data.byteLength / 1_048_576).toFixed(1)} MB; the limit is ${MAX_IMAGE_BYTES / 1_048_576} MB`);
 		}
-		const id = `${createHash('sha256').update(data).digest('hex')}.${extensionForImage(image.mime)}`;
-		mkdirSync(this.dir, { recursive: true });
-		try {
-			await writeFile(join(this.dir, id), data, { flag: 'wx', mode: 0o600 });
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-				throw error;
-			}
-			// Already stored: content addressing makes this the successful path, not a collision.
+		const id = await this.write(data, extensionForImage(image.mime));
+		const part: StoredImage = { kind: 'image', id, mime: image.mime, width: image.width, height: image.height };
+		const clean = cleanName(name);
+		if (clean) {
+			part.name = clean;
 		}
-		const part: ImagePart = { id, mime: image.mime, width: image.width, height: image.height };
+		return part;
+	}
+
+	/** Stores one PDF's bytes. Parsing and page counts belong to the PDF resolver, not the store. */
+	async putDocument(data: Uint8Array, name?: string): Promise<StoredDocument> {
+		if (!data.byteLength) {
+			throw new Error('the PDF is empty');
+		}
+		if (!sniffDocument(data)) {
+			throw new Error('not a PDF file');
+		}
+		if (data.byteLength > MAX_DOCUMENT_BYTES) {
+			throw new Error(`the PDF is ${(data.byteLength / 1_048_576).toFixed(1)} MB; the limit is ${MAX_DOCUMENT_BYTES / 1_048_576} MB`);
+		}
+		const id = await this.write(data, 'pdf');
+		const part: StoredDocument = { kind: 'document', id, mime: 'application/pdf' };
 		const clean = cleanName(name);
 		if (clean) {
 			part.name = clean;
@@ -80,8 +102,8 @@ export class Attachments extends Service {
 	}
 
 	/** The bytes behind one reference, or `undefined` when the id is malformed or the file is gone. */
-	read(id: string): { data: Buffer; mime: ImageMime } | undefined {
-		const mime = mimeFromImageId(id);
+	read(id: string): { data: Buffer; mime: AttachmentMime } | undefined {
+		const mime = mimeFromAttachmentId(id);
 		if (!mime) {
 			return undefined;
 		}
@@ -93,24 +115,27 @@ export class Attachments extends Service {
 	}
 
 	/** A `data:` URL for one reference. Synchronous: the chat payloads that use it are synchronous too. */
-	dataUrl(image: Pick<ImagePart, 'id' | 'mime'>): string | undefined {
-		const cached = this.urls.get(image.id);
+	dataUrl(part: Pick<ImageAttachment, 'id' | 'mime'> | Pick<DocumentAttachment, 'id' | 'mime'>): string | undefined {
+		const cacheable = part.mime.startsWith('image/');
+		const cached = cacheable ? this.urls.get(part.id) : undefined;
 		if (cached !== undefined) {
 			// Refresh insertion order: the entries the next request will ask for stay cached.
-			this.urls.delete(image.id);
-			this.urls.set(image.id, cached);
+			this.urls.delete(part.id);
+			this.urls.set(part.id, cached);
 			return cached;
 		}
-		const read = this.read(image.id);
+		const read = this.read(part.id);
 		if (!read) {
 			return undefined;
 		}
 		const url = `data:${read.mime};base64,${read.data.toString('base64')}`;
-		this.urls.set(image.id, url);
-		if (this.urls.size > CACHE_LIMIT) {
-			const oldest = this.urls.keys().next().value;
-			if (oldest !== undefined) {
-				this.urls.delete(oldest);
+		if (cacheable) {
+			this.urls.set(part.id, url);
+			if (this.urls.size > CACHE_LIMIT) {
+				const oldest = this.urls.keys().next().value;
+				if (oldest !== undefined) {
+					this.urls.delete(oldest);
+				}
 			}
 		}
 		return url;
@@ -118,52 +143,48 @@ export class Attachments extends Service {
 
 	/** A `data:` URL by id, for the webview's lazy image requests. */
 	dataUrlById(id: string): string | undefined {
-		const mime = mimeFromImageId(id);
+		const mime = mimeFromAttachmentId(id);
 		return mime ? this.dataUrl({ id, mime }) : undefined;
 	}
 
 	/**
 	 * Copies of the messages with their images resolved, for one request. The transcript itself keeps
-	 * metadata only: the copy is discarded when the adapter returns.
+	 * metadata only: the copy is discarded when the adapter returns. PDF text is already stored; its
+	 * bytes are not needed on the Chat Completions wire.
 	 */
 	resolveMessages(messages: readonly Message[]): Message[] {
 		return messages.map((message) => {
-			if (!message.images?.length) {
+			if (!message.attachments?.length) {
 				return message;
 			}
-			const images: ImagePart[] = [];
-			for (const image of message.images) {
-				const dataUrl = this.dataUrl(image);
+			const attachments: AttachmentPart[] = [];
+			let missing = 0;
+			for (const part of message.attachments) {
+				if (part.kind !== 'image') {
+					attachments.push(part);
+					continue;
+				}
+				if (part.dataUrl) {
+					attachments.push(part);
+					continue;
+				}
+				const dataUrl = this.dataUrl(part);
 				if (dataUrl) {
-					images.push({ ...image, dataUrl });
+					attachments.push({ ...part, dataUrl });
+				} else {
+					missing += 1;
 				}
 			}
-			const missing = message.images.length - images.length;
 			const content = missing
 				? `${message.content}${message.content ? '\n' : ''}[${missing} attachment(s) unavailable]`
 				: message.content;
-			return { ...message, content, images: images.length ? images : undefined };
+			return { ...message, content, attachments: attachments.length ? attachments : undefined };
 		});
 	}
 
-	/** Metadata only, as a webview payload: no base64 and no accidental `dataUrl`. */
-	publicParts(images?: readonly ImagePart[]): ImagePart[] | undefined {
-		if (!images?.length) {
-			return undefined;
-		}
-		return images.map((image) => {
-			const part: ImagePart = { id: image.id, mime: image.mime };
-			if (image.name) {
-				part.name = image.name;
-			}
-			if (image.width !== undefined) {
-				part.width = image.width;
-			}
-			if (image.height !== undefined) {
-				part.height = image.height;
-			}
-			return part;
-		});
+	/** Metadata only, as a webview payload: no base64, and only a preview of reference text. */
+	publicAttachments(attachments?: readonly AttachmentPart[]): AttachmentPart[] | undefined {
+		return publicAttachmentMeta(attachments);
 	}
 
 	/**
@@ -180,7 +201,7 @@ export class Attachments extends Service {
 		}
 		const now = Date.now();
 		for (const name of names) {
-			if (!IMAGE_ID.test(name) || keep.has(name)) {
+			if (!ATTACHMENT_ID.test(name) || keep.has(name)) {
 				continue;
 			}
 			const path = join(this.dir, name);
@@ -196,6 +217,20 @@ export class Attachments extends Service {
 			}
 		}
 		return removed;
+	}
+
+	private async write(data: Uint8Array, extension: string): Promise<string> {
+		const id = `${createHash('sha256').update(data).digest('hex')}.${extension}`;
+		mkdirSync(this.dir, { recursive: true });
+		try {
+			await writeFile(join(this.dir, id), data, { flag: 'wx', mode: 0o600 });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+				throw error;
+			}
+			// Already stored: content addressing makes this the successful path, not a collision.
+		}
+		return id;
 	}
 }
 

@@ -1,0 +1,15 @@
+{
+	"name": "comonad-plugin-pdf",
+	"displayName": "PDF documents",
+	"description": "Read PDF text and page ranges as @ references, as a Comonad plugin row.",
+	"version": "0.2.0",
+	"private": true,
+	"main": "./dist/index.js",
+	"comonad": {
+		"plugin": true,
+		"label": "PDF documents"
+	},
+	"files": [
+		"dist"
+	]
+}

@@ -2,6 +2,7 @@
 import { lstat, mkdir, open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
+import { sniffDocument } from '../lib/attachments';
 import { MAX_IMAGE_BYTES, looksLikeImagePath, sniffImage } from '../lib/images';
 import { guardPath, isDeniedRead } from '../lib/sandbox';
 import { objectSchema, type ToolContext } from '../lib/types';
@@ -37,6 +38,23 @@ async function readHead(path: string, size: number): Promise<Buffer> {
 	} finally {
 		await handle.close();
 	}
+}
+
+/** A PDF page argument: absent, a valid range, or `null` when the text is not a range. */
+function parsePages(value?: string): { start: number; end: number } | null | undefined {
+	if (value === undefined || !value.trim()) {
+		return undefined;
+	}
+	const match = /^(\d+)(?:-(\d+))?$/.exec(value.trim());
+	if (!match) {
+		return null;
+	}
+	const start = Number(match[1]);
+	const end = match[2] ? Number(match[2]) : start;
+	if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) {
+		return null;
+	}
+	return { start, end };
 }
 
 async function walk(dir: string, visit: (file: string) => Promise<void>): Promise<void> {
@@ -81,7 +99,7 @@ export const fsTools = toolset([
 	{
 		name: 'read_file',
 		description:
-			'Read a workspace file. Text is returned as UTF-8; PNG, JPEG, GIF and WebP images are attached to the model as image content. Optionally start at a line and limit the number of lines for text files.',
+			'Read a workspace file. Text is returned as UTF-8; PNG, JPEG, GIF and WebP images are attached to the model as image content; PDFs are read as page-marked text (install the PDF plugin), optionally with a page range. Optionally start at a line and limit the number of lines for text files.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -90,13 +108,31 @@ export const fsTools = toolset([
 				path: { type: 'string' },
 				startLine: { type: 'number', description: '1-based first line. Text files only.' },
 				lines: { type: 'number', description: 'How many lines to read. Text files only.' },
+				pages: { type: 'string', description: 'PDF page range, e.g. "1-5". PDFs only.' },
 			},
 			['path'],
 		),
 		async execute(args, ctx) {
-			const { path, startLine, lines } = args as { path: string; startLine?: number; lines?: number };
+			const { path, startLine, lines, pages } = args as { path: string; startLine?: number; lines?: number; pages?: string };
 			const target = await readable(ctx, path);
 			const info = await stat(target);
+			const head = await readHead(target, 1_024);
+			if (sniffDocument(head)) {
+				const range = parsePages(pages);
+				if (range === null) {
+					return `Error: "${pages}" is not a page range; use a page or a range such as 1-5.`;
+				}
+				if (!ctx.resolveReference) {
+					return `Error: PDF support is not installed. Install "PDF documents" from Settings → Plugins → Install…`;
+				}
+				const resolved = await ctx.resolveReference(path, range ? { range: { ...range, unit: 'page' } } : undefined);
+				const document = resolved?.attachments.find((part) => part.kind === 'document');
+				if (document?.kind === 'document' && document.text) {
+					return `Read PDF ${path}${document.pages ? ` (pages ${document.pages.start}-${document.pages.end}${document.pageCount ? ` of ${document.pageCount}` : ''})` : ''}:\n${document.text}`;
+				}
+				const problem = resolved?.errors?.[0]?.message;
+				return `Error: ${problem ?? 'the PDF has no extractable text; scanned PDFs are not supported.'}`;
+			}
 			// A huge binary is not loaded just to learn it is an image; a header is enough.
 			if (info.size > MAX_IMAGE_BYTES) {
 				const probe = sniffImage(await readHead(target, 64 * 1024));

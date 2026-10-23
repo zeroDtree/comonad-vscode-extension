@@ -9,7 +9,7 @@
 | `/help` | 列出命令 |
 | `/plan [task]` | 只读研究，然后写计划 |
 | `/review [focus]` | 只读审查待处理变更 |
-| `/summarize [notes]` | 摘要对话以释放上下文（`/compress`、`/compact`） |
+| `/summarize [notes] [--rebuild]` | 扩展模型上下文摘要；`--rebuild` 从完整聊天重写（`/compress`、`/compact`） |
 | `/clear`、`/new` | 新建会话 |
 | `/fork` | Fork 当前会话并继续探索 |
 | `/context` | 窗口、预算拆分与上次请求用量 |
