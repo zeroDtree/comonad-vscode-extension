@@ -189,6 +189,9 @@ frontmatter **选择**工具；写能力还需要 `comonad.subagents` 中的**�
 `test` 启用 `run_shell_test`。`run_shell`、`start_shell` 和计划写入永远不会授予子 Agent。没有 `tools`
 列表的定义视为只读。父模式也必须允许该能力。见[安全](/zh/guide/safety#子-agent)。
 
+`maxTurns`（默认 20）按每回合两图步、最少四步来收紧子 Agent 的图步预算；它只能收紧
+`comonad.subagentStepsMode`/`comonad.subagentSteps`，不能放宽。见[设置](/zh/reference/settings#子-agent)。
+
 ### MCP
 
 MCP 服务器在 `comonad.mcpServers` 中配置：

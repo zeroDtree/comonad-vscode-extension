@@ -723,6 +723,24 @@
           "default": 0,
           "markdownDescription": "Maximum graph steps per turn. `0` means no limit."
         },
+        "comonad.subagentStepsMode": {
+          "type": "string",
+          "enum": [
+            "inherit",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Subagents share the turn's Max steps.",
+            "Subagents spend the budget in comonad.subagentSteps."
+          ],
+          "default": "custom",
+          "markdownDescription": "Where a subagent's step budget comes from: the turn's `maxSteps` (`inherit`) or `comonad.subagentSteps` (`custom`). A definition's `maxTurns` can only tighten it."
+        },
+        "comonad.subagentSteps": {
+          "type": "number",
+          "default": 40,
+          "markdownDescription": "Steps a subagent may take when `comonad.subagentStepsMode` is `custom`. `0` means no limit."
+        },
         "comonad.planDirectory": {
           "type": "string",
           "default": "",

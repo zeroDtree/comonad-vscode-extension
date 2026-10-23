@@ -67,7 +67,7 @@ import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { agentIndex, agentLines, allowedToolsFor, skillLines } from './catalog';
 import type { JournalApi } from '../lib/journal';
-import { DEFAULT_CONTEXT_WINDOW, subagentGrant } from './settings';
+import { DEFAULT_CONTEXT_WINDOW, subagentGrant, subagentStepBudget } from './settings';
 import {
 	canRewrite,
 	createdInWorkspace,
@@ -2112,7 +2112,9 @@ export class Agent extends Service {
 				try {
 					abort.signal.throwIfAborted();
 					const outcome = await runGraph(this.graph(), state, {
-						maxSteps: Math.max(4, (agent?.maxTurns ?? 20) * 2),
+						// The parent turn's budget is the default only when the setting says to inherit:
+						// a subagent otherwise spends its own configured budget.
+						maxSteps: subagentStepBudget(this.ctx.settings.get(), parent.policy.maxSteps ?? 0, agent?.maxTurns),
 						signal: abort.signal,
 						choose: (soft: SoftRequest) => this.ctx.llm.choose(policy.model, soft, abort.signal),
 						onStep: (current) => remember(current.transcript),

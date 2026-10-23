@@ -469,10 +469,24 @@
 		post({ type: 'saveSubagents', subagents: grants });
 	}
 
+	// The budget input only applies to `custom`: leaving it enabled under `inherit` would invite edits
+	// that never take effect.
+	const syncSubagentSteps = () => {
+		const mode = $('subagent-steps-mode');
+		const steps = $('subagent-steps');
+		if (mode && steps) {
+			steps.disabled = mode.value === 'inherit';
+		}
+	};
+	$('subagent-steps-mode').addEventListener('change', syncSubagentSteps);
+
 	/** The tabs the Save button owns: a state push leaves them alone while the form is dirty. */
 	function renderDraftForm() {
 		const config = state.config;
 		put($('steps'), String(config.maxSteps));
+		put($('subagent-steps-mode'), config.subagentStepsMode);
+		put($('subagent-steps'), String(config.subagentSteps));
+		syncSubagentSteps();
 		const rules = config.permissions || {};
 		put($('rules-allow'), (rules.allow || []).join('\n'));
 		put($('rules-ask'), (rules.ask || []).join('\n'));
@@ -484,6 +498,8 @@
 	function collectDraft() {
 		const config = {
 			maxSteps: Number($('steps').value) || 0,
+			subagentStepsMode: $('subagent-steps-mode').value,
+			subagentSteps: Number($('subagent-steps').value) || 0,
 			graph: $('graph').value,
 		};
 		// A pane owns its own keys: it contributes the ones its tab holds, and nothing else.

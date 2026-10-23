@@ -68,6 +68,7 @@ import {
 	profileKeyEnvs,
 	sanitizeSubagentGrants,
 	subagentGrant,
+	subagentStepBudget,
 } from '../services/settings';
 import { toolset } from '../services/tools';
 import { promptText } from '../services/agent';
@@ -413,6 +414,19 @@ suite('Comonad domain', () => {
 		const outcome = await runGraph(graph, { value: 0 });
 		assert.strictEqual(outcome.status, 'done');
 		assert.strictEqual(outcome.state.value, 200);
+	});
+
+	test("a subagent's step budget is inherited or its own, and maxTurns only tightens it", () => {
+		const custom = { subagentStepsMode: 'custom' as const, subagentSteps: 40 };
+		const inherit = { subagentStepsMode: 'inherit' as const, subagentSteps: 40 };
+		assert.strictEqual(subagentStepBudget(custom, 0), 40, 'custom spends its own budget');
+		assert.strictEqual(subagentStepBudget(inherit, 12), 12, 'inherit shares the turn budget');
+		assert.strictEqual(subagentStepBudget(inherit, 0), 0, 'inheriting an unlimited turn is unlimited');
+		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 0 }, 0), 0, 'custom 0 means no limit');
+		assert.strictEqual(subagentStepBudget(inherit, 0, 20), 40, 'maxTurns bounds an inherited unlimited budget');
+		assert.strictEqual(subagentStepBudget(custom, 0, 10), 20, 'maxTurns counts two steps a turn');
+		assert.strictEqual(subagentStepBudget(custom, 0, 1), 4, 'and never below four steps');
+		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 100 }, 0, 20), 40, 'maxTurns can only tighten');
 	});
 
 	test('invalid graphs are rejected', () => {

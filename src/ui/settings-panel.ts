@@ -15,7 +15,7 @@ import { type ContextForm } from '../lib/prompt';
 import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
-import { asList, normalizeAgentPatch, profileKeyEnvs, sanitizeSubagentGrants, subagentGrant, type Profile, type ToolCardMode } from '../services/settings';
+import { asList, normalizeAgentPatch, profileKeyEnvs, sanitizeSubagentGrants, SUBAGENT_STEPS_MODES, subagentGrant, type Profile, type SubagentStepsMode, type ToolCardMode } from '../services/settings';
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
@@ -276,6 +276,17 @@ export function settingsPanel(ctx: Context): void {
 			const steps = Number(patch.maxSteps);
 			next.maxSteps = Number.isFinite(steps) ? Math.max(0, steps) : current.maxSteps;
 		}
+		if (Object.hasOwn(patch, 'subagentStepsMode')) {
+			const mode = patch.subagentStepsMode;
+			next.subagentStepsMode =
+				typeof mode === 'string' && (SUBAGENT_STEPS_MODES as readonly string[]).includes(mode)
+					? (mode as SubagentStepsMode)
+					: current.subagentStepsMode;
+		}
+		if (Object.hasOwn(patch, 'subagentSteps')) {
+			const steps = Number(patch.subagentSteps);
+			next.subagentSteps = Number.isFinite(steps) ? Math.max(0, steps) : current.subagentSteps;
+		}
 		if (Object.hasOwn(patch, 'allow') || Object.hasOwn(patch, 'ask') || Object.hasOwn(patch, 'deny')) {
 			next.permissions = {
 				allow: ruleList(patch.allow ?? current.permissions.allow, 'allow'),
@@ -365,6 +376,8 @@ export function settingsPanel(ctx: Context): void {
 				confineWrite: config.confineWrite,
 				allowUnsandboxedShell: config.allowUnsandboxedShell,
 				maxSteps: config.maxSteps,
+				subagentStepsMode: config.subagentStepsMode,
+				subagentSteps: config.subagentSteps,
 				displayForm: config.displayForm,
 				toolCard: config.toolCard,
 				contextForm: config.contextForm,
@@ -1129,6 +1142,19 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <label for="steps">Max steps</label>
         <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
         <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
+      </div>
+      <div class="field">
+        <label for="subagent-steps-mode">Subagent steps</label>
+        <p class="hint">Where a subagent's step budget comes from. A definition's <code>maxTurns</code> can tighten it, never loosen it.</p>
+        <select id="subagent-steps-mode" class="control" data-key="subagentStepsMode">
+          <option value="inherit">Inherit — same as Max steps</option>
+          <option value="custom">Custom — the budget below</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="subagent-steps">Subagent step budget</label>
+        <p class="hint">Steps a subagent may take when Subagent steps is Custom. 0 means no limit.</p>
+        <input id="subagent-steps" class="control" type="number" min="0" data-key="subagentSteps" />
       </div>
     </div>
   </section>

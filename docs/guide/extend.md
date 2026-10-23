@@ -200,6 +200,10 @@ Read-only tools need no grant. `files` enables only tracked file tools (`write_f
 granted to a subagent. A definition without a `tools` list is read-only. The parent mode must allow
 the capability too. See [Safety](/guide/safety#subagents).
 
+`maxTurns` (default 20) bounds the child's graph budget at two steps per turn, with a minimum of
+four steps. It can tighten `comonad.subagentStepsMode`/`comonad.subagentSteps` but never loosen
+them; see [Settings](/reference/settings#subagents).
+
 ### MCP
 
 MCP servers are configured in `comonad.mcpServers`:

@@ -14,6 +14,10 @@ import type { Host } from './host';
 export type ToolCardMode = 'collapsed' | 'preview' | 'open';
 export const TOOL_CARD_MODES: readonly ToolCardMode[] = ['collapsed', 'preview', 'open'];
 
+/** Where a subagent's step budget comes from: the turn's own `maxSteps`, or a budget of its own. */
+export type SubagentStepsMode = 'inherit' | 'custom';
+export const SUBAGENT_STEPS_MODES: readonly SubagentStepsMode[] = ['inherit', 'custom'];
+
 export interface Profile {
 	id: string;
 	label?: string;
@@ -226,6 +230,10 @@ export interface Config {
 	/** Workspace-relative folder for plan files; empty uses `.comonad/plans`. */
 	planDirectory: string;
 	maxSteps: number;
+	/** Whether a subagent shares the turn's `maxSteps` or spends `subagentSteps`. */
+	subagentStepsMode: SubagentStepsMode;
+	/** A subagent's own step budget when the mode is `custom`; `0` means no limit. */
+	subagentSteps: number;
 	graph: string;
 	model: string;
 	profiles: Profile[];
@@ -278,6 +286,8 @@ export const CONFIG_KEYS = [
 	'confineWrite',
 	'planDirectory',
 	'maxSteps',
+	'subagentStepsMode',
+	'subagentSteps',
 	'graph',
 	'model',
 	'profiles',
@@ -401,6 +411,25 @@ export function normalizeAgentPatch(patch: Record<string, unknown>, current: Age
 	return next;
 }
 
+/**
+ * The step budget for one subagent run. `inherit` shares the turn's `maxSteps`; `custom` spends
+ * `subagentSteps`. A definition's `maxTurns` counts turns rather than graph steps, so it keeps its
+ * old two-steps-per-turn reading — and it can only tighten the chosen budget, never loosen it.
+ * `0` means no limit, on either side of the comparison.
+ */
+export function subagentStepBudget(
+	config: Pick<Config, 'subagentStepsMode' | 'subagentSteps'>,
+	inherited: number,
+	maxTurns?: number,
+): number {
+	const own = config.subagentStepsMode === 'inherit' ? inherited : config.subagentSteps;
+	const definition = maxTurns === undefined ? 0 : Math.max(4, maxTurns * 2);
+	if (own <= 0) {
+		return definition;
+	}
+	return definition <= 0 ? own : Math.min(own, definition);
+}
+
 declare module 'cordis' {
 	interface Context {
 		settings: Settings;
@@ -456,6 +485,10 @@ export class Settings extends Service {
 			confineWrite: flag('confineWrite', true),
 			planDirectory: typeof raw.planDirectory === 'string' ? raw.planDirectory : '',
 			maxSteps: count('maxSteps', 0, 0),
+			// Kept apart so a hand-edited file can carry one without the other; `custom` with the
+			// shipped 40 matches the old budget every subagent got (`maxTurns` 20 × 2 steps).
+			subagentStepsMode: oneOf('subagentStepsMode', SUBAGENT_STEPS_MODES, 'custom'),
+			subagentSteps: count('subagentSteps', 40, 0),
 			graph: typeof raw.graph === 'string' ? raw.graph : DEFAULT_GRAPH_SOURCE,
 			model: typeof raw.model === 'string' ? raw.model : 'auto',
 			// An empty list means "nothing configured", which would leave the chat without a model, so

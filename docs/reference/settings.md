@@ -41,6 +41,8 @@ UI.
 | `comonad.commandTimeout` | `60` | Fallback shell timeout in seconds |
 | `comonad.commandTimeoutOverride` | `false` | Always use that value and ignore the model's timeout |
 | `comonad.maxSteps` | `0` (no limit) | Maximum graph steps per turn |
+| `comonad.subagentStepsMode` | `custom` | `inherit` shares the turn's `maxSteps`; `custom` spends `comonad.subagentSteps` |
+| `comonad.subagentSteps` | `40` | Subagent step budget under `custom`; `0` means no limit. A definition's `maxTurns` can only tighten it |
 | `comonad.filterSensitiveEnv` | `true` | Strip keys, tokens and passwords from command environments |
 | `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | Rule lists; see [Safety](/guide/safety#_2-rules) |
 | `comonad.subagents` | `{}` | Per-agent subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Built-in `implement` defaults to both; every other agent is read-only until granted. |
@@ -64,6 +66,11 @@ Read-only tools are always available. `files` and `test` are the only grants; `r
 tool using the capability; a definition without a `tools` list is read-only. The parent mode still
 has to allow the capability. Built-in `implement` defaults to both grants; every other built-in and
 every custom agent is read-only until configured. See [Safety](/guide/safety#subagents).
+
+Steps: `comonad.subagentStepsMode` defaults to `custom`, where each subagent spends
+`comonad.subagentSteps` (40) graph steps; `inherit` gives it the turn's `maxSteps` instead. A
+definition's `maxTurns` counts turns and can lower either budget (two steps per turn, four at the
+minimum), but never raise it.
 
 ## Checkpoints
 

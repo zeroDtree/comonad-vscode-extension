@@ -40,6 +40,8 @@
 | `comonad.commandTimeout` | `60` | shell 超时回退值（秒） |
 | `comonad.commandTimeoutOverride` | `false` | 始终使用该值，忽略模型选择的超时 |
 | `comonad.maxSteps` | `0`（无限制） | 每回合最大图步数 |
+| `comonad.subagentStepsMode` | `custom` | `inherit` 共享该回合的 `maxSteps`；`custom` 使用 `comonad.subagentSteps` |
+| `comonad.subagentSteps` | `40` | `custom` 下子 Agent 的步数预算；`0` 表示无限制。定义的 `maxTurns` 只能收紧它 |
 | `comonad.filterSensitiveEnv` | `true` | 从命令环境中移除 key、token 与密码 |
 | `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | 规则列表；见[安全](/zh/guide/safety#_2-规则) |
 | `comonad.subagents` | `{}` | 子 Agent 的逐 Agent 授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。内置 `implement` 默认两者都有；其它 Agent 默认只读。 |
@@ -62,6 +64,10 @@
 子 Agent。Agent 定义还必须列出使用该能力的工具；没有 `tools` 列表的定义视为只读。父模式仍需允许该
 能力。内置 `implement` 默认获得两种授权；其它内置和所有自定义 Agent 默认只读，需显式配置。见
 [安全](/zh/guide/safety#子-agent)。
+
+步数：`comonad.subagentStepsMode` 默认 `custom`，每个子 Agent 花费 `comonad.subagentSteps`（40）个图步；
+设为 `inherit` 时改用该回合的 `maxSteps`。定义里的 `maxTurns` 按回合计数，只会收紧预算（每回合两图步，
+最少四步），不会放宽。
 
 ## 检查点
 
