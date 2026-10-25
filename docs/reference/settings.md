@@ -40,12 +40,23 @@ UI.
 | `comonad.allowFullAccess` | `true` | Offer the unrestricted preset |
 | `comonad.commandTimeout` | `60` | Fallback shell timeout in seconds |
 | `comonad.commandTimeoutOverride` | `false` | Always use that value and ignore the model's timeout |
-| `comonad.maxSteps` | `0` (no limit) | Maximum graph steps per turn |
+| `comonad.maxSteps` | `0` (no limit) | Maximum graph steps per turn; a workflow stage's own budget is bounded by this |
 | `comonad.subagentStepsMode` | `custom` | `inherit` shares the turn's `maxSteps`; `custom` spends `comonad.subagentSteps` |
 | `comonad.subagentSteps` | `40` | Subagent step budget under `custom`; `0` means no limit. A definition's `maxTurns` can only tighten it |
 | `comonad.filterSensitiveEnv` | `true` | Strip keys, tokens and passwords from command environments |
 | `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | Rule lists; see [Safety](/guide/safety#_2-rules) |
 | `comonad.subagents` | `{}` | Per-agent subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Built-in `implement` defaults to both; every other agent is read-only until granted. |
+
+## Graph and workflows
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `comonad.graph` | shipped `agent` loop | Mermaid source for the Graph plugin's named graphs; empty uses the shipped graph. Edit it in **Settings → Graph**. |
+| `comonad.workflows` | shipped **Standard coding task** | The workflow library: named workflows, their stages and host checks. Edit it in **Settings → Workflow**. |
+
+A workflow stage runs one of the graphs by id. The shipped preset is Research → Plan (approval) →
+Implement → Verify → Review; duplicate it in the Workflow tab to make a variant. `/workflow [id] [task]`
+runs one for a single turn. See [Workflows](/guide/workflows).
 
 ## Subagents
 

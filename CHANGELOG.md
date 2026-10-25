@@ -12,6 +12,12 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 ### Highlights
 
+- **Graphs and workflows are plugins.** The graph engine now owns named Mermaid graphs, a node/route
+  registry and a dedicated **Graph** tab with a live preview. A new **Workflow** plugin composes those
+  graphs into user-editable stages, gates and host checks. The shipped **Standard coding task** is
+  Research → Plan (approval) → Implement → Verify → Review; verification reads fresh editor errors
+  in the files this turn wrote and runs the commands you configure, then sends failures back to the
+  repair stage. Customize both in Settings; `/workflow [id] [task]` runs one for a single turn.
 - **Compaction no longer rewrites the chat.** The canonical transcript is kept in full; a summary
   card and model-context coverage live beside it. Original turns expand from the card, older turns
   page in on demand, and restore points no longer move. `/summarize --rebuild` can rewrite the

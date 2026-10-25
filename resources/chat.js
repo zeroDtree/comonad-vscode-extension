@@ -933,12 +933,44 @@
 		jumpButton.hidden = pinned;
 	}
 
+	// What the reader last saw, so a scroll the content itself caused is not read as the reader
+	// scrolling away.
+	let lastHeight = messagesEl.scrollHeight;
+	let lastTop = messagesEl.scrollTop;
+
 	messagesEl.addEventListener('scroll', () => {
-		// A few pixels of slack, not a screen line: reading the last lines while a reply streams is
-		// exactly when the transcript must stop moving under the pointer.
-		pinned = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 8;
+		const height = messagesEl.scrollHeight;
+		const top = messagesEl.scrollTop;
+		const distance = height - top - messagesEl.clientHeight;
+		// A picture decoding above the reader grows the transcript, and scroll anchoring moves the
+		// offset to hold their place; that scroll event is not the reader leaving the end. Only growth
+		// that moved the offset down (never a wheel, which unpins first) keeps the transcript following.
+		const grew = height > lastHeight && top >= lastTop;
+		lastHeight = height;
+		lastTop = top;
+		if (distance < 8) {
+			// A few pixels of slack, not a screen line: reading the last lines while a reply streams is
+			// exactly when the transcript must stop moving under the pointer.
+			pinned = true;
+		} else if (pinned && grew) {
+			scroll(true);
+			return;
+		} else {
+			pinned = false;
+		}
 		paintJump();
 	});
+
+	// The footer (workflow strip, todos, the changes panel) and the panel's own size take room from
+	// the transcript without scrolling it: a reader at the end keeps seeing the end.
+	if (typeof ResizeObserver === 'function') {
+		const follow = new ResizeObserver(() => scroll());
+		follow.observe(messagesEl);
+		const footerEl = document.querySelector('footer');
+		if (footerEl) {
+			follow.observe(footerEl);
+		}
+	}
 
 	// A wheel turned upward unpins before its scroll event lands, so a token painted in the same
 	// frame cannot snap the reader back to the bottom first.
@@ -1459,12 +1491,26 @@
 		img.title = [part.name, part.mime, part.width && part.height ? part.width + '×' + part.height : '']
 			.filter(Boolean)
 			.join(' · ');
+		// Reserve the box the picture will fill from the size in its header. Without it the <img> is
+		// empty until the bytes arrive, and the transcript grows a frame after the scroll that was
+		// meant to bring the card into view — which a reader following the end sees as the bottom
+		// disappearing. The thumbnail's CSS caps are mirrored here so the reserved box is final.
+		const width = Number(part.width);
+		const height = Number(part.height);
+		if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+			const scale = Math.min(1, 180 / width, 120 / height);
+			img.width = Math.max(1, Math.round(width * scale));
+			img.height = Math.max(1, Math.round(height * scale));
+		}
 		const url = attachmentUrls.get(part.id);
 		if (url) {
 			img.src = url;
 		} else {
 			requestAttachment(part.id);
 		}
+		// A picture whose header carried no size, or one that decodes after the scroll that placed it,
+		// still belongs to the end a following reader is watching; scroll() leaves an unpinned one be.
+		img.addEventListener('load', () => scroll());
 		return img;
 	}
 
@@ -2750,12 +2796,19 @@
 		root.className = 'msg approval';
 		root.dataset.id = message.id;
 		root.dataset.session = message.sessionId || '';
-		root.innerHTML =
-			'<div class="approval-card"><div class="a-title">⚠ Approval required</div><div class="a-reason">' +
-			esc(message.reason || '') +
-			'</div><ul class="calls">' +
-			calls +
-			'</ul><div class="actions"><button class="primary" data-d="allow">Allow once</button><button data-d="always">Always allow</button><button class="ghost" data-d="deny">Deny</button></div></div>';
+		root.innerHTML = message.gate
+			? '<div class="approval-card gate"><div class="a-title">⏸ ' +
+				esc(message.gate.title || 'Approve the next stage') +
+				'</div><div class="a-reason">' +
+				esc(message.reason || '') +
+				'</div><pre class="gate-body">' +
+				esc(message.gate.body || '') +
+				'</pre><div class="actions"><button class="primary" data-d="allow">Approve</button><button class="ghost" data-d="deny">Deny</button></div></div>'
+			: '<div class="approval-card"><div class="a-title">⚠ Approval required</div><div class="a-reason">' +
+				esc(message.reason || '') +
+				'</div><ul class="calls">' +
+				calls +
+				'</ul><div class="actions"><button class="primary" data-d="allow">Allow once</button><button data-d="always">Always allow</button><button class="ghost" data-d="deny">Deny</button></div></div>';
 		// The question belongs to the turn that asked it, so it sits with that turn's steps.
 		if (live) {
 			live.turn._steps.appendChild(root);
@@ -3168,6 +3221,7 @@
 		refreshTip();
 		const detail = [state.detail, state.suspended ? '⏸ waiting for approval — send /resume' : ''].filter(Boolean).join('  ·  ');
 		$('status').textContent = detail;
+		renderWorkflow(state.workflow);
 		renderTodos();
 		if (state.runningSessionId) {
 			runningSession = state.runningSessionId;
@@ -3258,6 +3312,111 @@
 			'\n\nClick to pick the books this chat scans';
 	}
 
+	/* ------------------------------------------------------------- workflow strip */
+
+	/** The run the strip is drawing, and the stage whose detail is open. */
+	let lastWorkflow = null;
+	let workflowOpen = null;
+
+	const WORKFLOW_GLYPH = {
+		done: '✔',
+		running: '◐',
+		failed: '✕',
+		skipped: '–',
+		pending: '○',
+		waiting: '⏸',
+	};
+
+	function workflowDetail(run, stageId) {
+		const stage = (run.definition.stages || []).find((entry) => entry.id === stageId);
+		const state = (run.stages || {})[stageId];
+		if (!stage || !state) {
+			return '';
+		}
+		const parts = [];
+		if (state.summary) {
+			parts.push(esc(state.summary));
+		}
+		if (state.check && Array.isArray(state.check.checks)) {
+			for (const check of state.check.checks) {
+				parts.push(
+					'<span class="wf-check ' +
+						esc(check.status) +
+						'">' +
+						esc((check.status === 'passed' ? '✔' : '✕') + ' ' + (check.label || '')) +
+						'</span>' +
+						(check.output ? '<pre>' + esc(check.output) + '</pre>' : ''),
+				);
+			}
+		}
+		return parts.join('');
+	}
+
+	function renderWorkflow(run) {
+		lastWorkflow = run || null;
+		const node = $('workflow');
+		if (!node) {
+			return;
+		}
+		if (!run || !Array.isArray(run.order) || !run.order.length) {
+			workflowOpen = null;
+			node.hidden = true;
+			node.innerHTML = '';
+			return;
+		}
+		if (workflowOpen && !run.order.includes(workflowOpen)) {
+			workflowOpen = null;
+		}
+		const stages = run.stages || {};
+		const definition = run.definition || { stages: [] };
+		const chips = run.order
+			.map((id) => {
+				const stage = (definition.stages || []).find((entry) => entry.id === id) || { title: id, run: 'agent' };
+				const state = stages[id] || { status: 'pending' };
+				const waiting = run.pendingGate && run.pendingGate.after === id;
+				const glyph = waiting ? '⏸' : WORKFLOW_GLYPH[state.status] || '○';
+				const icon = stage.run === 'checks' ? '🛡 ' : '';
+				return (
+					'<button type="button" class="wf-chip ' +
+					esc(state.status) +
+					(waiting ? ' waiting' : '') +
+					'" data-stage="' +
+					esc(id) +
+					'" title="' +
+					esc((stage.title || id) + ' — ' + (waiting ? 'waiting for approval' : state.status)) +
+					'">' +
+					glyph +
+					' ' +
+					esc(icon + (stage.title || id)) +
+					'</button>'
+				);
+			})
+			.join('<span class="wf-arrow" aria-hidden="true">→</span>');
+		const detail = workflowOpen ? workflowDetail(run, workflowOpen) : '';
+		const status = run.status === 'failed' ? 'Failed' : run.status === 'waiting' ? 'Waiting' : run.status === 'stopped' ? 'Stopped' : run.status === 'done' ? 'Done' : 'Running';
+		node.hidden = false;
+		node.innerHTML =
+			'<div class="wf-head"><span class="wf-title">Workflow · ' +
+			esc(run.name || run.workflowId || '') +
+			'</span><span class="wf-status ' +
+			esc(run.status || '') +
+			'">' +
+			esc(status) +
+			'</span></div><div class="wf-stages">' +
+			chips +
+			'</div>' +
+			(detail ? '<div class="wf-detail">' + detail + '</div>' : '');
+	}
+
+	$('workflow').addEventListener('click', (event) => {
+		const chip = event.target.closest('.wf-chip');
+		if (!chip || !lastWorkflow) {
+			return;
+		}
+		workflowOpen = workflowOpen === chip.dataset.stage ? null : chip.dataset.stage;
+		renderWorkflow(lastWorkflow);
+	});
+
 	function renderTodos() {
 		const list = (state && state.todos) || [];
 		const node = $('todos');
@@ -3347,6 +3506,7 @@
 			case 'turn-start':
 				runningSession = message.sessionId || runningSession;
 				setRunning(true);
+				renderWorkflow(null);
 				beginTurn(message);
 				break;
 			case 'turn-resume': {
@@ -3381,6 +3541,9 @@
 				break;
 			case 'reasoning':
 				appendReasoning(message.text);
+				break;
+			case 'workflow':
+				renderWorkflow(message.workflow);
 				break;
 			case 'tool-start':
 				toolStart(message);

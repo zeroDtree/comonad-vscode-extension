@@ -7,8 +7,6 @@ import type { Context } from 'cordis';
 import { COMONAD_BLOCK, COMONAD_BLOCKS, DEFAULT_BLOCK_PREFIX, isComonadBlockId, type ComonadBlockId } from '../lib/blocks';
 import { isLoopbackBase, normalizeEndpoint } from '../lib/endpoint';
 import { defaultPromptLayout, mergePromptPrefixes, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
-import { compileGraphs } from '../lib/graph';
-import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { pluginNodeStatus, pluginTree, type PluginNode } from '../lib/plugins';
 import { APPROVAL_LABELS, capabilityAllowed, gateFlow, modeCapabilities, MODE_LABELS, parseRule } from '../lib/policy';
 import { type ContextForm } from '../lib/prompt';
@@ -19,7 +17,7 @@ import { asList, normalizeAgentPatch, profileKeyEnvs, sanitizeSubagentGrants, SU
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
-/** Webview settings panel: tabs for the agent policy, the graph editor, MCP servers and tools. */
+/** Webview settings panel: the core tabs, plus whatever panes plugins register. */
 
 const DISPLAY_LABELS: Record<ContextForm, string> = {
 	rendered: 'Rendered — folded thoughts, tool cards',
@@ -101,42 +99,6 @@ export function settingsPanel(ctx: Context): void {
 			controllers = new Map();
 		};
 	});
-
-	/** Nodes and routes of a Mermaid source, or the reason it does not compile. Cached: the graph
-	 *  source almost never moves between two pushes, and compiling it is not free. */
-	const graphCache = new Map<string, { nodes: string[]; routes: string[]; error: string }>();
-	const inspectGraph = (source: string): { nodes: string[]; routes: string[]; error: string } => {
-		const cached = graphCache.get(source);
-		if (cached) {
-			return cached;
-		}
-		let info: { nodes: string[]; routes: string[]; error: string };
-		try {
-			const parsed = parseGraphSource(source.trim() || DEFAULT_GRAPH_SOURCE);
-			compileGraphs(parsed, { nodes: new Map(), routes: new Map() }, { ignoreMissing: true });
-			const nodes = new Set<string>();
-			const routes = new Set<string>();
-			for (const node of Object.values(parsed.graphs[parsed.default]?.nodes ?? {})) {
-				if (node.use) {
-					nodes.add(node.use);
-				}
-				if (node.route) {
-					routes.add(node.route);
-				}
-			}
-			info = { nodes: [...nodes].sort(), routes: [...routes].sort(), error: '' };
-		} catch (error) {
-			info = { nodes: [], routes: [], error: describe(error) };
-		}
-		graphCache.set(source, info);
-		if (graphCache.size > 16) {
-			const oldest = graphCache.keys().next().value;
-			if (oldest !== undefined) {
-				graphCache.delete(oldest);
-			}
-		}
-		return info;
-	};
 
 	/** One level of directories for the working-directory picker. */
 	const listDirs = (raw: string): { path: string; parent: string; entries: { name: string; path: string }[]; error: string } => {
@@ -257,21 +219,12 @@ export function settingsPanel(ctx: Context): void {
 
 	/**
 	 * Writes what the panel sent. Only keys the patch actually carries are touched: the Agent tab
-	 * sends one control at a time, the Save button sends the draft tabs, and neither may write a
-	 * stale value for something it does not own. The graph is validated only when it is in the
-	 * patch, so a live safety toggle cannot fail on an unfinished Graph draft.
+	 * sends one control at a time, the Save button sends the draft panes, and neither may write a
+	 * stale value for something it does not own.
 	 */
 	const apply = async (patch: Record<string, unknown>): Promise<void> => {
 		const current = ctx.settings.get();
 		const next: Record<string, unknown> = { ...normalizeAgentPatch(patch, current) };
-		if (Object.hasOwn(patch, 'graph')) {
-			const graph = String(patch.graph ?? '').trim();
-			const info = inspectGraph(graph);
-			if (info.error) {
-				throw new Error(`graph: ${info.error}`);
-			}
-			next.graph = graph === DEFAULT_GRAPH_SOURCE.trim() ? '' : graph;
-		}
 		if (Object.hasOwn(patch, 'maxSteps')) {
 			const steps = Number(patch.maxSteps);
 			next.maxSteps = Number.isFinite(steps) ? Math.max(0, steps) : current.maxSteps;
@@ -358,7 +311,6 @@ export function settingsPanel(ctx: Context): void {
 			return;
 		}
 		const config = ctx.settings.get();
-		const graph = config.graph || DEFAULT_GRAPH_SOURCE;
 		// One walk of the plugin tree answers every question the panel asks about it.
 		const dependencies = pluginDependencies();
 		void panel.webview.postMessage({
@@ -382,7 +334,6 @@ export function settingsPanel(ctx: Context): void {
 				toolCard: config.toolCard,
 				contextForm: config.contextForm,
 				model: config.model,
-				graph,
 				permissions: config.permissions,
 			},
 			subagents: {
@@ -433,10 +384,8 @@ export function settingsPanel(ctx: Context): void {
 				workspace: tool.needsWorkspace,
 				description: tool.description,
 			})),
-			graphInfo: inspectGraph(graph),
 			flow: gateFlow(),
 			modeLegend: modeCapabilities(),
-			defaultGraph: DEFAULT_GRAPH_SOURCE,
 			workspace: config.workingDirectory,
 			home: ctx.settings.home(),
 			environment: { remote: ctx.host.remoteName() ?? '', sandbox: ctx.host.sandboxKind() },
@@ -591,9 +540,6 @@ export function settingsPanel(ctx: Context): void {
 					return;
 				case 'ready':
 					pushState();
-					return;
-				case 'validateGraph':
-					void panel.webview.postMessage({ type: 'graphInfo', ...inspectGraph(String(message.source ?? '')) });
 					return;
 				case 'listDirs':
 					void panel.webview.postMessage({ type: 'dirs', ...listDirs(String(message.path ?? '')) });
@@ -916,9 +862,6 @@ const TAB_ICONS = {
 	subagents: tabIcon(
 		'<rect x="2.5" y="4" width="4.2" height="4.2" rx="1"/><rect x="9.3" y="4" width="4.2" height="4.2" rx="1"/><rect x="2.5" y="9.8" width="4.2" height="4.2" rx="1"/><path d="M9.4 10.1h4M11.4 8.1v4"/>',
 	),
-	graph: tabIcon(
-		'<circle cx="4" cy="4" r="1.5"/><circle cx="12" cy="5" r="1.5"/><circle cx="7" cy="12" r="1.5"/><path d="M5.4 4.4l5.1.5M4.8 5.4l1.6 5.1M10.9 6.3l-2.6 4.2"/>',
-	),
 	mcp: tabIcon(
 		'<path d="M6 2.4v3M10 2.4v3"/><path d="M4.4 5.4h7.2v2.2a3.6 3.6 0 0 1-7.2 0z"/><path d="M8 11.2v2.4"/>',
 	),
@@ -967,7 +910,6 @@ ${paneStyles.map((src) => `<link rel="stylesheet" href="${src}" />`).join('\n')}
 ${tabButton('agent', 'Agent', 'Agent — model, policy, workspace', TAB_ICONS.agent)}
 ${tabButton('ui', 'UI', 'UI — how the conversation is displayed', TAB_ICONS.ui)}
 ${tabButton('subagents', 'Subagents', 'Subagents — per-agent capability grants', TAB_ICONS.subagents)}
-${tabButton('graph', 'Graph', 'Graph — the Mermaid agent loop', TAB_ICONS.graph)}
 ${paneTabs}
 ${tabButton('mcp', 'MCP', 'MCP — servers and their status', TAB_ICONS.mcp)}
 ${tabButton('tools', 'Tools', 'Tools — what a turn may run', TAB_ICONS.tools)}
@@ -978,7 +920,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     <div id="side-foot">
       <div id="status"></div>
       <div class="row">
-        <button class="primary" id="save" type="button" title="Save — write the draft tabs (Graph, ST) to this workspace"><span class="btn-icon" aria-hidden="true">✓</span><span class="btn-label">Save</span></button>
+        <button class="primary" id="save" type="button" title="Save — write the draft pane tabs to this workspace"><span class="btn-icon" aria-hidden="true">✓</span><span class="btn-label">Save</span></button>
         <button class="secondary" id="close" type="button" title="Close — unsaved edits are dropped"><span class="btn-icon" aria-hidden="true">✕</span><span class="btn-label">Close</span></button>
       </div>
     </div>
@@ -1021,6 +963,24 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <label for="network">Network</label>
         <p class="hint">Network tools and network access inside the shell sandbox. Loopback stays available when this is off.</p>
         <label class="check"><input type="checkbox" id="network" data-key="network" /></label>
+      </div>
+      <div class="field">
+        <label for="steps">Max steps</label>
+        <p class="hint">Maximum graph steps per turn. 0 means no limit. A workflow stage uses its own budget when it sets one, bounded by this number.</p>
+        <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
+      </div>
+      <div class="field">
+        <label for="subagent-steps-mode">Subagent steps</label>
+        <p class="hint">Where a subagent's step budget comes from. A definition's <code>maxTurns</code> can tighten it, never loosen it.</p>
+        <select id="subagent-steps-mode" class="control" data-key="subagentStepsMode">
+          <option value="inherit">Inherit — same as Max steps</option>
+          <option value="custom">Custom — the budget below</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="subagent-steps">Subagent step budget</label>
+        <p class="hint">Steps a subagent may take when Subagent steps is Custom. 0 means no limit.</p>
+        <input id="subagent-steps" class="control" type="number" min="0" data-key="subagentSteps" />
       </div>
     </div>
     <h2 class="group-title">Workspace</h2>
@@ -1116,49 +1076,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     <p class="group-note">Read-only tools are always available. <b>Files</b> grants the tracked write tools (<code>write_file</code>, <code>apply_patch</code>, <code>apply_edits</code>); <b>Test</b> grants <code>run_shell_test</code>, whose workspace is read-only and whose only writable place is the scratch directory. Full shell and plan writes are never granted to a subagent. The agent's own <code>tools</code> list still selects which tools it uses, and the parent mode must allow the capability too. Changes apply to the next spawn.</p>
     <table id="subagent-rows"></table>
   </section>
-
-  <section data-pane="graph" hidden>
-    <h1 class="page-title">Graph</h1>
-    <h2 class="group-title">Agent loop</h2>
-    <div class="group">
-      <div id="graph-wrap">
-        <div class="field">
-          <label for="graph">Graph</label>
-          <p class="hint">The Mermaid source the turn walks — nodes, routes and soft routes.</p>
-          <textarea id="graph" class="control" data-key="graph" spellcheck="false"></textarea>
-          <div class="row">
-            <button class="secondary" id="graph-reset" type="button">Use default</button>
-          </div>
-        </div>
-        <div class="field">
-          <label>Preview</label>
-          <div id="preview" class="diagram"></div>
-          <p class="hint error" id="graph-error"></p>
-          <p class="hint" id="graph-nodes"></p>
-          <p class="hint" id="graph-routes"></p>
-        </div>
-      </div>
-      <div class="field">
-        <label for="steps">Max steps</label>
-        <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
-        <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
-      </div>
-      <div class="field">
-        <label for="subagent-steps-mode">Subagent steps</label>
-        <p class="hint">Where a subagent's step budget comes from. A definition's <code>maxTurns</code> can tighten it, never loosen it.</p>
-        <select id="subagent-steps-mode" class="control" data-key="subagentStepsMode">
-          <option value="inherit">Inherit — same as Max steps</option>
-          <option value="custom">Custom — the budget below</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="subagent-steps">Subagent step budget</label>
-        <p class="hint">Steps a subagent may take when Subagent steps is Custom. 0 means no limit.</p>
-        <input id="subagent-steps" class="control" type="number" min="0" data-key="subagentSteps" />
-      </div>
-    </div>
-  </section>
-
 
 ${paneSections}
 

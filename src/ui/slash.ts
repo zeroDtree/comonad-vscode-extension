@@ -61,6 +61,7 @@ export function slashCommands(ctx: Context): void {
 			done: false,
 			text: `Research the workspace read-only, then write a step-by-step implementation plan for:\n\n${args}`,
 			policy: { workMode: 'pl', approval: 'whitelist_accept', network: false },
+			workflow: 'off',
 		};
 	});
 
@@ -70,6 +71,7 @@ export function slashCommands(ctx: Context): void {
 			done: false,
 			text: `Review the pending workspace changes. Start with the git_diff tool, read the relevant files, and report issues ordered by severity with file:line references. Do not modify anything.${focus}`,
 			policy: { workMode: 'ro', approval: 'whitelist_accept', network: false },
+			workflow: 'off',
 		};
 	});
 

@@ -317,6 +317,18 @@
         "icon": "$(gear)"
       },
       {
+        "command": "comonad.openGraph",
+        "title": "Comonad: Open Graph Settings",
+        "category": "Comonad",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "comonad.openWorkflow",
+        "title": "Comonad: Open Workflow Settings",
+        "category": "Comonad",
+        "icon": "$(run-all)"
+      },
+      {
         "command": "comonad.toggleHistory",
         "title": "Comonad: Recent Chats",
         "category": "Comonad",
@@ -749,7 +761,72 @@
         "comonad.graph": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Mermaid flowchart describing the agent loop. Empty uses the built-in default graph."
+          "markdownDescription": "Mermaid source for the Graph plugin's named agent loops. Empty uses the shipped `agent` graph. Edit it in Settings → Graph."
+        },
+        "comonad.workflows": {
+          "type": "object",
+          "default": {
+            "version": 1,
+            "enabled": true,
+            "default": "standard",
+            "workflows": [
+              {
+                "id": "standard",
+                "name": "Standard coding task",
+                "description": "Research, plan and approve, implement, verify, then review.",
+                "when": "auto",
+                "stages": [
+                  {
+                    "id": "research",
+                    "title": "Research",
+                    "run": "agent",
+                    "graph": "agent",
+                    "mode": "ro",
+                    "steps": 12,
+                    "objective": "Investigate the workspace before changing anything. Find the relevant files, symbols, call paths, tests and conventions. Report what exists, where the change belongs, and the constraints. Do not edit."
+                  },
+                  {
+                    "id": "plan",
+                    "title": "Plan",
+                    "run": "agent",
+                    "graph": "agent",
+                    "mode": "pl",
+                    "gate": true,
+                    "objective": "Write a concrete implementation plan for the task. List the files to change, ordered steps, edge cases, and how the change will be verified. Keep it short enough to act on. Do not edit project files."
+                  },
+                  {
+                    "id": "implement",
+                    "title": "Implement",
+                    "run": "agent",
+                    "graph": "agent",
+                    "mode": "inherit",
+                    "objective": "Implement the task, following the plan. If the plan is wrong, adapt it. Use the file tools for project changes. Keep edits focused and the workspace buildable. Finish with a short summary of what changed."
+                  },
+                  {
+                    "id": "verify",
+                    "title": "Verify",
+                    "run": "checks",
+                    "checks": {
+                      "diagnostics": true,
+                      "commands": [],
+                      "timeout": 120,
+                      "repairs": 1,
+                      "repairTo": "implement"
+                    }
+                  },
+                  {
+                    "id": "review",
+                    "title": "Review",
+                    "run": "agent",
+                    "graph": "agent",
+                    "mode": "ro",
+                    "objective": "Review the changes made in this turn. Read the diff and changed files. Report defects by severity with file:line references. Then give the final report: what changed, what verification showed, and any remaining issues. If verification failed, say so explicitly."
+                  }
+                ]
+              }
+            ]
+          },
+          "markdownDescription": "The workflow library: named workflows, each a list of agent or checks stages. `enabled` turns automatic runs on or off; `default` names the workflow auto/always uses. Edit it visually in Settings → Workflow."
         },
         "comonad.model": {
           "type": "string",

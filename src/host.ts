@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { sandboxKind } from './lib/sandbox';
+import type { DiagnosticLine } from './lib/types';
 import { hostStorage, type Host } from './services/host';
 
 /** The VS Code implementation of the Host contract. This is the only vscode-bound core module. */
@@ -77,6 +78,31 @@ export function host(ctx: Context, config: HostConfig): void {
 			return answer ? [answer] : [];
 		},
 		notify: (message) => void vscode.window.showInformationMessage(`Comonad: ${message}`),
+		diagnostics: (paths) => {
+			const wanted = paths?.length ? new Set(paths) : undefined;
+			const lines: DiagnosticLine[] = [];
+			for (const [uri, diagnostics] of vscode.languages.getDiagnostics()) {
+				if (wanted && !wanted.has(uri.fsPath)) {
+					continue;
+				}
+				for (const diagnostic of diagnostics) {
+					// Verification reads errors, not warnings: a warning is not a failed change.
+					if (diagnostic.severity !== vscode.DiagnosticSeverity.Error) {
+						continue;
+					}
+					lines.push({
+						file: uri.fsPath,
+						line: diagnostic.range.start.line + 1,
+						column: diagnostic.range.start.character + 1,
+						message: diagnostic.message,
+					});
+					if (lines.length >= 5_000) {
+						return lines;
+					}
+				}
+			}
+			return lines;
+		},
 	};
 	ctx.provide('host', service);
 	ctx.log.attach({ write: (line) => output.appendLine(line), show: () => output.show() });

@@ -118,6 +118,8 @@ import { REGEX_PLACEMENT } from 'comonad-plugin-tavern/lib/regex';
 import { INJECTION_POSITION } from 'comonad-plugin-tavern/lib/prompts';
 import { PROMPT_LIBRARY_KEY } from 'comonad-plugin-tavern/lib/preset';
 import { tavernSettings, TAVERN_SETTING_KEYS, WI_SETTINGS_DEFAULTS } from 'comonad-plugin-tavern/lib/settings';
+import { GRAPH_SETTING_KEYS } from '../services/graph';
+import { WORKFLOW_SETTING_KEYS } from '../services/workflow';
 import { embedTexts } from 'comonad-plugin-tavern/lib/vectors';
 import { webPlan } from '../services/web-tokenizers';
 import type { GenerationTrigger, WorldEntry } from 'comonad-plugin-tavern/lib/types';
@@ -2237,7 +2239,7 @@ suite('Comonad domain', () => {
 		assert.strictEqual(manifest.capabilities?.untrustedWorkspaces?.supported, 'limited', 'project plugins and hooks need trust');
 		const declared = new Set(Object.keys(manifest.contributes.configuration.properties).map((key) => key.replace(/^comonad\./, '')));
 		// The kernel reads its own keys; the tavern layer's keys are its own list, in its own package.
-		const read = new Set<string>([...CONFIG_KEYS, ...TAVERN_SETTING_KEYS]);
+		const read = new Set<string>([...CONFIG_KEYS, ...TAVERN_SETTING_KEYS, ...GRAPH_SETTING_KEYS, ...WORKFLOW_SETTING_KEYS]);
 		// A setting the manifest declares but no code reads is a setting the user cannot change: the
 		// panel writes it and nothing comes back. Every `comonad.tavern*` and `comonad.wi*` setting was
 		// in exactly that state.
@@ -3485,6 +3487,31 @@ suite('Cordis kernel', () => {
 			const escaped = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [hostile]);
 			assert.ok(!escaped.includes('<script>alert(1)</script>'), 'a pane cannot close the attribute and open a script');
 			assert.match(escaped, /&lt;b&gt;no&lt;\/b&gt;/, 'and its label is text, not markup');
+
+			// The graph and workflow plugins contribute their own panes, with their own clients.
+			await kernel.ctx.plugin(panesPlugin);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			const panes = kernel.ctx.panes.list();
+			const graph = panes.find((entry) => entry.id === 'graph');
+			const workflow = panes.find((entry) => entry.id === 'workflow');
+			assert.ok(graph, 'the graph plugin registered its tab');
+			assert.ok(workflow, 'the workflow plugin registered its tab');
+			assert.ok((graph?.order ?? 100) < (workflow?.order ?? 100), 'graph comes before workflow');
+			const pluginsDocument = settingsDocument(panel.webview, vscode.Uri.file(root), 'workflow', panes);
+			assert.match(pluginsDocument, /data-tab="graph"/);
+			assert.match(pluginsDocument, /data-tab="workflow"/);
+			assert.match(pluginsDocument, /<section data-pane="graph" hidden>/);
+			assert.match(pluginsDocument, /<section data-pane="workflow" hidden>/);
+			assert.match(pluginsDocument, /id="g-source"/, 'the graph editor is in the graph pane');
+			assert.match(pluginsDocument, /id="w-pipeline"/, 'the workflow pipeline is in the workflow pane');
+			const paneHost = { uri: () => '', refresh: () => undefined };
+			const graphState = graph?.controller?.(paneHost).state() as { graphs?: unknown[] } | undefined;
+			assert.ok(graphState?.graphs?.length, 'the graph pane reads the compiled graph list');
+			const workflowState = workflow?.controller?.(paneHost).state() as
+				| { library?: { workflows?: unknown[] }; graphs?: unknown[] }
+				| undefined;
+			assert.ok(workflowState?.library?.workflows?.length, 'the workflow pane reads the shipped library');
+			assert.ok(workflowState?.graphs?.length, 'and the graphs its stages may pick');
 		} finally {
 			panel.dispose();
 			await kernel.dispose();
@@ -9810,6 +9837,20 @@ suite('Images', () => {
 		assert.ok(css.includes('.thumbs') && css.includes('.composer-images'));
 		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		assert.ok(panel.includes('id="composer-images"'));
+	});
+
+	test('a picture that decodes late keeps a following transcript at the end', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		assert.ok(
+			js.includes('img.width =') && js.includes('img.height ='),
+			'the thumbnail reserves its box from the header size before the bytes arrive',
+		);
+		assert.ok(js.includes("img.addEventListener('load', () => scroll())"), 'a late decode re-follows the end');
+		assert.ok(js.includes('new ResizeObserver'), 'the footer taking room re-follows the end');
+		assert.ok(js.includes('pinned && grew'), 'scroll anchoring is not read as the reader leaving the end');
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.match(css, /footer\s*\{[^}]*position:\s*relative/, 'the jump control is anchored above the footer');
 	});
 
 	test('the chat carries the summary card, original details and pagination seams', () => {

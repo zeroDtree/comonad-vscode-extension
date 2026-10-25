@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context, type Fiber } from 'cordis';
 import type { SandboxKind } from '../lib/sandbox';
+import type { DiagnosticLine } from '../lib/types';
 import { hostStorage, type Host } from '../services/host';
 import { tokenizersPlugin } from '../services/tokenizers';
 import { logPlugin } from '../services/log';
@@ -23,6 +24,8 @@ import { loreToolPlugin } from 'comonad-plugin-tavern/tools/tavern';
 import { llmPlugin } from '../services/llm';
 import { hooksPlugin } from '../services/hooks';
 import { approvalPlugin } from '../services/approval';
+import { graphPlugin } from '../services/graph';
+import { workflowPlugin } from '../services/workflow';
 import { agentPlugin } from '../services/agent';
 
 /**
@@ -40,6 +43,8 @@ export interface FakeHost extends Host {
 	sandboxValue: SandboxKind;
 	/** Set to `'ssh-remote'` and the like to exercise remote-aware surfaces. */
 	remoteValue?: string;
+	/** Editor errors the workflow checks read. Tests set this per case. */
+	diagnosticsValue: DiagnosticLine[];
 }
 
 export interface TestKernel {
@@ -75,6 +80,9 @@ export function fakeHost(root: string, values: Record<string, unknown>, workspac
 		sandboxValue: 'bwrap',
 		ask: async () => [],
 		notify: () => undefined,
+		diagnosticsValue: [],
+		diagnostics: (paths) =>
+			paths?.length ? host.diagnosticsValue.filter((line) => paths.includes(line.file)) : [...host.diagnosticsValue],
 	};
 	return host;
 }
@@ -84,7 +92,7 @@ export function fakeHost(root: string, values: Record<string, unknown>, workspac
  * question a user asks with `cordis.yml`: does everything else still work without it?
  */
 export async function createTestKernel(
-	options: { config?: Record<string, unknown>; skip?: Array<'checkpoints' | 'tavern' | 'lore'> } = {},
+	options: { config?: Record<string, unknown>; skip?: Array<'checkpoints' | 'tavern' | 'lore' | 'workflows'> } = {},
 ): Promise<TestKernel> {
 	const root = mkdtempSync(join(tmpdir(), 'comonad-'));
 	const workspace = join(root, 'ws');
@@ -103,6 +111,8 @@ export async function createTestKernel(
 		memory: false,
 		skills: true,
 		graph: '',
+		// The shipped workflow is auto; tests opt in unless they are exercising it.
+		workflows: { enabled: false },
 		model: 'auto',
 		profiles: [],
 		mcpServers: {},
@@ -150,7 +160,9 @@ export async function createTestKernel(
 		'audit',
 		'log',
 		'commands',
+		'graphs',
 		'agent',
+		'workflows',
 		// `vectors` arrives with the tavern that mounts it, so it waits with it and is skipped with it.
 	].filter((name) => !skipped.has(name) && (name !== 'vectors' || !skipped.has('tavern')));
 	const fiber: Fiber & PromiseLike<Fiber> = ctx.plugin(function kernel(child: Context) {
@@ -180,7 +192,11 @@ export async function createTestKernel(
 		child.plugin(llmPlugin);
 		child.plugin(hooksPlugin);
 		child.plugin(approvalPlugin);
+		child.plugin(graphPlugin);
 		child.plugin(agentPlugin);
+		if (!skipped.has('workflows')) {
+			child.plugin(workflowPlugin);
+		}
 		child.plugin(waitForServices);
 	});
 	await fiber;

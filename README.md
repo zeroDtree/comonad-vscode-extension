@@ -11,6 +11,9 @@ file it writes, and asks before anything leaves the sandbox.
 - **Extensible as a plugin tree.** The kernel, tools, model adapters and UI are plugins on one
   [Cordis](https://github.com/cordiverse/cordis) context. Turn a row off, configure it, or mount your
   own.
+- **Graphs and workflows are plugins too.** Edit named Mermaid loops in **Settings → Graph**, then
+  compose them into user-defined stages in **Settings → Workflow**. The shipped preset is Research →
+  Plan (approval) → Implement → Verify → Review, with host-run diagnostics and commands.
 
 ## Install
 

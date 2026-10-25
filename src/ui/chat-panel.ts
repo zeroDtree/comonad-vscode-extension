@@ -221,6 +221,7 @@ export function chatPanel(ctx: Context): void {
 				.slice(0, 60)
 				.map((item) => ({ id: item.id, title: item.title, active: item.id === session?.id, updatedAt: item.updatedAt })),
 			todos: session ? ctx.agent.todos(session.id).map((todo) => ({ status: todo.status, text: todo.text })) : [],
+			workflow: session?.workflow ?? null,
 		};
 	};
 
@@ -568,6 +569,11 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text });
 		}
 	});
+	ctx.on('agent/workflow', (ref, run) => {
+		if (ref.surface === SURFACE) {
+			post({ type: 'workflow', workflow: run });
+		}
+	});
 	// The card gains its "Open session" link as soon as the child exists, while the call still runs.
 	ctx.on('agent/subagent-start', (ref, info) => {
 		if (ref.surface === SURFACE) {
@@ -620,6 +626,7 @@ export function chatPanel(ctx: Context): void {
 				id,
 				sessionId: request.sessionId,
 				reason: request.reason,
+				gate: request.gate,
 				// The approval is a decision about the whole call, so the prompt keeps the argument
 				// that matters (a shell command, a path) in full; 8k is a display bound, not a summary.
 				calls: request.calls.map((call) => ({ name: call.name, args: preview(call.arguments, 8_000) })),
@@ -804,6 +811,7 @@ export function chatPanel(ctx: Context): void {
 				sessionId: ctx.sessions.active()?.id,
 				policy: handled.policy,
 				trigger: handled.trigger,
+				workflow: handled.workflow,
 				surface: SURFACE,
 				signal: turnController.signal,
 			});
@@ -1649,6 +1657,10 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 	<div id="subagent-messages"></div>
 </div>
 <footer>
+	<!-- Floats at the bottom of the transcript, above every footer row, whenever the reader has
+	     scrolled away from the newest message. -->
+	<button id="jump-latest" type="button" hidden data-tip="Jump to the newest message">↓ Latest</button>
+	<div id="workflow" hidden></div>
 	<div id="todos" hidden></div>
 	<div id="changes-panel" hidden>
 		<div id="changes-head">
@@ -1669,8 +1681,6 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 			<div id="mention-head" class="mention-head" hidden></div>
 			<div id="mention-list"></div>
 		</div>
-		<!-- Floats above the composer whenever the transcript is following a reply from behind. -->
-		<button id="jump-latest" type="button" hidden data-tip="Jump to the newest message">↓ Latest</button>
 		<div id="controls">
 			<div class="pill" data-control="model">
 				<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="pill-label"></span><span class="chev">▾</span></button>

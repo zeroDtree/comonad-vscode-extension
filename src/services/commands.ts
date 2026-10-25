@@ -20,6 +20,8 @@ export interface CommandOutcome {
 	policy?: Partial<SessionPolicy>;
 	/** The generation type this command starts; the surface passes it to the turn. */
 	trigger?: GenerationTrigger;
+	/** A per-turn workflow choice: `off`, `always`, or a workflow id. */
+	workflow?: 'off' | 'always' | string;
 	/** Output to show when the command did not stream through the turn pipeline. */
 	result?: string;
 }

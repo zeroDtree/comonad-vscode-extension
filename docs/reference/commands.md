@@ -10,6 +10,7 @@ commands currently registered, including plugin commands.
 | `/help` | List commands |
 | `/plan [task]` | Research read-only, then write a plan |
 | `/review [focus]` | Review pending changes without editing |
+| `/workflow [id] [task]` | Run a workflow for this task; no id uses the default |
 | `/summarize [notes] [--rebuild]` | Extend the model-context summary; `--rebuild` rewrites it from the full chat (`/compress`, `/compact`) |
 | `/clear`, `/new` | Start a fresh session |
 | `/fork` | Fork this session and keep exploring |

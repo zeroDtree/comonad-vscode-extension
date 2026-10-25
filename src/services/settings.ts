@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
 import type { EffortTop } from '../lib/effort';
-import { DEFAULT_GRAPH_SOURCE } from '../lib/mermaid';
 import { asApproval, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { parsePromptLayout, parseToolLayout, type PromptBlockSetting, type ToolPromptSetting } from '../lib/prompt-layout';
@@ -234,7 +233,6 @@ export interface Config {
 	subagentStepsMode: SubagentStepsMode;
 	/** A subagent's own step budget when the mode is `custom`; `0` means no limit. */
 	subagentSteps: number;
-	graph: string;
 	model: string;
 	profiles: Profile[];
 	mcpServers: Record<string, McpServerSettings>;
@@ -288,7 +286,6 @@ export const CONFIG_KEYS = [
 	'maxSteps',
 	'subagentStepsMode',
 	'subagentSteps',
-	'graph',
 	'model',
 	'profiles',
 	'mcpServers',
@@ -350,7 +347,10 @@ export function asList(value: unknown): string[] {
  */
 export type AgentConfig = Pick<Config, (typeof AGENT_KEYS)[number]>;
 
-export function normalizeAgentPatch(patch: Record<string, unknown>, current: AgentConfig): Partial<Config> {
+export function normalizeAgentPatch(
+	patch: Record<string, unknown>,
+	current: AgentConfig & Partial<Pick<Config, 'maxSteps' | 'subagentStepsMode' | 'subagentSteps'>>,
+): Partial<Config> {
 	const next: Partial<Config> = {};
 	const has = (key: keyof Config): boolean => Object.hasOwn(patch, key);
 	const form = (key: 'displayForm' | 'contextForm'): ContextForm => {
@@ -407,6 +407,20 @@ export function normalizeAgentPatch(patch: Record<string, unknown>, current: Age
 	}
 	if (has('allowUnsandboxedShell')) {
 		next.allowUnsandboxedShell = Boolean(patch.allowUnsandboxedShell);
+	}
+	if (has('maxSteps')) {
+		const value = Number(patch.maxSteps);
+		next.maxSteps = Number.isFinite(value) ? Math.max(0, Math.round(value)) : (current.maxSteps ?? 0);
+	}
+	if (has('subagentSteps')) {
+		const value = Number(patch.subagentSteps);
+		next.subagentSteps = Number.isFinite(value) ? Math.max(0, Math.round(value)) : (current.subagentSteps ?? 40);
+	}
+	if (has('subagentStepsMode')) {
+		next.subagentStepsMode =
+			typeof patch.subagentStepsMode === 'string' && (SUBAGENT_STEPS_MODES as readonly string[]).includes(patch.subagentStepsMode)
+				? (patch.subagentStepsMode as SubagentStepsMode)
+				: (current.subagentStepsMode ?? 'custom');
 	}
 	return next;
 }
@@ -489,7 +503,6 @@ export class Settings extends Service {
 			// shipped 40 matches the old budget every subagent got (`maxTurns` 20 × 2 steps).
 			subagentStepsMode: oneOf('subagentStepsMode', SUBAGENT_STEPS_MODES, 'custom'),
 			subagentSteps: count('subagentSteps', 40, 0),
-			graph: typeof raw.graph === 'string' ? raw.graph : DEFAULT_GRAPH_SOURCE,
 			model: typeof raw.model === 'string' ? raw.model : 'auto',
 			// An empty list means "nothing configured", which would leave the chat without a model, so
 			// the built-in DeepSeek profiles stand in for it.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { join } from 'node:path';
 import type { SandboxKind } from '../lib/sandbox';
+import type { DiagnosticLine } from '../lib/types';
 
 /**
  * The Host contract: everything the kernel needs from its embedding environment,
@@ -41,6 +42,8 @@ export interface Host {
 	sandboxKind(): SandboxKind;
 	ask(question: string, options?: string[], multi?: boolean): Promise<string[]>;
 	notify(message: string): void;
+	/** Editor errors, for every file or only the given absolute paths. */
+	diagnostics(paths?: readonly string[]): DiagnosticLine[];
 }
 
 declare module 'cordis' {

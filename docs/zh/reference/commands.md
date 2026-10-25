@@ -9,6 +9,7 @@
 | `/help` | 列出命令 |
 | `/plan [task]` | 只读研究，然后写计划 |
 | `/review [focus]` | 只读审查待处理变更 |
+| `/workflow [id] [任务]` | 为当前任务运行工作流；不写 id 用默认工作流 |
 | `/summarize [notes] [--rebuild]` | 扩展模型上下文摘要；`--rebuild` 从完整聊天重写（`/compress`、`/compact`） |
 | `/clear`、`/new` | 新建会话 |
 | `/fork` | Fork 当前会话并继续探索 |

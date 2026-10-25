@@ -41,6 +41,8 @@ export interface PaneSpec {
 	title?: string;
 	/** A 16px inline SVG for the tab, drawn with currentColor; a pane without one gets the plugin icon. */
 	icon?: string;
+	/** Where the tab sits among the pane tabs; lower comes first, unset comes last. */
+	order?: number;
 	/** A command the panel registers to reveal this pane — `comonad.openContent`, say. */
 	command?: string;
 	/** The markup of the pane's `<section>`, as the panel writes it into the document. */
@@ -76,9 +78,9 @@ export class Panes extends Service {
 		}
 	}
 
-	/** The panes right now, in registration order: what the panel builds its document from. */
+	/** The panes right now, in tab order: what the panel builds its document from. */
 	list(): PaneSpec[] {
-		return [...this.specs];
+		return [...this.specs].sort((left, right) => (left.order ?? 100) - (right.order ?? 100));
 	}
 
 	/** Where a pane's client files live, so the panel can allow the webview to reach them. */

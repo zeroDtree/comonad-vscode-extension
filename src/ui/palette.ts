@@ -15,6 +15,15 @@ export function palette(ctx: Context): void {
 		if (request.surface) {
 			return next();
 		}
+		if (request.gate) {
+			const picked = await vscode.window.showWarningMessage(
+				`Comonad: ${request.gate.title}`,
+				{ modal: true, detail: request.gate.body },
+				'Approve',
+				'Deny',
+			);
+			return picked === 'Approve' ? 'allow' : 'deny';
+		}
 		const detail = request.calls.map((call) => `• ${call.name} ${call.arguments.slice(0, 160)}`).join('\n');
 		const picked = await vscode.window.showWarningMessage(
 			`Comonad needs approval (${request.reason}).\n\n${detail}`,

@@ -5,7 +5,10 @@ import { GraphError, type GraphsConfig, type NodeConfig } from './graph';
 
 const NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 
-export const DEFAULT_GRAPH_SOURCE = `flowchart TD
+export const DEFAULT_GRAPH_SOURCE = `%% default: agent
+
+%% graph: agent
+flowchart TD
   %% start: llm
   llm["llm.complete"] -->|route: agent.after-llm| reject["agent.reject"]
   llm -->|route: agent.after-llm| confirm["agent.confirm"]
@@ -143,7 +146,13 @@ function readDirective(line: string): Directive | null {
 		}
 		return { kind, value: match[1]!, instruct: match[2]!.trim() };
 	}
-	const match = rest.match(/^:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/);
+	// A graph or default names a graph, and graph ids may carry dot/dash; a start names a node,
+	// whose own parser is stricter.
+	const match = rest.match(
+		kind === 'graph' || kind === 'default'
+			? /^:\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*$/
+			: /^:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/,
+	);
 	if (!match) {
 		throw new GraphError(`%% ${kind}: name`);
 	}
@@ -367,4 +376,134 @@ function exits(node: DraftNode): string[] {
 		return node.choices.map((choice) => choice.id);
 	}
 	return [];
+}
+
+/** One named graph in a multi-graph source, as the Graph pane edits it. */
+export interface GraphBlock {
+	id: string;
+	/** The block's own lines, from its `%% graph` directive (when it has one) through the next block. */
+	source: string;
+}
+
+const GRAPH_NAME = /^\s*%%\s*graph\s*:\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*$/;
+const DEFAULT_LINE = /^\s*%%\s*default\s*:/;
+const FLOWCHART = /^\s*flowchart\s+(TD|TB|LR|RL|BT)\s*$/i;
+
+/**
+ * Splits a source into its named graphs so a pane can edit one at a time. The global `%% default`
+ * line belongs to the source, not to a block: it is removed here and written again on compose.
+ * A source without `%% graph` directives is one block, named `agent` as the parser names it.
+ */
+export function splitGraphBlocks(source: string): GraphBlock[] {
+	const lines = source.replace(/^\uFEFF/, '').split(/\r?\n/);
+	const blocks: GraphBlock[] = [];
+	let current: { id: string; start: number; chart: boolean } | null = null;
+	const finish = (end: number): void => {
+		if (!current) {
+			return;
+		}
+		const text = lines
+			.slice(current.start, end)
+			.filter((line) => !DEFAULT_LINE.test(line))
+			.join('\n')
+			.trim();
+		if (text) {
+			blocks.push({ id: current.id, source: `${text}\n` });
+		}
+		current = null;
+	};
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index]!;
+		const named = line.match(GRAPH_NAME);
+		if (named) {
+			finish(index);
+			current = { id: named[1]!, start: index, chart: false };
+			continue;
+		}
+		if (FLOWCHART.test(line)) {
+			if (current && !current.chart) {
+				current.chart = true;
+				continue;
+			}
+			finish(index);
+			current = { id: blocks.length === 0 ? 'agent' : '', start: index, chart: true };
+		}
+	}
+	finish(lines.length);
+	return blocks;
+}
+
+/** The source's `%% default` graph, when it declares one. */
+export function defaultGraphId(source: string): string | undefined {
+	for (const line of source.replace(/^\uFEFF/, '').split(/\r?\n/)) {
+		const match = line.match(/^\s*%%\s*default\s*:\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*$/);
+		if (match) {
+			return match[1];
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Writes blocks back into one source with a single `%% default` line. A block that begins with a
+ * `flowchart` and has no `%% graph` directive gets one, so the parser can name it.
+ */
+export function composeGraphBlocks(blocks: readonly GraphBlock[], defaultId: string): string {
+	const bodies = blocks
+		.map((block) => {
+			const text = block.source.trim();
+			if (!text) {
+				return '';
+			}
+			const named = text.split(/\r?\n/).some((line) => GRAPH_NAME.test(line));
+			return named || !block.id ? text : `%% graph: ${block.id}\n${text}`;
+		})
+		.filter(Boolean);
+	return `${[`%% default: ${defaultId}`, ...bodies].join('\n\n')}\n`;
+}
+
+/** Replaces the source's default without touching its blocks. */
+export function setDefaultGraph(source: string, id: string): string {
+	const lines = source
+		.replace(/^\uFEFF/, '')
+		.split(/\r?\n/)
+		.filter((line) => !DEFAULT_LINE.test(line));
+	while (lines.length && !lines[0]!.trim()) {
+		lines.shift();
+	}
+	return `${[`%% default: ${id}`, ...lines].join('\n').trimEnd()}\n`;
+}
+
+/** Appends a graph block, using a minimal valid loop when no template is given. */
+export function addGraphBlock(source: string, id: string, template?: string): string {
+	const block =
+		template?.trim() ||
+		`%% graph: ${id}\nflowchart TD\n  %% start: llm\n  llm["llm.complete"] --> End\n`;
+	const head = source.trim() ? `${source.trimEnd()}\n\n` : '';
+	return `${head}${block}\n`;
+}
+
+/** Copies a block under a new id. */
+export function duplicateGraphBlock(source: string, id: string, newId: string): string {
+	const block = splitGraphBlocks(source).find((entry) => entry.id === id);
+	if (!block) {
+		return source;
+	}
+	const trimmed = block.source.trim();
+	const text = /(^|\n)\s*%%\s*graph\s*:/.test(trimmed)
+		? trimmed.replace(/^\s*%%\s*graph\s*:\s*[A-Za-z_][A-Za-z0-9_.-]*\s*$/m, `%% graph: ${newId}`)
+		: `%% graph: ${newId}\n${trimmed}`;
+	const head = source.trim() ? `${source.trimEnd()}\n\n` : '';
+	return `${head}${text}\n`;
+}
+
+/** Removes a block, promoting the first remaining block when the removed one was the default. */
+export function removeGraphBlock(source: string, id: string): string {
+	const blocks = splitGraphBlocks(source).filter((block) => block.id !== id);
+	if (!blocks.length) {
+		return source;
+	}
+	const current = defaultGraphId(source);
+	const fallback = current && current !== id ? current : blocks[0]!.id;
+	return composeGraphBlocks(blocks, fallback);
 }

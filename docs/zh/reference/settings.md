@@ -39,12 +39,23 @@
 | `comonad.allowFullAccess` | `true` | 提供 unrestricted 预设 |
 | `comonad.commandTimeout` | `60` | shell 超时回退值（秒） |
 | `comonad.commandTimeoutOverride` | `false` | 始终使用该值，忽略模型选择的超时 |
-| `comonad.maxSteps` | `0`（无限制） | 每回合最大图步数 |
+| `comonad.maxSteps` | `0`（无限制） | 每回合最大图步数；工作流阶段自己的预算不会超过它 |
 | `comonad.subagentStepsMode` | `custom` | `inherit` 共享该回合的 `maxSteps`；`custom` 使用 `comonad.subagentSteps` |
 | `comonad.subagentSteps` | `40` | `custom` 下子 Agent 的步数预算；`0` 表示无限制。定义的 `maxTurns` 只能收紧它 |
 | `comonad.filterSensitiveEnv` | `true` | 从命令环境中移除 key、token 与密码 |
 | `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | 规则列表；见[安全](/zh/guide/safety#_2-规则) |
 | `comonad.subagents` | `{}` | 子 Agent 的逐 Agent 授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。内置 `implement` 默认两者都有；其它 Agent 默认只读。 |
+
+## 图与工作流
+
+| 键 | 默认 | 用途 |
+| --- | --- | --- |
+| `comonad.graph` | 内置 `agent` 图 | Graph 插件的多图 Mermaid 源；空值使用内置图。在 **Settings → Graph** 编辑。 |
+| `comonad.workflows` | 内置 **Standard coding task** | 工作流库：命名工作流、阶段和宿主检查。在 **Settings → Workflow** 编辑。 |
+
+工作流的每个阶段按 id 运行其中一个图。内置预置是 Research → Plan（审批）→ Implement →
+Verify → Review；在 Workflow 面板复制它即可做变体。`/workflow [id] [任务]` 为单个回合运行工作流。
+详见[工作流](/zh/guide/workflows)。
 
 ## 子 Agent
 

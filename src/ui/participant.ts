@@ -71,6 +71,15 @@ export function participant(ctx: Context): void {
 				if (approval.surface !== surface) {
 					return next();
 				}
+				if (approval.gate) {
+					const picked = await vscode.window.showWarningMessage(
+						`Comonad: ${approval.gate.title}`,
+						{ modal: true, detail: approval.gate.body },
+						'Approve',
+						'Deny',
+					);
+					return picked === 'Approve' ? 'allow' : 'deny';
+				}
 				const detail = approval.calls.map((call) => `• ${call.name} ${preview(call.arguments, 160)}`).join('\n');
 				const picked = await vscode.window.showWarningMessage(
 					`Comonad needs approval (${approval.reason}).\n\n${detail}`,
@@ -110,6 +119,7 @@ export function participant(ctx: Context): void {
 					sessionId: ctx.sessions.active()?.id,
 					attachments: notes.length ? notes : undefined,
 					policy: handled.policy,
+					workflow: handled.workflow,
 					surface,
 					signal: controller.signal,
 					resolveAttachments: uris.length

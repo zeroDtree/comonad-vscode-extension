@@ -17,15 +17,9 @@
 	let activeTab = (vscode.getState() || {}).tab || (askedTab && askedTab.dataset.tab) || 'agent';
 	// The Inspect tab's own sub-tab: the tool policy flow, or the prompt list.
 	let activeInspect = (vscode.getState() || {}).inspect || 'flow';
-	let graphInfo = { nodes: [], routes: [], error: '' };
 	let dirs = { path: '', parent: '', entries: [], error: '' };
 	let dirFilter = '';
 	let dirsTimer = 0;
-	let graphTimer = 0;
-	let previewTimer = 0;
-	let previewSeq = 0;
-	let previewSource = null;
-	let previewDrawn = false;
 
 	const status = (text, isError) => {
 		const node = $('status');
@@ -143,7 +137,6 @@
 		renderActive();
 		// The sidebar search travels from page to page: the new page's rows answer to it too.
 		applySearch();
-		schedulePreview();
 		scheduleFlow();
 	}
 
@@ -363,6 +356,10 @@
 		put($('timeout'), String(config.commandTimeout));
 		checked('timeout-override', config.commandTimeoutOverride);
 		put($('plans'), config.planDirectory);
+		put($('steps'), String(config.maxSteps));
+		put($('subagent-steps-mode'), config.subagentStepsMode);
+		put($('subagent-steps'), String(config.subagentSteps));
+		syncSubagentSteps();
 		put($('deny'), (config.denyReadPaths || []).join('\n'));
 		checked('confine-read', config.confineRead);
 		checked('confine-write', config.confineWrite);
@@ -483,25 +480,15 @@
 	/** The tabs the Save button owns: a state push leaves them alone while the form is dirty. */
 	function renderDraftForm() {
 		const config = state.config;
-		put($('steps'), String(config.maxSteps));
-		put($('subagent-steps-mode'), config.subagentStepsMode);
-		put($('subagent-steps'), String(config.subagentSteps));
-		syncSubagentSteps();
 		const rules = config.permissions || {};
 		put($('rules-allow'), (rules.allow || []).join('\n'));
 		put($('rules-ask'), (rules.ask || []).join('\n'));
 		put($('rules-deny'), (rules.deny || []).join('\n'));
-		put($('graph'), config.graph);
 	}
 
-	/** What the Save button owns: the draft tabs. The Agent tab saves itself. */
+	/** What the Save button owns: the draft pane tabs. The Agent tab saves itself. */
 	function collectDraft() {
-		const config = {
-			maxSteps: Number($('steps').value) || 0,
-			subagentStepsMode: $('subagent-steps-mode').value,
-			subagentSteps: Number($('subagent-steps').value) || 0,
-			graph: $('graph').value,
-		};
+		const config = {};
 		// A pane owns its own keys: it contributes the ones its tab holds, and nothing else.
 		for (const handlers of panes.values()) {
 			if (handlers.collect) {
@@ -520,10 +507,6 @@
 		const live = node.closest('section[data-pane="agent"], section[data-pane="ui"]') !== null;
 		const draft = () => {
 			markDirty();
-			if (node.dataset.key === 'graph') {
-				scheduleValidate();
-				schedulePreview();
-			}
 		};
 		node.addEventListener('input', () => {
 			if (!live) {
@@ -549,12 +532,6 @@
 	$('pr-save').addEventListener('click', savePrompts);
 	$('pr-reset').addEventListener('click', resetPrompts);
 	$('model-add').addEventListener('click', () => post({ type: 'configureModel' }));
-	$('graph-reset').addEventListener('click', () => {
-		$('graph').value = state ? state.defaultGraph : '';
-		markDirty();
-		post({ type: 'validateGraph', source: $('graph').value });
-		schedulePreview();
-	});
 
 	function save() {
 		const payload = { type: 'save', config: collectDraft() };
@@ -812,48 +789,6 @@
 			tr.addEventListener('click', () => post({ type: 'pluginTree', id: row.id }));
 			node.append(tr);
 		}
-	}
-
-	/* ------------------------------------------------------------------ graph */
-
-	function renderGraphInfo() {
-		$('graph-error').textContent = graphInfo.error ? '⚠ ' + graphInfo.error : '';
-		$('graph-error').className = graphInfo.error ? 'hint error' : 'hint';
-		$('graph-nodes').textContent = 'Nodes: ' + (graphInfo.nodes.join(', ') || '(none)');
-		$('graph-routes').textContent = 'Routes: ' + (graphInfo.routes.join(', ') || '(none)');
-	}
-
-	function scheduleValidate() {
-		clearTimeout(graphTimer);
-		graphTimer = setTimeout(() => post({ type: 'validateGraph', source: $('graph').value }), 300);
-	}
-
-	function schedulePreview() {
-		clearTimeout(previewTimer);
-		// Mermaid measures its container, so only render while the tab is visible.
-		if (activeTab !== 'graph') {
-			return;
-		}
-		previewTimer = setTimeout(renderPreview, 300);
-	}
-
-	function renderPreview() {
-		const node = $('preview');
-		const source = $('graph').value.trim();
-		if (source === previewSource && previewDrawn) {
-			return;
-		}
-		previewSource = source;
-		// The extension already parsed it: show its error instead of mermaid's.
-		if (source && graphInfo.error) {
-			node.innerHTML = '';
-			node.textContent = graphInfo.error;
-			previewDrawn = true;
-			return;
-		}
-		drawDiagram(node, source, 'graph-preview-' + ++previewSeq).then((drawn) => {
-			previewDrawn = drawn;
-		});
 	}
 
 	/* ------------------------------------------------------------------ mcp & tools */
@@ -1357,9 +1292,6 @@
 			case 'subagents':
 				renderSubagents();
 				break;
-			case 'graph':
-				renderGraphInfo();
-				break;
 			case 'mcp':
 			case 'tools':
 				renderReadOnly();
@@ -1370,7 +1302,6 @@
 			case 'inspect':
 				renderPluginDeps();
 				renderLegend();
-				renderGraphInfo();
 				break;
 			default:
 				break;
@@ -1394,7 +1325,6 @@
 			case 'state':
 				state = message;
 				paneSlices = message.panes || {};
-				graphInfo = message.graphInfo || graphInfo;
 				renderActive();
 				if (!ready) {
 					ready = true;
@@ -1415,13 +1345,6 @@
 			case 'dirs':
 				dirs = message;
 				renderDirs();
-				break;
-			case 'graphInfo':
-				graphInfo = message;
-				renderGraphInfo();
-				previewSource = null;
-				previewDrawn = false;
-				schedulePreview();
 				break;
 			case 'ok':
 				status(message.message);

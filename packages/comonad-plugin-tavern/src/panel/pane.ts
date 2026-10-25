@@ -132,6 +132,7 @@ export function tavernPane(ctx: Context): PaneSpec {
 	return {
 		id: 'st',
 		label: 'ST',
+		order: 30,
 		title: 'ST — characters, world books, personas, presets and their settings',
 		icon: BOOK_ICON,
 		command: 'comonad.openContent',
