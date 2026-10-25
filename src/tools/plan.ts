@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import { missingAncestor } from '../lib/created';
 import { guardPath, PathEscapeError } from '../lib/sandbox';
 import { objectSchema, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
@@ -72,6 +73,7 @@ export const planTools = toolset([
 			} catch (error) {
 				existed = (error as NodeJS.ErrnoException).code !== 'ENOENT';
 			}
+			const createdDir = await missingAncestor(dirname(target), ctx.policy.workingDirectory);
 			const write = async () => {
 				await mkdir(dirname(target), { recursive: true });
 				await writeFile(target, content);
@@ -80,6 +82,9 @@ export const planTools = toolset([
 				await ctx.edit(target, write);
 			} else {
 				await write();
+			}
+			if (createdDir) {
+				ctx.noteCreatedDir?.(createdDir);
 			}
 			if (!existed) {
 				ctx.noteCreated?.(target);

@@ -2,8 +2,9 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { missingAncestor } from '../lib/created';
 import { formatResult, runCommand, shellArgv, sandboxKind, type SandboxKind, type WriteScope } from '../lib/sandbox';
-import { creationTargets, rmTargets } from '../lib/shell';
+import { creationTargets, directoryTargets, rmTargets } from '../lib/shell';
 import { objectSchema, type Confinement, type SessionPolicy, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
 
@@ -32,6 +33,14 @@ async function presence(path: string): Promise<Presence> {
 async function createdFile(path: string): Promise<boolean> {
 	try {
 		return !(await lstat(path)).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+async function createdDirectory(path: string): Promise<boolean> {
+	try {
+		return (await lstat(path)).isDirectory();
 	} catch {
 		return false;
 	}
@@ -80,11 +89,19 @@ async function run(ctx: ToolContext, command: string, writeScope: WriteScope, re
 	const creates = track ? creationTargets(command, workspace) : [];
 	const removals = track ? rmTargets(command, workspace) : [];
 	const before = await Promise.all(creates.map(presence));
+	// A literal mkdir names a directory the session may own; remembering the highest missing
+	// ancestor before the command keeps the whole subtree owned even for `mkdir -p a/b/c`.
+	const directories = track ? await Promise.all(directoryTargets(command, workspace).map((dir) => missingAncestor(dir, workspace))) : [];
 	const result = await runCommand(shellArgv(command), workspace, shellOptions(ctx, writeScope, requestedTimeout));
 	for (let index = 0; index < creates.length; index += 1) {
 		const path = creates[index]!;
 		if (before[index] === 'absent' && (await createdFile(path))) {
 			ctx.noteCreated?.(path);
+		}
+	}
+	for (const dir of directories) {
+		if (dir && (await createdDirectory(dir))) {
+			ctx.noteCreatedDir?.(dir);
 		}
 	}
 	// A parsed rm that actually removed the path makes its provenance stale: a later user file at

@@ -109,7 +109,12 @@ export interface Session {
 	 * parsed shell creations. Bound to `createdRoot`; a different workspace discards them.
 	 */
 	created?: string[];
-	/** The resolved workspace `created` paths are relative to. */
+	/**
+	 * Workspace-relative directories this chat created. Their whole subtree is the chat's own, so
+	 * build output written there by a later command may be removed without asking.
+	 */
+	createdDirs?: string[];
+	/** The resolved workspace `created` and `createdDirs` paths are relative to. */
 	createdRoot?: string;
 	/** The chat that spawned this one; a subagent session is hidden from the ordinary history. */
 	parentId?: string;
@@ -187,6 +192,14 @@ export function createdInWorkspace(session: Session, workspace: string): Readonl
 		return new Set();
 	}
 	return new Set(session.created ?? []);
+}
+
+/** The directories this session created, bound to the same workspace as `createdInWorkspace`. */
+export function createdDirsInWorkspace(session: Session, workspace: string): ReadonlySet<string> {
+	if (!workspace.trim() || session.createdRoot !== resolve(workspace)) {
+		return new Set();
+	}
+	return new Set(session.createdDirs ?? []);
 }
 
 /** A parent's tool-call → child-session map, sanitised: it is read back from an untrusted JSON file. */
@@ -312,6 +325,7 @@ export class SessionStore {
 			cursor: null,
 			marks: [],
 			created: [],
+			createdDirs: [],
 			usage: emptyUsage(),
 		};
 	}
@@ -377,6 +391,7 @@ export class SessionStore {
 			marks: [],
 			// A fork is a new chat: the files its parent created are not its own to delete unreviewed.
 			created: [],
+			createdDirs: [],
 			createdRoot: undefined,
 			usage: emptyUsage(),
 		};
@@ -438,6 +453,11 @@ export class SessionStore {
 			marks: (session.marks ?? []).filter((mark) => typeof mark.entryCount === 'number'),
 			created: uniqueCreated(
 				(Array.isArray(session.created) ? session.created : [])
+					.map(createdPath)
+					.filter((path): path is string => path !== undefined),
+			).slice(-MAX_CREATED_PATHS),
+			createdDirs: uniqueCreated(
+				(Array.isArray(session.createdDirs) ? session.createdDirs : [])
 					.map(createdPath)
 					.filter((path): path is string => path !== undefined),
 			).slice(-MAX_CREATED_PATHS),

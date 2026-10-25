@@ -23,6 +23,14 @@ import type {
 export const ATTACHMENT_ID = /^[a-f0-9]{64}\.(png|jpg|gif|webp|pdf)$/;
 export const TEXT_PREVIEW_LIMIT = 4_096;
 export const STORED_TEXT_LIMIT = 200_000;
+/**
+ * How much of one pasted block a session keeps. A paste is stored as a text attachment, and a session
+ * read clamps text to `STORED_TEXT_LIMIT`; clipping at the same size keeps what the turn sees and what
+ * a reload sees identical.
+ */
+export const MAX_PASTED_TEXT_CHARS = STORED_TEXT_LIMIT;
+/** How many pasted blocks one message may carry. Images and PDFs have their own, separate count. */
+export const MAX_PASTED_TEXTS = 6;
 /** A PDF larger than this is refused before it is read into memory. */
 export const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
 
@@ -146,10 +154,42 @@ export function asTextAttachment(value: unknown): TextAttachment | undefined {
 	}
 	const source = sourceOf(record.source);
 	const part: TextAttachment = { kind: 'text', origin, form, source, text: record.text.slice(0, STORED_TEXT_LIMIT) };
+	if (typeof record.name === 'string' && record.name.trim()) {
+		part.name = record.name.trim().slice(0, 120);
+	}
 	if (record.truncated === true) {
 		part.truncated = true;
 	}
 	return part;
+}
+
+/**
+ * One composer text block, in the shape the webview sends (`{ kind: 'text', name, text }`). A long
+ * paste stays out of the `<textarea>` — Chromium lays the whole value out on every keystroke — and
+ * travels as a user note instead, its name shown on the transcript chip. The webview is not trusted,
+ * so the size and the name are bounded here even though it clips a paste before sending.
+ */
+export function asPastedTextAttachment(value: unknown): { part?: TextAttachment; clipped?: number } {
+	if (!value || typeof value !== 'object') {
+		return {};
+	}
+	const record = value as { kind?: unknown; name?: unknown; text?: unknown };
+	if (record.kind !== 'text' || typeof record.text !== 'string' || !/\S/.test(record.text)) {
+		return {};
+	}
+	const text = record.text.length > MAX_PASTED_TEXT_CHARS ? clipPasted(record.text) : record.text;
+	const name = typeof record.name === 'string' ? record.name.replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+	const part: TextAttachment = { kind: 'text', origin: 'user', form: 'note', source: {}, text };
+	if (name) {
+		part.name = name;
+	}
+	return text.length < record.text.length ? { part, clipped: record.text.length } : { part };
+}
+
+/** The bound leaves no half surrogate pair at the cut: a paste can end anywhere. */
+function clipPasted(text: string): string {
+	const kept = text.slice(0, MAX_PASTED_TEXT_CHARS);
+	return /[\uD800-\uDBFF]$/.test(kept) ? kept.slice(0, -1) : kept;
 }
 
 /** One attachment from a session file; anything malformed is dropped rather than repaired. */
@@ -260,7 +300,7 @@ export function attachmentNotes(attachments?: readonly AttachmentPart[]): string
 			const pages = part.pages ? ` pages ${part.pages.start}-${part.pages.end}` : '';
 			return `document ${part.name ?? part.id}${pages}${part.pageCount ? `/${part.pageCount}` : ''}`;
 		}
-		return `text ${part.form} ${part.source.path ?? ''}`.trim();
+		return `text ${part.name ?? part.form}${part.source.path ? ` ${part.source.path}` : ''}`.trim();
 	});
 }
 

@@ -1050,6 +1050,33 @@ details.thinking summary::before {
 	border-top: none;
 }
 
+/* A tool's picture waits behind this chip while the card is folded: the card stays a log line. */
+.image-reveal {
+	display: inline-flex;
+	margin: 0 10px 8px;
+	padding: 1px 9px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+	border-radius: 999px;
+	background: transparent;
+	font-size: 11px;
+	opacity: 0.85;
+}
+
+.image-reveal:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.14));
+	opacity: 1;
+}
+
+/* Open, the picture itself is in the body; the chip would only repeat what is on screen. */
+.tool-details[open] .image-reveal {
+	display: none;
+}
+
+/* The body brings its own padding; the pictures sit at its top, above the arguments. */
+.tool-body .thumbs {
+	padding: 0 0 8px;
+}
+
 .tool-more {
 	position: absolute;
 	top: 5px;
@@ -1659,6 +1686,49 @@ footer {
 }
 
 /* Images the composer is holding, before they are sent. */
+/* A long paste stays out of the textarea: one chip names the block, and removing it drops the block. */
+.composer-pastes {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 6px 8px 0;
+}
+
+.composer-pastes[hidden] {
+	display: none;
+}
+
+.composer-paste {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	max-width: 100%;
+	padding: 2px 4px 2px 8px;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.4));
+	border-radius: 6px;
+	background: var(--vscode-editor-background);
+	font-size: 11px;
+	line-height: 1.4;
+}
+
+.composer-paste-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.composer-paste-remove {
+	flex: none;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border: none;
+	border-radius: 50%;
+	line-height: 16px;
+	font-size: 12px;
+}
+
 .composer-images {
 	display: flex;
 	flex-wrap: wrap;

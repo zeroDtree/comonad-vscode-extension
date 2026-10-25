@@ -357,9 +357,6 @@
 		checked('timeout-override', config.commandTimeoutOverride);
 		put($('plans'), config.planDirectory);
 		put($('steps'), String(config.maxSteps));
-		put($('subagent-steps-mode'), config.subagentStepsMode);
-		put($('subagent-steps'), String(config.subagentSteps));
-		syncSubagentSteps();
 		put($('deny'), (config.denyReadPaths || []).join('\n'));
 		checked('confine-read', config.confineRead);
 		checked('confine-write', config.confineWrite);
@@ -373,8 +370,13 @@
 		}
 	}
 
-	/** The Subagents tab: one row per catalog agent, with the grant each capability needs. */
+	/** The Subagents tab: its step budget and one row per catalog agent, with the grant each
+	 *  capability needs. */
 	function renderSubagents() {
+		const config = state.config;
+		put($('subagent-steps-mode'), config.subagentStepsMode);
+		put($('subagent-steps'), String(config.subagentSteps));
+		syncSubagentSteps();
 		const data = state.subagents;
 		const table = $('subagent-rows');
 		if (!data || !table) {
@@ -498,13 +500,13 @@
 		return config;
 	}
 
-	/** The Agent and UI tabs' live save: one control, one key, no draft. */
+	/** The Agent, UI and Subagents tabs' live save: one control, one key, no draft. */
 	function saveAgent(key, value) {
 		post({ type: 'saveAgent', config: { [key]: value } });
 	}
 
 	for (const node of document.querySelectorAll('[data-key]')) {
-		const live = node.closest('section[data-pane="agent"], section[data-pane="ui"]') !== null;
+		const live = node.closest('section[data-pane="agent"], section[data-pane="ui"], section[data-pane="subagents"]') !== null;
 		const draft = () => {
 			markDirty();
 		};

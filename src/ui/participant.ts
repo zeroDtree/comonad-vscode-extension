@@ -83,7 +83,7 @@ export function participant(ctx: Context): void {
 				const detail = approval.calls.map((call) => `• ${call.name} ${preview(call.arguments, 160)}`).join('\n');
 				const picked = await vscode.window.showWarningMessage(
 					`Comonad needs approval (${approval.reason}).\n\n${detail}`,
-					{ modal: true, detail: 'Always allow adds a rule to the workspace settings.' },
+					{ modal: true, detail: 'Always allow adds a rule to the settings that already hold your permissions.' },
 					'Allow',
 					'Always allow',
 					'Deny',
@@ -154,4 +154,4 @@ export function participant(ctx: Context): void {
 	};
 	ctx.effect(() => () => created.dispose());
 }
-participant.inject = ['commands', 'agent', 'settings', 'sessions', 'log'];
+participant.inject = ['commands', 'agent', 'references', 'settings', 'sessions', 'log'];

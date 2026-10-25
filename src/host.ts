@@ -12,13 +12,29 @@ export interface HostConfig {
 	extension: vscode.ExtensionContext;
 }
 
+/** The scopes `WorkspaceConfiguration.inspect()` reports a value in; the effective one is a folder's. */
+export interface SettingsScopes {
+	workspaceFolderValue?: unknown;
+	workspaceValue?: unknown;
+}
+
 /**
- * Where a settings write lands. A window with no folder open has no workspace settings to write, and
- * VS Code refuses that write rather than redirecting it, so the value goes to the user's own settings
- * instead: a mode or an approval picked from the chat still sticks in a window with no folder.
+ * Where a settings write lands: the scope that already holds the key, else the user's own settings.
+ *
+ * A project that declares a key in `.vscode/settings.json` shadows the user value, so writing only
+ * the user value would leave the panel reading the project's old one — a save would look like it did
+ * nothing. Editing the key where it already lives makes the change visible on the next read. A key no
+ * project declares goes to the user's settings: one configuration follows every window, and opening
+ * the panel does not write a `.vscode/settings.json` entry by itself.
  */
-export function settingsTarget(hasFolder: boolean): vscode.ConfigurationTarget {
-	return hasFolder ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+export function settingsTarget(scopes: SettingsScopes): vscode.ConfigurationTarget {
+	if (scopes.workspaceFolderValue !== undefined) {
+		return vscode.ConfigurationTarget.WorkspaceFolder;
+	}
+	if (scopes.workspaceValue !== undefined) {
+		return vscode.ConfigurationTarget.Workspace;
+	}
+	return vscode.ConfigurationTarget.Global;
 }
 
 /** Every `comonad.*` key the manifest declares, kernel and plugin keys alike: what the section holds. */
@@ -60,8 +76,8 @@ export function host(ctx: Context, config: HostConfig): void {
 			return record;
 		},
 		update: async (key, value) => {
-			const target = settingsTarget(Boolean(vscode.workspace.workspaceFolders?.length));
-			await vscode.workspace.getConfiguration('comonad').update(key, value, target);
+			const section = vscode.workspace.getConfiguration('comonad');
+			await section.update(key, value, settingsTarget(section.inspect(key) ?? {}));
 		},
 		secret: (id) => Promise.resolve(extension.secrets.get(id)),
 		setSecret: (id, value) => Promise.resolve(extension.secrets.store(id, value)),

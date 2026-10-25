@@ -201,7 +201,7 @@ export function slashCommands(ctx: Context): void {
 	register('quiet', 'Generate a reply without adding it to the transcript', (args) => ({ done: false, text: args, trigger: 'quiet' }));
 
 }
-slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage', 'host'];
+slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage', 'host', 'tools'];
 
 async function statusText(ctx: Context): Promise<string> {
 	const config = ctx.settings.get();

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { lstat, mkdir, open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { missingAncestor } from '../lib/created';
 import type { Dirent } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
 import { sniffDocument } from '../lib/attachments';
@@ -234,6 +235,8 @@ export const fsTools = toolset([
 			} catch (error) {
 				existed = (error as NodeJS.ErrnoException).code !== 'ENOENT';
 			}
+			// A new file's missing parents are new too: the session owns that whole subtree.
+			const createdDir = await missingAncestor(dirname(target), ctx.policy.workingDirectory);
 			const write = async () => {
 				await mkdir(dirname(target), { recursive: true });
 				await writeFile(target, content);
@@ -242,6 +245,9 @@ export const fsTools = toolset([
 				await ctx.edit(target, write);
 			} else {
 				await write();
+			}
+			if (createdDir) {
+				ctx.noteCreatedDir?.(createdDir);
 			}
 			if (!existed) {
 				ctx.noteCreated?.(target);

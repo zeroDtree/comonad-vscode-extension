@@ -133,13 +133,21 @@ tasks have no timeout.
 
 ## Dangerous commands
 
-Commands shaped like `rm -rf`, `sudo`, `curl | sh`, `git push --force` and similar always prompt,
-even under accept policies. The one exception is cleanup of the agent's own work: a non-recursive
-`rm` whose every target is either inside the workspace and recorded as created by this session, or
-inside the test shell's private scratch tree. A `*`/`?` glob and the variables the test shell sets
-(`$TMPDIR`, `$HOME`, `$COMONAD_SCRATCH`, …) are expanded first and every match is checked. Recursive
-deletes, unknown variables, substitutions, symlinked parents that resolve outside the allowed
-trees, a glob that matches nothing, and anything else the scanner cannot prove still prompt.
+Commands shaped like `sudo`, `curl | sh`, `git push --force` and similar always prompt, even under
+accept policies. `rm` is the exception the agent may answer for itself: deleting its own work never
+asks, recursively or otherwise. A target is the session's own when it is a file the session wrote,
+lies under a directory the session created (the whole subtree, so build output a later command
+writes there counts too), or lies under a tree only the session can write — the test shell's scratch
+and the workspace `.comonad/tmp`. A `*`/`?` glob needs only an owned directory as its fixed prefix;
+the files it matches are not listed.
+
+Everything the scanner cannot place under an owned root still prompts: an unknown variable, a
+command substitution, a path outside the workspace, a glob in a directory the session did not create,
+and a symlinked parent that resolves outside the allowed trees.
+
+The test shell (`run_shell_test`) never prompts for an `rm`: its OS sandbox keeps every write inside
+its scratch tree and a private temp directory, so a deletion there cannot reach a user file. The
+other dangerous shapes above still prompt.
 
 ## Presets
 

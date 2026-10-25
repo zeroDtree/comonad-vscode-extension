@@ -2,7 +2,7 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -27,8 +27,15 @@ import {
 } from '../lib/prompt';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, ModelRequestError, toOpenAiMessages } from '../lib/openai';
 import { MAX_IMAGE_BYTES, estimateImageTokens, sniffImage } from '../lib/images';
-import { asImageAttachment, renderAttachments } from '../lib/attachments';
-import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, loginShellArgv, mergePath, parseLoginPath, PathEscapeError, resolveInside, sandboxEnv, sandboxKind, sanitizedEnv, testScratchEnvironment, type SandboxOptions } from '../lib/sandbox';
+import {
+	MAX_PASTED_TEXTS,
+	MAX_PASTED_TEXT_CHARS,
+	asImageAttachment,
+	asPastedTextAttachment,
+	asTextAttachment,
+	renderAttachments,
+} from '../lib/attachments';
+import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, loginShellArgv, mergePath, parseLoginPath, PathEscapeError, resolveInside, sandboxEnv, sandboxKind, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
 import { applyHunk, diffLines, editForHunk, revertHunk } from '../lib/line-diff';
 import { listEndpointModels, openAiChat } from '../lib/openai';
@@ -47,6 +54,7 @@ import { agentTools } from '../tools/misc';
 import { hostStorage, type Host } from '../services/host';
 import { Context, Service, type Plugin } from 'cordis';
 import {
+	createdDirsInWorkspace,
 	createdInWorkspace,
 	createdPath,
 	inWorkspace,
@@ -56,7 +64,7 @@ import {
 	type Mark,
 } from '../services/sessions';
 import { deletionTargetsAreOwned } from '../lib/deletions';
-import { creationTargets, rmInvocations, rmTargets } from '../lib/shell';
+import { creationTargets, directoryTargets, rmInvocations, rmTargets } from '../lib/shell';
 import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
 import {
 	AGENT_KEYS,
@@ -971,21 +979,28 @@ suite('Comonad domain', () => {
 		assert.ok(!isDangerous(call('write_file', { path: 'a.ts' }), writeTool));
 	});
 
-	test('an rm that only removes files this session created is not dangerous', () => {
-		const created = new Set(['a.txt', 'sub/b.txt']);
-		const deletion = { workspace: '/ws', created };
+	test('an rm inside the session-owned trees is not dangerous', () => {
+		const files = new Set(['a.txt', 'sub/b.txt', 'dist/app.js']);
+		const dirs = new Set(['dist', 'logs']);
+		const deletion = { workspace: '/ws', files, dirs };
 		assert.ok(!isDangerous(call('run_shell', { command: 'rm -f a.txt' }), shellTool, deletion));
 		assert.ok(!isDangerous(call('run_shell', { command: 'rm --force a.txt' }), shellTool, deletion));
 		assert.ok(!isDangerous(call('run_shell', { command: 'rm -f ./a.txt' }), shellTool, deletion));
 		assert.ok(!isDangerous(call('run_shell', { command: 'rm -f sub/../a.txt' }), shellTool, deletion));
 		assert.ok(!isDangerous(call('run_shell', { command: 'cd sub && rm -f b.txt' }), shellTool, deletion));
 		assert.ok(!isDangerous(call('run_shell', { command: 'echo x; rm -f a.txt' }), shellTool, deletion));
-		// Anything the scanner cannot prove stays dangerous, and other patterns still fire.
+		// A directory the session created owns its whole subtree, recursion included.
+		assert.ok(!isDangerous(call('run_shell', { command: 'rm -rf dist' }), shellTool, deletion));
+		assert.ok(!isDangerous(call('run_shell', { command: 'rm -rf dist/assets' }), shellTool, deletion));
+		assert.ok(!isDangerous(call('run_shell', { command: 'rm -f dist/*.js' }), shellTool, deletion));
+		assert.ok(!isDangerous(call('run_shell', { command: 'rm -rf logs/*.log' }), shellTool, deletion));
+		// Anything the scanner cannot place under an owned root stays dangerous.
 		assert.ok(isDangerous(call('run_shell', { command: 'rm -f b.txt' }), shellTool, deletion));
-		assert.ok(isDangerous(call('run_shell', { command: 'rm -rf a.txt' }), shellTool, deletion));
 		assert.ok(isDangerous(call('run_shell', { command: 'rm -f a.txt b.txt' }), shellTool, deletion));
 		assert.ok(isDangerous(call('run_shell', { command: 'rm -f ../a.txt' }), shellTool, deletion));
-		assert.ok(isDangerous(call('run_shell', { command: 'rm -f *.txt' }), shellTool, deletion));
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -f *.txt' }), shellTool, deletion), 'the workspace root is not owned');
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -rf .' }), shellTool, deletion));
+		assert.ok(isDangerous(call('run_shell', { command: 'rm -rf /' }), shellTool, deletion));
 		assert.ok(isDangerous(call('run_shell', { command: "sh -c 'rm -rf /' ; rm -f a.txt" }), shellTool, deletion));
 		assert.ok(isDangerous(call('run_shell', { command: 'echo rm -f a.txt; rm -f a.txt' }), shellTool, deletion));
 		assert.ok(isDangerous(call('run_shell', { command: 'rm -f a.txt; sudo true' }), shellTool, deletion));
@@ -1002,10 +1017,10 @@ suite('Comonad domain', () => {
 		}
 		assert.ok(isDangerous(call('run_shell', { command: 'rm -f a.txt' }), shellTool), 'no provenance keeps the old behaviour');
 		// The real-path check is part of ownership, not an optional hint.
-		assert.ok(deletionTargetsAreOwned('rm -f a.txt', '/ws', created));
-		assert.ok(deletionTargetsAreOwned('rm -f a.txt', '/ws', created, () => true));
-		assert.ok(!deletionTargetsAreOwned('rm -f a.txt', '/ws', created, () => false));
-		assert.ok(!deletionTargetsAreOwned('rm -f a.txt', '', created));
+		assert.ok(deletionTargetsAreOwned('rm -f a.txt', { workspace: '/ws', files, dirs }));
+		assert.ok(deletionTargetsAreOwned('rm -f a.txt', { workspace: '/ws', files, dirs, inside: () => true }));
+		assert.ok(!deletionTargetsAreOwned('rm -f a.txt', { workspace: '/ws', files, dirs, inside: () => false }));
+		assert.ok(!deletionTargetsAreOwned('rm -f a.txt', { workspace: '', files, dirs }));
 	});
 
 	test('the shell scanner names only provable creation targets', () => {
@@ -1050,10 +1065,21 @@ suite('Comonad domain', () => {
 			"echo '--- .git writable:'; touch .git/_probe && echo OK_git && rm -f .git/_probe;",
 			"echo '--- net:'; curl -sS -m 5 -o /dev/null -w '%{http_code}\\n' https://example.com 2>&1",
 		].join(' ');
-		const probeCreated = new Set(['.comonad/_perm_probe.txt', '.git/_probe']);
-		assert.ok(deletionTargetsAreOwned(probe, '/ws', probeCreated), probe);
+		const probeFiles = new Set(['.comonad/_perm_probe.txt', '.git/_probe']);
+		assert.ok(deletionTargetsAreOwned(probe, { workspace: '/ws', files: probeFiles, dirs: new Set() }), probe);
 		assert.deepStrictEqual(creationTargets(probe, '/ws').sort(), ['/ws/.git/_probe', '/ws/data/_probe']);
-		assert.ok(!deletionTargetsAreOwned(probe, '/ws', new Set(['.comonad/_perm_probe.txt'])), 'every rm target must be owned');
+		assert.ok(
+			!deletionTargetsAreOwned(probe, { workspace: '/ws', files: new Set(['.comonad/_perm_probe.txt']), dirs: new Set() }),
+			'every rm target must be owned',
+		);
+
+		// mkdir is provenance too: a created directory owns its subtree.
+		assert.deepStrictEqual(directoryTargets('mkdir -p made/dir', ws), ['/ws/made/dir']);
+		assert.deepStrictEqual(directoryTargets('cd sub && mkdir -p made/dir', ws), ['/ws/sub/made/dir']);
+		assert.deepStrictEqual(directoryTargets('mkdir -pv a b', ws), ['/ws/a', '/ws/b']);
+		for (const command of ['mkdir -m 755 a', 'mkdir $DIR', 'mkdir *.d', 'mkdir /tmp/a', "sh -c 'mkdir a'", 'mkdir -p ~/a']) {
+			assert.deepStrictEqual(directoryTargets(command, ws), [], command);
+		}
 	});
 
 	test('the gate allows an owned rm under accept-all', () => {
@@ -1080,47 +1106,22 @@ suite('Comonad domain', () => {
 		assert.strictEqual(asked.escalated, true);
 	});
 
-	test('the gate runs a scratch glob from the test shell without asking', () => {
-		const root = mkdtempSync(join(tmpdir(), 'comonad-gate-rm-'));
-		try {
-			const scratch = join(root, 'scratch');
-			mkdirSync(join(scratch, 'tmp', 'pages2'), { recursive: true });
-			writeFileSync(join(scratch, 'tmp', 'pages2', 'p-1.png'), 'x');
-			const inside = (target: string): boolean => {
-				try {
-					const rel = relative(realpathSync(scratch), realpathSync(dirname(target)));
-					return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-				} catch {
-					return false;
-				}
-			};
-			const env = {
-				sandbox: 'bwrap' as const,
-				allowUnsandboxedShell: false,
-				created: new Set<string>(),
-				testVariables: testScratchEnvironment(scratch),
-				testScratchInside: inside,
-			};
-			const accepted = policy({ approval: 'universal_accept' });
-			const command = 'rm -f "$TMPDIR/pages2"/*.png';
-			const allowed = gateCalls([call('run_shell_test', { command })], lookup, accepted, { allow: [], ask: [], deny: [] }, env);
-			assert.strictEqual(allowed.decision, 'allow', allowed.reason);
-			// Without the scratch tree the same command cannot be proven and still asks.
-			const asked = gateCalls(
-				[call('run_shell_test', { command })],
-				lookup,
-				accepted,
-				{ allow: [], ask: [], deny: [] },
-				{ ...env, testScratchInside: undefined },
-			);
-			assert.strictEqual(asked.decision, 'confirm');
-			assert.strictEqual(asked.escalated, true);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
+	test('the gate never asks about an rm inside the test shell', () => {
+		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
+		const rules = { allow: [], ask: [], deny: [] };
+		const env = gateEnv('bwrap', false, new Set());
+		// The test shell's sandbox keeps every write in its scratch: an unparseable command — a cd
+		// through $COMONAD_SCRATCH, an assignment prefix — still cannot delete a user file.
+		const command = 'cd "$COMONAD_SCRATCH" && HOME=/Users/x rm -f w-*.png';
+		const allowed = gateCalls([call('run_shell_test', { command })], lookup, accepted, rules, env);
+		assert.strictEqual(allowed.decision, 'allow', allowed.reason);
+		// The same rm through a workspace-writable shell still asks: nothing proves the target is ours.
+		const asked = gateCalls([call('run_shell', { command: 'rm -f w-*.png' })], lookup, accepted, rules, env);
+		assert.strictEqual(asked.decision, 'confirm');
+		assert.strictEqual(asked.escalated, true);
 	});
 
-	test('the deletion check expands the scratch globs it can prove', () => {
+	test('the deletion check trusts scratch roots and created directories', () => {
 		const root = mkdtempSync(join(tmpdir(), 'comonad-rm-'));
 		try {
 			const workspace = join(root, 'ws');
@@ -1129,7 +1130,7 @@ suite('Comonad domain', () => {
 			mkdirSync(join(scratch, 'tmp', 'pages2'), { recursive: true });
 			writeFileSync(join(scratch, 'tmp', 'pages2', 'p-1.png'), 'x');
 			writeFileSync(join(scratch, 'tmp', 'pages2', 'p-2.png'), 'x');
-			const variables = testScratchEnvironment(scratch);
+			const empty = { workspace, files: new Set<string>(), dirs: new Set<string>() };
 			// The production check is realpath-based; a symlink must not smuggle a user path in.
 			const inside = (target: string): boolean => {
 				try {
@@ -1139,22 +1140,27 @@ suite('Comonad domain', () => {
 					return false;
 				}
 			};
-			const command = 'rm -f "$TMPDIR/pages2"/*.png';
-			assert.ok(deletionTargetsAreOwned(command, workspace, new Set(), undefined, { variables, scratch: inside }), command);
-			// Without the scratch tree those files are not journaled, so the same glob cannot be proven.
-			assert.ok(!deletionTargetsAreOwned(command, workspace, new Set(), undefined, { variables }));
-			assert.ok(!deletionTargetsAreOwned('rm -f "$OTHER/pages2"/*.png', workspace, new Set(), undefined, { variables, scratch: inside }));
-			// A workspace glob is owned only when every file it matches was created by this session.
-			writeFileSync(join(workspace, 'a.log'), 'x');
-			writeFileSync(join(workspace, 'b.log'), 'x');
-			assert.ok(deletionTargetsAreOwned('rm -f *.log', workspace, new Set(['a.log', 'b.log'])));
-			assert.ok(!deletionTargetsAreOwned('rm -f *.log', workspace, new Set(['a.log'])), 'every match must be owned');
+			// A glob under the scratch root is trusted from its fixed prefix alone: no expansion.
+			const command = `rm -f ${scratch}/tmp/pages2/*.png`;
+			assert.ok(deletionTargetsAreOwned(command, { ...empty, scratch: inside }), command);
+			assert.ok(deletionTargetsAreOwned(`rm -rf ${scratch}/tmp/pages2`, { ...empty, scratch: inside }));
+			// Without the scratch tree those files are not the session's, so the same glob cannot be proven.
+			assert.ok(!deletionTargetsAreOwned(command, empty));
+			// A variable is unprovable in a workspace-writable shell; only literal paths are resolved.
+			assert.ok(!deletionTargetsAreOwned('rm -f "$TMPDIR/pages2"/*.png', { ...empty, scratch: inside }));
+			// A workspace glob is trusted when its fixed directory prefix is a directory this session
+			// created. Owning the files a glob happens to match is not enough.
+			assert.ok(!deletionTargetsAreOwned('rm -f *.log', { ...empty, files: new Set(['a.log', 'b.log']) }));
+			assert.ok(!deletionTargetsAreOwned('rm -f *.log', { ...empty, files: new Set(['a.log']) }), 'every match must be owned or the root must be');
+			assert.ok(deletionTargetsAreOwned('rm -rf logs', { ...empty, dirs: new Set(['logs']) }));
+			assert.ok(deletionTargetsAreOwned('rm -f logs/*.log', { ...empty, dirs: new Set(['logs']) }));
+			assert.ok(deletionTargetsAreOwned('rm -rf logs/old', { ...empty, dirs: new Set(['logs']) }));
 			// A symlink inside the scratch that leads outside it is not the session's to delete.
 			const outside = join(root, 'outside');
 			mkdirSync(outside);
 			writeFileSync(join(outside, 'secret.png'), 'x');
 			symlinkSync(outside, join(scratch, 'tmp', 'link'));
-			assert.ok(!deletionTargetsAreOwned('rm -f "$TMPDIR/link/secret.png"', workspace, new Set(), undefined, { variables, scratch: inside }));
+			assert.ok(!deletionTargetsAreOwned(`rm -f ${scratch}/tmp/link/secret.png`, { ...empty, scratch: inside }));
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -1166,16 +1172,21 @@ suite('Comonad domain', () => {
 			const store = new SessionStore(dir);
 			const session = store.build(policy());
 			session.created = ['a.txt', 'a.txt', 'a/b.txt'];
+			session.createdDirs = ['build', 'build/assets', 'build'];
 			session.createdRoot = resolve('/ws');
 			store.save(session);
 			const loaded = store.get(session.id);
 			assert.ok(loaded);
 			assert.deepStrictEqual(loaded.created, ['a.txt', 'a/b.txt']);
+			assert.deepStrictEqual(loaded.createdDirs, ['build', 'build/assets']);
 			assert.strictEqual(loaded.createdRoot, resolve('/ws'));
 			assert.deepStrictEqual([...createdInWorkspace(loaded, '/ws')], ['a.txt', 'a/b.txt']);
+			assert.deepStrictEqual([...createdDirsInWorkspace(loaded, '/ws')], ['build', 'build/assets']);
 			assert.strictEqual(createdInWorkspace(loaded, '/other').size, 0);
+			assert.strictEqual(createdDirsInWorkspace(loaded, '/other').size, 0);
 			const fork = store.copy(loaded);
 			assert.deepStrictEqual(fork.created, []);
+			assert.deepStrictEqual(fork.createdDirs, []);
 			assert.strictEqual(fork.createdRoot, undefined);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -1195,11 +1206,20 @@ suite('Comonad domain', () => {
 			assert.ok(spec);
 			const workspace = kernel.host.workspace();
 			const noted: string[] = [];
+			const notedDirs: string[] = [];
 			writeFileSync(join(workspace, 'existing.txt'), 'old');
-			const context = { ...directToolContext(kernel), noteCreated: (path: string) => noted.push(path) };
+			const context = {
+				...directToolContext(kernel),
+				noteCreated: (path: string) => noted.push(path),
+				noteCreatedDir: (path: string) => notedDirs.push(path),
+			};
 			await spec.execute({ path: 'new.txt', content: 'new' }, context);
+			await spec.execute({ path: 'deep/dir/nested.txt', content: 'new' }, context);
+			await spec.execute({ path: 'deep/other.txt', content: 'new' }, context);
 			await spec.execute({ path: 'existing.txt', content: 'old' }, context);
-			assert.deepStrictEqual(noted, [join(workspace, 'new.txt')]);
+			assert.deepStrictEqual(noted, [join(workspace, 'new.txt'), join(workspace, 'deep/dir/nested.txt'), join(workspace, 'deep/other.txt')]);
+			// The highest new ancestor is enough: everything below it is the session's own.
+			assert.deepStrictEqual(notedDirs, [join(workspace, 'deep')]);
 		} finally {
 			await kernel.dispose();
 		}
@@ -1213,15 +1233,21 @@ suite('Comonad domain', () => {
 			assert.ok(spec);
 			const workspace = kernel.host.workspace();
 			const noted: string[] = [];
+			const notedDirs: string[] = [];
 			const removed: string[] = [];
 			const context = {
 				...directToolContext(kernel),
 				noteCreated: (path: string) => noted.push(path),
+				noteCreatedDir: (path: string) => notedDirs.push(path),
 				noteDeleted: (path: string) => removed.push(path),
 			};
 			const made = await spec.execute({ command: 'touch made.txt && echo hi > out.txt' }, context);
 			assert.match(String(made), /exit_code: 0/, String(made));
 			assert.deepStrictEqual(noted.map((path) => basename(path)).sort(), ['made.txt', 'out.txt']);
+			// `mkdir -p` owns the highest new ancestor, so the whole new tree is provenance.
+			const dirs = await spec.execute({ command: 'mkdir -p tree/deep && touch tree/deep/x.txt' }, context);
+			assert.match(String(dirs), /exit_code: 0/, String(dirs));
+			assert.deepStrictEqual(notedDirs, [join(workspace, 'tree')]);
 			writeFileSync(join(workspace, 'user.txt'), 'x');
 			await spec.execute({ command: 'rm -f made.txt user.txt' }, context);
 			assert.deepStrictEqual(removed.map((path) => basename(path)).sort(), ['made.txt', 'user.txt']);
@@ -2218,12 +2244,19 @@ suite('Comonad domain', () => {
 		assert.match(guest, /checked\('timeout-override', config\.commandTimeoutOverride\)/, 'the guest renders it');
 	});
 
-	test('a setting picked with no folder open is written to the user’s own settings', () => {
-		// A window with no folder has no workspace settings to write, and VS Code refuses that write rather
-		// than redirecting it: without this, the mode or the approval picked from the chat — or a model from
-		// the same menu — simply fails with an error in a window that has no folder open.
-		assert.strictEqual(settingsTarget(false), vscode.ConfigurationTarget.Global);
-		assert.strictEqual(settingsTarget(true), vscode.ConfigurationTarget.Workspace);
+	test('a setting is written to the scope that already holds it, else the user’s own', () => {
+		// A project value shadows the user value; writing the user one would leave the panel reading
+		// the project's old value back, which is how saving a workflow looked like it undid itself.
+		assert.strictEqual(settingsTarget({ workspaceValue: { enabled: true } }), vscode.ConfigurationTarget.Workspace);
+		assert.strictEqual(settingsTarget({ workspaceFolderValue: { enabled: true } }), vscode.ConfigurationTarget.WorkspaceFolder);
+		assert.strictEqual(
+			settingsTarget({ workspaceFolderValue: { enabled: true }, workspaceValue: { enabled: true } }),
+			vscode.ConfigurationTarget.WorkspaceFolder,
+			'the folder value is the one that wins on read',
+		);
+		// A key no project declares goes to the user: one configuration follows every window, and
+		// opening the panel never writes a `.vscode/settings.json` entry by itself.
+		assert.strictEqual(settingsTarget({}), vscode.ConfigurationTarget.Global);
 	});
 
 	test('every setting the manifest declares is one the code actually reads', () => {
@@ -2277,6 +2310,39 @@ suite('Comonad domain', () => {
 		// A service read without an injection throws `cannot get property "X" without inject` the moment
 		// the panel builds its state — which takes every dropdown on the page down with it.
 		assert.deepStrictEqual(inject, used);
+	});
+
+	test('every UI surface injects the row services it reads', () => {
+		const root = join(__dirname, '..', '..');
+		const dir = join(root, 'src', 'ui');
+		// Cordis members that need no service, plus the platform rows mounted above the plugin host:
+		// every surface reaches those through its ancestors without an injection of its own.
+		const free = new Set([
+			'on', 'once', 'emit', 'get', 'inject', 'effect', 'plugin', 'provide', 'scope', 'dispose',
+			'host', 'log', 'settings',
+		]);
+		// Helpers and pane factories take the caller's context; they are not plugins and declare no inject.
+		const helpers = new Set(['graph-pane.ts', 'workflow-pane.ts', 'journal-actions.ts', 'mentions.ts']);
+		const scanned: string[] = [];
+		for (const file of readdirSync(dir).filter((name) => name.endsWith('.ts') && !helpers.has(name))) {
+			const source = readFileSync(join(dir, file), 'utf8');
+			const used = [...new Set([...source.matchAll(/\bctx\.([a-zA-Z]+)/g)].map((match) => match[1]!))]
+				.filter((name) => !free.has(name))
+				.sort();
+			if (!used.length) {
+				continue;
+			}
+			// A service read without an injection throws at the moment the surface can first reach the
+			// branch that reads it — the `@` picker once died on a `references` read this way.
+			const declared = /\.inject\s*=\s*\[([^\]]*)\]/.exec(source);
+			assert.ok(declared, `${file} reads ${used.join(', ')} but declares no inject`);
+			const inject = new Set([...declared![1].matchAll(/'([^']+)'/g)].map((match) => match[1]!));
+			for (const name of used) {
+				assert.ok(inject.has(name), `${file} reads ctx.${name} without inject`);
+			}
+			scanned.push(file);
+		}
+		assert.ok(scanned.includes('chat-panel.ts') && scanned.includes('participant.ts') && scanned.includes('slash.ts'), 'the scan sees the chat surfaces');
 	});
 });
 
@@ -9590,6 +9656,37 @@ suite('Images', () => {
 		assert.strictEqual(asImageAttachment(null), undefined);
 	});
 
+	test('a pasted block becomes a named user note, before the instruction', () => {
+		const pasted = asPastedTextAttachment({ kind: 'text', name: '  Pasted\n text 1 ', text: 'first line\nsecond' });
+		assert.deepStrictEqual(pasted.part, {
+			kind: 'text',
+			origin: 'user',
+			form: 'note',
+			source: {},
+			name: 'Pasted text 1',
+			text: 'first line\nsecond',
+		});
+		assert.strictEqual(pasted.clipped, undefined);
+		// The model reads the block as prose, ahead of the prompt it belongs to.
+		assert.strictEqual(renderAttachments([pasted.part!]), 'first line\nsecond');
+		const wire = toOpenAiMessages([{ role: 'user', content: 'Summarize', attachments: [pasted.part!] }]);
+		assert.strictEqual(wire[0]!.content, 'first line\nsecond\n\nSummarize');
+		// What the webview sends is bounded here too, at the size a session can read back.
+		const huge = asPastedTextAttachment({ kind: 'text', name: 'Pasted text 2', text: 'a'.repeat(MAX_PASTED_TEXT_CHARS + 7) });
+		assert.strictEqual(huge.part?.text.length, MAX_PASTED_TEXT_CHARS);
+		assert.strictEqual(huge.clipped, MAX_PASTED_TEXT_CHARS + 7);
+		// A cut through an emoji's surrogate pair drops the half rather than leaving broken UTF-16.
+		const split = asPastedTextAttachment({ kind: 'text', text: 'a'.repeat(MAX_PASTED_TEXT_CHARS - 1) + '😀' });
+		assert.strictEqual(split.part?.text.length, MAX_PASTED_TEXT_CHARS - 1);
+		assert.ok(!/[\uD800-\uDBFF]$/.test(split.part?.text ?? ''));
+		assert.strictEqual(asPastedTextAttachment({ kind: 'text', text: ' \n\t ' }).part, undefined, 'blank text is not a block');
+		assert.strictEqual(asPastedTextAttachment({ kind: 'image', text: 'x' }).part, undefined);
+		assert.strictEqual(asPastedTextAttachment(null).part, undefined);
+		// A session read keeps the name, so the transcript chip reads the same after a reload.
+		const back = asTextAttachment({ kind: 'text', origin: 'user', form: 'note', source: {}, name: 'Pasted text 1', text: 'body' });
+		assert.strictEqual(back?.name, 'Pasted text 1');
+	});
+
 	test('the attachment store round-trips, dedupes and refuses bad input', async () => {
 		const kernel = await createTestKernel();
 		try {
@@ -9839,6 +9936,29 @@ suite('Images', () => {
 		assert.ok(panel.includes('id="composer-images"'));
 	});
 
+	test('a long paste becomes a chip instead of textarea text', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		assert.ok(js.includes('const PASTE_CHIP_CHARS = 20_000'), 'the chip threshold is explicit');
+		// The guest and the kernel bound one paste and the number of pastes to the same numbers.
+		const pasteLimit = /const MAX_PASTE_CHARS = ([\d_]+)/.exec(js);
+		assert.strictEqual(Number(pasteLimit?.[1].replace(/_/g, '')), MAX_PASTED_TEXT_CHARS);
+		const pasteCount = /const MAX_COMPOSER_PASTES = (\d+)/.exec(js);
+		assert.strictEqual(Number(pasteCount?.[1]), MAX_PASTED_TEXTS);
+		assert.ok(js.includes('function addPastedText'), 'a block is kept beside the prompt');
+		assert.ok(js.includes("getData('text/plain')"), 'the paste handler reads the plain text');
+		assert.ok(js.includes("kind: 'text'"), 'the block is sent as a text attachment');
+		assert.ok(js.includes('composerPastes.length = 0'), 'sending clears the pending blocks');
+		assert.ok(js.includes('input.textLength'), 'the resize checks emptiness without copying the value');
+		assert.ok(js.includes('INPUT_MAX_HEIGHT') && js.includes('composerCapped'), 'a capped composer skips insertion measurement');
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(panel, /<textarea id="input"[^>]*spellcheck="false"/, 'the composer runs no spellchecker over a long prompt');
+		assert.ok(panel.includes('id="composer-pastes"'), 'the chip row exists above the input');
+		assert.ok(panel.includes('asPastedTextAttachment'), 'the host validates a pasted block');
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.ok(css.includes('.composer-paste'), 'the chip is styled');
+	});
+
 	test('a picture that decodes late keeps a following transcript at the end', () => {
 		const root = join(__dirname, '..', '..');
 		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
@@ -9851,6 +9971,31 @@ suite('Images', () => {
 		assert.ok(js.includes('pinned && grew'), 'scroll anchoring is not read as the reader leaving the end');
 		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
 		assert.match(css, /footer\s*\{[^}]*position:\s*relative/, 'the jump control is anchored above the footer');
+	});
+
+	test('a new step never drags a reader who scrolled away', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		// A tool card and an approval both belong at the end, but neither may force the transcript
+		// there: a reader in an earlier step keeps their place and the Latest button shows the way.
+		assert.match(js, /toolCards\.set\(message\.id, step\);\s*tick\(\);\s*(?:\/\/[^\n]*\s*)*scroll\(\);/);
+		assert.match(js, /messagesEl\.appendChild\(root\);\s*\}\s*(?:\/\/[^\n]*\s*)*scroll\(\);/);
+		// The deliberate jumps stay: a turn the user just sent, and the Latest control they press.
+		assert.match(js, /renderFoot\(turn\);\s*refreshActions\(\);\s*scroll\(true\);/);
+		assert.match(js, /jumpButton\.addEventListener\('click', \(\) => \{\s*pinned = true;\s*scroll\(true\);/);
+	});
+
+	test('a tool read keeps its picture behind a chip until asked for', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		assert.ok(js.includes('function imageReveal'), 'the folded card builds a chip, not the picture');
+		assert.ok(js.includes('imageReveal(step, details)'), 'tool cards use the chip');
+		assert.ok(js.includes("details.addEventListener('toggle'"), 'opening the card is what builds the picture');
+		assert.ok(js.includes('body.insertBefore(thumbs, body.firstChild)'), 'the picture lives in the body, not the summary');
+		assert.ok(js.includes('imageThumbs(turn.promptAttachments)'), 'a prompt’s own pictures still preview');
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.ok(css.includes('.image-reveal'), 'the chip is styled');
+		assert.ok(css.includes('.tool-details[open] .image-reveal'), 'the chip gives way to the picture');
 	});
 
 	test('the chat carries the summary card, original details and pagination seams', () => {

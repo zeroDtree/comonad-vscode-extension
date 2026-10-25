@@ -909,7 +909,7 @@ ${paneStyles.map((src) => `<link rel="stylesheet" href="${src}" />`).join('\n')}
     <nav id="tabs" role="tablist" aria-orientation="vertical" aria-label="Comonad settings">
 ${tabButton('agent', 'Agent', 'Agent — model, policy, workspace', TAB_ICONS.agent)}
 ${tabButton('ui', 'UI', 'UI — how the conversation is displayed', TAB_ICONS.ui)}
-${tabButton('subagents', 'Subagents', 'Subagents — per-agent capability grants', TAB_ICONS.subagents)}
+${tabButton('subagents', 'Subagents', 'Subagents — step budget and per-agent capability grants', TAB_ICONS.subagents)}
 ${paneTabs}
 ${tabButton('mcp', 'MCP', 'MCP — servers and their status', TAB_ICONS.mcp)}
 ${tabButton('tools', 'Tools', 'Tools — what a turn may run', TAB_ICONS.tools)}
@@ -968,19 +968,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <label for="steps">Max steps</label>
         <p class="hint">Maximum graph steps per turn. 0 means no limit. A workflow stage uses its own budget when it sets one, bounded by this number.</p>
         <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
-      </div>
-      <div class="field">
-        <label for="subagent-steps-mode">Subagent steps</label>
-        <p class="hint">Where a subagent's step budget comes from. A definition's <code>maxTurns</code> can tighten it, never loosen it.</p>
-        <select id="subagent-steps-mode" class="control" data-key="subagentStepsMode">
-          <option value="inherit">Inherit — same as Max steps</option>
-          <option value="custom">Custom — the budget below</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="subagent-steps">Subagent step budget</label>
-        <p class="hint">Steps a subagent may take when Subagent steps is Custom. 0 means no limit.</p>
-        <input id="subagent-steps" class="control" type="number" min="0" data-key="subagentSteps" />
       </div>
     </div>
     <h2 class="group-title">Workspace</h2>
@@ -1073,6 +1060,22 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
 
   <section data-pane="subagents" hidden>
     <h1 class="page-title">Subagents</h1>
+    <h2 class="group-title">Step budget</h2>
+    <div class="group">
+      <div class="field">
+        <label for="subagent-steps-mode">Subagent steps</label>
+        <p class="hint">Where a subagent's step budget comes from. A definition's <code>maxTurns</code> can tighten it, never loosen it.</p>
+        <select id="subagent-steps-mode" class="control" data-key="subagentStepsMode">
+          <option value="inherit">Inherit — same as Max steps</option>
+          <option value="custom">Custom — the budget below</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="subagent-steps">Subagent step budget</label>
+        <p class="hint">Steps a subagent may take when Subagent steps is Custom. 0 means no limit.</p>
+        <input id="subagent-steps" class="control" type="number" min="0" data-key="subagentSteps" />
+      </div>
+    </div>
     <p class="group-note">Read-only tools are always available. <b>Files</b> grants the tracked write tools (<code>write_file</code>, <code>apply_patch</code>, <code>apply_edits</code>); <b>Test</b> grants <code>run_shell_test</code>, whose workspace is read-only and whose only writable place is the scratch directory. Full shell and plan writes are never granted to a subagent. The agent's own <code>tools</code> list still selects which tools it uses, and the parent mode must allow the capability too. Changes apply to the next spawn.</p>
     <table id="subagent-rows"></table>
   </section>

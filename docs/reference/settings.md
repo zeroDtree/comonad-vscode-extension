@@ -1,8 +1,13 @@
 # Settings
 
-Settings live in VS Code's Settings UI (`comonad.*`), in the **Settings** panel's tabs, and in the
-`settings.json` of the workspace or user. The agent tab saves each control as it changes; a running
-turn keeps the policy it started with, so a change applies from the next message.
+Settings live in VS Code's Settings UI (`comonad.*`), in the **Settings** panel's tabs, and in
+`settings.json`. Comonad writes a key to the scope that already holds it. A key no project declares
+goes to the user settings, so one configuration follows every window and a repository gains no
+`.vscode/settings.json` entry just because the panel was opened. A key a project already declares is
+updated there: a user value would be shadowed by the project's, so the change would appear to be
+undone on the next read. To move such a key to the user settings, delete its project entry once. The
+agent tab saves each control as it changes; a running turn keeps the policy it started with, so a
+change applies from the next message.
 
 This page lists the keys you are likely to change. Every key is also documented in VS Code's Settings
 UI.

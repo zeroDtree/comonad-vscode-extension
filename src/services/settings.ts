@@ -562,7 +562,7 @@ export class Settings extends Service {
 		this.ctx.emit('settings/changed');
 	}
 
-	/** Applies a preset or partial policy to the workspace settings. */
+	/** Applies a preset or partial policy through the host's scope-aware update. */
 	async applyPolicy(patch: {
 		mode?: WorkMode;
 		approval?: Approval;

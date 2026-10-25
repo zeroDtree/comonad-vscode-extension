@@ -4,7 +4,13 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
-import { MAX_DOCUMENT_BYTES, publicImages } from '../lib/attachments';
+import {
+	MAX_DOCUMENT_BYTES,
+	MAX_PASTED_TEXTS,
+	MAX_PASTED_TEXT_CHARS,
+	asPastedTextAttachment,
+	publicImages,
+} from '../lib/attachments';
 import { asReasoningEffort } from '../lib/effort';
 import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES } from '../lib/images';
 import { APPROVAL_LABELS, MODE_LABELS } from '../lib/policy';
@@ -669,8 +675,9 @@ export function chatPanel(ctx: Context): void {
 	};
 
 	/**
-	 * Turns the composer's data URLs into stored references. The webview is not trusted: the bytes are
-	 * sniffed again by the store, and the types, count and sizes are checked here.
+	 * Turns the composer's pastes and data URLs into stored references. The webview is not trusted:
+	 * the bytes are sniffed again by the store, and the types, counts and sizes are checked here.
+	 * Pasted text is already in memory and has no bytes to sniff; it is a user note on the message.
 	 */
 	const ingestAttachments = async (value: unknown): Promise<{ attachments: AttachmentPart[]; problem?: string }> => {
 		if (!Array.isArray(value) || value.length === 0) {
@@ -681,8 +688,43 @@ export function chatPanel(ctx: Context): void {
 		let imageBytes = 0;
 		let documentBytes = 0;
 		let pdfHint = false;
-		for (const entry of value.slice(0, MAX_IMAGES_PER_MESSAGE)) {
-			const item = entry as { data?: unknown; name?: unknown };
+		let texts = 0;
+		let media = 0;
+		let textLimit = false;
+		let mediaLimit = false;
+		const entries = value.slice(0, MAX_IMAGES_PER_MESSAGE + MAX_PASTED_TEXTS);
+		for (const entry of entries) {
+			const item = entry as { kind?: unknown; data?: unknown; name?: unknown; text?: unknown };
+			if (item.kind === 'text') {
+				if (texts >= MAX_PASTED_TEXTS) {
+					if (!textLimit) {
+						textLimit = true;
+						problems.push(`only ${MAX_PASTED_TEXTS} pasted texts are sent at a time`);
+					}
+					continue;
+				}
+				const pasted = asPastedTextAttachment(item);
+				if (!pasted.part) {
+					problems.push('a pasted text was empty');
+					continue;
+				}
+				texts += 1;
+				attachments.push(pasted.part);
+				if (pasted.clipped !== undefined) {
+					problems.push(
+						`a pasted text was ${pasted.clipped.toLocaleString()} characters; only the first ${MAX_PASTED_TEXT_CHARS.toLocaleString()} were kept`,
+					);
+				}
+				continue;
+			}
+			if (media >= MAX_IMAGES_PER_MESSAGE) {
+				if (!mediaLimit) {
+					mediaLimit = true;
+					problems.push(`only ${MAX_IMAGES_PER_MESSAGE} images or PDFs are sent at a time`);
+				}
+				continue;
+			}
+			media += 1;
 			const dataUrl = typeof item.data === 'string' ? item.data : '';
 			const name = typeof item.name === 'string' ? item.name : undefined;
 			const pdf = /^data:application\/pdf;base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
@@ -728,8 +770,8 @@ export function chatPanel(ctx: Context): void {
 				problems.push(describe(error));
 			}
 		}
-		if (value.length > MAX_IMAGES_PER_MESSAGE) {
-			problems.push(`only ${MAX_IMAGES_PER_MESSAGE} attachments are sent at a time`);
+		if (value.length > entries.length) {
+			problems.push('only the first attachments were sent');
 		}
 		return { attachments, problem: problems.length ? `Attachment(s) skipped: ${problems.join('; ')}.` : undefined };
 	};
@@ -1595,7 +1637,7 @@ export function chatPanel(ctx: Context): void {
 	// The title-bar icons are commands; the chat list itself lives in the webview.
 	registerCommand(ctx, 'comonad.toggleHistory', () => post({ type: 'toggleHistory' }));
 }
-chatPanel.inject = ['sessions', 'agent', 'attachments', 'settings', 'llm', 'usage', 'commands', 'log', 'host'];
+chatPanel.inject = ['sessions', 'agent', 'attachments', 'references', 'settings', 'llm', 'usage', 'commands', 'log', 'host'];
 
 function splitChoices(labels: Record<string, string>): { id: string; label: string; description: string }[] {
 	return Object.entries(labels).map(([id, label]) => {
@@ -1675,8 +1717,9 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 		<div id="changes-list"></div>
 	</div>
 	<div id="editor">
+		<div id="composer-pastes" class="composer-pastes" hidden></div>
 		<div id="composer-images" class="composer-images" hidden></div>
-		<textarea id="input" rows="1" placeholder="Ask Comonad…  @ to reference code · /help for commands"></textarea>
+		<textarea id="input" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Ask Comonad…  @ to reference code · /help for commands"></textarea>
 		<div id="mention" class="mention-menu" role="listbox" aria-label="Reference a workspace item" hidden>
 			<div id="mention-head" class="mention-head" hidden></div>
 			<div id="mention-list"></div>

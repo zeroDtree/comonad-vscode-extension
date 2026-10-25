@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { deletionTargetsAreOwned } from './deletions';
+import { deletionTargetsAreOwned, type DeletionOwnership } from './deletions';
 import type { SandboxKind } from './sandbox';
 import { RM_PATTERN } from './shell';
 import type { Approval, Capability, Confinement, SessionPolicy, ToolCall, ToolSpec, WorkMode } from './types';
@@ -203,20 +203,20 @@ export function globToRegExp(pattern: string): RegExp {
 
 /**
  * What the gate is told about the host and the session: the sandbox it will run on, the setting that
- * opts out of the no-sandbox prompt, and — when known — the files this session created plus a
- * symlink-aware containment check for deletions. All of it is read afresh every turn.
+ * opts out of the no-sandbox prompt, and — when known — the files and directories this session
+ * created plus symlink-aware containment for deletions. All of it is read afresh every turn.
  */
 export interface GateEnvironment {
 	sandbox: SandboxKind;
 	allowUnsandboxedShell: boolean;
-	/** Workspace-relative paths this session created; absent disables the rm exemption. */
+	/** Workspace-relative files this session created; absent disables the rm exemption. */
 	created?: ReadonlySet<string>;
+	/** Workspace-relative directories this session created; their subtrees are the session's too. */
+	createdDirs?: ReadonlySet<string>;
 	/** Symlink-aware containment for a deletion target; production always supplies one. */
 	deletionStaysInside?: (absoluteTarget: string) => boolean;
-	/** The test shell's environment, so `$TMPDIR` in an rm is a real path before it is checked. */
-	testVariables?: Record<string, string>;
-	/** Symlink-aware containment for the test shell's scratch tree, which the session owns. */
-	testScratchInside?: (absoluteTarget: string) => boolean;
+	/** True for a path under a tree only this session can write (its scratch roots). */
+	deletionScratch?: (absoluteTarget: string) => boolean;
 }
 
 export interface GateResult {
@@ -225,6 +225,8 @@ export interface GateResult {
 	/** A confirmation a subagent's delegated approval must not answer. */
 	escalated?: boolean;
 }
+
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 export function gateCalls(
 	calls: ToolCall[],
@@ -276,10 +278,10 @@ export function gateCalls(
 			env.created
 				? {
 						workspace: policy.workingDirectory,
-						created: env.created,
+						files: env.created,
+						dirs: env.createdDirs ?? EMPTY_PATHS,
 						inside: env.deletionStaysInside,
-						variables: env.testVariables,
-						scratch: env.testScratchInside,
+						scratch: env.deletionScratch,
 					}
 				: undefined,
 		);
@@ -452,15 +454,7 @@ const DANGEROUS_PATTERNS: RegExp[] = [
 	/\bdiskutil\b[^\n]*\berase\b/i,
 ];
 
-export interface DeletionContext {
-	workspace: string;
-	created: ReadonlySet<string>;
-	inside?: (absoluteTarget: string) => boolean;
-	/** The test shell's environment, so `$TMPDIR` is a real path before the operands are checked. */
-	variables?: Record<string, string>;
-	/** True for a path under the test shell's scratch, which only this chat can write. */
-	scratch?: (absoluteTarget: string) => boolean;
-}
+export type DeletionContext = DeletionOwnership;
 
 /** Flags shell commands that deserve an explicit prompt even when the policy auto-approves. */
 export function isDangerous(call: ToolCall, tool: ToolSpec | undefined, deletion?: DeletionContext): boolean {
@@ -468,20 +462,10 @@ export function isDangerous(call: ToolCall, tool: ToolSpec | undefined, deletion
 		return false;
 	}
 	const command = callTarget(call, tool);
-	// An rm the session can prove is deleting its own files is not a reason to stop. Everything the
-	// scanner cannot prove stays dangerous. The scratch variables and the scratch tree itself only
-	// describe a test shell; no other capability runs with them.
-	const testShell = tool?.capability === 'shell_test';
-	if (
-		RM_PATTERN.test(command) &&
-		!(
-			deletion &&
-			deletionTargetsAreOwned(command, deletion.workspace, deletion.created, deletion.inside, {
-				variables: testShell ? deletion.variables : undefined,
-				scratch: testShell ? deletion.scratch : undefined,
-			})
-		)
-	) {
+	// The test shell writes only its scratch and a private temp tree: its sandbox already answers the
+	// deletion question, so an rm there is never a reason to stop. A workspace-writable shell still
+	// asks unless every operand lands under a tree this session owns or made.
+	if (tool?.capability !== 'shell_test' && RM_PATTERN.test(command) && !(deletion && deletionTargetsAreOwned(command, deletion))) {
 		return true;
 	}
 	return DANGEROUS_PATTERNS.some((pattern) => pattern.test(command));

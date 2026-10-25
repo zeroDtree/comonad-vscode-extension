@@ -647,6 +647,66 @@ export function rmTargets(command: string, workspace: string): string[] {
 	return [...targets];
 }
 
+/** Absolute workspace directories this command may create with `mkdir`, literal operands only. */
+export function directoryTargets(command: string, workspace: string): string[] {
+	if (!workspace.trim()) {
+		return [];
+	}
+	const commands = scan(command);
+	if (!commands) {
+		return [];
+	}
+	const root = resolve(workspace);
+	const targets = new Set<string>();
+	for (const simple of commands) {
+		const first = simple.words[0];
+		if (!first?.literal || first.value !== 'mkdir') {
+			continue;
+		}
+		const operands: string[] = [];
+		let options = true;
+		let usable = true;
+		for (const word of simple.words.slice(1)) {
+			if (options && word.value === '--') {
+				options = false;
+				continue;
+			}
+			if (options && word.value.startsWith('--')) {
+				if (word.value === '--parents' || word.value === '--verbose') {
+					continue;
+				}
+				usable = false;
+				break;
+			}
+			if (options && word.value.startsWith('-') && word.value !== '-') {
+				// `-m` takes a separate operand, so the words after it are not all paths.
+				if (/^-[pv]+$/.test(word.value)) {
+					continue;
+				}
+				usable = false;
+				break;
+			}
+			if (!word.literal || !word.value) {
+				usable = false;
+				break;
+			}
+			operands.push(word.value);
+		}
+		if (!usable) {
+			continue;
+		}
+		for (const operand of operands) {
+			const target = resolve(root, simple.cwd, operand);
+			const rel = relative(root, target);
+			if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
+				continue;
+			}
+			targets.add(target);
+		}
+	}
+	return [...targets];
+}
+
 /** Absolute workspace paths this command may create via `touch`, `tee` or a write redirection. */
 export function creationTargets(command: string, workspace: string): string[] {
 	if (!workspace.trim()) {

@@ -60,6 +60,8 @@ export interface TextAttachment {
 	kind: 'text';
 	origin: 'user' | 'reference';
 	form: 'file' | 'folder' | 'symbol' | 'note' | 'error';
+	/** A display name for a composer paste; resolved references leave it empty. */
+	name?: string;
 	source: { path?: string; range?: SourceRange; symbol?: string; hash?: string };
 	text: string;
 	truncated?: boolean;
@@ -267,6 +269,8 @@ export interface ToolContext {
 	edit?(path: string, write: () => Promise<void>): Promise<void>;
 	/** Note that this session created the absolute workspace file `path`. */
 	noteCreated?(path: string): void;
+	/** Note that this session created the absolute workspace directory `path` and its subtree. */
+	noteCreatedDir?(path: string): void;
 	/** Note that `path` no longer exists, dropping it and its descendants from provenance. */
 	noteDeleted?(path: string): void;
 }

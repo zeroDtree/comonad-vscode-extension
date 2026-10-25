@@ -7,6 +7,7 @@
 	const $ = (id) => document.getElementById(id);
 	const messagesEl = $('messages');
 	const input = $('input');
+	const composerPastesEl = $('composer-pastes');
 	const composerImagesEl = $('composer-images');
 	const mentionEl = $('mention');
 	const mentionHead = $('mention-head');
@@ -1528,6 +1529,37 @@
 		return box;
 	}
 
+	function imageLabel(part) {
+		const size = part.width && part.height ? ' · ' + part.width + '×' + part.height : '';
+		return (part.name || 'image') + size;
+	}
+
+	/**
+	 * A tool's pictures wait behind one chip until the card is opened. A card that read a screenshot
+	 * is a log line, and printing the picture while folded moves every line under it; the chip names
+	 * what is waiting, and opening the card — by the chip or by its header — shows the picture in the
+	 * body, where folding the card puts it away again.
+	 */
+	function imageReveal(step, details) {
+		const images = Array.isArray(step.images) ? step.images.filter((part) => !part.kind || part.kind === 'image') : [];
+		if (!images.length) {
+			return null;
+		}
+		const button = document.createElement('button');
+		button.type = 'button';
+		button.className = 'image-reveal';
+		button.dataset.tip = images.length === 1 ? 'Show this image' : 'Show these images';
+		button.textContent = images.length === 1 ? '🖼 ' + imageLabel(images[0]) : '🖼 ' + images.length + ' images';
+		button.addEventListener('click', (event) => {
+			// The chip lives inside the card's <summary>: its click opens the picture, not the card
+			// twice. The toggle listener below is the one place that builds it.
+			event.preventDefault();
+			event.stopPropagation();
+			details.open = true;
+		});
+		return button;
+	}
+
 	/** Resolved text and document references, as compact chips beside the prompt. */
 	function referenceChips(parts) {
 		const refs = Array.isArray(parts) ? parts.filter((part) => part.kind === 'text' || part.kind === 'document') : [];
@@ -1543,6 +1575,9 @@
 				const pages = part.pages ? ' · p.' + part.pages.start + (part.pages.end === part.pages.start ? '' : '-' + part.pages.end) : '';
 				const total = part.pageCount ? '/' + part.pageCount : '';
 				chip.textContent = '📄 ' + (part.name || 'PDF') + pages + total;
+			} else if (part.name) {
+				// A composer paste: its name, never its (possibly very long) body.
+				chip.textContent = '📋 ' + part.name;
 			} else {
 				const source = part.source || {};
 				const range = source.range ? ':' + source.range.start + (source.range.end === source.range.start ? '' : '-' + source.range.end) : '';
@@ -1652,10 +1687,10 @@
 			// Output is text, never markup: a command may print anything.
 			head.querySelector('.tool-preview').textContent = preview;
 		}
-		// A picture is the answer itself: it stays beside the title whether the card is open or not.
-		const thumbs = imageThumbs(step.images);
-		if (thumbs) {
-			head.appendChild(thumbs);
+		// A picture is not printed on the folded card: one chip names it, and opening the card shows it.
+		const reveal = imageReveal(step, details);
+		if (reveal) {
+			head.appendChild(reveal);
 		}
 
 		const body = document.createElement('div');
@@ -1721,9 +1756,29 @@
 			card.appendChild(menu);
 		}
 
+		// The pictures are built the first time the body is shown, not while the card is folded: the
+		// bytes are fetched only when someone asked to look, and folding the card puts them away.
+		let imagesShown = false;
+		const showImages = () => {
+			if (imagesShown) {
+				return;
+			}
+			imagesShown = true;
+			const thumbs = imageThumbs(step.images);
+			if (thumbs) {
+				body.insertBefore(thumbs, body.firstChild);
+			}
+		};
+
 		details.addEventListener('toggle', () => {
 			step._open = details.open;
+			if (details.open) {
+				showImages();
+			}
 		});
+		if (details.open) {
+			showImages();
+		}
 		step._card = card;
 		step._details = details;
 		step._timer = head.querySelector('.tool-time');
@@ -2019,6 +2074,7 @@
 		const area = document.createElement('textarea');
 		area.className = 'edit-input';
 		area.value = turn.prompt;
+		area.spellcheck = false;
 		area.setAttribute('aria-label', 'Edit prompt');
 		bubble.appendChild(area);
 
@@ -2685,7 +2741,9 @@
 		live.turn.steps.push(step);
 		toolCards.set(message.id, step);
 		tick();
-		scroll(true);
+		// A new call is not a reason to move a reader who scrolled away: the transcript follows the
+		// end only while they are at it, exactly as it does for streamed text.
+		scroll();
 	}
 
 	function toolResult(message) {
@@ -2815,7 +2873,9 @@
 		} else {
 			messagesEl.appendChild(root);
 		}
-		scroll(true);
+		// An approval belongs at the end of the turn, but it may not drag a reader there: the jump
+		// button says a question is waiting without taking the page from under them.
+		scroll();
 	}
 
 	/** A stopped turn withdraws its question: the card stays as a record, but nothing can be chosen. */
@@ -3919,6 +3979,87 @@
 		input.scrollTop = input.scrollHeight;
 	}
 
+	/* ------------------------------------------------------------------ composer pastes */
+
+	// A long paste stays out of the textarea: Chromium lays the whole value out on every keystroke, so
+	// a pasted block makes every later key slower. The block becomes a chip above the input and travels
+	// as a user note attachment; the transcript draws its name, not the whole text.
+	const PASTE_CHIP_CHARS = 20_000;
+	/** What one paste may carry. The kernel bounds a stored text attachment at the same size. */
+	const MAX_PASTE_CHARS = 200_000;
+	const MAX_COMPOSER_PASTES = 6;
+	const composerPastes = [];
+	let pasteSeq = 0;
+
+	function renderComposerPastes() {
+		composerPastesEl.innerHTML = '';
+		composerPastesEl.hidden = composerPastes.length === 0;
+		composerPastes.forEach((paste, index) => {
+			const chip = document.createElement('div');
+			chip.className = 'composer-paste';
+			const label = document.createElement('span');
+			label.className = 'composer-paste-label';
+			const kept = paste.text.length.toLocaleString();
+			const size = paste.original ? kept + ' of ' + paste.original.toLocaleString() : kept;
+			label.textContent = '📋 ' + paste.name + ' · ' + size + ' chars';
+			label.title = paste.text.slice(0, 2_000);
+			const remove = document.createElement('button');
+			remove.type = 'button';
+			remove.className = 'composer-paste-remove';
+			remove.textContent = '×';
+			remove.title = 'Remove this pasted text';
+			remove.addEventListener('click', () => {
+				composerPastes.splice(index, 1);
+				renderComposerPastes();
+				input.focus();
+			});
+			chip.append(label, remove);
+			composerPastesEl.appendChild(chip);
+		});
+	}
+
+	/** The bound leaves no half surrogate pair at the cut: a paste can end anywhere. */
+	function clipPaste(text) {
+		const kept = text.slice(0, MAX_PASTE_CHARS);
+		return /[\uD800-\uDBFF]$/.test(kept) ? kept.slice(0, -1) : kept;
+	}
+
+	/** Keeps one long paste beside the prompt instead of inside it. */
+	function addPastedText(text) {
+		const clipped = text.length > MAX_PASTE_CHARS;
+		composerPastes.push({
+			name: 'Pasted text ' + (++pasteSeq),
+			text: clipped ? clipPaste(text) : text,
+			original: clipped ? text.length : 0,
+		});
+		renderComposerPastes();
+		if (clipped) {
+			addNotice(
+				'Pasted text is ' +
+					text.length.toLocaleString() +
+					' characters; only the first ' +
+					MAX_PASTE_CHARS.toLocaleString() +
+					' were attached.',
+			);
+		}
+	}
+
+	/** A paste this long leaves the box; a shorter one stays native. Returns whether it was taken. */
+	function interceptPastedText(event, text) {
+		if (text.length < PASTE_CHIP_CHARS) {
+			return false;
+		}
+		if (composerPastes.length >= MAX_COMPOSER_PASTES) {
+			// Let the native paste keep the text rather than dropping what the reader brought.
+			addNotice('Only ' + MAX_COMPOSER_PASTES + ' pasted texts can be added to one message.');
+			return false;
+		}
+		event.preventDefault();
+		addPastedText(text);
+		input.focus();
+		return true;
+	}
+
 	/* ------------------------------------------------------------------ composer images */
 
 	// The composer holds attachments locally as data URLs, shows them as chips, and sends them once.
@@ -4066,15 +4207,39 @@
 
 	/* ------------------------------------------------------------------ outbound actions */
 
-	/** One line while empty, growing with the text: the box is as tall as what is in it. */
-	function resizeInput() {
-		if (!input.value) {
+	/** `#input`'s max-height in chat.css; the box never grows past this. */
+	const INPUT_MAX_HEIGHT = 200;
+	/** Whether the last measurement found the box at its ceiling. */
+	let composerCapped = false;
+	/** The value length at the last measurement (or skipped insertion), to spot a replacing edit. */
+	let composerLength = 0;
+
+	/**
+	 * One line while empty, growing with the text: the box is as tall as what is in it.
+	 *
+	 * Measuring lays the whole value out, so while the box is already at its ceiling an insertion
+	 * that only grows the value cannot make it taller and is skipped. A deletion, or an insertion
+	 * over a selection that leaves the value shorter, measures again and may bring the box down.
+	 */
+	function resizeInput(event) {
+		const length = input.textLength;
+		if (!length) {
 			// `rows="1"` is the empty height; measuring would also measure a long placeholder.
 			input.style.height = '';
+			composerCapped = false;
+			composerLength = 0;
+			return;
+		}
+		const cap = Math.min(Math.round(window.innerHeight * 0.4), INPUT_MAX_HEIGHT);
+		if (composerCapped && length > composerLength && event && /^insert/.test(event.inputType || '')) {
+			composerLength = length;
 			return;
 		}
 		input.style.height = 'auto';
-		input.style.height = Math.min(input.scrollHeight, Math.round(window.innerHeight * 0.4)) + 'px';
+		const height = input.scrollHeight;
+		input.style.height = Math.min(height, cap) + 'px';
+		composerCapped = height >= cap;
+		composerLength = length;
 	}
 
 	let submitting = false;
@@ -4093,15 +4258,20 @@
 				await Promise.all([...pendingReads]);
 			}
 			const text = input.value.trim();
-			if (!text && !composerImages.length) {
+			if (!text && !composerImages.length && !composerPastes.length) {
 				return;
 			}
 			closeMention();
-			const attachments = composerImages.map((attachment) => ({ kind: attachment.kind, name: attachment.name, data: attachment.dataUrl }));
+			const attachments = [
+				...composerPastes.map((paste) => ({ kind: 'text', name: paste.name, text: paste.text })),
+				...composerImages.map((attachment) => ({ kind: attachment.kind, name: attachment.name, data: attachment.dataUrl })),
+			];
 			input.value = '';
 			resizeInput();
 			composerImages.length = 0;
 			renderComposerImages();
+			composerPastes.length = 0;
+			renderComposerPastes();
 			vscode.postMessage({ type: 'send', text, attachments });
 			input.focus();
 		} finally {
@@ -4121,11 +4291,15 @@
 			return;
 		}
 		// Quiet is the one type with a prompt of its own, and it is the one the host refuses when the
-		// box is empty — so the box is emptied here and the answer comes back as a notice.
-		const text = trigger === 'quiet' ? input.value.trim() : '';
+		// box is empty — so the box is emptied here and the answer comes back as a notice. A quiet
+		// turn has no attachment channel, so its pasted blocks join the prompt text, material first.
+		const text =
+			trigger === 'quiet' ? [...composerPastes.map((paste) => paste.text), input.value.trim()].filter(Boolean).join('\n\n') : '';
 		if (trigger === 'quiet') {
 			input.value = '';
 			resizeInput();
+			composerPastes.length = 0;
+			renderComposerPastes();
 		}
 		vscode.postMessage({ type: 'generate', trigger, text });
 		input.focus();
@@ -4162,7 +4336,8 @@
 			submit();
 		}
 	});
-	// Paste and drop are image input only when they carry a picture; ordinary text paste stays native.
+	// A picture or a PDF becomes an attachment; a short text paste stays native, and a long one
+	// becomes a chip so the textarea never holds a prompt that makes every key slow.
 	input.addEventListener('paste', (event) => {
 		const files = [];
 		for (const item of event.clipboardData?.items ?? []) {
@@ -4174,13 +4349,14 @@
 				files.push(file);
 			}
 		}
-		if (!files.length) {
+		if (files.length) {
+			event.preventDefault();
+			for (const file of files) {
+				addAttachmentFile(file);
+			}
 			return;
 		}
-		event.preventDefault();
-		for (const file of files) {
-			addAttachmentFile(file);
-		}
+		interceptPastedText(event, event.clipboardData?.getData('text/plain') ?? '');
 	});
 	const editorEl = $('editor');
 	editorEl.addEventListener('dragover', (event) => {

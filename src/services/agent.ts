@@ -33,8 +33,8 @@ import {
 import { instructionBody, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, type Completion } from '../lib/openai';
 import { callTarget, gateCalls, isShellCapability, MODE_LABELS, suggestAllowRule } from '../lib/policy';
-import { testScratchEnvironment } from '../lib/sandbox';
-import { creationTargets, rmTargets } from '../lib/shell';
+import { workspaceTempDir } from '../lib/sandbox';
+import { creationTargets, directoryTargets, rmTargets } from '../lib/shell';
 import {
 	COMONAD_BLOCK,
 	COMONAD_BLOCKS,
@@ -72,6 +72,7 @@ import type { JournalApi } from '../lib/journal';
 import { DEFAULT_CONTEXT_WINDOW, subagentGrant, subagentStepBudget } from './settings';
 import {
 	canRewrite,
+	createdDirsInWorkspace,
 	createdInWorkspace,
 	createdPath,
 	MAX_CREATED_PATHS,
@@ -2055,6 +2056,7 @@ export class Agent extends Service {
 			}
 			const workspace = state.policy.workingDirectory;
 			const created = new Set(this.createdInSession(state));
+			const createdDirs = new Set(this.createdDirsInSession(state));
 			if (process.platform !== 'win32' && workspace.trim()) {
 				// A command that creates and removes the same literal path is safe when the path is
 				// absent now: the creation form will make it, and rm cannot delete a user's file.
@@ -2064,12 +2066,13 @@ export class Agent extends Service {
 						continue;
 					}
 					const command = callTarget(call, tool);
-					const creates = new Set(creationTargets(command, workspace));
-					if (!creates.size) {
+					const files = new Set(creationTargets(command, workspace));
+					const dirs = new Set(directoryTargets(command, workspace));
+					if (!files.size && !dirs.size) {
 						continue;
 					}
 					for (const target of rmTargets(command, workspace)) {
-						if (!creates.has(target)) {
+						if (!files.has(target) && !dirs.has(target)) {
 							continue;
 						}
 						let exists = true;
@@ -2083,22 +2086,25 @@ export class Agent extends Service {
 						}
 						const clean = createdPath(relative(resolve(workspace), target).split(sep).join('/'));
 						if (clean) {
-							created.add(clean);
+							(dirs.has(target) ? createdDirs : created).add(clean);
 						}
 					}
 				}
 			}
-			// The test shell's environment and the tree it owns outright: `rm "$TMPDIR/out"/*.png` can
-			// then be expanded and checked instead of asking about every glob it contains.
+			// The trees the session owns outright: the test scratch and the workspace temp dir are the
+			// AI's own, so a workspace-writable shell may delete under them without asking.
 			const scratch = join(this.ctx.host.storage.tmp, 'shell', state.rootSessionId);
+			const temp = workspace.trim() ? workspaceTempDir(workspace) : undefined;
+			const inTree = (root: string | undefined, target: string): boolean =>
+				Boolean(root && (resolve(target) === resolve(root) || insideRealWorkspace(root, target)));
 			const gate = gateCalls(state.toolCalls, (name) => this.ctx.tools.get(name), state.policy, this.ctx.settings.rules(), {
 				sandbox: this.ctx.host.sandboxKind(),
 				allowUnsandboxedShell: this.ctx.settings.get().allowUnsandboxedShell,
 				created: process.platform === 'win32' ? undefined : created,
+				createdDirs: process.platform === 'win32' ? undefined : createdDirs,
 				deletionStaysInside:
 					process.platform === 'win32' ? undefined : (target) => insideRealWorkspace(workspace, target),
-				testVariables: process.platform === 'win32' ? undefined : testScratchEnvironment(scratch),
-				testScratchInside: process.platform === 'win32' ? undefined : (target) => insideRealWorkspace(scratch, target),
+				deletionScratch: process.platform === 'win32' ? undefined : (target) => inTree(scratch, target) || inTree(temp, target),
 			});
 			state.gateReason = gate.reason;
 			if (gate.decision === 'allow') {
@@ -2188,6 +2194,7 @@ export class Agent extends Service {
 			sensitiveEnv: this.ctx.settings.get().filterSensitiveEnv,
 			edit: (path, write) => this.journalEdit(state, path, write),
 			noteCreated: (path) => this.noteCreated(state, path),
+			noteCreatedDir: (path) => this.noteCreatedDir(state, path),
 			noteDeleted: (path) => this.noteDeleted(state, path),
 		};
 	}
@@ -2262,6 +2269,7 @@ export class Agent extends Service {
 		const key = `${session.id}\0${root}`;
 		if (session.createdRoot !== root) {
 			session.created = [];
+			session.createdDirs = [];
 			session.createdRoot = root;
 			this.createdBackfilled.delete(key);
 		}
@@ -2297,7 +2305,21 @@ export class Agent extends Service {
 		return session ? createdInWorkspace(session, state.policy.workingDirectory) : new Set();
 	}
 
+	private createdDirsInSession(state: RunState): ReadonlySet<string> {
+		const session = this.turnSession(state.rootSessionId) ?? this.ctx.sessions.get(state.rootSessionId);
+		return session ? createdDirsInWorkspace(session, state.policy.workingDirectory) : new Set();
+	}
+
 	private noteCreated(state: RunState, path: string): void {
+		this.noteProvenance(state, path, 'files');
+	}
+
+	/** A created directory owns its whole subtree for the deletion check. */
+	private noteCreatedDir(state: RunState, path: string): void {
+		this.noteProvenance(state, path, 'dirs');
+	}
+
+	private noteProvenance(state: RunState, path: string, kind: 'files' | 'dirs'): void {
 		const session = this.turnSession(state.rootSessionId) ?? this.ctx.sessions.get(state.rootSessionId);
 		const workspace = state.policy.workingDirectory;
 		if (!session || !workspace.trim()) {
@@ -2306,18 +2328,24 @@ export class Agent extends Service {
 		const root = resolve(workspace);
 		if (session.createdRoot !== root) {
 			session.created = [];
+			session.createdDirs = [];
 			session.createdRoot = root;
 		}
 		const clean = createdPath(relative(root, resolve(path)).split(sep).join('/'));
 		if (!clean) {
 			return;
 		}
-		const created = new Set(session.created ?? []);
-		if (created.has(clean)) {
+		const list = new Set(kind === 'files' ? session.created ?? [] : session.createdDirs ?? []);
+		if (list.has(clean)) {
 			return;
 		}
-		created.add(clean);
-		session.created = [...created].slice(-MAX_CREATED_PATHS);
+		list.add(clean);
+		const bounded = [...list].slice(-MAX_CREATED_PATHS);
+		if (kind === 'files') {
+			session.created = bounded;
+		} else {
+			session.createdDirs = bounded;
+		}
 	}
 
 	private noteDeleted(state: RunState, path: string): void {
@@ -2334,7 +2362,9 @@ export class Agent extends Service {
 		if (!clean) {
 			return;
 		}
-		session.created = (session.created ?? []).filter((entry) => entry !== clean && !entry.startsWith(`${clean}/`));
+		const gone = (entry: string): boolean => entry !== clean && !entry.startsWith(`${clean}/`);
+		session.created = (session.created ?? []).filter(gone);
+		session.createdDirs = (session.createdDirs ?? []).filter(gone);
 	}
 
 	private async spawnAgent(parent: RunState, request: AgentSpawnRequest): Promise<string> {

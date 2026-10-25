@@ -27,7 +27,7 @@ export function palette(ctx: Context): void {
 		const detail = request.calls.map((call) => `• ${call.name} ${call.arguments.slice(0, 160)}`).join('\n');
 		const picked = await vscode.window.showWarningMessage(
 			`Comonad needs approval (${request.reason}).\n\n${detail}`,
-			{ modal: true, detail: 'Always allow adds a rule to the workspace settings.' },
+			{ modal: true, detail: 'Always allow adds a rule to the settings that already hold your permissions.' },
 			'Allow',
 			'Always allow',
 			'Deny',
