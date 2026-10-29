@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context, type Plugin } from 'cordis';
 import { abortable } from '../lib/cancel';
-import { capabilityAllowed } from '../lib/policy';
+import { capabilityAllowed, writesWorkspace } from '../lib/policy';
 import { mergeToolLayout } from '../lib/prompt-layout';
+import { sandboxAllowsWrites } from '../lib/sandbox';
 import { hasWorkspace, type SessionPolicy, type ToolCall, type ToolContext, type ToolImage, type ToolSpec } from '../lib/types';
 
 export interface ToolFilter {
@@ -42,6 +43,17 @@ export type PreToolDecision = { kind: 'allow' } | { kind: 'deny'; reason: string
 
 /** `accept` may replace what the model sees; `block` turns the result into a failure it must read. */
 export type PostToolDecision = { kind: 'accept'; content?: ToolContent } | { kind: 'block'; feedback: ToolContent };
+
+/**
+ * Whether the sandbox mode rules a tool out before approval: an unsandboxed tool outside the
+ * explicit full-access mode, or a tool whose contract needs a write the mode refuses.
+ */
+export function unavailableInSandbox(tool: ToolSpec, policy: Pick<SessionPolicy, 'sandboxMode'>): boolean {
+	if ((tool.unsandboxed === true || tool.name.endsWith('_unsandboxed')) && policy.sandboxMode !== 'danger-full-access') {
+		return true;
+	}
+	return !sandboxAllowsWrites(policy.sandboxMode) && (writesWorkspace(tool.capability) || tool.capability === 'shell_test');
+}
 
 /** Content blocks, or a string, as the text the model reads. */
 export function contentText(content: ToolContent): string {
@@ -128,6 +140,9 @@ export class Tools extends Service {
 				if (tool.needsWorkspace && !hasWorkspace(policy)) {
 					return false;
 				}
+				if (unavailableInSandbox(tool, policy)) {
+					return false;
+				}
 				if (filter?.allow && !filter.allow.includes(tool.name)) {
 					return false;
 				}
@@ -155,6 +170,9 @@ export class Tools extends Service {
 		}
 		if (tool.needsWorkspace && !hasWorkspace(ctx.policy)) {
 			return { content: 'Error: this session has no working directory', isError: true };
+		}
+		if (unavailableInSandbox(tool, ctx.policy)) {
+			return { content: `Error: tool ${call.name} cannot run under sandbox mode ${ctx.policy.sandboxMode}`, isError: true };
 		}
 		let args: unknown = {};
 		if (call.arguments.trim()) {

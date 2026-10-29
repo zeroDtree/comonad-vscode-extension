@@ -30,9 +30,9 @@ loopback base is saved remotely.
 ## Sandboxing
 
 Linux uses `bwrap`, macOS `sandbox-exec`. When neither is available — common on servers and on
-Windows — `/status`, the chat and the settings panel say **no OS sandbox**, and every shell call asks
-for approval even under an accept policy. Install bubblewrap on the remote, or set
-`comonad.allowUnsandboxedShell` to skip that prompt.
+Windows — `/status`, the chat and the settings panel say **no OS sandbox**, and shell commands are
+refused unless the sandbox mode is `danger-full-access` and network access is on. Install bubblewrap
+on the remote, or choose that combination deliberately when you accept unconfined commands.
 
 ## Everything else is remote
 
@@ -43,4 +43,4 @@ directory; bind another folder with `comonad.workingDirectory` if needed.
 ## Next
 
 - [Safety](/guide/safety) — sandbox and approval details
-- [Settings](/reference/settings) — `workingDirectory`, `allowUnsandboxedShell`, `profiles`
+- [Settings](/reference/settings) — `workingDirectory`, `sandboxMode`, `profiles`

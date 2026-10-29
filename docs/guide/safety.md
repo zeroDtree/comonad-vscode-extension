@@ -1,23 +1,34 @@
 # Safety
 
-Three layers decide whether a tool call runs, in order. A denial always wins.
+Six layers decide whether a tool call runs, in order. The first layer to stop a call ends it; a
+call that reaches the end runs inside the configured sandbox.
 
 ```mermaid
 flowchart LR
-  Call["Tool call"] --> Mode{"Mode<br/>capability"}
-  Mode -->|no| Reject["Reject"]
-  Mode -->|yes| Rule{"Rules<br/>allow / ask / deny"}
-  Rule -->|allow| Run["Run"]
+  Call["Tool call"] --> Cap{"Capability<br/>+ network"}
+  Cap -->|no| Reject["Reject"]
+  Cap -->|yes| Rule{"User rules<br/>deny / ask / allow"}
   Rule -->|deny| Reject
-  Rule -->|ask| Approval{"Approval<br/>policy"}
-  Approval -->|ask| Prompt["Prompt the user"]
-  Approval -->|run| Run
+  Rule -->|ask| Response{"Approval<br/>response policy"}
+  Rule -->|allow| Sandbox["Sandbox mode"]
+  Rule -->|no match| Approval{"Tool approval<br/>policy"}
   Approval -->|reject| Reject
-  Prompt -->|allow| Run
-  Prompt -->|deny| Reject
+  Approval -->|ask| Response
+  Approval -->|run| Sandbox
+  Response -->|deny| Reject
+  Response -->|allow| Sandbox
 ```
 
-## 1. Mode
+| Layer | Setting | Values |
+| --- | --- | --- |
+| Work mode | `comonad.mode` | `chat`, `ro`, `sw`, `aw`, `pl` |
+| Network access policy | `comonad.network` | `on`, `off` |
+| User rules | `comonad.permissions` | `deny`, `ask`, `allow` lists |
+| Tool approval policy | `comonad.approval` | `manual`, `whitelist_accept`, `blacklist_reject`, `universal_accept`, `universal_reject` |
+| Approval response policy | `comonad.approvalResponse` | `ask`, `never` |
+| Sandbox mode | `comonad.sandboxMode` | `workspace-read`, `read-only`, `workspace-write`, `danger-full-access` |
+
+## 1. Work mode
 
 The mode decides which capabilities exist at all.
 
@@ -26,12 +37,18 @@ The mode decides which capabilities exist at all.
 | Chat Only (`chat`) | No tools; plain conversation |
 | Read-Only (`ro`) | Read files, read-only shell |
 | Semi-Write (`sw`) | + write files, + test shell (workspace read-only, scratch writable) |
-| Full Access (`aw`) | + full shell inside the workspace |
+| Full Access (`aw`) | + full shell |
 | Plan (`pl`) | Read files, read-only shell, writes plan files only |
 
 The mode is remembered per chat; new chats start from `comonad.mode`.
 
-## 2. Rules
+## 2. Network access policy
+
+`on` lets tools that declare a network need run, and lets commands reach the network inside the
+sandbox. `off` refuses both. Loopback stays available inside the OS sandbox, so local test servers
+and IPC clients still work.
+
+## 3. User rules
 
 Rules are patterns in `comonad.permissions.allow`, `ask` and `deny`:
 
@@ -41,62 +58,76 @@ read_file(./.env)
 fetch_url(domain:example.com)
 ```
 
-Edit them in **Comonad: Open Settings → Agent → Tool rules**, one rule per line. A deny rule always wins; an allow
-rule always runs without asking. Without a matching rule, the approval policy decides.
+Edit them in **Comonad: Open Settings → Agent → User rules**, one rule per line. The lists are
+checked in this order:
 
-## 3. Approval policy
+1. **deny** — the call is rejected;
+2. **ask** — the call is confirmed;
+3. **allow** — the call runs.
 
-| Policy | Behaviour |
-| --- | --- |
-| `manual` | Ask for every call |
-| `whitelist_accept` | Run the read-only defaults and allowed rules; ask for the rest |
-| `blacklist_reject` | Reject the write-capable defaults and denied rules; run the rest |
-| `universal_accept` | Run everything the mode allows |
-| `universal_reject` | Run nothing |
+A rule that matches decides the call; the tool approval policy is consulted only when none of the
+three lists matched. This means an allow rule runs even under `universal_reject`.
+
+## 4. Tool approval policy
+
+| Policy | Runs | Asks | Rejects |
+| --- | --- | --- | --- |
+| `manual` | – | every call | – |
+| `whitelist_accept` | `ro`, `shell_ro`, `rw_plan` | everything else | – |
+| `blacklist_reject` | everything else | dangerous commands | `rw`, `shell_test`, `shell_rw`, `rw_plan` |
+| `universal_accept` | everything | dangerous commands | – |
+| `universal_reject` | – | – | every call |
+
+The whitelist and blacklist are fixed capability sets; use the user rules to name individual tools
+or arguments.
+
+## 5. Approval response policy
+
+- `ask` sends each confirmation to a responder — the chat panel, the chat participant, or the
+  fallback dialog. A responder answers only requests for its own chat. If no responder answers, the
+  request is denied; it never falls open.
+- `never` denies every confirmation without showing it.
 
 Approvals pause the turn. **Always allow** adds an allow rule. **Stop** cancels the turn for real:
 a foreground shell command is killed with its process tree, and a pending approval is withdrawn and
 denied. Background tasks started with `start_shell` keep running; stop them from the Tasks view or
 with `stop_shell`.
 
-## Sandbox
+## 6. Sandbox mode
 
-Shell commands run under:
+The sandbox mode is the file range every approved call runs under. The executor resolves it per
+call, and the file tools plus the OS sandbox (`sandbox-exec` on macOS, `bwrap` on Linux) enforce it.
 
-- **macOS:** `sandbox-exec`
-- **Linux:** `bwrap`
-- **No OS sandbox:** Windows, or a host without the tool — every shell call asks for confirmation,
-  even under an accept policy
+| Mode | Reads | Writes |
+| --- | --- | --- |
+| `workspace-read` | workspace + system runtime | none |
+| `read-only` | anywhere | none |
+| `workspace-write` | anywhere | workspace only |
+| `danger-full-access` | anywhere | anywhere |
 
-`comonad.allowUnsandboxedShell` opts out of that extra prompt. Tools named `*_unsandboxed` always ask.
+A call can narrow the mode but never widen it: the read-only shell writes nothing, the test shell
+writes only its scratch tree, and `run_task` runs the editor's own process, so it is available only
+under `danger-full-access`.
 
-### Workspace boundary
+### No OS sandbox
 
-- `comonad.confineWrite` (on by default) keeps writes inside the working directory.
-- `comonad.confineRead` (off by default) does the same for reads.
-- Both apply to file tools and the shell sandbox; symlinks are resolved before the check.
-- A write-confined full shell gets a scratch directory at `<working directory>/.comonad/tmp` with
+On Windows, or a host without `sandbox-exec`/`bwrap`, a writable shell can only run under
+`danger-full-access` with the network access policy **on**; every other combination refuses it,
+because the file and network limits could not be enforced. The read-only shell and the test shell
+always need an OS sandbox, because their promises cannot be kept without one. The chat footer and
+`/status` say when the host has no OS sandbox.
+
+### Workspace boundary details
+
+- A workspace-write shell gets a temp directory at `<working directory>/.comonad/tmp` with
   `TMPDIR` pointing at it.
-- The test shell uses a separate, private tree in the extension's storage instead; see below.
+- The test shell uses its own tree, `<working directory>/.comonad/scratch/<session>`, exposed as
+  `$COMONAD_SCRATCH`; `TMPDIR`, `TMP`, `TEMP`, `HOME`, `XDG_CACHE_HOME` and `PYTHONPYCACHEPREFIX`
+  point into it. The rest of the workspace stays read-only.
 - `.env` files are denied to reading and writing; `.git` is never writable by file tools.
+- Symlinks are resolved before the containment check.
 - Secrets (keys, tokens, passwords) are stripped from the environment unless
   `comonad.filterSensitiveEnv` is off.
-
-With network off, loopback TCP/UDP stays available inside the sandbox, so local test servers work;
-only traffic that leaves the machine is blocked.
-
-### The test shell
-
-`run_shell_test` (capability `shell_test`, available in `sw` and `aw`) keeps the workspace
-read-only and opens only a private scratch tree:
-
-- **macOS:** `sandbox-exec` denies every write, then allows the scratch path.
-- **Linux:** `bwrap` mounts the workspace read-only, the scratch read-write, and gives the command a
-  private `/tmp` of its own (never the host's).
-- `TMPDIR`, `TMP`, `TEMP`, `HOME`, `XDG_CACHE_HOME`, `PYTHONPYCACHEPREFIX` and `COMONAD_SCRATCH`
-  point into that tree, so test runners and build tools write there instead of the repository.
-- Without an OS sandbox the tool is refused outright. `comonad.allowUnsandboxedShell` and allow
-  rules do not override this: the capability's promise cannot be kept without one.
 
 ## Subagents
 
@@ -133,28 +164,32 @@ tasks have no timeout.
 
 ## Dangerous commands
 
-Commands shaped like `sudo`, `curl | sh`, `git push --force` and similar always prompt, even under
-accept policies. `rm` is the exception the agent may answer for itself: deleting its own work never
-asks, recursively or otherwise. A target is the session's own when it is a file the session wrote,
-lies under a directory the session created (the whole subtree, so build output a later command
-writes there counts too), or lies under a tree only the session can write — the test shell's scratch
-and the workspace `.comonad/tmp`. A `*`/`?` glob needs only an owned directory as its fixed prefix;
-the files it matches are not listed.
+Commands shaped like `sudo`, `curl | sh`, `git push --force` and similar still prompt when the
+approval policy would otherwise run them (`universal_accept`, or `blacklist_reject` for a
+non-blacklisted capability). `manual` asks every call anyway. `whitelist_accept` runs a dangerous
+call when its capability is whitelisted — the OS-enforced read-only range is what the whitelist
+trusts; use a `deny` or `ask` rule to stop a specific shape. A user `allow` rule is consent. `rm` is
+the exception the agent may answer for itself: deleting its own work never asks, recursively or
+otherwise.
 
-Everything the scanner cannot place under an owned root still prompts: an unknown variable, a
-command substitution, a path outside the workspace, a glob in a directory the session did not create,
-and a symlinked parent that resolves outside the allowed trees.
-
-The test shell (`run_shell_test`) never prompts for an `rm`: its OS sandbox keeps every write inside
-its scratch tree and a private temp directory, so a deletion there cannot reach a user file. The
-other dangerous shapes above still prompt.
+A target is the session's own when it is a file the session wrote, lies under a directory the
+session created (the whole subtree), or lies under a tree only the session can write — the test
+shell's scratch and the workspace `.comonad/tmp`. A `*`/`?` glob needs only an owned directory as
+its fixed prefix. Everything the scanner cannot place under an owned root still prompts.
 
 ## Presets
 
-The three layers can be combined into presets: **Ask**, **Plan**, **Auto**, **Read only** and
-**Full access**. **Comonad: Select Model** uses the model menu; presets live in the mode and approval
-controls. `comonad.allowFullAccess: false` hides the unrestricted preset, and **Full access** is the
-one preset that drops the workspace boundary.
+The layers can be combined into presets: **Ask**, **Plan**, **Auto**, **Read only** and
+**Full access**. Presets live in the mode and approval controls.
+`comonad.allowFullAccess: false` hides the unrestricted preset.
+
+| Preset | Work mode | Tool approval | Network | Sandbox mode |
+| --- | --- | --- | --- | --- |
+| Ask | `sw` | `manual` | off | `workspace-write` |
+| Plan | `pl` | `whitelist_accept` | off | `workspace-write` |
+| Auto | `aw` | `universal_accept` | off | `workspace-write` |
+| Read only | `ro` | `whitelist_accept` | off | `read-only` |
+| Full access | `aw` | `universal_accept` | on | `danger-full-access` |
 
 ## Workspace Trust
 

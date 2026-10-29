@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
-import { runCommand, shellArgv, type SandboxOptions } from '../lib/sandbox';
+import { runCommand, sandboxKind, shellArgv, type SandboxOptions } from '../lib/sandbox';
 import type { SessionPolicy } from '../lib/types';
 import type { GenerationTrigger } from '../lib/generations';
 import type { CustomCommand } from './catalog';
@@ -148,8 +148,7 @@ export class Commands extends Service {
 	private sandboxOptions(): SandboxOptions {
 		const config = this.ctx.settings.get();
 		return {
-			writeScope: config.confineWrite ? 'workspace' : 'all',
-			confinement: { read: config.confineRead, write: config.confineWrite },
+			sandboxMode: config.sandboxMode,
 			network: config.network,
 			denyReadPaths: [...config.denyReadPaths],
 			timeoutMs: 20_000,
@@ -180,7 +179,9 @@ async function expandCommand(command: CustomCommand, args: string, workspace: st
 	for (const match of [...output.matchAll(shellPattern)]) {
 		const snippet = match[1]!;
 		let replacement = `(command failed: ${snippet})`;
-		if (workspace) {
+		if (workspace && sandboxKind() === 'none' && options.sandboxMode !== 'danger-full-access') {
+			replacement = '(command failed: no OS sandbox; only sandbox mode danger-full-access can run commands on this host)';
+		} else if (workspace) {
 			try {
 				const result = await runCommand(shellArgv(snippet), workspace, options);
 				replacement = [result.stdout, result.stderr].filter(Boolean).join('\n').trim() || `(no output: ${snippet})`;

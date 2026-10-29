@@ -2,7 +2,7 @@
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { isLoopbackBase } from '../lib/endpoint';
-import { APPROVAL_LABELS, MODE_CAPS, MODE_LABELS } from '../lib/policy';
+import { APPROVAL_LABELS, APPROVAL_RESPONSE_LABELS, MODE_CAPS, MODE_LABELS, SANDBOX_LABELS } from '../lib/policy';
 import type { CommandSpec } from '../services/commands';
 import { formatUsage } from '../services/usage';
 import { sandboxStatus } from '../tools/shell';
@@ -150,8 +150,10 @@ export function slashCommands(ctx: Context): void {
 			[
 				`**Mode:** ${MODE_LABELS[config.mode] ?? config.mode}`,
 				`Capabilities: ${[...MODE_CAPS[config.mode]].join(', ') || 'none'}`,
-				`**Approval:** ${config.approval} — ${APPROVAL_LABELS[config.approval]}`,
-				`**Network:** ${config.network ? 'on' : 'off'}`,
+				`**Tool approval:** ${config.approval} — ${APPROVAL_LABELS[config.approval]}`,
+				`**Approval response:** ${config.approvalResponse} — ${APPROVAL_RESPONSE_LABELS[config.approvalResponse]}`,
+				`**Network access:** ${config.network ? 'on' : 'off'}`,
+				`**Sandbox mode:** ${config.sandboxMode} — ${SANDBOX_LABELS[config.sandboxMode]}`,
 				'',
 				'Permission rules (settings `comonad.permissions`):',
 				`- allow: ${config.permissions.allow.join(', ') || '(none)'}`,
@@ -221,17 +223,17 @@ async function statusText(ctx: Context): Promise<string> {
 		'**Comonad status**',
 		'',
 		`- Model: ${ctx.llm.describe(config.model)}`,
-		`- Mode: ${config.mode} · approval: ${config.approval} · network: ${config.network ? 'on' : 'off'}`,
-		`- Host: ${remote ? `remote (${remote})` : 'local'} · ${sandboxStatus({ read: config.confineRead, write: config.confineWrite }, sandbox)}`,
+		`- Mode: ${config.mode} · tool approval: ${config.approval} · approval response: ${config.approvalResponse} · network: ${config.network ? 'on' : 'off'}`,
+		`- Host: ${remote ? `remote (${remote})` : 'local'} · ${sandboxStatus(config.sandboxMode, sandbox)}`,
 		`- Workspace: ${config.workingDirectory || '(none)'}`,
 		`- Tools available now: ${visible.length}`,
 		`- Today: ${formatUsage(ctx.usage.today())}`,
 	];
 	if (sandbox === 'none') {
 		lines.push(
-			config.allowUnsandboxedShell
-				? '- No OS sandbox: shell calls run unconfined (`comonad.allowUnsandboxedShell` is on).'
-				: '- No OS sandbox: shell calls require approval (`comonad.allowUnsandboxedShell` skips it).',
+			config.sandboxMode === 'danger-full-access' && config.network
+				? '- No OS sandbox: shell commands run unconfined under the full-access sandbox mode.'
+				: '- No OS sandbox: shell commands are refused; use danger-full-access with network access on to run them unconfined.',
 		);
 	}
 	const loopback = remote ? config.profiles.filter((profile) => isLoopbackBase(profile.base)).map((profile) => profile.id) : [];

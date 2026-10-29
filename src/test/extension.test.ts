@@ -10,7 +10,24 @@ import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { limitEffort } from '../lib/effort';
 import { isLoopbackBase, normalizeEndpoint } from '../lib/endpoint';
-import { APPROVAL_LABELS, gateCalls, gateFlow, isDangerous, modeCapabilities, MODE_CAPS, MODE_LABELS, parseRule, parseRules, presetPolicy, ruleMatches, suggestAllowRule, WORKSPACE_BOUNDARY, type GateEnvironment } from '../lib/policy';
+import {
+	APPROVAL_LABELS,
+	APPROVAL_RESPONSE_LABELS,
+	gateCalls,
+	gateFlow,
+	isDangerous,
+	modeCapabilities,
+	MODE_CAPS,
+	MODE_LABELS,
+	parseRule,
+	parseRules,
+	presetPolicy,
+	ruleMatches,
+	SANDBOX_LABELS,
+	sandboxCapabilities,
+	suggestAllowRule,
+	type GateEnvironment,
+} from '../lib/policy';
 import { MAX_SHELL_TIMEOUT_SECONDS, MIN_SHELL_TIMEOUT_SECONDS, sandboxStatus, shellTimeoutSeconds, shellTools } from '../tools/shell';
 import type { SandboxKind } from '../lib/sandbox';
 import {
@@ -35,7 +52,22 @@ import {
 	asTextAttachment,
 	renderAttachments,
 } from '../lib/attachments';
-import { bwrapArguments, buildSbpl, guardPath, isProtectedPath, loginShellArgv, mergePath, parseLoginPath, PathEscapeError, resolveInside, sandboxEnv, sandboxKind, sanitizedEnv, type SandboxOptions } from '../lib/sandbox';
+import {
+	bwrapArguments,
+	buildSbpl,
+	DEFAULT_SANDBOX_MODE,
+	guardPath,
+	isProtectedPath,
+	loginShellArgv,
+	mergePath,
+	parseLoginPath,
+	PathEscapeError,
+	resolveInside,
+	sandboxEnv,
+	sandboxKind,
+	sanitizedEnv,
+	type SandboxOptions,
+} from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
 import { applyHunk, diffLines, editForHunk, revertHunk } from '../lib/line-diff';
 import { listEndpointModels, openAiChat } from '../lib/openai';
@@ -79,7 +111,7 @@ import {
 	subagentStepBudget,
 } from '../services/settings';
 import { toolset } from '../services/tools';
-import { promptText } from '../services/agent';
+import { promptText, scratchDirectory } from '../services/agent';
 import { PLUGINS, ROWS } from '../app';
 import type { Plugins, PluginState } from '../services/plugins';
 import { pluginNodeStatus, pluginTree, type PluginNode } from '../lib/plugins';
@@ -175,20 +207,20 @@ const lookup = (name: string): ToolSpec | undefined =>
 
 const gateEnv = (
 	sandbox: SandboxKind = 'bwrap',
-	allowUnsandboxedShell = false,
 	created?: ReadonlySet<string>,
 	deletionStaysInside?: (target: string) => boolean,
-): GateEnvironment => ({ sandbox, allowUnsandboxedShell, created, deletionStaysInside });
+): GateEnvironment => ({ sandbox, created, deletionStaysInside });
 
 const policy = (patch: Partial<SessionPolicy> = {}): SessionPolicy => ({
 	workMode: 'sw',
 	approval: 'manual',
+	approvalResponse: 'ask',
 	network: false,
+	sandboxMode: DEFAULT_SANDBOX_MODE,
 	workingDirectory: '/tmp/workspace',
 	commandTimeout: 60,
 	commandTimeoutOverride: false,
 	denyReadPaths: [],
-	confinement: { read: false, write: false },
 	model: 'auto',
 	...patch,
 });
@@ -257,17 +289,26 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(presetPolicy('plan'), {
 			workMode: 'pl',
 			approval: 'whitelist_accept',
+			approvalResponse: 'ask',
 			network: false,
-			confinement: WORKSPACE_BOUNDARY,
+			sandboxMode: 'workspace-write' as const,
 		});
 		assert.deepStrictEqual(presetPolicy('auto'), {
 			workMode: 'aw',
 			approval: 'universal_accept',
+			approvalResponse: 'ask',
 			network: false,
-			confinement: WORKSPACE_BOUNDARY,
+			sandboxMode: 'workspace-write' as const,
+		});
+		assert.deepStrictEqual(presetPolicy('readonly'), {
+			workMode: 'ro',
+			approval: 'whitelist_accept',
+			approvalResponse: 'ask',
+			network: false,
+			sandboxMode: 'read-only' as const,
 		});
 		assert.strictEqual(presetPolicy('full').network, true);
-		assert.deepStrictEqual(presetPolicy('full').confinement, { read: false, write: false }, 'full is the preset that drops the boundary');
+		assert.strictEqual(presetPolicy('full').sandboxMode, 'danger-full-access', 'full is the preset that drops the file sandbox');
 	});
 
 	test('manual approval confirms and universal reject rejects', () => {
@@ -287,7 +328,7 @@ suite('Comonad domain', () => {
 		assert.strictEqual(gateCalls([call('write_file', { path: 'a.ts' })], lookup, policy({ approval: 'whitelist_accept' }), rules, gateEnv()).decision, 'confirm');
 	});
 
-	test('the whitelist is the allow list, not a read/write split', () => {
+	test('a user allow rule runs before the whitelist', () => {
 		const rules = parseRules({ allow: ['write_file(a.ts)'] });
 		const whitelist = policy({ approval: 'whitelist_accept' });
 		assert.strictEqual(gateCalls([call('write_file', { path: 'a.ts' })], lookup, whitelist, rules, gateEnv()).decision, 'allow');
@@ -300,7 +341,7 @@ suite('Comonad domain', () => {
 		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, blacklist, empty, gateEnv()).decision, 'allow');
 		assert.strictEqual(gateCalls([call('write_file', { path: 'a.ts' })], lookup, blacklist, empty, gateEnv()).decision, 'reject');
 		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls' })], lookup, blacklist, empty, gateEnv()).decision, 'reject');
-		// A `permissions.deny` rule adds to the blacklist and rejects in every policy.
+		// A user deny rule is a layer of its own and rejects in every policy.
 		const rules = parseRules({ deny: ['read_file(secret.ts)'] });
 		assert.strictEqual(gateCalls([call('read_file', { path: 'secret.ts' })], lookup, blacklist, rules, gateEnv()).decision, 'reject');
 		assert.strictEqual(gateCalls([call('read_file', { path: 'secret.ts' })], lookup, policy({ approval: 'universal_accept' }), rules, gateEnv()).decision, 'reject');
@@ -482,20 +523,20 @@ suite('Comonad domain', () => {
 			try {
 				const escape = { access: 'read' as const, denyReadPaths: [] as string[] };
 				await assert.rejects(
-					guardPath(workspace, 'link/secret.txt', { ...escape, confinement: { read: true, write: true } }),
+					guardPath(workspace, 'link/secret.txt', { ...escape, sandboxMode: 'workspace-read' as const }),
 					PathEscapeError,
 				);
 				assert.strictEqual(
-					await guardPath(workspace, 'link/secret.txt', { ...escape, confinement: { read: false, write: true } }),
+					await guardPath(workspace, 'link/secret.txt', { ...escape, sandboxMode: 'workspace-write' as const }),
 					join(workspace, 'link', 'secret.txt'),
 				);
 				assert.strictEqual(
-					await guardPath(workspace, 'inside.txt', { ...escape, confinement: { read: true, write: true } }),
+					await guardPath(workspace, 'inside.txt', { ...escape, sandboxMode: 'workspace-read' as const }),
 					join(workspace, 'inside.txt'),
 				);
 				// A link that stays inside is fine either way, and still resolves to its target.
 				assert.strictEqual(
-					await guardPath(workspace, 'alias/inside.txt', { ...escape, confinement: { read: true, write: true } }),
+					await guardPath(workspace, 'alias/inside.txt', { ...escape, sandboxMode: 'workspace-read' as const }),
 					join(workspace, 'alias', 'inside.txt'),
 				);
 			} finally {
@@ -507,16 +548,41 @@ suite('Comonad domain', () => {
 		test('a write target that does not exist yet is checked through its parent', async () => {
 			const { root, outside, workspace } = tree();
 			try {
-				const confined = { access: 'write' as const, denyReadPaths: [] as string[], confinement: { read: false, write: true } };
+				const confined = { access: 'write' as const, denyReadPaths: [] as string[], sandboxMode: 'workspace-write' as const };
 				assert.strictEqual(
 					await guardPath(workspace, 'src/deep/new.ts', confined),
 					join(workspace, 'src', 'deep', 'new.ts'),
 				);
 				await assert.rejects(guardPath(workspace, 'link/new.ts', confined), PathEscapeError);
 				assert.strictEqual(
-					await guardPath(workspace, 'link/new.ts', { ...confined, confinement: { read: false, write: false } }),
+					await guardPath(workspace, 'link/new.ts', { ...confined, sandboxMode: 'danger-full-access' as const }),
 					join(workspace, 'link', 'new.ts'),
 				);
+				// A mode that refuses every write refuses it before any path is considered.
+				await assert.rejects(
+					guardPath(workspace, 'src/deep/new.ts', { ...confined, sandboxMode: 'read-only' as const }),
+					/refuses every write/,
+				);
+			} finally {
+				cleanup(root);
+				cleanup(outside);
+			}
+		});
+
+		test('the test shell scratch cannot escape the workspace through a symlink', () => {
+			const root = mkdtempSync(join(tmpdir(), 'comonad-scratch-'));
+			const outside = mkdtempSync(join(tmpdir(), 'comonad-scratch-out-'));
+			try {
+				const workspace = join(root, 'ws');
+				mkdirSync(workspace);
+				const inside = scratchDirectory(workspace, 'session');
+				assert.ok(inside?.startsWith(workspace), 'a normal workspace gets a scratch tree');
+				assert.ok(existsSync(inside!), 'and the tree exists before the shell runs');
+				// A workspace that ships .comonad as a symlink must not create a writable hole outside.
+				const linked = join(root, 'linked');
+				mkdirSync(linked);
+				symlinkSync(outside, join(linked, '.comonad'));
+				assert.strictEqual(scratchDirectory(linked, 'session'), undefined);
 			} finally {
 				cleanup(root);
 				cleanup(outside);
@@ -526,7 +592,7 @@ suite('Comonad domain', () => {
 		test('deny patterns and the .git guard hold on the real path', async () => {
 			const { root, outside, workspace } = tree();
 			try {
-				const open = { confinement: { read: false, write: false } };
+				const open = { sandboxMode: 'danger-full-access' as const };
 				await assert.rejects(
 					guardPath(workspace, '.env', { access: 'read', denyReadPaths: ['.env'], ...open }),
 					PathEscapeError,
@@ -554,7 +620,7 @@ suite('Comonad domain', () => {
 		test('an absolute deny pattern also covers paths outside the workspace', async () => {
 			const { root, outside, workspace } = tree();
 			try {
-				const open = { confinement: { read: false, write: false } };
+				const open = { sandboxMode: 'danger-full-access' as const };
 				await assert.rejects(
 					guardPath(workspace, join(outside, 'secret.txt'), { access: 'read', denyReadPaths: [outside], ...open }),
 					PathEscapeError,
@@ -573,36 +639,39 @@ suite('Comonad domain', () => {
 			}
 		});
 
-		test('the macOS profile applies each boundary flag', () => {
-			const base: SandboxOptions = { writeScope: 'all', confinement: { read: false, write: false }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+		test('the macOS profile applies each sandbox mode', () => {
+			const base: SandboxOptions = { sandboxMode: 'danger-full-access' as const, network: false, denyReadPaths: [], timeoutMs: 1_000 };
 			const open = buildSbpl('/ws', base);
 			assert.ok(!open.includes('(deny file-write*)'));
 			assert.ok(!open.includes('(allow file-write* (subpath "/ws"))'));
 			assert.ok(!open.includes('(deny file-read*)'));
 
-			const writes = buildSbpl('/ws', { ...base, writeScope: 'workspace', confinement: { read: false, write: true } });
+			const writes = buildSbpl('/ws', { ...base, sandboxMode: 'workspace-write' as const });
 			assert.ok(writes.includes('(allow file-write* (subpath "/ws"))'));
 			// SBPL is last-match-wins, so the allow alone confines nothing: the deny must come first.
 			assert.ok(writes.includes('(deny file-write*)'));
 			assert.ok(writes.indexOf('(deny file-write*)') < writes.indexOf('(allow file-write* (subpath "/ws"))'));
 			assert.ok(!writes.includes('(deny file-read*)'));
 
-			const both = buildSbpl('/ws', { ...base, writeScope: 'workspace', confinement: { read: true, write: true } });
-			assert.ok(both.includes('(deny file-read*)'));
-			assert.ok(both.includes('(allow file-read* (subpath "/ws"))'));
+			const workspaceRead = buildSbpl('/ws', { ...base, sandboxMode: 'workspace-read' as const });
+			assert.ok(workspaceRead.includes('(deny file-read*)'));
+			assert.ok(workspaceRead.includes('(allow file-read* (subpath "/ws"))'));
+			assert.ok(workspaceRead.includes('(deny file-write*)'), 'workspace-read refuses every write');
+			assert.ok(!workspaceRead.includes('(allow file-write* (subpath "/ws"))'));
 
-			const readonly = buildSbpl('/ws', { ...base, writeScope: 'none', confinement: { read: true, write: true } });
+			const readonly = buildSbpl('/ws', { ...base, sandboxMode: 'read-only' as const });
 			assert.ok(readonly.includes('(deny file-write*)'));
 			assert.ok(!readonly.includes('(allow file-write* (subpath "/ws"))'));
+			assert.ok(!readonly.includes('(deny file-read*)'), 'read-only reads anywhere');
 
 			// The test shell denies every write, then reopens only the scratch tree; the workspace,
 			// which is allowed for reading, is never allowed for writing.
-			const scratch = buildSbpl('/ws', { ...base, writeScope: 'scratch', confinement: { read: true, write: true }, scratch: '/scratch' });
+			const scratch = buildSbpl('/ws', { ...base, sandboxMode: 'workspace-write' as const, write: 'scratch', scratch: '/scratch' });
 			assert.ok(scratch.includes('(deny file-write*)'));
 			assert.ok(scratch.includes('(allow file-write* (subpath "/scratch"))'));
 			assert.ok(!scratch.includes('(allow file-write* (subpath "/ws"))'));
 			assert.ok(scratch.indexOf('(deny file-write*)') < scratch.indexOf('(allow file-write* (subpath "/scratch"))'));
-			assert.ok(scratch.includes('(allow file-read* (subpath "/scratch"))'), 'test output stays readable when reads are confined');
+			assert.ok(scratch.includes('(allow file-read* (subpath "/scratch"))'), 'test output stays readable');
 
 			// Network off still leaves loopback for test servers and IPC, never the outside.
 			assert.ok(open.includes('(deny network*)'));
@@ -614,37 +683,44 @@ suite('Comonad domain', () => {
 			assert.ok(!online.includes('localhost:*'));
 		});
 
-		test('the bwrap mounts follow the boundary flags', () => {
-			const base: SandboxOptions = { writeScope: 'workspace', confinement: { read: true, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+		test('the bwrap mounts follow the sandbox mode', () => {
+			const base: SandboxOptions = { sandboxMode: 'workspace-write' as const, network: false, denyReadPaths: [], timeoutMs: 1_000 };
 			const confined = bwrapArguments('bwrap', ['ls'], '/ws', base).join(' ');
-			assert.ok(!confined.includes('--ro-bind / /'));
-			assert.ok(confined.includes('--ro-bind /usr /usr'));
+			assert.ok(confined.includes('--ro-bind / /'), 'workspace-write reads anywhere');
 			assert.ok(confined.includes('--bind /ws /ws'));
 			// Writes confined: /tmp is private and read-only, remounted only after the workspace bind.
 			assert.ok(confined.includes('--tmpfs /tmp'));
 			assert.ok(confined.includes('--remount-ro /tmp'));
 			assert.ok(confined.indexOf('--bind /ws /ws') < confined.indexOf('--remount-ro /tmp'));
 
-			const reads = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, confinement: { read: false, write: true } }).join(' ');
-			assert.ok(reads.includes('--ro-bind / /'));
-			assert.ok(reads.includes('--bind /ws /ws'));
-			assert.ok(reads.includes('--remount-ro /tmp'));
+			// A full shell is not given a separate read-only scratch mount: the workspace mount already
+			// makes its own scratch writable under workspace-write.
+			const fullWithScratch = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, scratch: '/ws/.comonad/scratch/s' }).join(' ');
+			assert.ok(!fullWithScratch.includes('--ro-bind /ws/.comonad/scratch/s'));
+			assert.ok(!fullWithScratch.includes('--bind /ws/.comonad/scratch/s /ws/.comonad/scratch/s'));
 
-			const open = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, writeScope: 'all', confinement: { read: false, write: false } }).join(' ');
+			const workspaceRead = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, sandboxMode: 'workspace-read' as const }).join(' ');
+			assert.ok(!workspaceRead.includes('--ro-bind / /'), 'workspace-read does not open the whole disk');
+			assert.ok(workspaceRead.includes('--ro-bind /usr /usr'));
+			assert.ok(workspaceRead.includes('--ro-bind /ws /ws'));
+			assert.ok(!workspaceRead.includes('--bind /ws /ws'));
+
+			const open = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, sandboxMode: 'danger-full-access' as const }).join(' ');
 			assert.ok(open.includes('--bind / /'));
 			assert.ok(open.includes('--bind /ws /ws'), 'the workspace stays writable when the whole host is');
 			// Writes open: /tmp is a private, writable tmpfs.
 			assert.ok(open.includes('--tmpfs /tmp'));
 			assert.ok(!open.includes('--remount-ro /tmp'));
 
-			const readonly = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, writeScope: 'none' }).join(' ');
+			const readonly = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, sandboxMode: 'read-only' as const }).join(' ');
+			assert.ok(readonly.includes('--ro-bind / /'));
 			assert.ok(readonly.includes('--ro-bind /ws /ws'));
 			assert.ok(!readonly.includes('--bind /ws /ws'));
 			assert.ok(readonly.includes('--remount-ro /tmp'));
 
 			// The test shell: the workspace is read-only, the scratch is a writable hole, and the
 			// private /tmp stays writable for the test runner's own temp files.
-			const scratch = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, writeScope: 'scratch', scratch: '/scratch' }).join(' ');
+			const scratch = bwrapArguments('bwrap', ['ls'], '/ws', { ...base, write: 'scratch', scratch: '/scratch' }).join(' ');
 			assert.ok(scratch.includes('--ro-bind /ws /ws'));
 			assert.ok(scratch.includes('--bind /scratch /scratch'));
 			assert.ok(scratch.indexOf('--ro-bind /ws /ws') < scratch.indexOf('--bind /scratch /scratch'));
@@ -665,7 +741,7 @@ suite('Comonad domain', () => {
 		});
 
 		test('the sandbox mounts the real workspace path, not a symlink', () => {
-			const base: SandboxOptions = { writeScope: 'workspace', confinement: { read: false, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+			const base: SandboxOptions = { sandboxMode: 'workspace-write' as const, network: false, denyReadPaths: [], timeoutMs: 1_000 };
 			const root = mkdtempSync(join(tmpdir(), 'comonad-link-'));
 			try {
 				const real = join(root, 'real');
@@ -710,7 +786,7 @@ suite('Comonad domain', () => {
 		const ws = join(root, 'ws');
 		mkdirSync(ws, { recursive: true });
 		const workspaceScratch = join(realpathSync(ws), '.comonad', 'tmp');
-		const base: SandboxOptions = { writeScope: 'workspace', confinement: { read: false, write: true }, network: false, denyReadPaths: [], timeoutMs: 1_000 };
+		const base: SandboxOptions = { sandboxMode: 'workspace-write' as const, network: false, denyReadPaths: [], timeoutMs: 1_000 };
 
 		const bwrap = sandboxEnv(base, 'bwrap', '/login/bin:/usr/bin', ws);
 		assert.strictEqual(bwrap?.TMPDIR, workspaceScratch, 'a write-confined bwrap shell writes temp files inside the workspace');
@@ -718,7 +794,7 @@ suite('Comonad domain', () => {
 		assert.ok(bwrap?.PATH?.startsWith('/login/bin:/usr/bin'), bwrap?.PATH);
 		assert.strictEqual(sandboxEnv(base, 'macos', '/login/bin', ws)?.TMPDIR, workspaceScratch, 'macOS uses the same workspace scratch directory');
 
-		const open: SandboxOptions = { ...base, writeScope: 'all', confinement: { read: false, write: false } };
+		const open: SandboxOptions = { ...base, sandboxMode: 'danger-full-access' as const };
 		assert.strictEqual(sandboxEnv(open, 'bwrap', '/login/bin', ws)?.TMPDIR, '/tmp', 'bwrap keeps its private /tmp when writes are open');
 		assert.strictEqual(
 			sandboxEnv(open, 'macos', '/login/bin', ws)?.TMPDIR,
@@ -726,18 +802,21 @@ suite('Comonad domain', () => {
 			'macOS keeps the host temp directory when writes are open',
 		);
 		assert.strictEqual(
-			sandboxEnv({ ...base, writeScope: 'none' }, 'macos', '/login/bin', ws)?.TMPDIR,
+			sandboxEnv({ ...base, sandboxMode: 'read-only' as const }, 'macos', '/login/bin', ws)?.TMPDIR,
 			process.env.TMPDIR,
 			'a read-only shell gets no writable scratch space',
 		);
-		const direct = sandboxEnv({ ...base, mode: 'direct' }, 'bwrap', '/login/bin', ws);
-		assert.strictEqual(direct?.TMPDIR, process.env.TMPDIR, 'a direct command is not inside bwrap');
+		assert.strictEqual(
+			sandboxEnv({ ...base, write: 'none' }, 'macos', '/login/bin', ws)?.TMPDIR,
+			process.env.TMPDIR,
+			'a read-only shell capability gets no writable scratch space',
+		);
 		assert.strictEqual(sandboxEnv({ ...base, filterEnv: false }, 'macos', undefined), undefined, 'inheriting is preserved');
 
 		// The test shell gets its own hermetic tree: every place a test runner would write is
 		// redirected there, and the tree exists before the command starts.
 		const testScratch = join(root, 'test-scratch');
-		const testEnv = sandboxEnv({ ...base, writeScope: 'scratch', scratch: testScratch }, 'macos', '/login/bin', ws);
+		const testEnv = sandboxEnv({ ...base, write: 'scratch', scratch: testScratch }, 'macos', '/login/bin', ws);
 		assert.strictEqual(testEnv?.TMPDIR, join(testScratch, 'tmp'));
 		assert.strictEqual(testEnv?.TMP, join(testScratch, 'tmp'));
 		assert.strictEqual(testEnv?.TEMP, join(testScratch, 'tmp'));
@@ -753,20 +832,22 @@ suite('Comonad domain', () => {
 			model: 'auto',
 			mode: 'sw' as const,
 			approval: 'manual' as const,
+			approvalResponse: 'ask' as const,
 			displayForm: 'rendered' as const,
 			toolCard: 'collapsed' as const,
 			contextForm: 'rendered' as const,
 			network: false,
+			sandboxMode: 'workspace-write' as const,
 			workingDirectory: '/ws',
 			commandTimeout: 60,
 			commandTimeoutOverride: false,
 			planDirectory: '',
 			denyReadPaths: ['.env'],
-			confineRead: false,
-			confineWrite: true,
-			allowUnsandboxedShell: false,
 		};
-		assert.deepStrictEqual(normalizeAgentPatch({ confineWrite: false }, current), { confineWrite: false });
+		assert.deepStrictEqual(normalizeAgentPatch({ sandboxMode: 'read-only' as const }, current), { sandboxMode: 'read-only' as const });
+		assert.deepStrictEqual(normalizeAgentPatch({ sandboxMode: 'nonsense' as const }, current), { sandboxMode: 'workspace-write' as const });
+		assert.deepStrictEqual(normalizeAgentPatch({ approvalResponse: 'never' }, current), { approvalResponse: 'never' });
+		assert.deepStrictEqual(normalizeAgentPatch({ approvalResponse: 'nonsense' }, current), { approvalResponse: 'ask' });
 		assert.deepStrictEqual(normalizeAgentPatch({ commandTimeoutOverride: true }, current), { commandTimeoutOverride: true });
 		assert.deepStrictEqual(normalizeAgentPatch({ commandTimeoutOverride: false }, current), { commandTimeoutOverride: false });
 		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'open' }, current), { toolCard: 'open' });
@@ -784,18 +865,17 @@ suite('Comonad domain', () => {
 				'model',
 				'mode',
 				'approval',
+				'approvalResponse',
 				'displayForm',
 				'toolCard',
 				'contextForm',
 				'network',
+				'sandboxMode',
 				'workingDirectory',
 				'commandTimeout',
 				'commandTimeoutOverride',
 				'planDirectory',
 				'denyReadPaths',
-				'confineRead',
-				'confineWrite',
-				'allowUnsandboxedShell',
 			],
 		);
 	});
@@ -843,12 +923,12 @@ suite('Comonad domain', () => {
 	});
 
 	test('a path escape from apply_edits is an error, not a success', async () => {
-		const kernel = await createTestKernel({ config: { confineWrite: true } });
+		const kernel = await createTestKernel({ config: { sandboxMode: 'workspace-write' as const } });
 		try {
 			await kernel.ctx.plugin(vscodeTools);
 			const outcome = await kernel.ctx.tools.invoke(call('apply_edits', { path: '../escape.txt', edits: [] }), directToolContext(kernel));
 			assert.strictEqual(outcome.isError, true);
-			assert.match(outcome.content, /escapes the workspace/);
+			assert.match(outcome.content, /cannot write outside the workspace/);
 		} finally {
 			await kernel.dispose();
 		}
@@ -1086,10 +1166,10 @@ suite('Comonad domain', () => {
 		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
 		const created = new Set(['a.txt']);
 		assert.strictEqual(
-			gateCalls([call('run_shell', { command: 'rm -f a.txt' })], lookup, accepted, rules, gateEnv('bwrap', false, created)).decision,
+			gateCalls([call('run_shell', { command: 'rm -f a.txt' })], lookup, accepted, rules, gateEnv('bwrap', created)).decision,
 			'allow',
 		);
-		const unowned = gateCalls([call('run_shell', { command: 'rm -f b.txt' })], lookup, accepted, rules, gateEnv('bwrap', false, created));
+		const unowned = gateCalls([call('run_shell', { command: 'rm -f b.txt' })], lookup, accepted, rules, gateEnv('bwrap', created));
 		assert.strictEqual(unowned.decision, 'confirm');
 		assert.strictEqual(unowned.escalated, true);
 		assert.match(unowned.reason, /dangerous/);
@@ -1099,7 +1179,7 @@ suite('Comonad domain', () => {
 			lookup,
 			accepted,
 			parseRules({ ask: ['run_shell'] }),
-			gateEnv('bwrap', false, created),
+			gateEnv('bwrap', created),
 		);
 		assert.strictEqual(asked.decision, 'confirm');
 		assert.strictEqual(asked.escalated, true);
@@ -1108,7 +1188,7 @@ suite('Comonad domain', () => {
 	test('the gate never asks about an rm inside the test shell', () => {
 		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
 		const rules = { allow: [], ask: [], deny: [] };
-		const env = gateEnv('bwrap', false, new Set());
+		const env = gateEnv('bwrap', new Set());
 		// The test shell's sandbox keeps every write in its scratch: an unparseable command — a cd
 		// through $COMONAD_SCRATCH, an assignment prefix — still cannot delete a user file.
 		const command = 'cd "$COMONAD_SCRATCH" && HOME=/Users/x rm -f w-*.png';
@@ -1462,54 +1542,78 @@ suite('Comonad domain', () => {
 		}
 	});
 
-	test('dangerous commands and unsandboxed escalation always confirm', () => {
+	test('dangerous commands confirm, and an unsandboxed tool needs the full-access mode', () => {
 		const rules = { allow: [], ask: [], deny: [] };
 		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
 		assert.strictEqual(gateCalls([call('run_shell', { command: 'npm test' })], lookup, accepted, rules, gateEnv()).decision, 'allow');
 		const dangerous = gateCalls([call('run_shell', { command: 'rm -rf build' })], lookup, accepted, rules, gateEnv());
 		assert.strictEqual(dangerous.decision, 'confirm');
 		assert.match(dangerous.reason, /dangerous/);
-		const escalated = gateCalls([call('run_shell_unsandboxed', { command: 'ls' })], lookup, accepted, rules, gateEnv());
-		assert.strictEqual(escalated.decision, 'confirm');
-		assert.match(escalated.reason, /outside the OS sandbox/);
+		assert.strictEqual(dangerous.escalated, true);
+		// A tool that runs outside the OS sandbox cannot satisfy a sandboxed mode.
+		const refused = gateCalls([call('run_shell_unsandboxed', { command: 'ls' })], lookup, accepted, rules, gateEnv());
+		assert.strictEqual(refused.decision, 'reject');
+		assert.match(refused.reason, /danger-full-access/);
+		const full = policy({ approval: 'universal_accept', workMode: 'aw', sandboxMode: 'danger-full-access' as const });
+		assert.strictEqual(gateCalls([call('run_shell_unsandboxed', { command: 'ls' })], lookup, full, rules, gateEnv()).decision, 'allow');
 	});
 
-	test('no OS sandbox escalates every shell call, and the setting opts out', () => {
+	test('no OS sandbox refuses shell calls unless the full-access mode is chosen', () => {
 		const rules = { allow: [], ask: [], deny: [] };
 		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
 		for (const name of ['run_shell', 'run_shell_readonly', 'run_shell_unsandboxed']) {
 			const result = gateCalls([call(name, { command: 'ls' })], lookup, accepted, rules, gateEnv('none'));
-			assert.strictEqual(result.decision, 'confirm', name);
-			assert.match(result.reason, /no OS sandbox/, name);
-			assert.strictEqual(result.escalated, true, name);
+			assert.strictEqual(result.decision, 'reject', name);
+			assert.match(result.reason, /needs an OS sandbox/, name);
 		}
-		// The test shell is different: without a sandbox its contract cannot be enforced at all,
-		// so it is refused rather than confirmed.
+		// The test shell cannot be enforced without one either.
 		const testShell = gateCalls([call('run_shell_test', { command: 'npm test' })], lookup, accepted, rules, gateEnv('none'));
 		assert.strictEqual(testShell.decision, 'reject');
 		assert.match(testShell.reason, /needs an OS sandbox/);
-		// Only shell capabilities escalate; a read keeps the policy's decision.
+		// A read needs no shell sandbox and keeps the policy's decision.
 		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, accepted, rules, gateEnv('none')).decision, 'allow');
-		// The explicit opt-out restores the quiet path, and a sandboxed host was never affected.
-		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls' })], lookup, accepted, rules, gateEnv('none', true)).decision, 'allow');
+		// The explicit full-access mode is the one way to run a writable command on such a host; the
+		// network policy still has to be one the host can keep.
+		const full = policy({ approval: 'universal_accept', workMode: 'aw', sandboxMode: 'danger-full-access' as const, network: true });
+		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls' })], lookup, full, rules, gateEnv('none')).decision, 'allow');
+		const offline = gateCalls(
+			[call('run_shell', { command: 'ls' })],
+			lookup,
+			policy({ approval: 'universal_accept', workMode: 'aw', sandboxMode: 'danger-full-access' as const }),
+			rules,
+			gateEnv('none'),
+		);
+		assert.strictEqual(offline.decision, 'reject');
+		assert.match(offline.reason, /network access policy/);
+		// The read-only and test shells promise an enforced view, so even full access cannot run them.
+		const readonly = gateCalls([call('run_shell_readonly', { command: 'ls' })], lookup, full, rules, gateEnv('none'));
+		assert.strictEqual(readonly.decision, 'reject');
+		assert.match(readonly.reason, /keep the shell read-only/);
+		const testShellFull = gateCalls([call('run_shell_test', { command: 'npm test' })], lookup, full, rules, gateEnv('none'));
+		assert.strictEqual(testShellFull.decision, 'reject');
+		assert.match(testShellFull.reason, /keep the workspace read-only/);
 		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls' })], lookup, accepted, rules, gateEnv('bwrap')).decision, 'allow');
-		// An ask rule still asks, and the no-sandbox escalation rides along so a subagent cannot
-		// answer it by delegation.
+		// The capability check runs before the rules, so an ask rule cannot turn it into a prompt.
 		const asked = gateCalls([call('run_shell', { command: 'ls' })], lookup, accepted, parseRules({ ask: ['run_shell'] }), gateEnv('none'));
-		assert.strictEqual(asked.decision, 'confirm');
-		assert.strictEqual(asked.escalated, true);
+		assert.strictEqual(asked.decision, 'reject');
 	});
 
-	test('an explicit allow rule is consent even without a sandbox', () => {
+	test('an explicit allow rule cannot override an unenforceable sandbox', () => {
 		const rules = parseRules({ allow: ['run_shell(ls:*)'] });
 		const accepted = policy({ approval: 'universal_accept', workMode: 'aw' });
-		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls -la' })], lookup, accepted, rules, gateEnv('none')).decision, 'allow');
+		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls -la' })], lookup, accepted, rules, gateEnv('none')).decision, 'reject');
+		const full = policy({ approval: 'universal_accept', workMode: 'aw', sandboxMode: 'danger-full-access' as const, network: true });
+		assert.strictEqual(gateCalls([call('run_shell', { command: 'ls -la' })], lookup, full, rules, gateEnv('none')).decision, 'allow');
 	});
 
-	test('reject all settles before rules and escalations', () => {
+	test('a user allow rule runs before the tool approval policy', () => {
 		const rejected = policy({ approval: 'universal_reject', workMode: 'aw' });
 		const rules = parseRules({ allow: ['read_file(a.ts)'] });
-		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, rejected, rules, gateEnv()).decision, 'reject');
+		assert.strictEqual(gateCalls([call('read_file', { path: 'a.ts' })], lookup, rejected, rules, gateEnv()).decision, 'allow');
+		assert.strictEqual(gateCalls([call('read_file', { path: 'b.ts' })], lookup, rejected, rules, gateEnv()).decision, 'reject');
+		const asked = gateCalls([call('read_file', { path: 'a.ts' })], lookup, rejected, parseRules({ ask: ['read_file'] }), gateEnv());
+		assert.strictEqual(asked.decision, 'confirm', 'an ask rule also runs before the policy');
+		assert.strictEqual(asked.escalated, true);
 		assert.strictEqual(
 			gateCalls([call('run_shell', { command: 'sudo rm -rf /' })], lookup, rejected, { allow: [], ask: [], deny: [] }, gateEnv()).decision,
 			'reject',
@@ -1553,6 +1657,12 @@ suite('Comonad domain', () => {
 				.decision,
 			'reject',
 		);
+		// Its scratch must be writable, so a mode that refuses every write rules it out too.
+		for (const sandboxMode of ['read-only', 'workspace-read'] as const) {
+			const result = gateCalls([testCall], lookup, policy({ workMode: 'sw', approval: 'universal_accept', sandboxMode }), rules, gateEnv());
+			assert.strictEqual(result.decision, 'reject', sandboxMode);
+			assert.match(result.reason, /needs a writable scratch tree/, sandboxMode);
+		}
 	});
 
 	test('loopback model endpoints are recognized', () => {
@@ -1564,11 +1674,13 @@ suite('Comonad domain', () => {
 		}
 	});
 
-	test('sandboxStatus names the engine and boundary', () => {
-		assert.match(sandboxStatus({ read: false, write: true }, 'bwrap'), /sandbox: bwrap/);
-		assert.match(sandboxStatus({ read: false, write: true }, 'macos'), /sandbox: sandbox-exec/);
-		assert.match(sandboxStatus({ read: true, write: true }, 'none'), /no OS sandbox available/);
-		assert.match(sandboxStatus({ read: true, write: false }, 'bwrap'), /reads/);
+	test('sandboxStatus names the engine and mode', () => {
+		assert.match(sandboxStatus('workspace-write', 'bwrap'), /sandbox: bwrap/);
+		assert.match(sandboxStatus('workspace-write', 'macos'), /sandbox: sandbox-exec/);
+		assert.match(sandboxStatus('workspace-read', 'none'), /no OS sandbox available/);
+		assert.match(sandboxStatus('workspace-read', 'bwrap'), /workspace-read: workspace reads, no writes/);
+		assert.match(sandboxStatus('workspace-write', 'bwrap'), /all reads, workspace writes/);
+		assert.match(sandboxStatus('danger-full-access', 'bwrap'), /all reads, all writes/);
 	});
 
 	test('sensitive environment variables are filtered', () => {
@@ -2183,7 +2295,7 @@ suite('Comonad domain', () => {
 			const identity = blocks[0].text.split('\n');
 			assert.strictEqual(identity[0], 'You are Comonad, an agentic coding assistant running inside VS Code.');
 			assert.strictEqual(identity[1], 'Never ask the user for permission in your reply; the host asks whenever a tool needs approval.');
-			assert.match(identity[2], /^Mode: .+; approval: .+; network: (on|off)\.$/);
+			assert.match(identity[2], /^Mode: .+; approval: .+; approval response: .+; network: (on|off); sandbox: .+\.$/);
 			assert.match(identity[3], /^Today: \d{4}-\d{2}-\d{2}\.$/);
 			// The tool guidance lives in its own block now, so a preset can place it like any other prompt.
 			assert.match(blocks[1].text, /Inspect the workspace with the provided tools/);
@@ -3566,6 +3678,9 @@ suite('Cordis kernel', () => {
 			assert.deepStrictEqual(scripts, ['settings.js', 'worldinfo.js', 'persona.js', 'content.js', 'st.js'], 'the host’s client comes first, and the pane’s last');
 			assert.match(document, /id="plugins-install"/, 'and the host’s own tabs are still there');
 			assert.match(document, /id="timeout-override"[^>]*data-key="commandTimeoutOverride"/, 'including the timeout override');
+			assert.match(document, /id="approval-response"[^>]*data-key="approvalResponse"/, 'the approval response policy control');
+			assert.match(document, /id="sandbox-mode"[^>]*data-key="sandboxMode"/, 'the sandbox mode control');
+			assert.match(document, /User rules/, 'the rule lists are named as the pipeline names them');
 			assert.match(document, /data-tab="subagents"/, 'the subagents tab is a core tab');
 			assert.match(document, /<section data-pane="subagents" hidden>/, 'with its own section');
 			assert.match(document, /id="subagent-rows"/, 'holding the grant matrix');
@@ -3754,49 +3869,64 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('every gate in the flow diagram owns its outcome', () => {
+	test('every layer in the flow diagram owns its outcome', () => {
 		const flow = gateFlow();
 		assert.match(flow, /^flowchart TD\n/);
-		for (const gate of ['work mode set', 'network ok', 'workspace ok', 'deny rule', 'ask rule', 'allow rule', 'no OS sandbox', 'dangerous', 'no rule matched']) {
+		for (const gate of [
+			'work mode grants it?',
+			'network allowed?',
+			'sandbox can enforce it?',
+			'deny rule?',
+			'ask rule?',
+			'allow rule?',
+			'no rule matched',
+			'dangerous command?',
+			'ask or never?',
+			'a surface answers?',
+			'approved?',
+			'sandbox mode limits this call',
+		]) {
 			assert.ok(flow.includes(gate), `flow covers ${gate}`);
 		}
-		assert.ok(flow.includes('in the whitelist?') && flow.includes('in the blacklist?'), 'flow covers both rule lists');
-		// Every approval policy is a node of its own, named after the setting value. Reject-all is
-		// settled before the rules, so it is the question rather than one of the policy branches.
-		for (const policy of Object.keys(APPROVAL_LABELS).filter((policy) => policy !== 'universal_reject')) {
+		assert.ok(flow.includes('whitelisted capability?') && flow.includes('blacklisted capability?'), 'flow covers both lists');
+		for (const policy of Object.keys(APPROVAL_LABELS)) {
 			assert.ok(flow.includes(`["${policy}"]`), `flow has a ${policy} policy node`);
 		}
-		assert.ok(flow.includes('approval policy universal_reject?'), 'flow settles reject-all first');
 		// `call` and `end` are mermaid keywords: the source must not use them as node ids.
 		assert.ok(!/^\s*call[\s[(]/.test(flow) && !/^\s*end\[/m.test(flow), 'flow avoids mermaid keywords');
 
-		// Two frames: the user's own rules, then the approval policy for the calls they left open.
+		// Four frames: the capability preflight, the user's rules, the tool approval policy, and the
+		// approval response policy for the calls it left open.
 		const box = (id: string): string => {
 			const start = flow.indexOf(`  subgraph ${id}[`);
 			assert.ok(start >= 0, `flow has a ${id} subgraph`);
 			return flow.slice(start, flow.indexOf('\n  end', start));
 		};
+		const cap = box('cap');
 		const rules = box('rules');
 		const policy = box('policy');
-		for (const gate of ['deny rule matches?', 'ask rule matches?', 'allow rule matches?']) {
+		const response = box('response');
+		for (const gate of ['work mode grants it?', 'network allowed?', 'sandbox can enforce it?']) {
+			assert.ok(cap.includes(gate), `the capability frame holds ${gate}`);
+		}
+		for (const gate of ['deny rule?', 'ask rule?', 'allow rule?']) {
 			assert.ok(rules.includes(gate), `the rules frame holds ${gate}`);
 		}
-		// The policy frame holds the policy question and the four remaining policy nodes; their
-		// consequences (the list questions and every outcome) flow out below it.
+		// The policy frame holds the policy question, every policy node and the two list questions.
 		assert.ok(policy.includes('no rule matched'), 'the policy frame holds the policy question');
-		for (const id of ['policyManual', 'policyAccept', 'policyWhitelist', 'policyBlacklist']) {
-			assert.ok(policy.includes(`    ${id}["`), `the policy frame holds ${id}`);
+		for (const value of Object.keys(APPROVAL_LABELS)) {
+			assert.ok(policy.includes(`["${value}"]`), `the policy frame holds the ${value} node`);
 		}
-		assert.strictEqual((policy.match(/^    approval --> /gm) ?? []).length, 4, 'the policy question offers four policies');
-		assert.ok(!policy.includes('in the whitelist?') && !policy.includes('in the blacklist?'), 'the list questions sit outside the frame');
-		assert.ok(!policy.includes('deny rule'), 'the rules frame does not hold the policy gates');
-		// The safety escalation sits between the two frames: it is neither a rule nor a policy.
-		assert.ok(!rules.includes('unsandboxed') && !policy.includes('unsandboxed'), 'the escalation sits between the frames');
+		assert.strictEqual((policy.match(/^    which --> /gm) ?? []).length, 5, 'the policy question offers five policies');
+		assert.ok(policy.includes('whitelisted capability?') && policy.includes('blacklisted capability?'), 'the list questions sit inside the frame');
+		assert.ok(!policy.includes('deny rule'), 'the policy frame does not hold the rule gates');
+		assert.ok(response.includes('ask or never?') && response.includes('a surface answers?'), 'the response frame holds its questions');
+		assert.ok(flow.includes('neverReject') && flow.includes('noResponder'), 'never and an unavailable surface both fail closed');
 
 		// One outcome node per gate, directly below it: no shared sink, so no edge runs across the
 		// chart — every target of an edge is reached exactly once.
 		const declared = [...flow.matchAll(/(\w+)\(\["(Rejected|Asks you|Runs)"\]\)/g)].map((match) => [match[1]!, match[2]!] as const);
-		assert.ok(declared.length >= 12, `every gate owns an outcome, got ${declared.length}`);
+		assert.ok(declared.length >= 14, `every gate owns an outcome, got ${declared.length}`);
 		for (const kind of ['Rejected', 'Asks you', 'Runs']) {
 			assert.ok(declared.filter(([, label]) => label === kind).length >= 3, `several ${kind} nodes`);
 		}
@@ -3808,7 +3938,9 @@ suite('Cordis kernel', () => {
 		const coloured = (flow.match(/^  class ([\w,]+) (reject|confirm|run)$/gm) ?? []).flatMap((line) => /^  class ([\w,]+) /.exec(line)![1]!.split(','));
 		const byKind: Record<string, string> = { Rejected: 'reject', 'Asks you': 'confirm', Runs: 'run' };
 		const expected = declared.map(([id, label]) => `${id}:${byKind[label]!}`).sort();
+		const outcomes = new Set(declared.map(([id]) => id));
 		const actual = coloured
+			.filter((id) => outcomes.has(id))
 			.map((id) => {
 				const kind = (flow.match(new RegExp(`^  class [\\w,]*\\b${id}\\b[\\w,]* (reject|confirm|run)$`, 'm')) ?? [])[1]!;
 				return `${id}:${kind}`;
@@ -3823,6 +3955,9 @@ suite('Cordis kernel', () => {
 			assert.ok(legend.some((line) => line.startsWith(`${name} — `)), `legend names mode ${mode}`);
 		}
 		assert.ok(legend.some((line) => line.endsWith('no tools')), 'legend says the chat mode has no tools');
+		const sandboxes = sandboxCapabilities();
+		assert.deepStrictEqual(sandboxes, Object.values(SANDBOX_LABELS));
+		assert.strictEqual(Object.keys(APPROVAL_RESPONSE_LABELS).length, 2);
 	});
 
 	test('the chat controls are title-bar commands with icons', () => {
@@ -5129,15 +5264,20 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('a host without an OS sandbox asks before a shell tool even under accept-all', async () => {
+	test('a host without an OS sandbox refuses a shell tool before it reaches a surface', async () => {
 		const kernel = await createTestKernel({ config: { approval: 'universal_accept', mode: 'aw' } });
 		try {
 			kernel.host.sandboxValue = 'none';
 			let calls = 0;
+			let rejected = '';
 			kernel.ctx.llm.use({
 				name: 'test',
 				async chat(request) {
 					calls += 1;
+					const answer = request.messages.find((message) => message.role === 'tool');
+					if (answer) {
+						rejected = answer.content;
+					}
 					const last = request.messages[request.messages.length - 1];
 					if (last?.role === 'user') {
 						const toolCall: ToolCall = { id: `c${calls}`, name: 'probe_shell', arguments: '{}' };
@@ -5168,8 +5308,63 @@ suite('Cordis kernel', () => {
 				return 'deny';
 			});
 			await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
-			assert.strictEqual(requests.length, 1, 'the unconfined shell call waited for the user');
-			assert.match(requests[0]!.reason, /no OS sandbox/);
+			assert.strictEqual(requests.length, 0, 'the unenforceable call never reaches a surface');
+			assert.match(rejected, /Rejected: .*needs an OS sandbox/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an approval response policy of never denies without a surface', async () => {
+		const kernel = await createTestKernel({ config: { approval: 'manual', approvalResponse: 'never', mode: 'aw' } });
+		try {
+			let calls = 0;
+			let rejected = '';
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					calls += 1;
+					const answer = request.messages.find((message) => message.role === 'tool');
+					if (answer) {
+						rejected = answer.content;
+					}
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						const toolCall: ToolCall = { id: `c${calls}`, name: 'probe_read', arguments: '{}' };
+						return { message: { role: 'assistant', content: 'working', toolCalls: [toolCall] }, toolCalls: [toolCall] };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [] };
+				},
+			});
+			let ran = 0;
+			await kernel.ctx.plugin(
+				toolset([
+					{
+						name: 'probe_read',
+						description: '',
+						parameters: objectSchema({}),
+						capability: 'ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						execute: async () => {
+							ran += 1;
+							return 'ran';
+						},
+					},
+				]),
+			);
+			const requests: ApprovalRequest[] = [];
+			kernel.ctx.on('approval/request', (request, next) => {
+				if (request.surface !== 'test') {
+					return next();
+				}
+				requests.push(request);
+				return 'allow';
+			});
+			await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			assert.strictEqual(requests.length, 0, 'the request never reaches a surface');
+			assert.strictEqual(ran, 0, 'the denied call did not run');
+			assert.match(rejected, /Rejected: manual approval/);
 		} finally {
 			await kernel.dispose();
 		}
@@ -9077,7 +9272,7 @@ suite('Explicit references', () => {
 			mkdirSync(join(root, 'src'));
 			writeFileSync(join(root, 'src', 'a.ts'), 'a');
 			const cache = new WorkspaceFileCache();
-			const files = await cache.list({ workingDirectory: root, confinement: { read: false, write: false }, denyReadPaths: [] });
+			const files = await cache.list({ workingDirectory: root, sandboxMode: 'danger-full-access' as const, denyReadPaths: [] });
 			assert.deepStrictEqual(files, ['src/a.ts']);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
@@ -9091,7 +9286,7 @@ suite('Explicit references', () => {
 			mkdirSync(join(root, 'src'));
 			writeFileSync(join(root, 'src', 'a.ts'), 'line one\nline two\nline three\n');
 			writeFileSync(join(root, 'src', 'b.ts'), 'b\n');
-			const scope = { workingDirectory: root, confinement: { read: false, write: false }, denyReadPaths: [] };
+			const scope = { workingDirectory: root, sandboxMode: 'danger-full-access' as const, denyReadPaths: [] };
 			const result = await kernel.ctx.references.resolve('see @src/a.ts:2-3 and @src/ and @missing.ts', scope, new AbortController().signal);
 			const file = result.attachments.find((part) => part.kind === 'text' && part.source.path === 'src/a.ts');
 			assert.ok(file?.kind === 'text', 'the file is a text attachment');
@@ -9113,7 +9308,7 @@ suite('Explicit references', () => {
 		const root = mkdtempSync(join(tmpdir(), 'comonad-image-ref-'));
 		try {
 			writeFileSync(join(root, 'pic.png'), pngOf(3, 2));
-			const scope = { workingDirectory: root, confinement: { read: false, write: false }, denyReadPaths: [] };
+			const scope = { workingDirectory: root, sandboxMode: 'danger-full-access' as const, denyReadPaths: [] };
 			const result = await kernel.ctx.references.resolve('@pic.png', scope, new AbortController().signal);
 			const image = result.attachments[0];
 			assert.ok(image?.kind === 'image', 'the image is not decoded as text');
@@ -9152,7 +9347,7 @@ suite('Explicit references', () => {
 		try {
 			writeFileSync(join(root, 'inside.txt'), 'inside');
 			writeFileSync(join(outside, 'outside.txt'), 'SECRET CONTENT');
-			const scope = { workingDirectory: root, confinement: { read: true, write: false }, denyReadPaths: [] };
+			const scope = { workingDirectory: root, sandboxMode: 'workspace-read' as const, denyReadPaths: [] };
 			const inside = await kernel.ctx.references.resolveUris([{ scheme: 'file', fsPath: join(root, 'inside.txt') }], scope, new AbortController().signal);
 			assert.ok(inside.attachments[0]?.kind === 'text' && inside.attachments[0].text.includes('inside'));
 			const denied = await kernel.ctx.references.resolveUris([{ scheme: 'file', fsPath: join(outside, 'outside.txt') }], scope, new AbortController().signal);
@@ -9168,7 +9363,7 @@ suite('Explicit references', () => {
 	test('a prompt without references or without a workspace resolves to nothing', async () => {
 		const kernel = await createTestKernel();
 		try {
-			const empty = { workingDirectory: '', confinement: { read: false, write: false }, denyReadPaths: [] };
+			const empty = { workingDirectory: '', sandboxMode: 'danger-full-access' as const, denyReadPaths: [] };
 			assert.deepStrictEqual((await kernel.ctx.references.resolve('see @src/a.ts', empty, new AbortController().signal)).attachments, []);
 			const workspace = { ...empty, workingDirectory: tmpdir() };
 			assert.deepStrictEqual((await kernel.ctx.references.resolve('no references here', workspace, new AbortController().signal)).attachments, []);
@@ -9626,7 +9821,7 @@ function directToolContext(kernel: Awaited<ReturnType<typeof createTestKernel>>)
 				path,
 				{
 					workingDirectory: kernel.host.workspace(),
-					confinement: kernel.ctx.agent.policyFor().confinement,
+					sandboxMode: kernel.ctx.agent.policyFor().sandboxMode,
 					denyReadPaths: kernel.ctx.agent.policyFor().denyReadPaths,
 				},
 				signal,
@@ -10041,7 +10236,7 @@ suite('Images', () => {
 suite('PDF documents', () => {
 	const scopeOf = (kernel: Awaited<ReturnType<typeof createTestKernel>>) => ({
 		workingDirectory: kernel.host.workspace(),
-		confinement: { read: false, write: false },
+		sandboxMode: 'danger-full-access' as const,
 		denyReadPaths: [] as string[],
 	});
 

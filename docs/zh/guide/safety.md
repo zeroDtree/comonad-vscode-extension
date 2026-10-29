@@ -1,23 +1,33 @@
 # 安全
 
-三层机制按顺序决定一次工具调用是否运行，拒绝永远优先。
+六层机制按顺序决定一次工具调用是否运行。第一个阻止调用的层即结束流程；走到最后的调用在配置的沙箱中执行。
 
 ```mermaid
 flowchart LR
-  Call["工具调用"] --> Mode{"模式<br/>能力"}
-  Mode -->|否| Reject["拒绝"]
-  Mode -->|是| Rule{"规则<br/>allow / ask / deny"}
-  Rule -->|allow| Run["运行"]
+  Call["工具调用"] --> Cap{"能力<br/>+ 网络"}
+  Cap -->|否| Reject["拒绝"]
+  Cap -->|是| Rule{"用户规则<br/>deny / ask / allow"}
   Rule -->|deny| Reject
-  Rule -->|ask| Approval{"审批<br/>策略"}
-  Approval -->|ask| Prompt["询问用户"]
-  Approval -->|run| Run
-  Approval -->|reject| Reject
-  Prompt -->|允许| Run
-  Prompt -->|拒绝| Reject
+  Rule -->|ask| Response{"审批响应<br/>策略"}
+  Rule -->|allow| Sandbox["Sandbox mode"]
+  Rule -->|未命中| Approval{"工具审批<br/>策略"}
+  Approval -->|拒绝| Reject
+  Approval -->|询问| Response
+  Approval -->|执行| Sandbox
+  Response -->|拒绝| Reject
+  Response -->|放行| Sandbox
 ```
 
-## 1. 模式
+| 层 | 设置 | 取值 |
+| --- | --- | --- |
+| Work mode | `comonad.mode` | `chat`、`ro`、`sw`、`aw`、`pl` |
+| Network access policy | `comonad.network` | `on`、`off` |
+| User rule | `comonad.permissions` | `deny`、`ask`、`allow` 三个列表 |
+| Tool approval policy | `comonad.approval` | `manual`、`whitelist_accept`、`blacklist_reject`、`universal_accept`、`universal_reject` |
+| Approval response policy | `comonad.approvalResponse` | `ask`、`never` |
+| Sandbox mode | `comonad.sandboxMode` | `workspace-read`、`read-only`、`workspace-write`、`danger-full-access` |
+
+## 1. Work mode
 
 模式决定哪些能力存在。
 
@@ -31,7 +41,12 @@ flowchart LR
 
 模式按聊天记忆；新聊天从 `comonad.mode` 开始。
 
-## 2. 规则
+## 2. Network access policy
+
+`on` 允许声明了网络需求的工具运行，也允许沙箱内的命令访问网络。`off` 同时拒绝两者；OS 沙箱内仍保留回环，
+本地测试服务器和 IPC 客户端因此仍可用。
+
+## 3. User rule
 
 规则是 `comonad.permissions.allow`、`ask`、`deny` 中的模式：
 
@@ -41,113 +56,128 @@ read_file(./.env)
 fetch_url(domain:example.com)
 ```
 
-在 **Comonad: Open Settings → Agent → Tool rules** 中编辑，一行一条。deny 规则永远优先；allow 规则永远不询问。
-没有匹配规则时，由审批策略决定。
+在 **Comonad: Open Settings → Agent → User rules** 中编辑，一行一条。三个列表按以下顺序检查：
 
-## 3. 审批策略
+1. **deny** —— 拒绝该调用；
+2. **ask** —— 询问；
+3. **allow** —— 执行。
 
-| 策略 | 行为 |
-| --- | --- |
-| `manual` | 每次调用都询问 |
-| `whitelist_accept` | 运行只读默认项和 allow 规则；其余询问 |
-| `blacklist_reject` | 拒绝可写默认项和 deny 规则；其余运行 |
-| `universal_accept` | 运行模式允许的一切 |
-| `universal_reject` | 什么都不运行 |
+规则一旦命中就决定结果；只有三个列表都未命中时，Tool approval policy 才会介入。因此 allow 规则在
+`universal_reject` 下也会执行。
+
+## 4. Tool approval policy
+
+| 策略 | 直接执行 | 先询问 | 拒绝 |
+| --- | --- | --- | --- |
+| `manual` | – | 全部调用 | – |
+| `whitelist_accept` | `ro`、`shell_ro`、`rw_plan` | 其余调用 | – |
+| `blacklist_reject` | 其余调用 | 危险命令 | `rw`、`shell_test`、`shell_rw`、`rw_plan` |
+| `universal_accept` | 全部调用 | 危险命令 | – |
+| `universal_reject` | – | – | 全部调用 |
+
+白名单和黑名单是固定的能力集合；用用户规则来指定单个工具或参数。
+
+## 5. Approval response policy
+
+- `ask`：把每条确认交给应答方 —— 聊天面板、聊天参与者或兜底对话框。应答方只回答自己聊天的请求。没有
+  应答方时请求按拒绝处理，绝不默认放行。
+- `never`：所有确认直接拒绝，不显示。
 
 审批会暂停回合。**Always allow** 会添加一条 allow 规则。**Stop** 会真正取消回合：前台 shell 命令会连同
 进程树一起杀掉，待审批会被撤回并拒绝。`start_shell` 启动的后台任务不受影响，仍会继续运行；可在 Tasks
 视图或 `stop_shell` 中停止它们。
 
-## 沙箱
+## 6. Sandbox mode
 
-shell 命令运行在：
+Sandbox mode 是每个获准调用实际运行的读写范围。执行器在每次调用时解析它，由文件工具和 OS 沙箱
+（macOS 的 `sandbox-exec`、Linux 的 `bwrap`）强制执行。
 
-- **macOS：** `sandbox-exec`
-- **Linux：** `bwrap`
-- **没有 OS 沙箱：** Windows，或未安装工具的宿主机 —— 每次 shell 调用都会请求确认，即使审批策略是 accept
+| 模式 | 读取 | 写入 |
+| --- | --- | --- |
+| `workspace-read` | 工作区 + 系统运行时 | 无 |
+| `read-only` | 任意位置 | 无 |
+| `workspace-write` | 任意位置 | 仅工作区 |
+| `danger-full-access` | 任意位置 | 任意位置 |
 
-`comonad.allowUnsandboxedShell` 可以跳过这个额外确认。名为 `*_unsandboxed` 的工具始终询问。
+调用可以收窄模式，但不能放宽：只读 shell 不写任何东西，测试 shell 只写自己的 scratch 目录，`run_task`
+运行的是编辑器自己的进程，因此只在 `danger-full-access` 下可用。
 
-### 工作区边界
+### 没有 OS 沙箱
 
-- `comonad.confineWrite`（默认开启）把写入限制在工作目录内。
-- `comonad.confineRead`（默认关闭）对读取做同样限制。
-- 两者同时作用于文件工具和 shell 沙箱；符号链接在检查前解析。
-- 写受限的完整 shell 会得到 `<working directory>/.comonad/tmp` 作为临时目录，`TMPDIR` 指向它。
-- 测试 shell 改用扩展存储中的独立私有目录，见下文。
+在 Windows，或没有 `sandbox-exec`/`bwrap` 的宿主机上，可写 shell 只能在 `danger-full-access` 且
+Network access policy 为 **on** 时运行；其它组合一律拒绝，因为文件与网络限制都无法强制执行。只读
+shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没有沙箱时兑现。聊天底部和 `/status` 会显示
+宿主机没有 OS 沙箱。
+
+### 工作区边界细节
+
+- `workspace-write` 的 shell 会得到 `<working directory>/.comonad/tmp` 作为临时目录，`TMPDIR` 指向它。
+- 测试 shell 使用自己的目录 `<working directory>/.comonad/scratch/<session>`，暴露为
+  `$COMONAD_SCRATCH`；`TMPDIR`、`TMP`、`TEMP`、`HOME`、`XDG_CACHE_HOME` 和 `PYTHONPYCACHEPREFIX`
+  都指向其中。工作区的其余部分保持只读。
 - `.env` 读写都被拒绝；文件工具永远不能写 `.git`。
+- 符号链接在包含检查前解析。
 - 除非关闭 `comonad.filterSensitiveEnv`，密钥、token、密码会从命令环境中移除。
-
-关闭网络时，沙箱内仍可使用回环 TCP/UDP，因此本地测试服务器可用；只有离开本机的流量被阻断。
-
-### 测试 shell
-
-`run_shell_test`（能力 `shell_test`，在 `sw` 与 `aw` 中可用）保持工作区只读，只打开一个私有 scratch
-目录：
-
-- **macOS：** `sandbox-exec` 先拒绝所有写入，再放行 scratch 路径。
-- **Linux：** `bwrap` 以只读方式挂载工作区，以读写方式挂载 scratch，并给命令一个私有的 `/tmp`
-  （永远不是宿主机的 `/tmp`）。
-- `TMPDIR`、`TMP`、`TEMP`、`HOME`、`XDG_CACHE_HOME`、`PYTHONPYCACHEPREFIX` 和
-  `COMONAD_SCRATCH` 都指向该目录，测试框架和构建工具因此不会写进仓库。
-- 没有 OS 沙箱时工具直接拒绝；`comonad.allowUnsandboxedShell` 和 allow 规则都不能覆盖这一点 ——
-  没有沙箱就无法兑现这个能力的承诺。
 
 ## 子 Agent
 
-子 Agent 的有效工具是四层交集：
+子 Agent 的实际工具是四者的交集：
 
-1. 父会话模式的能力；
-2. `comonad.subagents` 中的 per-agent 授权（**Settings → Subagents**）；
-3. Agent 定义中的 `tools` 列表；
+1. 父模式的能力；
+2. `comonad.subagents` 中的逐 Agent 授权（**Settings → Subagents**）；
+3. Agent 定义里的 `tools` 列表；
 4. 子 Agent 的硬上限。
 
-硬上限保证子 Agent **永远**拿不到 `shell_rw` 和 `rw_plan`：
+硬上限意味着子 Agent **永远**拿不到 `shell_rw` 或 `rw_plan`：
 
 - `files` 只授予可跟踪的文件工具（`write_file`、`apply_patch`、`apply_edits`）。
 - `test` 授予 `run_shell_test`。
 - 只读工具始终可用。
-- 没有 `tools` 列表的定义视为只读。
-- 内置 `implement` 默认获得 **files + test**；其它内置和所有自定义 Agent 默认只读，需显式授权。
-- 项目里同名覆盖内置 Agent 的文件不会继承该默认授权。
-- 子 Agent 的文件写入记在**主会话**的 journal 中，因此会出现在主会话的 review、inline diff 和
-  Git Changes 里。
-- 可写子 Agent 只在前台运行，且同一时间只允许一个。后台子 Agent 只读。
-- `ask` 规则会升级，而子 Agent 无法代替用户回答，因此该调用被拒绝，而不是被自动批准。
-- 在 `manual` 下，批准 `agent` 这次调用就等于批准该子 Agent 列出的工具。要拦住子 Agent 内部的某次
-  具体调用，请使用 `deny`（或 `ask`）规则。
+- 没有 `tools` 列表的定义是只读的。
+- 内置 `implement` 默认是 **files + test**；其它内置 Agent 和所有自定义 Agent 在授权前都是只读。
+- 项目文件覆盖内置名称时，不会继承该内置 Agent 的默认授权。
+- 子 Agent 的文件写入记在**父聊天**的 journal 下，因此出现在它的 review、inline diff 和 Git Changes 中。
+- 可写子 Agent 在前台运行，一次一个。后台子 Agent 是只读的。
+- `ask` 规则会被升级，子 Agent 无法回答，因此调用被拒绝而不是自动批准。
+- 在 `manual` 下，批准 `agent` 调用就是对子 Agent 列出工具的批准。用 `deny`（或 `ask`）规则阻止子 Agent
+  内的特定调用。
 
 ## 命令超时
 
 前台 shell 调用可带模型选择的 `timeout`（秒），限制在 1–300。`comonad.commandTimeout` 是回退值；
-**Always use the command timeout**（`comonad.commandTimeoutOverride`）会用固定值替换模型的选择。
+**Always use the command timeout**（`comonad.commandTimeoutOverride`）会用固定值覆盖模型的选择。
 `start_shell` 任务没有超时。
 
 ## 危险命令
 
-`sudo`、`curl | sh`、`git push --force` 等形态的命令始终会询问，即使策略是 accept。`rm` 是例外：
-清理 agent 自己的工作不会询问，递归删除也一样。目标属于本会话的条件是：它是本会话写过的文件；
-它位于本会话创建的目录下（整棵子树都算，因此之后构建工具写进去的产物也算）；或它位于只有本会话
-可写的临时树里（test shell 的 scratch 和 `<工作区>/.comonad/tmp`）。`*`/`?` glob 只要求固定前缀是
-已拥有的目录，不会逐个列出匹配文件。
+`sudo`、`curl | sh`、`git push --force` 等形态在策略本来会直接执行时仍然询问（`universal_accept`，或
+`blacklist_reject` 下的非黑名单能力）。`manual` 本来就会询问所有调用。`whitelist_accept` 下，白名单能力
+中的危险形态会直接执行 —— 白名单信任的正是 OS 强制的只读范围；要阻止特定形态，请写 `deny` 或 `ask`
+规则。用户 allow 规则即视为同意。`rm` 是例外：删除自己的工作永远不问，递归与否都一样。
 
-扫描器无法归入已拥有根目录的命令仍会询问：未知变量、命令替换、工作区外的路径、会话未创建过的
-目录里的 glob，以及解析到允许范围外的符号链接父目录。
-
-test shell（`run_shell_test`）里的 `rm` 从不询问：它的 OS 沙箱把所有写入限制在自己的 scratch 和
-私有临时目录里，删除不可能碰到用户文件。上面其他形态的危险命令仍会询问。
+当目标是本会话写过的文件、本会话创建的目录下的路径（整个子树），或只有本会话可写的树 —— 测试 shell 的
+scratch 和工作区 `.comonad/tmp` —— 时，目标才算本会话所有。`*`/`?` glob 只要求固定前缀是自有目录。
+扫描器无法归入自有根的一切仍会询问。
 
 ## 预设
 
-三层可以组合成预设：**Ask**、**Plan**、**Auto**、**Read only** 和 **Full access**。`comonad.allowFullAccess:
-false` 会隐藏 unrestricted 预设；**Full access** 是唯一放弃工作区边界的预设。
+这些层可组合为预设：**Ask**、**Plan**、**Auto**、**Read only** 和 **Full access**。预设位于模式和审批
+控件中。`comonad.allowFullAccess: false` 会隐藏 unrestricted 预设。
 
-## Workspace Trust
+| 预设 | Work mode | Tool approval | Network | Sandbox mode |
+| --- | --- | --- | --- | --- |
+| Ask | `sw` | `manual` | off | `workspace-write` |
+| Plan | `pl` | `whitelist_accept` | off | `workspace-write` |
+| Auto | `aw` | `universal_accept` | off | `workspace-write` |
+| Read only | `ro` | `whitelist_accept` | off | `read-only` |
+| Full access | `aw` | `universal_accept` | on | `danger-full-access` |
 
-在不受信任的工作区中，项目插件、Hooks 和指令文件不会被加载。工具调用仍遵循配置的审批策略和 OS 沙箱。
+## 工作区信任
+
+项目插件、hooks 和指令文件在不受信任的工作区中不会被加载。工具调用仍遵循配置的审批策略和 OS 沙箱。
 
 ## 下一步
 
-- [检查点与审查](/zh/guide/checkpoints) —— agent 写过的文件如何处理
+- [检查点与 review](/zh/guide/checkpoints) —— Agent 写入的文件会怎样
 - [设置](/zh/reference/settings) —— 所有安全相关设置
-- [架构](/zh/development) —— 策略门控与事件接缝
+- [架构](/zh/development) —— 策略门与事件接缝

@@ -30,14 +30,13 @@ Comonad 把某个键写回**已经声明该键的作用域**：项目没有声�
 
 | 键 | 默认值 | 用途 |
 | --- | --- | --- |
-| `comonad.mode` | `sw` | `chat`、`ro`、`sw`、`aw` 或 `pl` |
-| `comonad.approval` | `manual` | `manual`、`whitelist_accept`、`blacklist_reject`、`universal_accept`、`universal_reject` |
-| `comonad.network` | `false` | 网络工具与 shell 内网络；回环仍可用 |
+| `comonad.mode` | `sw` | Work mode：`chat`、`ro`、`sw`、`aw` 或 `pl` |
+| `comonad.approval` | `manual` | Tool approval policy：`manual`、`whitelist_accept`、`blacklist_reject`、`universal_accept`、`universal_reject` |
+| `comonad.approvalResponse` | `ask` | Approval response policy：`ask` 交给应答方并失败关闭；`never` 直接拒绝 |
+| `comonad.network` | `false` | Network access policy：网络工具与 shell 内网络；回环仍可用 |
+| `comonad.sandboxMode` | `workspace-write` | Sandbox mode：`workspace-read`、`read-only`、`workspace-write`、`danger-full-access` |
 | `comonad.workingDirectory` | 工作区根目录 | 文件与 shell 工具的工作目录 |
 | `comonad.planDirectory` | `.comonad/plans` | 计划文件的工作区相对目录 |
-| `comonad.confineRead` | `false` | 把读取限制在工作区 |
-| `comonad.confineWrite` | `true` | 把写入限制在工作区 |
-| `comonad.allowUnsandboxedShell` | `false` | 无 OS 沙箱时跳过额外确认 |
 | `comonad.allowFullAccess` | `true` | 提供 unrestricted 预设 |
 | `comonad.commandTimeout` | `60` | shell 超时回退值（秒） |
 | `comonad.commandTimeoutOverride` | `false` | 始终使用该值，忽略模型选择的超时 |
@@ -45,7 +44,7 @@ Comonad 把某个键写回**已经声明该键的作用域**：项目没有声�
 | `comonad.subagentStepsMode` | `custom` | `inherit` 共享该回合的 `maxSteps`；`custom` 使用 `comonad.subagentSteps` |
 | `comonad.subagentSteps` | `40` | `custom` 下子 Agent 的步数预算；`0` 表示无限制。定义的 `maxTurns` 只能收紧它 |
 | `comonad.filterSensitiveEnv` | `true` | 从命令环境中移除 key、token 与密码 |
-| `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | 规则列表；见[安全](/zh/guide/safety#_2-规则) |
+| `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | 用户规则；见[安全](/zh/guide/safety#_3-user-rule) |
 | `comonad.subagents` | `{}` | 子 Agent 的逐 Agent 授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。内置 `implement` 默认两者都有；其它 Agent 默认只读。 |
 
 ## 图

@@ -229,6 +229,28 @@ suite('Cancellation', () => {
 		}
 	});
 
+	test('the approval response policy never denies without reaching a surface', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let seen = 0;
+			kernel.ctx.on('approval/request', () => {
+				seen += 1;
+				return 'allow';
+			});
+			const answer = await kernel.ctx.approval.request({
+				calls: [],
+				reason: 'probe',
+				sessionId: 's',
+				signal: new AbortController().signal,
+				response: 'never',
+			});
+			assert.strictEqual(answer, 'deny');
+			assert.strictEqual(seen, 0, 'no surface was asked');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('stop during a tool writes a stopped result and ends the turn', async () => {
 		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept' } });
 		try {

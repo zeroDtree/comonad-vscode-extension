@@ -24,7 +24,7 @@ function planPath(ctx: ToolContext, name: string | null, access: 'read' | 'write
 	}
 	return guardPath(ctx.policy.workingDirectory, join(...parts), {
 		access,
-		confinement: ctx.policy.confinement,
+		sandboxMode: ctx.policy.sandboxMode,
 		denyReadPaths: ctx.policy.denyReadPaths,
 	});
 }
@@ -38,10 +38,16 @@ export const planTools = toolset([
 		needsWorkspace: true,
 		parameters: objectSchema({}),
 		async execute(_args, ctx) {
-			const dir = await planPath(ctx, null, 'write');
-			await mkdir(dir, { recursive: true });
-			const names = await readdir(dir);
-			return names.join('\n') || '(no plans)';
+			const dir = await planPath(ctx, null, 'read');
+			try {
+				const names = await readdir(dir);
+				return names.join('\n') || '(no plans)';
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+					return '(no plans)';
+				}
+				throw error;
+			}
 		},
 	},
 	{

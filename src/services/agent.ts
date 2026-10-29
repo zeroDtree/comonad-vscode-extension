@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { randomUUID } from 'node:crypto';
-import { lstatSync, realpathSync } from 'node:fs';
+import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Service, type Context } from 'cordis';
 import { abortable, linkAbort } from '../lib/cancel';
@@ -316,12 +316,13 @@ export class Agent extends Service {
 		return {
 			workMode: config.mode,
 			approval: config.approval,
+			approvalResponse: config.approvalResponse,
 			network: config.network,
+			sandboxMode: config.sandboxMode,
 			workingDirectory: config.workingDirectory,
 			commandTimeout: config.commandTimeout,
 			commandTimeoutOverride: config.commandTimeoutOverride,
 			denyReadPaths: [...config.denyReadPaths],
-			confinement: { read: config.confineRead, write: config.confineWrite },
 			planDirectory: config.planDirectory,
 			maxSteps: config.maxSteps,
 			model: config.model,
@@ -737,6 +738,7 @@ export class Agent extends Service {
 				surface: options.surface,
 				sessionId,
 				signal: turn.signal,
+				response: session.policy.approvalResponse,
 			});
 			// A stop during the resume prompt leaves the original suspension intact and resumable.
 			if (turn.signal.aborted) {
@@ -1290,6 +1292,7 @@ export class Agent extends Service {
 						surface: state.ref.surface,
 						sessionId: session.id,
 						signal,
+						response: state.policy.approvalResponse,
 					})
 				: 'deny';
 			if (signal.aborted) {
@@ -1726,13 +1729,12 @@ export class Agent extends Service {
 			}
 			// The trees the session owns outright: the test scratch and the workspace temp dir are the
 			// AI's own, so a workspace-writable shell may delete under them without asking.
-			const scratch = join(this.ctx.host.storage.tmp, 'shell', state.rootSessionId);
+			const scratch = workspace.trim() ? scratchDirectory(workspace, state.rootSessionId) : undefined;
 			const temp = workspace.trim() ? workspaceTempDir(workspace) : undefined;
 			const inTree = (root: string | undefined, target: string): boolean =>
 				Boolean(root && (resolve(target) === resolve(root) || insideRealWorkspace(root, target)));
 			const gate = gateCalls(state.toolCalls, (name) => this.ctx.tools.get(name), state.policy, this.ctx.settings.rules(), {
 				sandbox: this.ctx.host.sandboxKind(),
-				allowUnsandboxedShell: this.ctx.settings.get().allowUnsandboxedShell,
 				created: process.platform === 'win32' ? undefined : created,
 				createdDirs: process.platform === 'win32' ? undefined : createdDirs,
 				deletionStaysInside:
@@ -1744,9 +1746,9 @@ export class Agent extends Service {
 				return 'tools';
 			}
 			// A subagent runs inside a pre-approved, filtered tool set: ordinary confirmations are
-			// resolved by delegation. An escalated one — no sandbox, an unsandboxed tool, a dangerous
-			// command, or a rule the user wrote to ask about — needs the user, and a subagent cannot
-			// ask, so it is refused rather than parked on a surface that will never answer it.
+			// resolved by delegation. An escalated one — a dangerous command, or a rule the user
+			// wrote to ask about — needs the user, and a subagent cannot ask, so it is refused rather
+			// than parked on a surface that will never answer it.
 			if (gate.decision === 'confirm' && state.filter) {
 				if (gate.escalated) {
 					state.gateReason = `${gate.reason}; a subagent cannot ask you`;
@@ -1811,7 +1813,7 @@ export class Agent extends Service {
 			policy: state.policy,
 			signal,
 			// One scratch tree per chat, shared by its subagents so the main agent can read their reports.
-			scratchDirectory: join(this.ctx.host.storage.tmp, 'shell', state.rootSessionId),
+			scratchDirectory: state.policy.workingDirectory.trim() ? scratchDirectory(state.policy.workingDirectory, state.rootSessionId) : undefined,
 			resolveReference: (path, options) => this.ctx.references.resolvePath(path, scopeOf(state.policy), signal, options),
 			log: (text) => this.notice(state.ref, text),
 			ask: (question, options, multi) => this.ctx.host.ask(question, options, multi),
@@ -2016,10 +2018,12 @@ export class Agent extends Service {
 		// a user has agents of their own, and that would silently make one of them the default.
 		const agent = definition ?? this.ctx.catalog.agent('explore');
 		// A subagent's writes belong to the chat that spawned it, and never reach outside the workspace.
+		// A full-access parent is narrowed to workspace-write for its children; a narrower parent is
+		// inherited as it is, because a sandbox mode can only ever tighten.
 		const policy: SessionPolicy = {
 			...parent.policy,
 			model: agent?.model || parent.policy.model,
-			confinement: { ...parent.policy.confinement, write: true },
+			sandboxMode: parent.policy.sandboxMode === 'danger-full-access' ? 'workspace-write' : parent.policy.sandboxMode,
 		};
 		const grant = subagentGrant(this.ctx.settings.get(), agent?.name ?? 'explore', agent?.builtin === true);
 		// The settings grant is the authorization; the definition's tools are the selection. Both, plus
@@ -2333,7 +2337,7 @@ export class Agent extends Service {
 		push(
 			COMONAD_BLOCK.identity,
 			[
-				`Mode: ${MODE_LABELS[session.policy.workMode] ?? session.policy.workMode}; approval: ${session.policy.approval}; network: ${session.policy.network ? 'on' : 'off'}.`,
+				`Mode: ${MODE_LABELS[session.policy.workMode] ?? session.policy.workMode}; approval: ${session.policy.approval}; approval response: ${session.policy.approvalResponse}; network: ${session.policy.network ? 'on' : 'off'}; sandbox: ${session.policy.sandboxMode}.`,
 				`Today: ${new Date().toISOString().slice(0, 10)}.`,
 			].join('\n'),
 		);
@@ -2403,6 +2407,24 @@ export function promptText(blocks: readonly PromptBlock[]): string {
 }
 
 export const agentPlugin = Agent;
+
+/**
+ * The test shell's scratch tree. It sits inside the workspace so a workspace-write sandbox can
+ * permit it while every read outside the workspace's mode stays refused; `run_shell_test` still
+ * narrows the call to this one writable subpath. The real path is checked because a workspace can
+ * ship `.comonad` (or the session folder) as a symlink: the scratch must not become a writable hole
+ * outside the workspace. A path that escapes, or cannot be created, disables the test shell instead.
+ */
+export function scratchDirectory(workspace: string, rootSessionId: string): string | undefined {
+	const dir = join(workspace, '.comonad', 'scratch', rootSessionId);
+	try {
+		mkdirSync(dir, { recursive: true });
+		const root = realpathSync(workspace);
+		return isInside(root, realpathSync(dir)) ? dir : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 /** Whether a path lies inside the workspace; anything outside is not journaled. */
 function isInside(workspace: string, path: string): boolean {

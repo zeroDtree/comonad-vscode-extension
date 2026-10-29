@@ -3,9 +3,9 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { missingAncestor } from '../lib/created';
-import { formatResult, runCommand, shellArgv, sandboxKind, type SandboxKind, type WriteScope } from '../lib/sandbox';
+import { formatResult, runCommand, shellArgv, sandboxAllowsWrites, sandboxConfinesReads, sandboxKind, sandboxWrites, type SandboxKind, type SandboxMode } from '../lib/sandbox';
 import { creationTargets, directoryTargets, rmTargets } from '../lib/shell';
-import { objectSchema, type Confinement, type SessionPolicy, type ToolContext } from '../lib/types';
+import { objectSchema, type SessionPolicy, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
 
 /** Shell tools with OS sandboxing (sandbox-exec on macOS, bwrap on Linux). */
@@ -82,17 +82,28 @@ export function shellTimeoutSeconds(
 		: Math.min(MAX_SHELL_TIMEOUT_SECONDS, Math.max(MIN_SHELL_TIMEOUT_SECONDS, asked));
 }
 
-async function run(ctx: ToolContext, command: string, writeScope: WriteScope, requestedTimeout?: unknown): Promise<string> {
+async function run(ctx: ToolContext, command: string, write?: 'none' | 'scratch', requestedTimeout?: unknown): Promise<string> {
+	// The same precondition the gate applies, repeated here so a direct caller cannot run a
+	// read-only shell — or any shell outside the full-access mode — with no OS sandbox at all.
+	if (sandboxKind() === 'none' && (write === 'none' || ctx.policy.sandboxMode !== 'danger-full-access' || !ctx.policy.network)) {
+		return `Error: ${
+			write === 'none'
+				? 'a read-only shell needs an OS sandbox'
+				: ctx.policy.sandboxMode !== 'danger-full-access'
+					? 'shell commands need an OS sandbox outside sandbox mode danger-full-access'
+					: 'shell commands need an OS sandbox to enforce the network access policy'
+		}`;
+	}
 	const workspace = ctx.policy.workingDirectory;
 	// A test shell cannot create workspace files, so its redirections must not become provenance.
-	const track = process.platform !== 'win32' && Boolean(workspace.trim()) && writeScope !== 'scratch';
+	const track = process.platform !== 'win32' && Boolean(workspace.trim()) && write !== 'scratch';
 	const creates = track ? creationTargets(command, workspace) : [];
 	const removals = track ? rmTargets(command, workspace) : [];
 	const before = await Promise.all(creates.map(presence));
 	// A literal mkdir names a directory the session may own; remembering the highest missing
 	// ancestor before the command keeps the whole subtree owned even for `mkdir -p a/b/c`.
 	const directories = track ? await Promise.all(directoryTargets(command, workspace).map((dir) => missingAncestor(dir, workspace))) : [];
-	const result = await runCommand(shellArgv(command), workspace, shellOptions(ctx, writeScope, requestedTimeout));
+	const result = await runCommand(shellArgv(command), workspace, shellOptions(ctx, write, requestedTimeout));
 	for (let index = 0; index < creates.length; index += 1) {
 		const path = creates[index]!;
 		if (before[index] === 'absent' && (await createdFile(path))) {
@@ -113,21 +124,20 @@ async function run(ctx: ToolContext, command: string, writeScope: WriteScope, re
 	}
 	const output = formatResult(result);
 	// The model has to know where it may put a report; the path is the same inside the sandbox.
-	return writeScope === 'scratch' && ctx.scratchDirectory ? `scratch: ${ctx.scratchDirectory}\n${output}` : output;
+	return write === 'scratch' && ctx.scratchDirectory ? `scratch: ${ctx.scratchDirectory}\n${output}` : output;
 }
 
-/** A full shell writes the workspace when confined, and the host when the boundary is off. */
-function shellScope(policy: SessionPolicy): WriteScope {
-	return policy.confinement.write ? 'workspace' : 'all';
-}
-
-/** The boundary a shell tool runs under, from the session policy. */
-function shellOptions(ctx: ToolContext, writeScope: WriteScope, requestedTimeout?: unknown) {
+/**
+ * The boundary a shell tool runs under, from the session policy. `write` narrows the mode for a
+ * tool whose capability promises less: `run_shell_readonly` writes nothing, `run_shell_test` writes
+ * only its scratch tree.
+ */
+function shellOptions(ctx: ToolContext, write?: 'none' | 'scratch', requestedTimeout?: unknown) {
 	const workspace = ctx.policy.workingDirectory;
 	return {
-		writeScope,
+		sandboxMode: ctx.policy.sandboxMode,
+		write,
 		scratch: ctx.scratchDirectory,
-		confinement: ctx.policy.confinement,
 		network: ctx.policy.network,
 		denyReadPaths: deniedFiles(workspace, ctx.policy.denyReadPaths),
 		// Only runCommand reads these; start_shell spawns without a deadline or a turn signal.
@@ -186,14 +196,13 @@ function collect(dir: string, found: Set<string>, depth: number): void {
 	}
 }
 
-/** Reports the OS sandbox in use and what the workspace boundary currently covers. */
-export function sandboxStatus(confinement: Confinement, kind: SandboxKind = sandboxKind()): string {
+/** Reports the OS sandbox in use and the file range the sandbox mode enforces. */
+export function sandboxStatus(mode: SandboxMode, kind: SandboxKind = sandboxKind()): string {
 	const engine = kind === 'none' ? 'no OS sandbox available' : `sandbox: ${kind === 'macos' ? 'sandbox-exec' : kind}`;
-	const boundary = [
-		confinement.read ? 'reads' : null,
-		confinement.write ? 'writes' : null,
-	].filter(Boolean).join(' and ') || 'nothing';
-	return `${engine} · confined to the workspace: ${boundary}`;
+	const reads = sandboxConfinesReads(mode) ? 'workspace reads' : 'all reads';
+	const scope = sandboxWrites(mode);
+	const writes = scope === 'none' ? 'no writes' : scope === 'workspace' ? 'workspace writes' : 'all writes';
+	return `${engine} · ${mode}: ${reads}, ${writes}`;
 }
 
 /** The optional per-call deadline both foreground tools share. */
@@ -232,7 +241,7 @@ export const shellTools = toolset([
 	{
 		name: 'run_shell_test',
 		description:
-			'Run a command with the workspace read-only and only the scratch directory writable. Use for tests, linters and builds; TMPDIR, HOME, XDG_CACHE_HOME and COMONAD_SCRATCH already point into that directory. Writes to the workspace fail. Pass timeout (seconds) for a slow command; the maximum is 300.',
+			'Run a command with the rest of the workspace read-only and only the scratch directory (inside .comonad/scratch) writable. Use for tests, linters and builds; TMPDIR, HOME, XDG_CACHE_HOME and COMONAD_SCRATCH already point into that directory. Writes elsewhere in the workspace fail. Pass timeout (seconds) for a slow command; the maximum is 300.',
 		capability: 'shell_test',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -246,6 +255,9 @@ export const shellTools = toolset([
 			// unconfined, so this refuses even when a gate or a direct caller let the call through.
 			if (sandboxKind() === 'none') {
 				return 'Error: run_shell_test needs an OS sandbox (sandbox-exec on macOS, bwrap on Linux); none is available';
+			}
+			if (!sandboxAllowsWrites(ctx.policy.sandboxMode)) {
+				return `Error: run_shell_test needs a writable scratch tree; sandbox mode ${ctx.policy.sandboxMode} refuses every write`;
 			}
 			if (!ctx.scratchDirectory?.trim()) {
 				return 'Error: no scratch directory is configured for this session';
@@ -266,7 +278,7 @@ export const shellTools = toolset([
 		),
 		execute(args, ctx) {
 			const { command, timeout } = args as { command: string; timeout?: unknown };
-			return run(ctx, command, shellScope(ctx.policy), timeout);
+			return run(ctx, command, undefined, timeout);
 		},
 	},
 	{
@@ -279,7 +291,12 @@ export const shellTools = toolset([
 		parameters: objectSchema({ command: { type: 'string' }, description: descriptionParameter }, ['command', 'description']),
 		async execute(args, ctx) {
 			const { command } = args as { command: string };
-			const task = await ctx.tasks.start(command, ctx.policy.workingDirectory, shellOptions(ctx, shellScope(ctx.policy)));
+			if (sandboxKind() === 'none' && (ctx.policy.sandboxMode !== 'danger-full-access' || !ctx.policy.network)) {
+				return `Error: background shell commands need an OS sandbox ${
+					ctx.policy.sandboxMode !== 'danger-full-access' ? 'outside sandbox mode danger-full-access' : 'to enforce the network access policy'
+				}`;
+			}
+			const task = await ctx.tasks.start(command, ctx.policy.workingDirectory, shellOptions(ctx));
 			return `started task ${task.id}: ${command}`;
 		},
 	},

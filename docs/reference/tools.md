@@ -27,13 +27,14 @@ read-only overlay shows the subagent's prompt, steps and tool results and follow
 
 ## Shell tools
 
-- `run_shell_readonly` runs in a read-only sandbox; `run_shell` can write inside the workspace.
-- `run_shell_test` keeps the workspace read-only and writes only to a private scratch tree, exposed
-  as `COMONAD_SCRATCH` (with `TMPDIR`, `HOME` and `XDG_CACHE_HOME` pointing into it). It needs an OS
-  sandbox and is refused without one.
+- `run_shell_readonly` runs with no write permission and needs an OS sandbox; `run_shell` follows the
+  sandbox mode and can write inside the workspace under `workspace-write`.
+- `run_shell_test` keeps the rest of the workspace read-only and writes only to
+  `.comonad/scratch/<session>`, exposed as `COMONAD_SCRATCH` (with `TMPDIR`, `HOME` and
+  `XDG_CACHE_HOME` pointing into it). It needs an OS sandbox and a sandbox mode that permits writes.
 - `start_shell` starts a long-running command; read it with `shell_output`, stop it with `stop_shell`.
 - Foreground calls take an optional `timeout` in seconds, clamped to 1–300.
-- Every shell runs under the OS sandbox when one is available. See [Safety](/guide/safety).
+- Every shell runs under the OS sandbox when one is available. See [Safety](/guide/safety#_6-sandbox-mode).
 
 ## Background tasks
 

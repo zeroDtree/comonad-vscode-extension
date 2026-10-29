@@ -31,8 +31,16 @@ Highlights are below; the full implementation notes are linked at the end. The u
   on a step budget unless one is set.
 - **Stop actually stops** the turn, its process tree and its pending approval; background tasks stay
   independent.
-- **Shell calls** take a model-chosen timeout, keep loopback available when network is off, and never
-  run unconfined without a prompt when no OS sandbox exists.
+- **One runtime policy pipeline.** Capability, network access, user rules, the tool approval policy,
+  the approval response policy and the sandbox mode now run in a fixed order. The new
+  `comonad.approvalResponse` (`ask`/`never`) decides who answers a confirmation, and
+  `comonad.sandboxMode` (`workspace-read`, `read-only`, `workspace-write`, `danger-full-access`)
+  replaces `confineRead`/`confineWrite`. A user rule that matches settles the call; the approval
+  policy is consulted only when none of `deny`/`ask`/`allow` matched. The settings panel, chat
+  footer, `/permissions`, `/status` and the flow diagram all show the same six layers.
+- **Shell calls** take a model-chosen timeout and keep loopback available when network is off. With
+  no OS sandbox, shell commands are refused unless the sandbox mode is `danger-full-access`; the
+  read-only and test shells always need an OS sandbox.
 - **Model keys belong to the endpoint**, not the profile, and the model menu is read from each
   endpoint.
 - **The workspace boundary** is enforced where the panel says it is, with a writable scratch

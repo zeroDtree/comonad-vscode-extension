@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
 import type { EffortTop } from '../lib/effort';
-import { asApproval, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
+import { asApproval, asApprovalResponse, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { parsePromptLayout, parseToolLayout, type PromptBlockSetting, type ToolPromptSetting } from '../lib/prompt-layout';
-import type { Approval, Capability, Confinement, ReasoningEffort, WorkMode } from '../lib/types';
+import { asSandboxMode, DEFAULT_SANDBOX_MODE } from '../lib/sandbox';
+import type { Approval, ApprovalResponse, Capability, ReasoningEffort, SandboxMode, WorkMode } from '../lib/types';
 import type { Host } from './host';
 
 /** Typed view over the `comonad.*` settings section. */
@@ -216,16 +217,16 @@ export interface McpServerSettings {
 export interface Config {
 	mode: WorkMode;
 	approval: Approval;
+	/** Who answers the requests the tool approval policy raised. */
+	approvalResponse: ApprovalResponse;
 	network: boolean;
+	/** The OS-enforced read and write range for every call. */
+	sandboxMode: SandboxMode;
 	workingDirectory: string;
 	commandTimeout: number;
 	/** Pin every foreground shell call to `commandTimeout` instead of letting the model choose. */
 	commandTimeoutOverride: boolean;
 	denyReadPaths: string[];
-	/** Refuse reads outside the working directory, in the file tools and in the shell sandbox. */
-	confineRead: boolean;
-	/** Refuse writes outside the working directory, in the file tools and in the shell sandbox. */
-	confineWrite: boolean;
 	/** Workspace-relative folder for plan files; empty uses `.comonad/plans`. */
 	planDirectory: string;
 	maxSteps: number;
@@ -254,8 +255,6 @@ export interface Config {
 	budgetUsd: number;
 	filterSensitiveEnv: boolean;
 	allowFullAccess: boolean;
-	/** Let shell tools run without the extra confirmation when no OS sandbox is available. */
-	allowUnsandboxedShell: boolean;
 	/** A SillyTavern folder whose `src/tokenizers` holds the tokenizer files it ships itself. */
 	tokenizerDir: string;
 	/** Show the agent's changes inline in the editor, with Keep/Undo on each block and each file. */
@@ -275,13 +274,13 @@ export interface Config {
 export const CONFIG_KEYS = [
 	'mode',
 	'approval',
+	'approvalResponse',
 	'network',
+	'sandboxMode',
 	'workingDirectory',
 	'commandTimeout',
 	'commandTimeoutOverride',
 	'denyReadPaths',
-	'confineRead',
-	'confineWrite',
 	'planDirectory',
 	'maxSteps',
 	'subagentStepsMode',
@@ -304,7 +303,6 @@ export const CONFIG_KEYS = [
 	'budgetUsd',
 	'filterSensitiveEnv',
 	'allowFullAccess',
-	'allowUnsandboxedShell',
 	'tokenizerDir',
 	'inlineDiff',
 	'prompts',
@@ -316,18 +314,17 @@ export const AGENT_KEYS = [
 	'model',
 	'mode',
 	'approval',
+	'approvalResponse',
 	'displayForm',
 	'toolCard',
 	'contextForm',
 	'network',
+	'sandboxMode',
 	'workingDirectory',
 	'commandTimeout',
 	'commandTimeoutOverride',
 	'planDirectory',
 	'denyReadPaths',
-	'confineRead',
-	'confineWrite',
-	'allowUnsandboxedShell',
 ] as const satisfies readonly (keyof Config)[];
 
 /** A textarea (one entry per line) or an array, trimmed and without blanks. */
@@ -368,6 +365,12 @@ export function normalizeAgentPatch(
 	if (has('approval')) {
 		next.approval = asApproval(patch.approval, current.approval);
 	}
+	if (has('approvalResponse')) {
+		next.approvalResponse = asApprovalResponse(patch.approvalResponse, current.approvalResponse);
+	}
+	if (has('sandboxMode')) {
+		next.sandboxMode = asSandboxMode(patch.sandboxMode, current.sandboxMode);
+	}
 	if (has('displayForm')) {
 		next.displayForm = form('displayForm');
 	}
@@ -398,15 +401,6 @@ export function normalizeAgentPatch(
 	}
 	if (has('denyReadPaths')) {
 		next.denyReadPaths = asList(patch.denyReadPaths);
-	}
-	if (has('confineRead')) {
-		next.confineRead = Boolean(patch.confineRead);
-	}
-	if (has('confineWrite')) {
-		next.confineWrite = Boolean(patch.confineWrite);
-	}
-	if (has('allowUnsandboxedShell')) {
-		next.allowUnsandboxedShell = Boolean(patch.allowUnsandboxedShell);
 	}
 	if (has('maxSteps')) {
 		const value = Number(patch.maxSteps);
@@ -490,13 +484,13 @@ export class Settings extends Service {
 		return {
 			mode: asWorkMode(raw.mode),
 			approval: asApproval(raw.approval),
+			approvalResponse: oneOf('approvalResponse', APPROVAL_RESPONSES, 'ask'),
 			network: flag('network', false),
+			sandboxMode: asSandboxMode(raw.sandboxMode, DEFAULT_SANDBOX_MODE),
 			workingDirectory: (typeof raw.workingDirectory === 'string' ? raw.workingDirectory : '') || folder,
 			commandTimeout: count('commandTimeout', 60, 1),
 			commandTimeoutOverride: flag('commandTimeoutOverride', false),
 			denyReadPaths: lines('denyReadPaths', ['.env', '**/.env']),
-			confineRead: flag('confineRead', false),
-			confineWrite: flag('confineWrite', true),
 			planDirectory: typeof raw.planDirectory === 'string' ? raw.planDirectory : '',
 			maxSteps: count('maxSteps', 0, 0),
 			// Kept apart so a hand-edited file can carry one without the other; `custom` with the
@@ -530,7 +524,6 @@ export class Settings extends Service {
 			budgetUsd: count('budgetUsd', 0, 0),
 			filterSensitiveEnv: flag('filterSensitiveEnv', true),
 			allowFullAccess: flag('allowFullAccess', true),
-			allowUnsandboxedShell: flag('allowUnsandboxedShell', false),
 			tokenizerDir: typeof raw.tokenizerDir === 'string' ? raw.tokenizerDir : '',
 			inlineDiff: flag('inlineDiff', true),
 			// Both are untrusted arrays: a webview save, a hand-edited settings file or a value from an
@@ -566,8 +559,9 @@ export class Settings extends Service {
 	async applyPolicy(patch: {
 		mode?: WorkMode;
 		approval?: Approval;
+		approvalResponse?: ApprovalResponse;
 		network?: boolean;
-		confinement?: Confinement;
+		sandboxMode?: SandboxMode;
 	}): Promise<void> {
 		if (patch.mode) {
 			await this.host.update('mode', patch.mode);
@@ -575,12 +569,14 @@ export class Settings extends Service {
 		if (patch.approval) {
 			await this.host.update('approval', patch.approval);
 		}
+		if (patch.approvalResponse) {
+			await this.host.update('approvalResponse', patch.approvalResponse);
+		}
 		if (patch.network !== undefined) {
 			await this.host.update('network', patch.network);
 		}
-		if (patch.confinement) {
-			await this.host.update('confineRead', patch.confinement.read);
-			await this.host.update('confineWrite', patch.confinement.write);
+		if (patch.sandboxMode) {
+			await this.host.update('sandboxMode', patch.sandboxMode);
 		}
 		this.ctx.emit('settings/changed');
 	}
@@ -604,3 +600,4 @@ function withDefaults(profiles: Profile[]): Profile[] {
 /** The remaining value sets a `get()` may fall back within — a settings file is untrusted input. */
 const CONTEXT_FORMS: readonly ContextForm[] = ['rendered', 'token', 'raw'];
 const REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'max'];
+const APPROVAL_RESPONSES: readonly ApprovalResponse[] = ['ask', 'never'];

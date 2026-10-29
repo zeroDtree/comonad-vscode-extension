@@ -5,8 +5,8 @@ import { join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
 import { asAttachments, attachmentIdOf } from '../lib/attachments';
 import { asReasoningEffort } from '../lib/effort';
-import { WORKSPACE_BOUNDARY, asApproval, asWorkMode } from '../lib/policy';
-import { isInside } from '../lib/sandbox';
+import { asApproval, asApprovalResponse, asWorkMode } from '../lib/policy';
+import { asSandboxMode, DEFAULT_SANDBOX_MODE, isInside } from '../lib/sandbox';
 import { modelContextDigest, type ContextForm } from '../lib/prompt';
 import { turnsOf } from '../lib/turns';
 import type { AttachmentPart, Message, ModelContext, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
@@ -424,11 +424,13 @@ export class SessionStore {
 			...rest,
 			title: session.title || UNTITLED,
 			// A session on disk is untrusted input like any other: a stale or hand-edited policy that
-			// names a mode or approval the gates do not know falls back to the safe pair.
+			// names a mode, approval or sandbox the gates do not know falls back to the safe value.
 			policy: {
 				...session.policy,
 				workMode: asWorkMode(session.policy?.workMode),
 				approval: asApproval(session.policy?.approval),
+				approvalResponse: asApprovalResponse(session.policy?.approvalResponse),
+				sandboxMode: asSandboxMode(session.policy?.sandboxMode, DEFAULT_SANDBOX_MODE),
 			},
 			// Only a string is a workspace; a hand-edited value falls back to the directory the chat ran
 			// in, which is what the history uses for sessions written before the field existed.
@@ -724,12 +726,13 @@ export class Sessions extends Service {
 			return this.create({
 				workMode: 'sw',
 				approval: 'manual',
+				approvalResponse: 'ask',
 				network: false,
+				sandboxMode: DEFAULT_SANDBOX_MODE,
 				workingDirectory: '',
 				commandTimeout: 60,
 				commandTimeoutOverride: false,
 				denyReadPaths: [],
-				confinement: { ...WORKSPACE_BOUNDARY },
 				model: 'auto',
 			});
 		}

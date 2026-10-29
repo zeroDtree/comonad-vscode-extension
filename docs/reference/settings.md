@@ -34,14 +34,13 @@ UI.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `comonad.mode` | `sw` | `chat`, `ro`, `sw`, `aw` or `pl` |
-| `comonad.approval` | `manual` | `manual`, `whitelist_accept`, `blacklist_reject`, `universal_accept`, `universal_reject` |
-| `comonad.network` | `false` | Network tools and network inside the shell sandbox; loopback stays available |
+| `comonad.mode` | `sw` | Work mode: `chat`, `ro`, `sw`, `aw` or `pl` |
+| `comonad.approval` | `manual` | Tool approval policy: `manual`, `whitelist_accept`, `blacklist_reject`, `universal_accept`, `universal_reject` |
+| `comonad.approvalResponse` | `ask` | Approval response policy: `ask` sends the request to a surface and fails closed; `never` denies without asking |
+| `comonad.network` | `false` | Network access policy: network tools and network inside the shell sandbox; loopback stays available |
+| `comonad.sandboxMode` | `workspace-write` | Sandbox mode: `workspace-read`, `read-only`, `workspace-write`, `danger-full-access` |
 | `comonad.workingDirectory` | workspace root | Working directory for file and shell tools |
 | `comonad.planDirectory` | `.comonad/plans` | Workspace-relative folder for plan files |
-| `comonad.confineRead` | `false` | Restrict reads to the workspace |
-| `comonad.confineWrite` | `true` | Restrict writes to the workspace |
-| `comonad.allowUnsandboxedShell` | `false` | Skip the extra prompt when no OS sandbox exists |
 | `comonad.allowFullAccess` | `true` | Offer the unrestricted preset |
 | `comonad.commandTimeout` | `60` | Fallback shell timeout in seconds |
 | `comonad.commandTimeoutOverride` | `false` | Always use that value and ignore the model's timeout |
@@ -49,7 +48,7 @@ UI.
 | `comonad.subagentStepsMode` | `custom` | `inherit` shares the turn's `maxSteps`; `custom` spends `comonad.subagentSteps` |
 | `comonad.subagentSteps` | `40` | Subagent step budget under `custom`; `0` means no limit. A definition's `maxTurns` can only tighten it |
 | `comonad.filterSensitiveEnv` | `true` | Strip keys, tokens and passwords from command environments |
-| `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | Rule lists; see [Safety](/guide/safety#_2-rules) |
+| `comonad.permissions` | `{allow:[], ask:[], deny:[]}` | User rules; see [Safety](/guide/safety#_3-user-rules) |
 | `comonad.subagents` | `{}` | Per-agent subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Built-in `implement` defaults to both; every other agent is read-only until granted. |
 
 ## Graph

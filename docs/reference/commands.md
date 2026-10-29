@@ -20,9 +20,9 @@ a command — elsewhere it is ordinary text.
 | `/clear`, `/new` | Start a fresh session |
 | `/fork` | Fork this session and keep exploring |
 | `/context` | Window, budget breakdown and the last request's usage |
-| `/status` | Mode, model, workspace, sandbox and usage |
+| `/status` | Work mode, approval policies, sandbox mode, model, workspace and usage |
 | `/cost` | Token usage for today and the session |
-| `/permissions` | Mode capabilities and permission rules |
+| `/permissions` | Capabilities and the full policy: rules, approval policies and sandbox mode |
 | `/model` | Switch the active model |
 | `/continue` | Carry the last message on |
 | `/impersonate` | Write your next message for you |

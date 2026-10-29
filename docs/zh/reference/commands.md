@@ -13,9 +13,9 @@
 | `/clear`、`/new` | 新建会话 |
 | `/fork` | Fork 当前会话并继续探索 |
 | `/context` | 窗口、预算拆分与上次请求用量 |
-| `/status` | 模式、模型、工作区、沙箱与用量 |
+| `/status` | Work mode、审批策略、Sandbox mode、模型、工作区与用量 |
 | `/cost` | 今天与会话的 token 用量 |
-| `/permissions` | 模式能力与权限规则 |
+| `/permissions` | 能力与完整策略：用户规则、审批策略和 Sandbox mode |
 | `/model` | 切换当前模型 |
 | `/continue` | 续写最后一条消息 |
 | `/impersonate` | 替你写下一句话 |

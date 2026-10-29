@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Domain types shared by the agent kernel. This module must not import `vscode` or `cordis`. */
 
-import type { SandboxOptions } from './sandbox';
+import type { SandboxMode, SandboxOptions } from './sandbox';
+
+export type { SandboxMode } from './sandbox';
 
 /** Work modes, least capable first: chat only, then reads, writes and a full shell, then plan files. */
 export type WorkMode = 'chat' | 'ro' | 'sw' | 'aw' | 'pl';
 
+/** The tool approval policy: what happens to a call no user rule matched. */
 export type Approval = 'manual' | 'universal_reject' | 'blacklist_reject' | 'whitelist_accept' | 'universal_accept';
+
+/** The approval response policy: who answers the requests the approval policy raised. */
+export type ApprovalResponse = 'ask' | 'never';
 
 /**
  * The thinking levels a chat can ask for. `auto` leaves the provider default alone; `none` turns
@@ -166,18 +172,14 @@ export interface SwipeInfo {
 	extra?: { gen_id?: number; api?: string; model?: string };
 }
 
-/** What the workspace boundary applies to. `false` leaves that direction unrestricted. */
-export interface Confinement {
-	/** Reads outside the workspace are refused, by the file tools and inside the shell sandbox. */
-	read: boolean;
-	/** Writes outside the workspace are refused, by the file tools and inside the shell sandbox. */
-	write: boolean;
-}
-
 export interface SessionPolicy {
 	workMode: WorkMode;
 	approval: Approval;
+	/** Who answers an approval request: a surface (`ask`) or nobody (`never`). */
+	approvalResponse: ApprovalResponse;
 	network: boolean;
+	/** The OS-enforced read and write range every call runs under. */
+	sandboxMode: SandboxMode;
 	workingDirectory: string;
 	commandTimeout: number;
 	/**
@@ -186,8 +188,6 @@ export interface SessionPolicy {
 	 */
 	commandTimeoutOverride: boolean;
 	denyReadPaths: string[];
-	/** How far outside the working directory reads and writes may reach. */
-	confinement: Confinement;
 	/** Workspace-relative folder for plan files; empty uses `.comonad/plans`. */
 	planDirectory?: string;
 	/** Maximum graph steps for one turn; absent uses the compiled graph's own limit. */
@@ -282,6 +282,11 @@ export interface ToolSpec {
 	needsNetwork: boolean;
 	needsWorkspace: boolean;
 	/**
+	 * Runs outside the OS sandbox (a VS Code task, a plugin's own process). Such a tool can only
+	 * run under `danger-full-access`, because no other sandbox mode could be enforced for it.
+	 */
+	unsandboxed?: boolean;
+	/**
 	 * Its writes go through `ToolContext.edit`, so the journal records them. A subagent is offered a
 	 * write tool only when this is true; a plugin tool that writes without the seam is not tracked and
 	 * therefore not delegated.
@@ -322,4 +327,6 @@ export interface ApprovalRequest {
 	/** The chat that owns the request; a surface shows the card only for that chat. */
 	sessionId: string;
 	surface?: string;
+	/** `never` rejects without reaching a surface; absent reads as `ask`. */
+	response?: ApprovalResponse;
 }

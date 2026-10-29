@@ -16,7 +16,7 @@ const SKIP = new Set(['node_modules', '.git', 'dist', 'out', '.next', 'build', '
 function readable(ctx: ToolContext, path: string): Promise<string> {
 	return guardPath(ctx.policy.workingDirectory, path, {
 		access: 'read',
-		confinement: ctx.policy.confinement,
+		sandboxMode: ctx.policy.sandboxMode,
 		denyReadPaths: ctx.policy.denyReadPaths,
 	});
 }
@@ -24,7 +24,7 @@ function readable(ctx: ToolContext, path: string): Promise<string> {
 function writable(ctx: ToolContext, path: string): Promise<string> {
 	return guardPath(ctx.policy.workingDirectory, path, {
 		access: 'write',
-		confinement: ctx.policy.confinement,
+		sandboxMode: ctx.policy.sandboxMode,
 		denyReadPaths: ctx.policy.denyReadPaths,
 	});
 }

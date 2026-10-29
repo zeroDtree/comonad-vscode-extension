@@ -13,11 +13,11 @@ import {
 } from '../lib/attachments';
 import { asReasoningEffort } from '../lib/effort';
 import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES } from '../lib/images';
-import { APPROVAL_LABELS, MODE_LABELS } from '../lib/policy';
+import { APPROVAL_LABELS, MODE_LABELS, SANDBOX_LABELS } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
 import { turnsOf, type Step, type Turn } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
-import type { Approval, ApprovalDecision, AttachmentPart, WorkMode } from '../lib/types';
+import type { Approval, ApprovalDecision, AttachmentPart, SandboxMode, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
 import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
 import { formatReference } from '../lib/references';
@@ -201,8 +201,8 @@ export function chatPanel(ctx: Context): void {
 			approval: config.approval,
 			network: config.network,
 			sandbox: ctx.host.sandboxKind(),
+			sandboxMode: config.sandboxMode,
 			remote: ctx.host.remoteName() ?? null,
-			allowUnsandboxedShell: config.allowUnsandboxedShell,
 			context: session?.contextForm ?? config.contextForm,
 			display: config.displayForm,
 			toolCard: config.toolCard,
@@ -216,6 +216,7 @@ export function chatPanel(ctx: Context): void {
 			windowTokens: session ? ctx.agent.windowFor(session) : 0,
 			modes: splitChoices(MODE_LABELS),
 			approvals: splitChoices(APPROVAL_LABELS),
+			sandboxes: splitChoices(SANDBOX_LABELS),
 			generations: GENERATION_TRIGGERS.map((value) => ({ value, label: GENERATION_LABELS[value] })),
 			// The composer's `/` menu: what `commands.handle()` would resolve, custom files included.
 			commands: ctx.commands.suggestions(),
@@ -1365,6 +1366,11 @@ export function chatPanel(ctx: Context): void {
 						await ctx.settings.applyPolicy({ approval: message.approval as Approval });
 					}
 					break;
+				case 'setSandboxMode':
+					if (typeof message.sandboxMode === 'string' && message.sandboxMode in SANDBOX_LABELS) {
+						await ctx.settings.applyPolicy({ sandboxMode: message.sandboxMode as SandboxMode });
+					}
+					break;
 				case 'setContext': {
 					// The control is the chat's, but the pick is also the default for the next chat:
 					// a setting changed here outlives the session it was made in.
@@ -1753,6 +1759,10 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 			<div class="pill-menu" hidden></div>
 		</div>
 		<div class="pill" data-control="approval">
+			<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="pill-label"></span><span class="chev">▾</span></button>
+			<div class="pill-menu" hidden></div>
+		</div>
+		<div class="pill" data-control="sandbox">
 			<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="pill-label"></span><span class="chev">▾</span></button>
 			<div class="pill-menu" hidden></div>
 		</div>

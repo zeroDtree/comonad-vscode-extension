@@ -8,12 +8,23 @@ import { COMONAD_BLOCK, COMONAD_BLOCKS, DEFAULT_BLOCK_PREFIX, isComonadBlockId, 
 import { isLoopbackBase, normalizeEndpoint } from '../lib/endpoint';
 import { defaultPromptLayout, mergePromptPrefixes, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
 import { pluginNodeStatus, pluginTree, type PluginNode } from '../lib/plugins';
-import { APPROVAL_LABELS, capabilityAllowed, gateFlow, modeCapabilities, MODE_LABELS, parseRule } from '../lib/policy';
+import {
+	APPROVAL_LABELS,
+	APPROVAL_RESPONSE_LABELS,
+	capabilityAllowed,
+	gateFlow,
+	modeCapabilities,
+	MODE_LABELS,
+	parseRule,
+	SANDBOX_LABELS,
+	sandboxCapabilities,
+} from '../lib/policy';
 import { type ContextForm } from '../lib/prompt';
 import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
 import { asList, normalizeAgentPatch, profileKeyEnvs, sanitizeSubagentGrants, SUBAGENT_STEPS_MODES, subagentGrant, type Profile, type SubagentStepsMode, type ToolCardMode } from '../services/settings';
+import { unavailableInSandbox } from '../services/tools';
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
@@ -318,15 +329,14 @@ export function settingsPanel(ctx: Context): void {
 			config: {
 				mode: config.mode,
 				approval: config.approval,
+				approvalResponse: config.approvalResponse,
 				network: config.network,
+				sandboxMode: config.sandboxMode,
 				workingDirectory: config.workingDirectory,
 				commandTimeout: config.commandTimeout,
 				commandTimeoutOverride: config.commandTimeoutOverride,
 				planDirectory: config.planDirectory,
 				denyReadPaths: config.denyReadPaths,
-				confineRead: config.confineRead,
-				confineWrite: config.confineWrite,
-				allowUnsandboxedShell: config.allowUnsandboxedShell,
 				maxSteps: config.maxSteps,
 				subagentStepsMode: config.subagentStepsMode,
 				subagentSteps: config.subagentSteps,
@@ -370,6 +380,8 @@ export function settingsPanel(ctx: Context): void {
 			labels: {
 				modes: MODE_LABELS,
 				approvals: APPROVAL_LABELS,
+				approvalResponses: APPROVAL_RESPONSE_LABELS,
+				sandboxes: SANDBOX_LABELS,
 				displays: DISPLAY_LABELS,
 				toolCards: TOOL_CARD_LABELS,
 				contexts: CONTEXT_LABELS,
@@ -385,7 +397,7 @@ export function settingsPanel(ctx: Context): void {
 				description: tool.description,
 			})),
 			flow: gateFlow(),
-			modeLegend: modeCapabilities(),
+			modeLegend: [...modeCapabilities(), ...sandboxCapabilities()],
 			workspace: config.workingDirectory,
 			home: ctx.settings.home(),
 			environment: { remote: ctx.host.remoteName() ?? '', sandbox: ctx.host.sandboxKind() },
@@ -491,7 +503,9 @@ export function settingsPanel(ctx: Context): void {
 									? 'network is off'
 									: tool.needsWorkspace && !policy.workingDirectory.trim()
 										? 'no workspace'
-										: 'not offered';
+										: unavailableInSandbox(tool, policy)
+											? `not available under ${policy.sandboxMode}`
+											: 'not offered';
 			return {
 				name: tool.name,
 				capability: tool.capability,
@@ -513,6 +527,8 @@ export function settingsPanel(ctx: Context): void {
 							title: session.title,
 							mode: MODE_LABELS[policy.workMode] ?? policy.workMode,
 							approval: APPROVAL_LABELS[policy.approval] ?? policy.approval,
+							approvalResponse: APPROVAL_RESPONSE_LABELS[policy.approvalResponse] ?? policy.approvalResponse,
+							sandbox: SANDBOX_LABELS[policy.sandboxMode] ?? policy.sandboxMode,
 						}
 					: null,
 			takeover,
@@ -950,9 +966,14 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <select id="mode" class="control" data-key="mode"></select>
       </div>
       <div class="field">
-        <label for="approval">Approval</label>
-        <p class="hint">How a tool call is gated before it runs, on top of the mode.</p>
+        <label for="approval">Tool approval policy</label>
+        <p class="hint">Applied only when no user rule matched. It decides which calls run, which ask, and which are rejected.</p>
         <select id="approval" class="control" data-key="approval"></select>
+      </div>
+      <div class="field">
+        <label for="approval-response">Approval response policy</label>
+        <p class="hint">Who answers a request the tool approval policy raised. <code>ask</code> sends it to the chat surface and denies when no surface answers; <code>never</code> denies every request outright.</p>
+        <select id="approval-response" class="control" data-key="approvalResponse"></select>
       </div>
       <div class="field">
         <label for="context">Context</label>
@@ -960,8 +981,8 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <select id="context" class="control" data-key="contextForm"></select>
       </div>
       <div class="field">
-        <label for="network">Network</label>
-        <p class="hint">Network tools and network access inside the shell sandbox. Loopback stays available when this is off.</p>
+        <label for="network">Network access policy</label>
+        <p class="hint">On: network tools and network inside the shell sandbox may run. Off: both are refused; loopback stays available inside the sandbox so local test servers work.</p>
         <label class="check"><input type="checkbox" id="network" data-key="network" /></label>
       </div>
       <div class="field">
@@ -969,6 +990,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
         <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
       </div>
+      <p class="group-note">Every tool call walks the layers in order: Work mode → Network access → User rules → Tool approval policy → Approval response policy → Sandbox mode. The first layer that stops the call ends it.</p>
     </div>
     <h2 class="group-title">Workspace</h2>
     <div class="group">
@@ -996,46 +1018,36 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <input id="plans" class="control" type="text" data-key="planDirectory" spellcheck="false" placeholder=".comonad/plans" />
       </div>
     </div>
-    <h2 class="group-title">Safety</h2>
+    <h2 class="group-title">Sandbox</h2>
     <div class="group">
+      <div class="field">
+        <label for="sandbox-mode">Sandbox mode</label>
+        <p class="hint">The OS-enforced read and write range for every approved call. It is applied by the file tools and by <code>sandbox-exec</code>/<code>bwrap</code>; a call may narrow it but never widen it.</p>
+        <select id="sandbox-mode" class="control" data-key="sandboxMode"></select>
+      </div>
       <div class="field">
         <label for="deny">Deny read paths</label>
         <p class="hint">One workspace-relative path or basename per line — file and shell tools refuse to read or write them.</p>
         <textarea id="deny" class="control" data-key="denyReadPaths" spellcheck="false" rows="3"></textarea>
       </div>
-      <div class="field">
-        <label for="confine-read">Confine reads</label>
-        <p class="hint">Reads outside the working directory are refused.</p>
-        <label class="check"><input type="checkbox" id="confine-read" data-key="confineRead" /></label>
-      </div>
-      <div class="field">
-        <label for="confine-write">Confine writes</label>
-        <p class="hint">Writes outside the working directory are refused.</p>
-        <label class="check"><input type="checkbox" id="confine-write" data-key="confineWrite" /></label>
-      </div>
-      <div class="field">
-        <label for="allow-unsandboxed">Allow shell without an OS sandbox</label>
-        <p class="hint">When no sandbox is available, shell commands run unconfined without the extra confirmation. Tools named <code>*_unsandboxed</code> still ask.</p>
-        <label class="check"><input type="checkbox" id="allow-unsandboxed" data-key="allowUnsandboxedShell" /></label>
-      </div>
-      <p class="group-note">Confinement applies to the file tools and to commands run in the shell sandbox. A write-confined full shell still gets a writable scratch directory at <code>.comonad/tmp</code>. The test shell (<code>run_shell_test</code>) keeps the workspace read-only and writes to the extension's own temp folder instead, exposed as <code>$COMONAD_SCRATCH</code> with <code>TMPDIR</code>, <code>HOME</code> and <code>XDG_CACHE_HOME</code> pointing there. Confining reads also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
+      <p class="group-note">A workspace-write shell gets a temporary directory at <code>.comonad/tmp</code>. The test shell (<code>run_shell_test</code>) writes only <code>.comonad/scratch/&lt;session&gt;</code>, exposed as <code>$COMONAD_SCRATCH</code> with <code>TMPDIR</code>, <code>HOME</code> and <code>XDG_CACHE_HOME</code> pointing there. Workspace-read also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
       <p class="group-note" id="environment-note"></p>
     </div>
-    <h2 class="group-title">Tool rules</h2>
+    <h2 class="group-title">User rules</h2>
     <div class="group">
       <div class="field">
         <label for="rules-deny">Deny</label>
-        <p class="hint">Rejected in every policy, before anything else — the deny rules win over the rest.</p>
+        <p class="hint">Checked first and rejects the call, whatever the tool approval policy says.</p>
         <textarea id="rules-deny" class="control" data-key="deny" spellcheck="false" rows="3" placeholder="run_shell(rm:*)"></textarea>
       </div>
       <div class="field">
         <label for="rules-ask">Ask</label>
-        <p class="hint">Always confirmed before they run, even under an accept policy.</p>
+        <p class="hint">Checked second and asks you, even under an accept policy.</p>
         <textarea id="rules-ask" class="control" data-key="ask" spellcheck="false" rows="3" placeholder="run_shell(git push:*)"></textarea>
       </div>
       <div class="field">
         <label for="rules-allow">Allow</label>
-        <p class="hint">Run without asking, even under Ask. One rule per line: <code>tool</code> or <code>tool(pattern)</code> — <code>run_shell(npm run test:*)</code>, <code>read_file(./.env)</code>, <code>fetch_url(domain:example.com)</code>. “Always allow” in the approval prompt appends here.</p>
+        <p class="hint">Checked last and runs the call without asking. One rule per line: <code>tool</code> or <code>tool(pattern)</code> — <code>run_shell(npm run test:*)</code>, <code>read_file(./.env)</code>, <code>fetch_url(domain:example.com)</code>. “Always allow” in the approval prompt appends here. The tool approval policy is consulted only when none of the three lists matches.</p>
         <textarea id="rules-allow" class="control" data-key="allow" spellcheck="false" rows="3" placeholder="run_shell(npm run test:*)"></textarea>
       </div>
     </div>
@@ -1125,7 +1137,7 @@ ${paneSections}
       <div class="group">
         <div class="field">
           <label>Tool Policy Flow</label>
-          <p class="hint">Every call walks the gates in order and leaves at the first one that stops it. The framed part is what you configure: the rules from the <strong>Rules</strong> tab, then the approval policy for the calls no rule matched.</p>
+          <p class="hint">Every call walks the layers in order and leaves at the first one that stops it: capability, network, user rules, tool approval policy, approval response policy, then the sandbox. The framed parts are the layers you configure.</p>
           <ul class="legend" id="flow-legend"></ul>
           <p class="hint">Red ends the call, amber asks you first, green runs without asking.</p>
         </div>
@@ -1203,7 +1215,7 @@ ${paneSections}
     <div class="group">
       <div class="field">
         <label>Tools</label>
-        <p class="hint">Every registered tool with what it needs. The work mode and the approval policy decide which ones a turn may actually use.</p>
+        <p class="hint">Every registered tool with what it needs. The work mode decides which capabilities exist; the tool approval policy and sandbox mode decide what happens to a call.</p>
         <table id="tools"></table>
       </div>
     </div>

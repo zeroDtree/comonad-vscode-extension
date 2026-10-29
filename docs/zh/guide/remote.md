@@ -29,8 +29,9 @@ Host devbox
 ## 沙箱
 
 Linux 使用 `bwrap`，macOS 使用 `sandbox-exec`。两者都不可用时 —— 服务器和 Windows 上很常见 ——
-`/status`、聊天和设置面板会显示 **no OS sandbox**，并且每次 shell 调用都会请求审批，即使策略是 accept。
-在远程安装 bubblewrap，或设置 `comonad.allowUnsandboxedShell` 跳过该提示。
+`/status`、聊天和设置面板会显示 **no OS sandbox**，并且除非 Sandbox mode 是 `danger-full-access` 且
+Network access policy 为 on，shell 命令会被拒绝。在远程安装 bubblewrap，或在你确实接受无约束命令时
+显式选择该组合。
 
 ## 其他一切也在远程
 
@@ -40,4 +41,4 @@ Linux 使用 `bwrap`，macOS 使用 `sandbox-exec`。两者都不可用时 —�
 ## 下一步
 
 - [安全](/zh/guide/safety) —— 沙箱与审批细节
-- [设置](/zh/reference/settings) —— `workingDirectory`、`allowUnsandboxedShell`、`profiles`
+- [设置](/zh/reference/settings) —— `workingDirectory`、`sandboxMode`、`profiles`

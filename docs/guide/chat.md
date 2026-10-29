@@ -42,10 +42,11 @@ Below the input:
 | Control | What it does |
 | --- | --- |
 | **Mode** | What the agent may do at all — see [Safety](/guide/safety) |
-| **Approval** | What happens to a call no rule matched |
+| **Tool approval** | What happens to a call no rule matched |
+| **Sandbox** | The OS-enforced read and write range |
 | **Context** | What this chat sends back: Rendered, Token or Raw |
 | **Display** | How the whole transcript is drawn |
-| **Network** | Network tools and network inside the shell |
+| **Network** | Network access policy: tools and shell network |
 | **Tool cards** | How a tool card starts: collapsed (default), preview or open |
 
 Every pick is written back to the matching `comonad.*` setting, so a new chat starts with the same
@@ -115,7 +116,7 @@ selection**. A chosen item becomes a token:
 ```
 
 Select code in an editor and press `Cmd+L` (`Ctrl+L`) to append its token to the chat. References are
-resolved when the turn runs, with numbered lines, read confinement and deny rules applied. A missing
+resolved when the turn runs, with numbered lines, sandbox read scope and deny rules applied. A missing
 or denied reference becomes an error note instead of failing the turn.
 
 Resolved references are **part of that user message**: they are kept in the transcript, survive a

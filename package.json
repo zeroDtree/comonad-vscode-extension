@@ -192,7 +192,17 @@
       },
       {
         "command": "comonad.pickApproval",
-        "title": "Comonad: Select Approval Policy",
+        "title": "Comonad: Select Tool Approval Policy",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.pickApprovalResponse",
+        "title": "Comonad: Select Approval Response Policy",
+        "category": "Comonad"
+      },
+      {
+        "command": "comonad.pickSandboxMode",
+        "title": "Comonad: Select Sandbox Mode",
         "category": "Comonad"
       },
       {
@@ -675,18 +685,48 @@
           "type": "string",
           "enum": [
             "manual",
-            "universal_reject",
-            "blacklist_reject",
             "whitelist_accept",
-            "universal_accept"
+            "blacklist_reject",
+            "universal_accept",
+            "universal_reject"
           ],
           "default": "manual",
-          "markdownDescription": "What happens after the mode allows a tool call: `manual` asks for every call, `whitelist_accept` runs the whitelisted calls (`permissions.allow`, plus read-only calls by default) and asks for the rest, `blacklist_reject` rejects the write-capable calls by default (plus whatever `permissions.deny` names) and runs the rest, `universal_accept` runs everything the mode allows, `universal_reject` runs nothing."
+          "markdownDescription": "Tool approval policy, consulted only when no user rule matched. `manual` asks for every call; `whitelist_accept` runs the whitelisted capabilities (`ro`, `shell_ro`, `rw_plan`) and asks for the rest; `blacklist_reject` rejects the blacklisted capabilities (`rw`, `shell_test`, `shell_rw`, `rw_plan`) and asks for dangerous commands; `universal_accept` runs everything and asks for dangerous commands; `universal_reject` rejects every call."
+        },
+        "comonad.approvalResponse": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Send the request to a chat surface; no available surface means deny.",
+            "Deny every approval request without asking."
+          ],
+          "default": "ask",
+          "markdownDescription": "Approval response policy: who answers a request the tool approval policy raised. `ask` hands it to the UI or another responder and fails closed when none answers; `never` denies it outright."
         },
         "comonad.network": {
           "type": "boolean",
           "default": false,
-          "description": "Allow tools that need network access, and network inside the shell sandbox. When off, loopback connections stay available so local test servers work."
+          "description": "Network access policy: allow tools that need network access, and network inside the shell sandbox. When off, loopback connections stay available so local test servers work."
+        },
+        "comonad.sandboxMode": {
+          "type": "string",
+          "enum": [
+            "workspace-read",
+            "read-only",
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "enumDescriptions": [
+            "The workspace and the system runtime are readable, nothing is writable, and other files outside the workspace are not readable.",
+            "The disk is readable, nothing is writable.",
+            "The workspace is writable, the rest of the disk is read-only.",
+            "No file sandbox restriction."
+          ],
+          "default": "workspace-write",
+          "markdownDescription": "Sandbox mode: the OS-enforced read and write range every approved call runs under. `workspace-read` = workspace only; `read-only` = read anywhere, write nothing; `workspace-write` = write the workspace; `danger-full-access` = no file restriction."
         },
         "comonad.workingDirectory": {
           "type": "string",
@@ -713,16 +753,6 @@
             "**/.env"
           ],
           "description": "Workspace-relative paths or basenames that file and shell tools must not read or write."
-        },
-        "comonad.confineRead": {
-          "type": "boolean",
-          "default": false,
-          "description": "Restrict reads to the workspace. With this on, the file tools refuse paths outside the working directory and the shell sandbox cannot read outside it, which can break commands that read ~/.gitconfig, ~/.npmrc and similar."
-        },
-        "comonad.confineWrite": {
-          "type": "boolean",
-          "default": true,
-          "description": "Restrict writes to the workspace. With this on, the file tools refuse paths outside the working directory and the shell sandbox cannot write outside it."
         },
         "comonad.maxSteps": {
           "type": "number",
@@ -933,7 +963,7 @@
               }
             }
           },
-          "description": "Permission rules such as `run_shell(npm run test:*)`, `read_file(./.env)`, `fetch_url(domain:example.com)`."
+          "description": "User rules such as `run_shell(npm run test:*)`, `read_file(./.env)`, `fetch_url(domain:example.com)`: deny is checked first, then ask, then allow; a matching rule settles the call before the tool approval policy."
         },
         "comonad.subagents": {
           "type": "object",
@@ -1098,11 +1128,6 @@
           "type": "boolean",
           "default": true,
           "description": "Offer the unrestricted preset. Set to false to keep the agent behind approvals and sandboxing."
-        },
-        "comonad.allowUnsandboxedShell": {
-          "type": "boolean",
-          "default": false,
-          "description": "Run shell commands without the extra confirmation when no OS sandbox is available (Windows, or Linux/macOS without bwrap/sandbox-exec). Off by default. Tools named *_unsandboxed always ask."
         },
         "comonad.tavernEnabled": {
           "type": "boolean",

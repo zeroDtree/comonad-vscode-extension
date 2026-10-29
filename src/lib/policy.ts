@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { deletionTargetsAreOwned, type DeletionOwnership } from './deletions';
-import type { SandboxKind } from './sandbox';
+import { sandboxAllowsWrites, type SandboxKind, type SandboxMode } from './sandbox';
 import { RM_PATTERN } from './shell';
-import type { Approval, Capability, Confinement, SessionPolicy, ToolCall, ToolSpec, WorkMode } from './types';
+import type { Approval, ApprovalResponse, Capability, SessionPolicy, ToolCall, ToolSpec, WorkMode } from './types';
 
-/** Modes, capability gating, permission rules and the approval gate. Pure module. */
+/**
+ * Modes, capability gating, user rules, the tool approval policy and the approval response policy.
+ * Pure module.
+ *
+ * One call walks the layers in this order and leaves at the first one that stops it:
+ * capability → network → user rules → tool approval policy. A confirmation then enters the approval
+ * response policy (the `Approval` service); a run enters the sandbox (the executor). The rules and
+ * the tool approval policy are the two layers a user configures here; sandbox mode is enforced by
+ * `lib/sandbox`.
+ */
 
 export const MODE_CAPS: Record<WorkMode, ReadonlySet<Capability>> = {
 	chat: new Set(),
@@ -27,12 +36,29 @@ export function isShellCapability(capability: Capability | undefined): boolean {
 	return capability === 'shell_ro' || capability === 'shell_test' || capability === 'shell_rw';
 }
 
+/** Whether the capability writes project files, which a sandbox that refuses writes cannot honor. */
+export function writesWorkspace(capability: Capability): boolean {
+	return capability === 'rw' || capability === 'rw_plan';
+}
+
 export const APPROVAL_LABELS: Record<Approval, string> = {
-	manual: 'Ask — confirm every tool call',
-	universal_reject: 'Reject all — never run tools',
-	blacklist_reject: 'Blacklist — reject the blacklisted calls, run the rest',
-	whitelist_accept: 'Whitelist — run the whitelisted calls, ask for the rest',
-	universal_accept: 'Accept all — run everything the mode allows',
+	manual: 'Manual — ask for every call no rule matched',
+	whitelist_accept: 'Whitelist — run whitelisted capabilities, ask for the rest',
+	blacklist_reject: 'Blacklist — reject blacklisted capabilities, ask for dangerous commands',
+	universal_accept: 'Accept all — run everything, ask for dangerous commands',
+	universal_reject: 'Reject all — reject every call no rule matched',
+};
+
+export const APPROVAL_RESPONSE_LABELS: Record<ApprovalResponse, string> = {
+	ask: 'Ask — send each request to a surface; no surface means deny',
+	never: 'Never — deny every approval request without asking',
+};
+
+export const SANDBOX_LABELS: Record<SandboxMode, string> = {
+	'workspace-read': 'Workspace read — read the workspace and system runtime, write nothing',
+	'read-only': 'Read only — read anywhere, write nothing',
+	'workspace-write': 'Workspace write — write inside the workspace, read anywhere',
+	'danger-full-access': 'Full access — no file sandbox (careful)',
 };
 
 /** A mode or approval read from a settings file or a session on disk: a value outside these maps
@@ -46,36 +72,40 @@ export function asApproval(value: unknown, fallback: Approval = 'manual'): Appro
 	return typeof value === 'string' && Object.hasOwn(APPROVAL_LABELS, value) ? (value as Approval) : fallback;
 }
 
+export function asApprovalResponse(value: unknown, fallback: ApprovalResponse = 'ask'): ApprovalResponse {
+	return typeof value === 'string' && Object.hasOwn(APPROVAL_RESPONSE_LABELS, value) ? (value as ApprovalResponse) : fallback;
+}
+
 export const PRESET_LABELS: Record<string, string> = {
 	ask: 'Ask — edit files with approval, sandboxed shell',
 	plan: 'Plan — research read-only, write a plan',
 	auto: 'Auto — apply edits automatically, no network',
 	readonly: 'Read only — inspect without changes',
-	full: 'Unrestricted — no sandbox, network on (careful)',
+	full: 'Unrestricted — no file sandbox, network on (careful)',
 };
 
-export function presetPolicy(preset: string): { workMode: WorkMode; approval: Approval; network: boolean; confinement: Confinement } {
-	switch (preset) {
-		case 'plan':
-			return { workMode: 'pl', approval: 'whitelist_accept', network: false, confinement: WORKSPACE_BOUNDARY };
-		case 'auto':
-			return { workMode: 'aw', approval: 'universal_accept', network: false, confinement: WORKSPACE_BOUNDARY };
-		case 'readonly':
-			return { workMode: 'ro', approval: 'whitelist_accept', network: false, confinement: WORKSPACE_BOUNDARY };
-		case 'full':
-			// The preset's whole point is to drop the boundary, so it is the one that moves it.
-			return { workMode: 'aw', approval: 'universal_accept', network: true, confinement: { read: false, write: false } };
-		default:
-			return { workMode: 'sw', approval: 'manual', network: false, confinement: WORKSPACE_BOUNDARY };
-	}
+export interface PresetPolicy {
+	workMode: WorkMode;
+	approval: Approval;
+	approvalResponse: ApprovalResponse;
+	network: boolean;
+	sandboxMode: SandboxMode;
 }
 
-/**
- * The boundary the shipped settings use, and the one every preset but `full` restores: writes stay
- * inside the working directory, reads do not. Confining reads is opt-in, because it costs commands
- * like `git` and `npm` access to their per-user configuration.
- */
-export const WORKSPACE_BOUNDARY: Confinement = { read: false, write: true };
+export function presetPolicy(preset: string): PresetPolicy {
+	switch (preset) {
+		case 'plan':
+			return { workMode: 'pl', approval: 'whitelist_accept', approvalResponse: 'ask', network: false, sandboxMode: 'workspace-write' };
+		case 'auto':
+			return { workMode: 'aw', approval: 'universal_accept', approvalResponse: 'ask', network: false, sandboxMode: 'workspace-write' };
+		case 'readonly':
+			return { workMode: 'ro', approval: 'whitelist_accept', approvalResponse: 'ask', network: false, sandboxMode: 'read-only' };
+		case 'full':
+			return { workMode: 'aw', approval: 'universal_accept', approvalResponse: 'ask', network: true, sandboxMode: 'danger-full-access' };
+		default:
+			return { workMode: 'sw', approval: 'manual', approvalResponse: 'ask', network: false, sandboxMode: 'workspace-write' };
+	}
+}
 
 export function capabilityAllowed(capability: Capability, mode: WorkMode): boolean {
 	return MODE_CAPS[mode].has(capability);
@@ -83,13 +113,13 @@ export function capabilityAllowed(capability: Capability, mode: WorkMode): boole
 
 /**
  * The whitelist's built-in contents: read-only calls, plus the plan tools (which only `pl` mode
- * grants anyway). The whitelist itself is `comonad.permissions.allow`, which adds to this list.
+ * grants anyway). A user `allow` rule is a separate layer and runs its call directly.
  */
 const DEFAULT_WHITELIST: ReadonlySet<Capability> = new Set(['ro', 'shell_ro', 'rw_plan']);
 
 /**
- * The blacklist's built-in contents: everything that can write. `comonad.permissions.deny` adds to
- * this list, and — unlike the built-in defaults — those deny rules reject in every policy.
+ * The blacklist's built-in contents: everything that can write. A user `deny` rule is a separate
+ * layer and rejects its call in every policy.
  */
 const DEFAULT_BLACKLIST: ReadonlySet<Capability> = new Set(['rw', 'shell_test', 'shell_rw', 'rw_plan']);
 
@@ -202,13 +232,12 @@ export function globToRegExp(pattern: string): RegExp {
 }
 
 /**
- * What the gate is told about the host and the session: the sandbox it will run on, the setting that
- * opts out of the no-sandbox prompt, and — when known — the files and directories this session
- * created plus symlink-aware containment for deletions. All of it is read afresh every turn.
+ * What the gate is told about the host and the session: the OS sandbox the host can apply, and —
+ * when known — the files and directories this session created plus symlink-aware containment for
+ * deletions. All of it is read afresh every turn.
  */
 export interface GateEnvironment {
 	sandbox: SandboxKind;
-	allowUnsandboxedShell: boolean;
 	/** Workspace-relative files this session created; absent disables the rm exemption. */
 	created?: ReadonlySet<string>;
 	/** Workspace-relative directories this session created; their subtrees are the session's too. */
@@ -219,60 +248,131 @@ export interface GateEnvironment {
 	deletionScratch?: (absoluteTarget: string) => boolean;
 }
 
+/** Which layer decided. The sandbox is the executor's layer and is not a gate decision. */
+export type PolicyStage = 'capability' | 'network' | 'rules' | 'approval';
+
 export interface GateResult {
 	decision: 'allow' | 'confirm' | 'reject';
 	reason: string;
+	stage: PolicyStage;
 	/** A confirmation a subagent's delegated approval must not answer. */
 	escalated?: boolean;
 }
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
-export function gateCalls(
-	calls: ToolCall[],
-	lookup: (name: string) => ToolSpec | undefined,
+/**
+ * One call through the pipeline. The order is the contract:
+ *
+ * 1. capability — the tool exists and the work mode grants it; a capability the sandbox cannot
+ *    enforce is not granted either;
+ * 2. network — a network tool needs the network access policy on;
+ * 3. user rules — deny rejects, ask confirms, allow runs, checked in that order;
+ * 4. tool approval policy — only for a call no rule matched.
+ *
+ * A confirmation is answered by the approval response policy; an allow runs under the sandbox mode.
+ */
+export function gateCall(
+	call: ToolCall,
+	tool: ToolSpec | undefined,
 	policy: SessionPolicy,
 	rules: RuleSet,
 	env: GateEnvironment,
 ): GateResult {
-	let confirm = '';
-	let escalated = false;
-	for (const call of calls) {
-		const tool = lookup(call.name);
-		if (!tool) {
-			return { decision: 'reject', reason: `unknown tool: ${call.name}` };
-		}
-		if (!capabilityAllowed(tool.capability, policy.workMode)) {
-			return { decision: 'reject', reason: `tool ${call.name} (${tool.capability}) is not allowed in mode ${policy.workMode}` };
-		}
-		if (tool.needsNetwork && !policy.network) {
-			return { decision: 'reject', reason: `tool ${call.name} requires network, which is off` };
-		}
-		if (tool.needsWorkspace && !policy.workingDirectory.trim()) {
-			return { decision: 'reject', reason: `tool ${call.name} needs a working directory` };
-		}
-		// "Reject all" means every call, so it is settled before rules and escalations can turn one
-		// into an approval prompt.
-		if (policy.approval === 'universal_reject') {
-			return { decision: 'reject', reason: 'approval policy rejects all calls' };
-		}
-		// The test shell's whole contract is an OS-enforced read-only workspace. Without a sandbox
-		// there is nothing to enforce it with, so no rule and no policy can turn it on.
-		if (tool.capability === 'shell_test' && env.sandbox === 'none') {
-			return { decision: 'reject', reason: `${call.name} needs an OS sandbox to keep the workspace read-only; none is available` };
-		}
-		const denied = rules.deny.find((rule) => ruleMatches(rule, call, tool));
-		if (denied) {
-			return { decision: 'reject', reason: `deny rule ${ruleText(denied)} blocks ${call.name}` };
-		}
-		// What would make this call unsafe to answer by delegation, whichever confirmation it ends
-		// up with: no sandbox for a shell command, a tool that names itself unsandboxed, a dangerous
-		// command, or a rule the user wrote to ask about. An explicit allow rule — including "Always
-		// allow" — remains consent.
-		const shell = isShellCapability(tool.capability);
-		const unconfined = !env.allowUnsandboxedShell && env.sandbox === 'none' && shell;
-		const outside = tool.name.endsWith('_unsandboxed');
-		const dangerous = isDangerous(
+	// 1. Capability.
+	if (!tool) {
+		return { decision: 'reject', reason: `unknown tool: ${call.name}`, stage: 'capability' };
+	}
+	if (!capabilityAllowed(tool.capability, policy.workMode)) {
+		return {
+			decision: 'reject',
+			reason: `tool ${call.name} (${tool.capability}) is not allowed in mode ${policy.workMode}`,
+			stage: 'capability',
+		};
+	}
+	if (tool.needsWorkspace && !policy.workingDirectory.trim()) {
+		return { decision: 'reject', reason: `tool ${call.name} needs a working directory`, stage: 'capability' };
+	}
+	// A shell capability is only honest when the sandbox can enforce it. Without an OS sandbox the
+	// only mode that can run a command is the explicit full-access mode; every other mode refuses.
+	if (isShellCapability(tool.capability) && env.sandbox === 'none' && policy.sandboxMode !== 'danger-full-access') {
+		return {
+			decision: 'reject',
+			reason: `${call.name} needs an OS sandbox; only sandbox mode danger-full-access can run commands on this host`,
+			stage: 'capability',
+		};
+	}
+	// A read-only shell promises an OS-enforced read-only view. The full-access mode may run a
+	// writable shell unconfined, but it cannot make that promise.
+	if (tool.capability === 'shell_ro' && env.sandbox === 'none') {
+		return {
+			decision: 'reject',
+			reason: `${call.name} needs an OS sandbox to keep the shell read-only; none is available`,
+			stage: 'capability',
+		};
+	}
+	// The test shell's whole contract is a workspace that stays read-only while its scratch tree is
+	// writable. A sandbox mode that refuses every write cannot keep it.
+	if (tool.capability === 'shell_test' && env.sandbox === 'none') {
+		return {
+			decision: 'reject',
+			reason: `${call.name} needs an OS sandbox to keep the workspace read-only; none is available`,
+			stage: 'capability',
+		};
+	}
+	if (tool.capability === 'shell_test' && !sandboxAllowsWrites(policy.sandboxMode)) {
+		return {
+			decision: 'reject',
+			reason: `${call.name} needs a writable scratch tree; sandbox mode ${policy.sandboxMode} refuses every write`,
+			stage: 'capability',
+		};
+	}
+	// With no OS sandbox, the network access policy would be unenforceable for an unconfined shell.
+	if (isShellCapability(tool.capability) && env.sandbox === 'none' && !policy.network) {
+		return {
+			decision: 'reject',
+			reason: `${call.name} needs an OS sandbox to enforce the network access policy; turn network on or install a sandbox`,
+			stage: 'capability',
+		};
+	}
+	if (writesWorkspace(tool.capability) && !sandboxAllowsWrites(policy.sandboxMode)) {
+		return {
+			decision: 'reject',
+			reason: `${call.name} writes files; sandbox mode ${policy.sandboxMode} refuses every write`,
+			stage: 'capability',
+		};
+	}
+	// A tool that runs outside the OS sandbox cannot satisfy any mode but the explicit full access
+	// one; no rule or policy can make it sandboxed after the fact.
+	if ((tool.unsandboxed === true || tool.name.endsWith('_unsandboxed')) && policy.sandboxMode !== 'danger-full-access') {
+		return {
+			decision: 'reject',
+			reason: `${call.name} runs outside the OS sandbox; only sandbox mode danger-full-access can run it`,
+			stage: 'capability',
+		};
+	}
+
+	// 2. Network.
+	if (tool.needsNetwork && !policy.network) {
+		return { decision: 'reject', reason: `tool ${call.name} requires network, which is off`, stage: 'network' };
+	}
+
+	// 3. User rules, in the order the document defines: deny, then ask, then allow.
+	const denied = rules.deny.find((rule) => ruleMatches(rule, call, tool));
+	if (denied) {
+		return { decision: 'reject', reason: `deny rule ${ruleText(denied)} blocks ${call.name}`, stage: 'rules' };
+	}
+	if (rules.ask.some((rule) => ruleMatches(rule, call, tool))) {
+		return { decision: 'confirm', reason: `ask rule matches ${call.name}`, stage: 'rules', escalated: true };
+	}
+	const allowed = rules.allow.find((rule) => ruleMatches(rule, call, tool));
+	if (allowed) {
+		return { decision: 'allow', reason: `allow rule ${ruleText(allowed)}`, stage: 'rules' };
+	}
+
+	// 4. Tool approval policy: reached only when all three rule lists were silent.
+	const danger = (): boolean =>
+		isDangerous(
 			call,
 			tool,
 			env.created
@@ -285,60 +385,68 @@ export function gateCalls(
 					}
 				: undefined,
 		);
-		if (rules.ask.some((rule) => ruleMatches(rule, call, tool))) {
-			confirm ||= `ask rule matches ${call.name}`;
-			escalated = true;
-			continue;
-		}
-		if (rules.allow.some((rule) => ruleMatches(rule, call, tool))) {
-			continue;
-		}
-		// Escalation and dangerous commands never run silently under an accept policy. The tool-name
-		// suffix is a convention, not a list: the shipped tree registers no unsandboxed tool, but a
-		// plugin of yours may register one, and that is the call this catches.
-		if (unconfined) {
-			escalated = true;
-			confirm ||= `no OS sandbox is available; ${call.name} would run unconfined`;
-			continue;
-		}
-		if (outside) {
-			escalated = true;
-			confirm ||= `${call.name} runs outside the OS sandbox`;
-			continue;
-		}
-		if (dangerous) {
-			escalated = true;
-			confirm ||= `dangerous command requires explicit confirmation (${call.name})`;
-			continue;
-		}
-		switch (policy.approval) {
-			case 'universal_accept':
-				break;
-			case 'manual':
-				confirm ||= 'manual approval';
-				break;
-			case 'blacklist_reject':
-				// The blacklist is the write-capable default plus `permissions.deny`, applied above.
-				if (blacklistedByDefault(tool.capability)) {
-					return { decision: 'reject', reason: `blacklist policy rejects write tool ${call.name}` };
-				}
-				break;
-			case 'whitelist_accept':
-				// The whitelist is `permissions.allow`, already applied above, plus the read-only default.
-				if (!whitelistedByDefault(tool.capability)) {
-					confirm ||= `whitelist policy asks for ${call.name}`;
-				}
-				break;
-		}
+	switch (policy.approval) {
+		case 'manual':
+			return { decision: 'confirm', reason: 'manual approval', stage: 'approval' };
+		case 'whitelist_accept':
+			if (whitelistedByDefault(tool.capability)) {
+				return { decision: 'allow', reason: `whitelist runs ${tool.capability} calls`, stage: 'approval' };
+			}
+			return { decision: 'confirm', reason: `whitelist policy asks for ${call.name}`, stage: 'approval' };
+		case 'blacklist_reject':
+			if (blacklistedByDefault(tool.capability)) {
+				return { decision: 'reject', reason: `blacklist policy rejects ${tool.capability} calls`, stage: 'approval' };
+			}
+			if (danger()) {
+				return {
+					decision: 'confirm',
+					reason: `dangerous command requires explicit confirmation (${call.name})`,
+					stage: 'approval',
+					escalated: true,
+				};
+			}
+			return { decision: 'allow', reason: `blacklist policy runs ${call.name}`, stage: 'approval' };
+		case 'universal_accept':
+			if (danger()) {
+				return {
+					decision: 'confirm',
+					reason: `dangerous command requires explicit confirmation (${call.name})`,
+					stage: 'approval',
+					escalated: true,
+				};
+			}
+			return { decision: 'allow', reason: 'approval policy accepts every call', stage: 'approval' };
+		case 'universal_reject':
+			return { decision: 'reject', reason: 'approval policy rejects every call no rule matched', stage: 'approval' };
 	}
-	if (confirm) {
-		return escalated ? { decision: 'confirm', reason: confirm, escalated: true } : { decision: 'confirm', reason: confirm };
-	}
-	return { decision: 'allow', reason: 'allowed by policy' };
 }
 
 function ruleText(rule: PolicyRule): string {
 	return rule.pattern ? `${rule.tool}(${rule.pattern})` : rule.tool;
+}
+
+/**
+ * The batch view of `gateCall`: a rejection anywhere rejects the batch, otherwise a confirmation
+ * anywhere confirms it. Escalation is carried so a delegated approval cannot answer it.
+ */
+export function gateCalls(
+	calls: ToolCall[],
+	lookup: (name: string) => ToolSpec | undefined,
+	policy: SessionPolicy,
+	rules: RuleSet,
+	env: GateEnvironment,
+): GateResult {
+	let confirm: GateResult | undefined;
+	for (const call of calls) {
+		const gate = gateCall(call, lookup(call.name), policy, rules, env);
+		if (gate.decision === 'reject') {
+			return gate;
+		}
+		if (gate.decision === 'confirm') {
+			confirm = confirm ? { ...confirm, escalated: confirm.escalated === true || gate.escalated === true } : gate;
+		}
+	}
+	return confirm ?? { decision: 'allow', reason: 'allowed by policy', stage: 'approval' };
 }
 
 /** Short capability names for the flow tab's mode legend, so it cannot drift from the table. */
@@ -360,84 +468,120 @@ export function modeCapabilities(): string[] {
 	});
 }
 
+/** One line per sandbox mode, for the flow tab's legend. */
+export function sandboxCapabilities(): string[] {
+	return (Object.keys(SANDBOX_LABELS) as SandboxMode[]).map((mode) => SANDBOX_LABELS[mode]);
+}
+
 /**
- * Mermaid source for the tool-call gate, generated from the tables above so the diagram shown in
- * the settings panel's Flow tab cannot drift from `gateCalls`.
+ * Mermaid source for the tool-call pipeline, generated from the tables above so the diagram shown
+ * in the settings panel's Flow tab cannot drift from `gateCall`.
  *
- * Shape: the mode / network / workspace checks, the test-shell sandbox check and the reject-all
- * short-circuit first, then two
- * frames — the user's rules and the remaining approval policies, with the built-in no-sandbox /
- * unsandboxed / dangerous-command escalation between them. Every gate ends in **its own**
- * `Rejected` / `Asks you` / `Runs` node directly below it: sharing one sink per outcome made every
- * edge run back across the whole chart. Only edges whose two ends are both inside a frame may be
- * written inside that frame — mermaid pulls both ends of an inner edge into the subgraph, which
- * would otherwise swallow the outcome nodes and the frame label.
+ * The frames are the layers the user configures: the capability check, the user's rules, the tool
+ * approval policy, and the approval response policy. The sandbox is the executor's last step.
+ * Every branch ends in its own `Rejected` / `Asks you` / `Runs` node directly below it; only edges
+ * whose two ends are both inside a frame are written inside that frame, because mermaid pulls both
+ * ends of an inner edge into the subgraph.
  */
 export function gateFlow(): string {
 	return [
 		'flowchart TD',
-		// `call` and `end` are mermaid keywords, so the entry node is `entry`. The gates are
-		// hexagons: a diamond grows with its label width, which made this chart 2.5× taller than the
-		// pane and shrank the text to nothing.
+		// `call` and `end` are mermaid keywords, so the entry node is `entry`. Hexagons keep a long
+		// label from making the chart taller than the pane the way diamonds do.
 		'  entry(["a tool call"])',
-		'  entry --> mode{{"in the work mode set?"}}',
-		'  mode -- no --> modeNo(["Rejected"])',
-		'  mode --> net{{"network ok?"}}',
-		'  net -- no --> netNo(["Rejected"])',
-		'  net --> ws{{"workspace ok?"}}',
-		'  ws -- no --> wsNo(["Rejected"])',
-		'  ws --> testShellQ{{"test shell without an OS sandbox?"}}',
-		'  testShellQ -- yes --> testShellNo(["Rejected"])',
-		'  testShellQ -- no --> rejectAllQ{{"approval policy universal_reject?"}}',
-		'  rejectAllQ -- yes --> rejectAll(["Rejected"])',
-		'  rejectAllQ -- no --> deny',
 		'',
-		'  subgraph rules["your rules"]',
-		'    deny{{"deny rule matches?"}}',
-		'    ask{{"ask rule matches?"}}',
-		'    allow{{"allow rule matches?"}}',
-		'    deny -- no --> ask',
-		'    ask -- no --> allow',
+		'  subgraph cap["capability"]',
+		'    direction TB',
+		'    mode{{"work mode grants it?"}}',
+		'    net{{"network allowed?"}}',
+		'    feasible{{"sandbox can enforce it?"}}',
+		'    mode -- yes --> net',
+		'    net -- yes --> feasible',
+		'  end',
+		'',
+		'  entry --> mode',
+		'  mode -- no --> capReject(["Rejected"])',
+		'  net -- no --> netReject(["Rejected"])',
+		'  feasible -- no --> feasibleReject(["Rejected"])',
+		'  feasible -- yes --> deny',
+		'',
+		'  subgraph rules["user rules"]',
+		'    direction TB',
+		'    deny{{"deny rule?"}}',
+		'    askRule{{"ask rule?"}}',
+		'    allow{{"allow rule?"}}',
+		'    deny -- no --> askRule',
+		'    askRule -- no --> allow',
 		'  end',
 		'',
 		'  deny -- yes --> denyReject(["Rejected"])',
-		'  ask -- yes --> askConfirm(["Asks you"])',
+		'  askRule -- yes --> askRuleAsk(["Asks you"])',
 		'  allow -- yes --> allowRun(["Runs"])',
-		'  allow -- no --> sandbox{{"no OS sandbox and shell?"}}',
-		'  sandbox -- yes --> sandboxConfirm(["Asks you"])',
-		'  sandbox -- no --> danger{{"unsandboxed or dangerous?"}}',
-		'  danger -- yes --> dangerConfirm(["Asks you"])',
-		'  danger -- no --> approval',
+		'  allow -- no --> which',
 		'',
-		'  subgraph policy["approval policy"]',
-		'    approval{{"no rule matched — which policy?"}}',
-		'    policyManual["manual"]',
-		'    policyAccept["universal_accept"]',
-		'    policyWhitelist["whitelist_accept"]',
-		'    policyBlacklist["blacklist_reject"]',
-		'    approval --> policyManual',
-		'    approval --> policyAccept',
-		'    approval --> policyWhitelist',
-		'    approval --> policyBlacklist',
+		'  subgraph policy["tool approval policy"]',
+		'    direction TB',
+		'    which{{"no rule matched — which policy?"}}',
+		'    manual["manual"]',
+		'    whitelist["whitelist_accept"]',
+		'    blacklist["blacklist_reject"]',
+		'    accept["universal_accept"]',
+		'    rejectAll["universal_reject"]',
+		'    which --> manual',
+		'    which --> whitelist',
+		'    which --> blacklist',
+		'    which --> accept',
+		'    which --> rejectAll',
+		'    whitelist --> whitelistQ{{"whitelisted capability?"}}',
+		'    blacklist --> blacklistQ{{"blacklisted capability?"}}',
+		'    blacklistQ -- no --> blacklistDanger{{"dangerous command?"}}',
+		'    accept --> acceptDanger{{"dangerous command?"}}',
 		'  end',
 		'',
-		'  policyManual --> manualConfirm(["Asks you"])',
-		'  policyAccept --> runAll(["Runs"])',
-		'  policyWhitelist --> whitelist{{"in the whitelist?"}}',
-		'  whitelist -- yes --> whitelistRun(["Runs"])',
-		'  whitelist -- no --> whitelistConfirm(["Asks you"])',
-		'  policyBlacklist --> blacklist{{"in the blacklist?"}}',
-		'  blacklist -- yes --> blacklistReject(["Rejected"])',
-		'  blacklist -- no --> blacklistRun(["Runs"])',
+		'  manual --> manualAsk(["Asks you"])',
+		'  whitelistQ -- yes --> whitelistRun(["Runs"])',
+		'  whitelistQ -- no --> whitelistAsk(["Asks you"])',
+		'  blacklistQ -- yes --> blacklistReject(["Rejected"])',
+		'  blacklistDanger -- yes --> blacklistAsk(["Asks you"])',
+		'  blacklistDanger -- no --> blacklistRun(["Runs"])',
+		'  acceptDanger -- yes --> acceptAsk(["Asks you"])',
+		'  acceptDanger -- no --> acceptRun(["Runs"])',
+		'  rejectAll --> rejectAllNode(["Rejected"])',
+		'  manualAsk --> toAsk',
+		'  whitelistAsk --> toAsk',
+		'  blacklistAsk --> toAsk',
+		'  acceptAsk --> toAsk',
 		'',
+		'  subgraph response["approval response policy"]',
+		'    direction TB',
+		'    toAsk["submit approval request"]',
+		'    responseQ{{"ask or never?"}}',
+		'    responder{{"a surface answers?"}}',
+		'    verdict{{"approved?"}}',
+		'    toAsk --> responseQ',
+		'    responseQ -- ask --> responder',
+		'    responder -- yes --> verdict',
+		'  end',
+		'',
+		'  responseQ -- never --> neverReject(["Rejected"])',
+		'  responder -- no --> noResponder(["Rejected"])',
+		'  verdict -- no --> verdictReject(["Rejected"])',
+		'  verdict -- yes --> sandbox["sandbox mode limits this call"]',
+		'  whitelistRun --> sandbox',
+		'  blacklistRun --> sandbox',
+		'  acceptRun --> sandbox',
+		'  allowRun --> sandbox',
+		'',
+		'  style cap fill:transparent,stroke:#8a8a8a,stroke-dasharray:4 4',
 		'  style rules fill:transparent,stroke:#8a8a8a,stroke-dasharray:4 4',
 		'  style policy fill:transparent,stroke:#8a8a8a,stroke-dasharray:4 4',
+		'  style response fill:transparent,stroke:#8a8a8a,stroke-dasharray:4 4',
 		'  classDef reject fill:#6d2f2f,stroke:#c26060,color:#ffffff',
 		'  classDef confirm fill:#6d5620,stroke:#d5a33a,color:#ffffff',
 		'  classDef run fill:#1e5c39,stroke:#43b581,color:#ffffff',
-		'  class modeNo,netNo,wsNo,testShellNo,denyReject,rejectAll,blacklistReject reject',
-		'  class askConfirm,sandboxConfirm,dangerConfirm,manualConfirm,whitelistConfirm confirm',
-		'  class allowRun,runAll,whitelistRun,blacklistRun run',
+		'  class capReject,netReject,feasibleReject,denyReject,blacklistReject,rejectAllNode,neverReject,noResponder,verdictReject reject',
+		'  class askRuleAsk,manualAsk,whitelistAsk,blacklistAsk,acceptAsk,toAsk confirm',
+		'  class allowRun,whitelistRun,blacklistRun,acceptRun,sandbox run',
 	].join('\n');
 }
 

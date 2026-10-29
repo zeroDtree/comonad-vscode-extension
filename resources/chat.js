@@ -210,6 +210,7 @@
 	};
 	const generationPill = setupPill('generate', () => undefined);
 	const approvalPill = setupPill('approval', (approval) => vscode.postMessage({ type: 'setApproval', approval }));
+	const sandboxPill = setupPill('sandbox', (sandboxMode) => vscode.postMessage({ type: 'setSandboxMode', sandboxMode }));
 	const contextPill = setupPill('context', (context) => vscode.postMessage({ type: 'setContext', context }));
 	// Display is global: it re-renders the whole transcript instead of one reply at a time.
 	const displayPill = setupPill('display', (display) => vscode.postMessage({ type: 'setDisplay', display }));
@@ -3224,7 +3225,8 @@
 		}
 		renderChats();
 		fillPill(modePill, state.modes, state.mode, 'Work mode — what the agent may do');
-		fillPill(approvalPill, state.approvals, state.approval, 'Approval — what runs without asking');
+		fillPill(approvalPill, state.approvals, state.approval, 'Tool approval policy — what happens to a call no rule matched');
+		fillPill(sandboxPill, state.sandboxes, state.sandboxMode, 'Sandbox mode — how far reads and writes may reach');
 		fillPill(contextPill, CONTEXTS, state.context, 'Context — what this chat sends back to the model');
 		fillPill(displayPill, DISPLAYS, currentView(), 'Display — how every turn is shown');
 		fillGenerations();
@@ -3260,15 +3262,16 @@
 		updateModelPill();
 		networkChip.classList.toggle('is-on', Boolean(state.network));
 		networkChip.dataset.tip =
-			'Network — allow network tools and network inside the shell sandbox\nCurrent: ' + (state.network ? 'on' : 'off');
+			'Network access policy — allow network tools and network inside the shell sandbox\nCurrent: ' + (state.network ? 'on' : 'off');
 		const noSandbox = state.sandbox === 'none';
 		environmentChip.hidden = !noSandbox;
 		environmentChip.textContent = noSandbox ? (state.remote ? 'remote · no sandbox' : 'no OS sandbox') : '';
 		environmentChip.dataset.tip = noSandbox
-			? 'No OS sandbox on this host — shell commands run unconfined.\n' +
-				(state.allowUnsandboxedShell
-					? 'comonad.allowUnsandboxedShell is on, so they run without a prompt.'
-					: 'Every shell call asks for confirmation; set comonad.allowUnsandboxedShell to skip it.')
+			? state.sandboxMode === 'danger-full-access'
+				? state.network
+					? 'No OS sandbox on this host; the full-access sandbox mode runs shell commands unconfined.'
+					: 'No OS sandbox on this host, so the network access policy cannot be enforced.\nShell commands are refused until network is on; then full access runs them unconfined.'
+				: 'No OS sandbox on this host — shell commands are refused.\nChoose danger-full-access with network on to run them unconfined.'
 			: '';
 		refreshTip();
 		const detail = [state.detail, state.suspended ? '⏸ waiting for approval — send /resume' : ''].filter(Boolean).join('  ·  ');

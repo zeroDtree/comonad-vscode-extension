@@ -5,9 +5,52 @@ import { realpath } from 'node:fs/promises';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { abortable } from './cancel';
-import type { Confinement } from './types';
 
 /** Path guards, OS sandboxing and process helpers. Pure module (Node only, no vscode). */
+
+/**
+ * The sandbox mode: the file range every approved call runs under. The executor resolves it for
+ * each call, and the OS sandbox enforces it.
+ *
+ * - `workspace-read`: the workspace (and the system runtime a command needs) is readable, nothing
+ *   is writable, and other files outside the workspace are not readable.
+ * - `read-only`: the disk is readable, nothing is writable.
+ * - `workspace-write`: the workspace is writable, the rest of the disk is read-only.
+ * - `danger-full-access`: no file restriction.
+ */
+export type SandboxMode = 'workspace-read' | 'read-only' | 'workspace-write' | 'danger-full-access';
+
+export const DEFAULT_SANDBOX_MODE: SandboxMode = 'workspace-write';
+
+/** The mode a settings file or a session names, or the default for a value the gate does not know. */
+export function asSandboxMode(value: unknown, fallback: SandboxMode = DEFAULT_SANDBOX_MODE): SandboxMode {
+	return value === 'workspace-read' || value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access'
+		? value
+		: fallback;
+}
+
+/** Which reads the mode allows: the workspace alone, or the whole disk. */
+export function sandboxReads(mode: SandboxMode): 'workspace' | 'all' {
+	return mode === 'workspace-read' ? 'workspace' : 'all';
+}
+
+/** Which writes the mode itself allows, before a tool narrows its own scope. */
+export function sandboxWrites(mode: SandboxMode): 'none' | 'workspace' | 'all' {
+	if (mode === 'workspace-read' || mode === 'read-only') {
+		return 'none';
+	}
+	return mode === 'workspace-write' ? 'workspace' : 'all';
+}
+
+/** Whether a sandbox mode permits any write at all. */
+export function sandboxAllowsWrites(mode: SandboxMode): boolean {
+	return sandboxWrites(mode) !== 'none';
+}
+
+/** Whether the mode restricts reads to the workspace. */
+export function sandboxConfinesReads(mode: SandboxMode): boolean {
+	return sandboxReads(mode) === 'workspace';
+}
 
 export class PathEscapeError extends Error {
 	constructor(message: string) {
@@ -38,7 +81,7 @@ export function isDeniedRead(workspace: string, target: string, patterns: readon
 	const name = target.replaceAll('\\', '/').split('/').pop() ?? '';
 	return patterns.some((pattern) => {
 		// An absolute pattern names a place on disk, not a path inside the workspace: it must apply
-		// even when the target itself is outside (the resolver reads outside when confinement allows it).
+		// even when the target itself is outside (the resolver reads outside when the mode allows it).
 		if (isAbsolute(pattern)) {
 			if (isInside(pattern, target)) {
 				return true;
@@ -68,7 +111,7 @@ export function isDeniedRead(workspace: string, target: string, patterns: readon
 /** How a path argument is resolved and how far it may reach. */
 export interface GuardOptions {
 	access: 'read' | 'write';
-	confinement: Confinement;
+	sandboxMode: SandboxMode;
 	denyReadPaths: readonly string[];
 }
 
@@ -126,9 +169,17 @@ export async function guardPath(workspace: string, input: string, options: Guard
 	const target = resolve(resolve(workspace), input);
 	const real = await realTarget(target);
 	const root = await realRoot(workspace);
-	const confine = options.access === 'read' ? options.confinement.read : options.confinement.write;
-	if (confine && !isInside(root, real)) {
-		throw new PathEscapeError(`path escapes the workspace: ${input}`);
+	if (options.access === 'read') {
+		if (sandboxConfinesReads(options.sandboxMode) && !isInside(root, real)) {
+			throw new PathEscapeError(`the ${options.sandboxMode} sandbox cannot read outside the workspace: ${input}`);
+		}
+	} else {
+		if (!sandboxAllowsWrites(options.sandboxMode)) {
+			throw new PathEscapeError(`the ${options.sandboxMode} sandbox refuses every write: ${input}`);
+		}
+		if (sandboxWrites(options.sandboxMode) === 'workspace' && !isInside(root, real)) {
+			throw new PathEscapeError(`the ${options.sandboxMode} sandbox cannot write outside the workspace: ${input}`);
+		}
 	}
 	if (isDeniedRead(root, real, options.denyReadPaths)) {
 		throw new PathEscapeError(`${options.access === 'read' ? 'reading' : 'writing'} ${input} is denied by policy`);
@@ -141,26 +192,36 @@ export async function guardPath(workspace: string, input: string, options: Guard
 
 /**
  * What a command may write. `scratch` is the test shell: the workspace stays read-only and only the
- * session's scratch directory is writable. `workspace` follows `confinement.write`; `all` is the
- * explicit opt-out the full-access preset uses.
+ * session's scratch directory is writable. `workspace` and `all` come from the sandbox mode.
  */
 export type WriteScope = 'none' | 'scratch' | 'workspace' | 'all';
 
 export interface SandboxOptions {
-	writeScope: WriteScope;
+	/** The session's sandbox mode: the read and write range the OS sandbox enforces. */
+	sandboxMode: SandboxMode;
+	/**
+	 * A narrower write promise this call makes on top of the mode: the read-only shell writes
+	 * nothing, the test shell writes only its scratch directory. Absent uses the mode's own scope.
+	 */
+	write?: 'none' | 'scratch';
 	/** The absolute scratch directory a `scratch` scope may write, and every scope may read. */
 	scratch?: string;
-	/** How far outside the working directory reads and writes may reach. */
-	confinement: Confinement;
 	network: boolean;
 	denyReadPaths: readonly string[];
 	timeoutMs: number;
 	/** The turn's cancellation for foreground commands. Background tasks never receive it. */
 	signal?: AbortSignal;
-	/** `direct` skips the OS sandbox; the policy gate forces confirmation for such tools. */
-	mode?: 'sandbox' | 'direct';
 	/** Remove secret-shaped environment variables before spawning. Defaults to true. */
 	filterEnv?: boolean;
+}
+
+/** The write scope a call actually gets: the sandbox mode, narrowed by what the tool promises. */
+export function writeScopeFor(options: Pick<SandboxOptions, 'sandboxMode' | 'write'>): WriteScope {
+	const mode = sandboxWrites(options.sandboxMode);
+	if (mode === 'none' || options.write === 'none') {
+		return 'none';
+	}
+	return options.write === 'scratch' ? 'scratch' : mode;
 }
 
 export interface RunResult {
@@ -389,22 +450,19 @@ export function sandboxEnv(
 	loginPath: string | undefined = loginPathNow(),
 	cwd?: string,
 ): NodeJS.ProcessEnv | undefined {
-	const sandboxed = kind !== 'none' && options.mode !== 'direct';
+	const sandboxed = kind !== 'none';
+	const scope = writeScopeFor(options);
 	// A test shell gets a hermetic home: every place a test runner or build tool would write outside
 	// the workspace is redirected into the scratch tree. A workspace-writable shell keeps the older
 	// `.comonad/tmp` convention, since it may write the workspace itself.
-	const testScratch = sandboxed && options.writeScope === 'scratch' && options.scratch?.trim()
-		? canonicalPath(options.scratch)
-		: undefined;
-	const workspaceScratch =
-		sandboxed && options.writeScope === 'workspace' && options.confinement.write && cwd?.trim()
-			? workspaceTempDir(cwd)
-			: undefined;
-	const wantsTmp = kind === 'bwrap' && options.mode !== 'direct';
+	const testScratch = sandboxed && scope === 'scratch' && options.scratch?.trim() ? canonicalPath(options.scratch) : undefined;
+	const workspaceScratch = sandboxed && scope === 'workspace' && cwd?.trim() ? workspaceTempDir(cwd) : undefined;
+	const wantsTmp = kind === 'bwrap';
 	// The command's temp directory must exist before it starts: bwrap cannot bind a missing source,
-	// and every shell would otherwise fail its first `mktemp`.
-	if (sandboxed && options.scratch?.trim()) {
-		createScratch(testScratch ?? options.scratch, Boolean(testScratch));
+	// and every shell would otherwise fail its first `mktemp`. Only the test shell's own tree is
+	// pre-created; a read-only shell must not write one into the workspace.
+	if (testScratch) {
+		createScratch(testScratch, true);
 	}
 	if (workspaceScratch) {
 		createScratch(workspaceScratch, false);
@@ -461,9 +519,6 @@ function createScratch(root: string, withHome: boolean): void {
 
 /** The argv that runs `argv` under the OS sandbox, or `null` when there is none to apply. */
 function sandboxArgv(argv: string[], cwd: string, options: SandboxOptions): string[] | null {
-	if (options.mode === 'direct') {
-		return null;
-	}
 	const kind = sandboxKind();
 	if (kind === 'macos') {
 		const exe = findExecutable('sandbox-exec');
@@ -667,21 +722,22 @@ function quote(path: string): string {
 export function buildSbpl(workspace: string, options: SandboxOptions): string {
 	const root = canonicalPath(workspace);
 	const scratch = options.scratch?.trim() ? canonicalPath(options.scratch) : undefined;
+	const write = writeScopeFor(options);
 	const lines = ['(version 1)', '(allow default)'];
 	// SBPL is last-match-wins: an allow for the workspace does not close writes outside it, so the
-	// deny has to come first. Without it, confineWrite did nothing on macOS.
-	if (options.writeScope !== 'all') {
+	// deny has to come first. Without it, a workspace-write sandbox did nothing on macOS.
+	if (write !== 'all') {
 		lines.push('(deny file-write*)');
 	}
-	if (options.writeScope === 'workspace') {
+	if (write === 'workspace') {
 		lines.push(`(allow file-write* (subpath "${quote(root)}"))`);
 	}
 	// The test shell: the workspace above stays read-only; only the scratch tree opens for writing.
-	if (options.writeScope === 'scratch' && scratch) {
+	if (write === 'scratch' && scratch) {
 		lines.push(`(allow file-write* (subpath "${quote(scratch)}"))`);
 	}
 	lines.push('(allow file-write* (literal "/dev/null"))');
-	if (options.confinement.read) {
+	if (sandboxConfinesReads(options.sandboxMode)) {
 		// Reads start closed, so the boundary is the allow-list below rather than a deny-list.
 		lines.push('(deny file-read*)');
 	}
@@ -728,9 +784,10 @@ export function bwrapArguments(bwrap: string, command: string[], cwd: string, op
 	const root = canonicalPath(cwd);
 	const tmpRoot = canonicalPath('/tmp');
 	const scratch = options.scratch?.trim() ? canonicalPath(options.scratch) : undefined;
-	const openWrite = options.writeScope === 'all';
-	const workspaceWrite = options.writeScope === 'workspace';
-	const scratchWrite = options.writeScope === 'scratch';
+	const write = writeScopeFor(options);
+	const openWrite = write === 'all';
+	const workspaceWrite = write === 'workspace';
+	const scratchWrite = write === 'scratch';
 	const args = [bwrap, '--die-with-parent'];
 	if (!options.network) {
 		args.push('--unshare-net');
@@ -738,7 +795,7 @@ export function bwrapArguments(bwrap: string, command: string[], cwd: string, op
 	// The base view goes on first: a later mount wins over an earlier one for the same destination,
 	// so everything below it — the special mounts, the workspace and the scratch — is what the shell
 	// actually sees.
-	const openRead = !options.confinement.read;
+	const openRead = !sandboxConfinesReads(options.sandboxMode);
 	if (openWrite) {
 		args.push('--bind', '/', '/');
 	} else if (openRead) {
@@ -763,10 +820,12 @@ export function bwrapArguments(bwrap: string, command: string[], cwd: string, op
 		args.push('--tmpfs', '/tmp');
 	}
 	args.push(openWrite || workspaceWrite ? '--bind' : '--ro-bind', root, root);
-	// The scratch bind comes after the workspace so it can carve a writable hole out of a read-only
-	// workspace; it is mounted read-only for every scope that does not write it.
-	if (scratch && scratch !== root) {
-		args.push(scratchWrite ? '--bind' : '--ro-bind', scratch, scratch);
+	// Only the test shell has a scratch tree of its own. Its bind comes after the workspace so it
+	// can carve a writable hole out of a read-only workspace; every other scope already sees the
+	// scratch (or does not use it) through the workspace mount, so a separate ro-bind would only
+	// make a workspace-writable tree read-only again.
+	if (scratch && scratch !== root && scratchWrite) {
+		args.push('--bind', scratch, scratch);
 	}
 	for (const denyPath of options.denyReadPaths) {
 		if (existsSync(denyPath)) {

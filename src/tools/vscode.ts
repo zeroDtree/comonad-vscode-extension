@@ -2,7 +2,7 @@
 import { relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
 import { abortable } from '../lib/cancel';
-import { formatResult, guardPath, resolveInside, runCommand } from '../lib/sandbox';
+import { formatResult, guardPath, resolveInside, runCommand, sandboxConfinesReads } from '../lib/sandbox';
 import { objectSchema } from '../lib/types';
 import { toolset } from '../services/tools';
 
@@ -35,7 +35,7 @@ export const vscodeTools = toolset([
 			const root = ctx.policy.workingDirectory;
 			const files = uris
 				.map((uri) => uri.fsPath)
-				.filter((path) => !ctx.policy.confinement.read || within(root, path))
+				.filter((path) => !sandboxConfinesReads(ctx.policy.sandboxMode) || within(root, path))
 				.map((path) => shown(root, path));
 			return files.join('\n') || '(no files)';
 		},
@@ -53,7 +53,7 @@ export const vscodeTools = toolset([
 				(await vscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>('vscode.executeWorkspaceSymbolProvider', query)) ?? [];
 			const root = ctx.policy.workingDirectory;
 			const lines = symbols
-				.filter((symbol) => !ctx.policy.confinement.read || within(root, symbol.location.uri.fsPath))
+				.filter((symbol) => !sandboxConfinesReads(ctx.policy.sandboxMode) || within(root, symbol.location.uri.fsPath))
 				.slice(0, Math.min(max ?? 50, 100))
 				.map((symbol) => {
 					const path = shown(root, symbol.location.uri.fsPath);
@@ -72,7 +72,7 @@ export const vscodeTools = toolset([
 		async execute(args, ctx) {
 			const { path } = args as { path?: string };
 			const root = ctx.policy.workingDirectory;
-			const confine = ctx.policy.confinement.read;
+			const confine = sandboxConfinesReads(ctx.policy.sandboxMode);
 			const filter = path ? (confine ? resolveInside(root, path) : resolve(root, path)) : root;
 			const lines: string[] = [];
 			for (const [uri, diagnostics] of vscode.languages.getDiagnostics()) {
@@ -132,7 +132,7 @@ export const vscodeTools = toolset([
 			// returned "Error: …" string is a successful call with unfortunate text.
 			const target = await guardPath(ctx.policy.workingDirectory, path, {
 				access: 'write',
-				confinement: ctx.policy.confinement,
+				sandboxMode: ctx.policy.sandboxMode,
 				denyReadPaths: ctx.policy.denyReadPaths,
 			});
 			const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
@@ -176,8 +176,8 @@ export const vscodeTools = toolset([
 		async execute(args, ctx) {
 			const { staged } = args as { staged?: boolean };
 			const options = {
-				writeScope: 'none' as const,
-				confinement: ctx.policy.confinement,
+				sandboxMode: ctx.policy.sandboxMode,
+				write: 'none' as const,
 				network: false,
 				denyReadPaths: [] as string[],
 				timeoutMs: 20_000,
@@ -196,6 +196,8 @@ export const vscodeTools = toolset([
 		name: 'run_task',
 		description: 'List or run a VS Code task by name (build, test, lint). Without a name, lists available tasks.',
 		capability: 'shell_rw',
+		// A VS Code task is the editor's process, not ours: no OS sandbox can constrain it.
+		unsandboxed: true,
 		needsNetwork: false,
 		needsWorkspace: true,
 		parameters: objectSchema({ name: { type: 'string' } }),

@@ -9,11 +9,11 @@ import { formatReference, looksLikePath, parseReferences, type ParsedReference }
 import { guardPath, isDeniedRead } from '../lib/sandbox';
 import type {
 	AttachmentPart,
-	Confinement,
 	DocumentAttachment,
 	ImageAttachment,
 	ReferenceResolution,
 	ResolvedPart,
+	SandboxMode,
 	SessionPolicy,
 	SourceRange,
 	TextAttachment,
@@ -37,14 +37,14 @@ declare module 'cordis' {
 
 export interface ReferenceScope {
 	workingDirectory: string;
-	confinement: Confinement;
+	sandboxMode: SandboxMode;
 	denyReadPaths: readonly string[];
 }
 
-export function scopeOf(policy: Pick<SessionPolicy, 'workingDirectory' | 'confinement' | 'denyReadPaths'>): ReferenceScope {
+export function scopeOf(policy: Pick<SessionPolicy, 'workingDirectory' | 'sandboxMode' | 'denyReadPaths'>): ReferenceScope {
 	return {
 		workingDirectory: policy.workingDirectory,
-		confinement: policy.confinement,
+		sandboxMode: policy.sandboxMode,
 		denyReadPaths: policy.denyReadPaths,
 	};
 }
@@ -349,7 +349,7 @@ export class References extends Service {
 		try {
 			const absolute = await guardPath(scope.workingDirectory, reference.path, {
 				access: 'read',
-				confinement: scope.confinement,
+				sandboxMode: scope.sandboxMode,
 				denyReadPaths: scope.denyReadPaths,
 			});
 			const info = await stat(absolute);

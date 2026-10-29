@@ -86,7 +86,7 @@ export function apply(ctx) {
 }
 ```
 
-`ctx.references` owns path guards, read confinement, deduplication, budgets and the stamp that puts a
+`ctx.references` owns path guards, sandbox read scope, deduplication, budgets and the stamp that puts a
 part on the user message. A resolver only recognizes a format and returns typed parts; a part that
 claims a file and then fails becomes an error note, not a UTF-8 fallback. `comonad-plugin-pdf` is the
 worked example for a document resolver.

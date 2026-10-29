@@ -9,9 +9,10 @@ declare module 'cordis' {
 }
 
 /**
- * Approval arbitration. Surfaces (panel, participant, fallback dialog) register
- * `approval/request` waterfall listeners; each answers for its own surface id and
- * delegates everything else. With no listener the request is denied — safe by default.
+ * Approval arbitration. The approval response policy is applied here: `never` denies before a
+ * surface sees the request. Otherwise surfaces (panel, participant, fallback dialog) register
+ * `approval/request` waterfall listeners; each answers for its own surface id and delegates
+ * everything else. With no listener the request is denied — safe by default.
  */
 export class Approval extends Service {
 	constructor(ctx: Context) {
@@ -19,7 +20,9 @@ export class Approval extends Service {
 	}
 
 	request(input: ApprovalRequest): Promise<ApprovalDecision> {
-		if (input.signal.aborted) {
+		// The approval response policy is the last word on a confirmation: `never` settles it here,
+		// without reaching a surface, and an abort keeps its usual meaning.
+		if (input.response === 'never' || input.signal.aborted) {
 			return Promise.resolve('deny');
 		}
 		return new Promise<ApprovalDecision>((resolve, reject) => {

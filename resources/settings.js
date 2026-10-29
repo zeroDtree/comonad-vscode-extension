@@ -340,6 +340,8 @@
 		const config = state.config;
 		fillSelect($('mode'), state.labels.modes, config.mode);
 		fillSelect($('approval'), state.labels.approvals, config.approval);
+		fillSelect($('approval-response'), state.labels.approvalResponses, config.approvalResponse);
+		fillSelect($('sandbox-mode'), state.labels.sandboxes, config.sandboxMode);
 		fillSelect($('display'), state.labels.displays, config.displayForm);
 		fillSelect($('toolCard'), state.labels.toolCards, config.toolCard);
 		fillSelect($('context'), state.labels.contexts, config.contextForm);
@@ -357,15 +359,16 @@
 		put($('plans'), config.planDirectory);
 		put($('steps'), String(config.maxSteps));
 		put($('deny'), (config.denyReadPaths || []).join('\n'));
-		checked('confine-read', config.confineRead);
-		checked('confine-write', config.confineWrite);
-		checked('allow-unsandboxed', config.allowUnsandboxedShell);
 		const environment = state.environment || {};
 		const note = $('environment-note');
 		if (note) {
 			const where = environment.remote ? `Remote window (${environment.remote})` : 'Local window';
 			const sandbox = environment.sandbox === 'none' ? 'no OS sandbox' : `sandbox: ${environment.sandbox}`;
-			note.textContent = `${where} · ${sandbox}${environment.sandbox === 'none' ? ' — shell commands ask before running unless allowed above.' : ''}`;
+			const mode = config.sandboxMode ? ` · mode: ${config.sandboxMode}` : '';
+			note.textContent =
+				environment.sandbox === 'none'
+					? `${where} · ${sandbox}${mode} — shell commands are refused unless the sandbox mode is danger-full-access and network access is on.`
+					: `${where} · ${sandbox}${mode}`;
 		}
 	}
 
@@ -1278,7 +1281,8 @@
 		}
 		$('pr-chat').textContent =
 			promptsData && promptsData.chat
-				? 'The next turn would run as ' + promptsData.chat.mode + ' · ' + promptsData.chat.approval + '.'
+				? 'The next turn would run as ' + promptsData.chat.mode + ' · ' + promptsData.chat.approval +
+					' · response: ' + promptsData.chat.approvalResponse + ' · ' + promptsData.chat.sandbox + '.'
 				: 'No active chat: tools are reported as not offered.';
 		renderPromptPreview(shown);
 		updatePromptSave();

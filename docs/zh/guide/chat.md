@@ -39,10 +39,11 @@ Secondary Side Bar。同样的会话也可以在 VS Code 内置聊天视图里�
 | 控件 | 作用 |
 | --- | --- |
 | **Mode** | agent 能做什么 —— 见[安全](/zh/guide/safety) |
-| **Approval** | 没有规则匹配时如何处理调用 |
+| **Tool approval** | 没有规则匹配时如何处理调用 |
+| **Sandbox** | OS 强制的读写范围（Sandbox mode） |
 | **Context** | 这个聊天回传给模型的内容：Rendered、Token、Raw |
 | **Display** | 整个转录如何绘制 |
-| **Network** | 网络工具与 shell 内的网络 |
+| **Network** | Network access policy：网络工具与 shell 内的网络 |
 | **Tool cards** | 工具卡初始状态：collapsed（默认）、preview、open |
 
 这里的每个选择都会写回对应的 `comonad.*` 设置，所以新建聊天会沿用同样的模型、思考强度、

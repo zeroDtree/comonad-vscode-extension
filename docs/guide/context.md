@@ -67,7 +67,7 @@ The **Display** pill only changes what you see; Context changes what the model r
 
 `@` references are resolved into typed attachments on the **user message**, not into the system
 prompt: numbered text, images, or page-marked PDF text. They are capped at 20k characters per
-reference and 60k in total, and filtered by read confinement and deny rules. The resolved snapshot is
+reference and 60k in total, and filtered by sandbox read scope and deny rules. The resolved snapshot is
 stored with the turn, so later turns and replays do not read the file again.
 
 Images and PDFs live in a content-addressed store; the transcript keeps only their metadata. See
