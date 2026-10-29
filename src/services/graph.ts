@@ -109,7 +109,7 @@ export class Graphs extends Service {
 		this.touch();
 	}
 
-	/** The graph names a pane or a workflow may reference. */
+	/** The graph names the Graph pane may reference. */
 	names(): string[] {
 		return this.inspect().graphs.map((graph) => graph.id);
 	}
@@ -150,10 +150,6 @@ export class Graphs extends Service {
 		return { source, default: parsed.default, graphs, blocks, error };
 	}
 
-	list(): GraphInfo[] {
-		return this.inspect().graphs;
-	}
-
 	blocks(source: string = this.source()): GraphBlock[] {
 		return splitGraphBlocks(source);
 	}
@@ -161,7 +157,7 @@ export class Graphs extends Service {
 	/**
 	 * Compiles the configured source and returns one graph. With no id the turn's own loop is asked
 	 * for: a broken source is logged and the shipped graph runs instead, which is what a user typing
-	 * a half-finished graph expects. A named graph (a workflow stage) gets the real error.
+	 * a half-finished graph expects. A named graph lookup gets the real error.
 	 */
 	get<S>(id?: string): CompiledGraph<S> {
 		const source = this.source();

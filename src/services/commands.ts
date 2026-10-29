@@ -20,8 +20,6 @@ export interface CommandOutcome {
 	policy?: Partial<SessionPolicy>;
 	/** The generation type this command starts; the surface passes it to the turn. */
 	trigger?: GenerationTrigger;
-	/** A per-turn workflow choice: `off`, `always`, or a workflow id. */
-	workflow?: 'off' | 'always' | string;
 	/** Output to show when the command did not stream through the turn pipeline. */
 	result?: string;
 }
@@ -29,7 +27,18 @@ export interface CommandOutcome {
 export interface CommandSpec {
 	name: string;
 	description: string;
+	/** The arguments the command takes, for the composer's menu: `[task]`, `<path>`. */
+	hint?: string;
 	run(args: string, surface: CommandSurface): Promise<CommandOutcome> | CommandOutcome;
+}
+
+/** One row of the composer's `/` menu: the registered commands and the custom command files. */
+export interface CommandSuggestion {
+	name: string;
+	description: string;
+	hint?: string;
+	/** True for `.comonad/commands/*.md`, so the menu can say where the row came from. */
+	custom?: boolean;
 }
 
 declare module 'cordis' {
@@ -53,8 +62,10 @@ export class Commands extends Service {
 		this.ctx.effect(
 			() => {
 				this.specs.set(spec.name.toLowerCase(), spec);
+				this.ctx.emit('commands/changed');
 				return () => {
 					this.specs.delete(spec.name.toLowerCase());
+					this.ctx.emit('commands/changed');
 				};
 			},
 			`ctx.commands.register(${JSON.stringify(spec.name)})`,
@@ -63,6 +74,26 @@ export class Commands extends Service {
 
 	list(): CommandSpec[] {
 		return [...this.specs.values()].sort((left, right) => left.name.localeCompare(right.name));
+	}
+
+	/**
+	 * Every command the composer may offer, under the names `handle()` resolves: a registered spec
+	 * wins a name a custom file shares, because the spec is what runs.
+	 */
+	suggestions(): CommandSuggestion[] {
+		const rows = new Map<string, CommandSuggestion>();
+		for (const command of this.ctx.catalog.commands) {
+			rows.set(command.name.toLowerCase(), {
+				name: command.name,
+				description: command.description,
+				hint: command.hint,
+				custom: true,
+			});
+		}
+		for (const spec of this.specs.values()) {
+			rows.set(spec.name.toLowerCase(), { name: spec.name, description: spec.description, hint: spec.hint });
+		}
+		return [...rows.values()].sort((left, right) => left.name.localeCompare(right.name));
 	}
 
 	/**

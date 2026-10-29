@@ -83,8 +83,6 @@ export interface Aborted<S> {
 export type Outcome<S> = Finished<S> | Suspended<S> | Aborted<S>;
 
 export interface ResumeCursor {
-	/** What the resumed decision belongs to: a tool approval or a workflow gate. */
-	kind?: 'tool' | 'gate';
 	node: string;
 	value: unknown;
 	payload: unknown;

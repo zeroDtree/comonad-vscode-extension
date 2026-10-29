@@ -12,10 +12,9 @@
 	const gutter = $('g-gutter');
 	const preview = $('g-preview');
 	const inspector = $('g-inspector');
-	const list = $('g-graphs');
+	const select = $('g-select');
 	const status = $('g-status');
 	const whole = $('g-whole');
-	const title = $('g-title');
 	const defaultBadge = $('g-default-badge');
 
 	let slice = null;
@@ -90,37 +89,23 @@
 		status.className = error ? 'g-status error' : 'g-status';
 	}
 
-	function renderList() {
+	function renderSelect() {
 		const entries = graphs();
-		list.innerHTML = entries
-			.map((graph) => {
-				const active = graph.id === selected;
-				return (
-					'<button type="button" class="g-card' +
-					(active ? ' active' : '') +
-					'" data-graph="' +
-					esc(graph.id) +
-					'">' +
-					'<span class="g-card-id">' +
-					(graph.default ? '<span class="g-star" title="default">★</span> ' : '') +
-					esc(graph.id) +
-					'</span>' +
-					'<span class="g-card-meta">' +
-					graph.nodes.length +
-					' nodes · ' +
-					graph.routes.length +
-					' routes</span></button>'
-				);
-			})
-			.join('');
-		if (!entries.length) {
-			list.innerHTML = '<p class="g-hint">No valid graph yet. Fix the source to see it here.</p>';
-		}
+		select.innerHTML = entries.length
+			? entries
+					.map(
+						(graph) =>
+							'<option value="' + esc(graph.id) + '">' + (graph.default ? '★ ' : '') + esc(graph.id) + '</option>',
+					)
+					.join('')
+			: '<option value="" disabled selected>No valid graph yet</option>';
+		select.value = selected || '';
+		// Whole-source mode edits every block at once, so picking one is meaningless there.
+		select.disabled = isWhole || !entries.length;
 	}
 
 	function renderMain() {
 		const graph = selectedGraph();
-		title.textContent = selected || '(no graph)';
 		defaultBadge.hidden = !graph || !graph.default;
 		$('g-set-default').disabled = !graph || graph.default;
 		$('g-duplicate').disabled = !graph;
@@ -187,7 +172,7 @@
 			whole.checked = true;
 		}
 		validated = null;
-		renderList();
+		renderSelect();
 		renderMain();
 		renderTools();
 		setStatus(slice.error ? 'Graph source has an error' : '', Boolean(slice.error));
@@ -290,18 +275,19 @@
 		editor.dispatchEvent(new Event('input'));
 	});
 
-	list.addEventListener('click', (event) => {
-		const card = event.target.closest('[data-graph]');
-		if (!card) {
+	select.addEventListener('change', () => {
+		const next = select.value;
+		if (next === selected) {
 			return;
 		}
 		if (dirty && !window.confirm('Discard the unsaved changes to this graph?')) {
+			select.value = selected || '';
 			return;
 		}
 		dirty = false;
 		validated = null;
-		selected = card.dataset.graph;
-		renderList();
+		selected = next;
+		renderSelect();
 		renderMain();
 	});
 
@@ -374,6 +360,7 @@
 		isWhole = whole.checked;
 		dirty = false;
 		validated = null;
+		renderSelect();
 		renderMain();
 	});
 
@@ -392,14 +379,14 @@
 				setStatus(message.message || 'Error', true);
 				if (message.graphs) {
 					validated = message;
-					renderList();
+					renderSelect();
 					renderInspector();
 				}
 				return;
 			}
 			if (message.graphs) {
 				validated = message;
-				renderList();
+				renderSelect();
 				renderInspector();
 				setStatus(message.message || 'Valid.', false);
 				return;

@@ -18,22 +18,22 @@ const ICON =
 	'<svg viewBox="0 0 16 16"><circle cx="4" cy="4" r="1.6"/><circle cx="12" cy="5" r="1.6"/><circle cx="7" cy="12" r="1.6"/><path d="M5.5 4.4l5 .6M4.8 5.5l1.6 5M11 6.4l-2.7 4.1"/></svg>';
 
 const MARKUP = `  <h1 class="page-title">Graphs</h1>
-  <p class="group-note">The Mermaid source the turn walks. A source may hold several named graphs; a workflow stage picks one by id. <code>%% graph: id</code> names a graph, <code>%% default: id</code> picks the turn's own loop, and <code>%% soft node: instruct</code> lets the model choose a target.</p>
+  <p class="group-note">The Mermaid source the turn walks. A source may hold several named graphs; <code>%% default: id</code> picks the turn's own loop. <code>%% graph: id</code> names a graph and <code>%% soft node: instruct</code> lets the model choose a target.</p>
   <div class="g-layout">
-    <aside class="g-list">
-      <div class="g-list-head"><span>Graphs</span><button class="secondary" id="g-new" type="button">+ New</button></div>
-      <div id="g-graphs"></div>
-      <p class="g-hint" id="g-list-note"></p>
-    </aside>
+    <section class="g-picker">
+      <label for="g-select">Graphs</label>
+      <select id="g-select" class="g-select"></select>
+      <span id="g-default-badge" class="g-badge" hidden>default</span>
+      <span class="g-spacer"></span>
+      <button class="secondary" id="g-set-default" type="button">Set default</button>
+      <button class="secondary" id="g-duplicate" type="button">Duplicate</button>
+      <button class="secondary" id="g-delete" type="button">Delete</button>
+      <button class="secondary" id="g-new" type="button">+ New</button>
+    </section>
     <section class="g-main">
       <div class="g-toolbar">
-        <span id="g-title">agent</span>
-        <span id="g-default-badge" class="g-badge" hidden>default</span>
         <span class="g-spacer"></span>
         <button class="secondary" id="g-validate" type="button">Validate</button>
-        <button class="secondary" id="g-set-default" type="button">Set default</button>
-        <button class="secondary" id="g-duplicate" type="button">Duplicate</button>
-        <button class="secondary" id="g-delete" type="button">Delete</button>
         <button class="primary" id="g-save" type="button">Save</button>
       </div>
       <div class="g-editor">
@@ -50,12 +50,14 @@ const MARKUP = `  <h1 class="page-title">Graphs</h1>
     <aside class="g-preview">
       <div class="g-preview-head">Preview</div>
       <div id="g-preview" class="g-diagram"></div>
-      <div class="g-inspector" id="g-inspector"></div>
-      <div class="g-insert">
-        <div class="g-insert-label">Registered nodes</div>
-        <div id="g-nodes" class="g-chips"></div>
-        <div class="g-insert-label">Routes</div>
-        <div id="g-routes" class="g-chips"></div>
+      <div class="g-preview-body">
+        <div class="g-inspector" id="g-inspector"></div>
+        <div class="g-insert">
+          <div class="g-insert-label">Registered nodes</div>
+          <div id="g-nodes" class="g-chips"></div>
+          <div class="g-insert-label">Routes</div>
+          <div id="g-routes" class="g-chips"></div>
+        </div>
       </div>
     </aside>
   </div>

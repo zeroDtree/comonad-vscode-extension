@@ -78,8 +78,44 @@ function removedHover(lines: string[]): vscode.MarkdownString {
 	return new vscode.MarkdownString(`${fence}diff\n${lines.join('\n')}\n${fence}`);
 }
 
-function clipped(text: string, length = 110): string {
-	return text.length > length ? `${text.slice(0, length)}…` : text;
+/**
+ * Removed text rides on its anchor line as a chip, and VS Code never wraps decoration text
+ * (`after.contentText` cannot contain a newline), so a long line would be clipped mid-glyph at the
+ * viewport edge. The chip is a bounded preview of the first removed line instead — wide glyphs
+ * count twice, so CJK text gets a sensible budget — and the hover carries the full text.
+ */
+const CHIP_COLUMNS = 60;
+const WIDE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/;
+
+/** The monospace columns a string takes, counting CJK glyphs as two. */
+function columns(text: string): number {
+	let width = 0;
+	for (const char of text) {
+		width += WIDE.test(char) ? 2 : 1;
+	}
+	return width;
+}
+
+/** A removed block as a one-row chip: a bounded preview, because decoration text cannot wrap. */
+function chipText(lines: string[], reserved = 0): string {
+	const words = lines.map((line) => line.replace(/\s+/g, ' ').trim()).find(Boolean);
+	const suffix = lines.length > 1 ? ` (+${lines.length - 1})` : '';
+	if (!words) {
+		return lines.length > 1 ? `(${lines.length} removed lines)` : '(blank line removed)';
+	}
+	const budget = Math.max(24, CHIP_COLUMNS - reserved);
+	let width = 0;
+	let text = '';
+	for (const char of words) {
+		const size = WIDE.test(char) ? 2 : 1;
+		if (width + size > budget) {
+			text += '…';
+			break;
+		}
+		width += size;
+		text += char;
+	}
+	return text + suffix;
 }
 
 export function inlineDiff(ctx: Context): void {
@@ -209,19 +245,21 @@ export function inlineDiff(ctx: Context): void {
 				if (!removed.length) {
 					continue;
 				}
-				const label = `${clipped(removed[0]!)}${removed.length > 1 ? ` … (+${removed.length - 1})` : ''}`;
 				const anchor = hunk.newLines > 0 ? hunk.newStart - 2 : hunk.newStart - 1;
 				const options: vscode.DecorationOptions = {
 					range: new vscode.Range(0, 0, 0, 0),
 					hoverMessage: removedHover(removed),
 				};
 				if (anchor >= 0) {
-					options.range = new vscode.Range(clampLine(editor.document, anchor), 0, clampLine(editor.document, anchor), 0);
+					const line = clampLine(editor.document, anchor);
+					options.range = new vscode.Range(line, 0, line, 0);
+					// The chip starts after the anchor line's own text; budget the remainder of the row.
+					const label = chipText(removed, columns(editor.document.lineAt(line).text));
 					// The red chip already says "removed"; a minus sign and padding only add noise.
 					options.renderOptions = { after: { contentText: label } };
 					after.push(options);
 				} else {
-					options.renderOptions = { before: { contentText: label } };
+					options.renderOptions = { before: { contentText: chipText(removed) } };
 					before.push(options);
 				}
 			}

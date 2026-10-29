@@ -42,8 +42,8 @@ const HELP_TAIL = [
 ];
 
 export function slashCommands(ctx: Context): void {
-	const register = (name: string, description: string, run: CommandSpec['run']): void => {
-		ctx.commands.register({ name, description, run });
+	const register = (name: string, description: string, run: CommandSpec['run'], hint?: string): void => {
+		ctx.commands.register({ name, description, hint, run });
 	};
 
 	register('help', 'List commands', (_args, surface) => {
@@ -52,28 +52,36 @@ export function slashCommands(ctx: Context): void {
 		return { done: true };
 	});
 
-	register('plan', 'Research read-only, then write a plan', (args, surface) => {
-		if (!args.trim()) {
-			surface.markdown('Describe what you want planned.');
-			return { done: true };
-		}
-		return {
-			done: false,
-			text: `Research the workspace read-only, then write a step-by-step implementation plan for:\n\n${args}`,
-			policy: { workMode: 'pl', approval: 'whitelist_accept', network: false },
-			workflow: 'off',
-		};
-	});
+	register(
+		'plan',
+		'Research read-only, then write a plan',
+		(args, surface) => {
+			if (!args.trim()) {
+				surface.markdown('Describe what you want planned.');
+				return { done: true };
+			}
+			return {
+				done: false,
+				text: `Research the workspace read-only, then write a step-by-step implementation plan for:\n\n${args}`,
+				policy: { workMode: 'pl', approval: 'whitelist_accept', network: false },
+			};
+		},
+		'[task]',
+	);
 
-	register('review', 'Review pending changes without editing', (args) => {
-		const focus = args.trim() ? `\n\nFocus: ${args}` : '';
-		return {
-			done: false,
-			text: `Review the pending workspace changes. Start with the git_diff tool, read the relevant files, and report issues ordered by severity with file:line references. Do not modify anything.${focus}`,
-			policy: { workMode: 'ro', approval: 'whitelist_accept', network: false },
-			workflow: 'off',
-		};
-	});
+	register(
+		'review',
+		'Review pending changes without editing',
+		(args) => {
+			const focus = args.trim() ? `\n\nFocus: ${args}` : '';
+			return {
+				done: false,
+				text: `Review the pending workspace changes. Start with the git_diff tool, read the relevant files, and report issues ordered by severity with file:line references. Do not modify anything.${focus}`,
+				policy: { workMode: 'ro', approval: 'whitelist_accept', network: false },
+			};
+		},
+		'[focus]',
+	);
 
 	const summarize: CommandSpec['run'] = async (args, surface) => {
 		const session = ctx.sessions.active();
@@ -93,9 +101,9 @@ export function slashCommands(ctx: Context): void {
 	};
 
 	// `/summarize` is the name; the other two are what people reach for, and what other tools call it.
-	register('summarize', 'Summarize the conversation to free up context', summarize);
-	register('compress', 'Summarize the conversation to free up context', summarize);
-	register('compact', 'Summarize the conversation to free up context', summarize);
+	register('summarize', 'Summarize the conversation to free up context', summarize, '[notes] [--rebuild]');
+	register('compress', 'Summarize the conversation to free up context', summarize, '[notes] [--rebuild]');
+	register('compact', 'Summarize the conversation to free up context', summarize, '[notes] [--rebuild]');
 
 	register('clear', 'Start a fresh session', (_args, surface) => {
 		ctx.sessions.create(ctx.agent.policyFor());
@@ -198,7 +206,7 @@ export function slashCommands(ctx: Context): void {
 	register('impersonate', 'Write your next message for you', () => ({ done: false, text: '', trigger: 'impersonate' }));
 	register('swipe', 'Generate another version of the last reply', () => ({ done: false, text: '', trigger: 'swipe' }));
 	register('regenerate', 'Generate the last reply again', () => ({ done: false, text: '', trigger: 'regenerate' }));
-	register('quiet', 'Generate a reply without adding it to the transcript', (args) => ({ done: false, text: args, trigger: 'quiet' }));
+	register('quiet', 'Generate a reply without adding it to the transcript', (args) => ({ done: false, text: args, trigger: 'quiet' }), '[text]');
 
 }
 slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage', 'host', 'tools'];

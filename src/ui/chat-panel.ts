@@ -217,6 +217,8 @@ export function chatPanel(ctx: Context): void {
 			modes: splitChoices(MODE_LABELS),
 			approvals: splitChoices(APPROVAL_LABELS),
 			generations: GENERATION_TRIGGERS.map((value) => ({ value, label: GENERATION_LABELS[value] })),
+			// The composer's `/` menu: what `commands.handle()` would resolve, custom files included.
+			commands: ctx.commands.suggestions(),
 			model: config.model,
 			modelLabel: ctx.llm.describe(config.model),
 			models: await ctx.llm.availableModels(),
@@ -227,7 +229,6 @@ export function chatPanel(ctx: Context): void {
 				.slice(0, 60)
 				.map((item) => ({ id: item.id, title: item.title, active: item.id === session?.id, updatedAt: item.updatedAt })),
 			todos: session ? ctx.agent.todos(session.id).map((todo) => ({ status: todo.status, text: todo.text })) : [],
-			workflow: session?.workflow ?? null,
 		};
 	};
 
@@ -575,11 +576,6 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text });
 		}
 	});
-	ctx.on('agent/workflow', (ref, run) => {
-		if (ref.surface === SURFACE) {
-			post({ type: 'workflow', workflow: run });
-		}
-	});
 	// The card gains its "Open session" link as soon as the child exists, while the call still runs.
 	ctx.on('agent/subagent-start', (ref, info) => {
 		if (ref.surface === SURFACE) {
@@ -616,6 +612,9 @@ export function chatPanel(ctx: Context): void {
 	// Content changes (a reload, a card added) only move what the composer reads out, never the
 	// transcript.
 	ctx.on('tavern/changed', refreshSoon);
+	// The `/` menu is state, not a query: a new command (a plugin mounting, a file written) repaints it.
+	ctx.on('commands/changed', refreshSoon);
+	ctx.on('catalog/changed', refreshSoon);
 
 	// Approvals for panel turns are answered by the webview buttons.
 	ctx.on('approval/request', (request, next): Promise<ApprovalDecision> | ApprovalDecision => {
@@ -632,7 +631,6 @@ export function chatPanel(ctx: Context): void {
 				id,
 				sessionId: request.sessionId,
 				reason: request.reason,
-				gate: request.gate,
 				// The approval is a decision about the whole call, so the prompt keeps the argument
 				// that matters (a shell command, a path) in full; 8k is a display bound, not a summary.
 				calls: request.calls.map((call) => ({ name: call.name, args: preview(call.arguments, 8_000) })),
@@ -853,7 +851,6 @@ export function chatPanel(ctx: Context): void {
 				sessionId: ctx.sessions.active()?.id,
 				policy: handled.policy,
 				trigger: handled.trigger,
-				workflow: handled.workflow,
 				surface: SURFACE,
 				signal: turnController.signal,
 			});
@@ -1597,8 +1594,18 @@ export function chatPanel(ctx: Context): void {
 		pendingReferences.push(token);
 	};
 
+	// The focus handoff in openChat is async: `editorTextFocus` stays true for a few frames after
+	// the first press, so a fast double-press (or the macOS expandLineSelection dance) can fire
+	// this twice and drop the token twice, racing the visibility-triggered full refresh. One
+	// gesture, one token — the command sees no key events, so the window is time-based.
+	let referenceCooldownUntil = 0;
 	/** Cmd+L on a selection: the editor's lines as the `@path:lines` token in the composer. */
 	const referenceSelection = async (): Promise<void> => {
+		const now = Date.now();
+		if (now < referenceCooldownUntil) {
+			return;
+		}
+		referenceCooldownUntil = now + 400;
 		const editor = vscode.window.activeTextEditor;
 		if (!editor || editor.selection.isEmpty) {
 			void vscode.window.showInformationMessage('Comonad: select some code first.');
@@ -1702,7 +1709,6 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 	<!-- Floats at the bottom of the transcript, above every footer row, whenever the reader has
 	     scrolled away from the newest message. -->
 	<button id="jump-latest" type="button" hidden data-tip="Jump to the newest message">↓ Latest</button>
-	<div id="workflow" hidden></div>
 	<div id="todos" hidden></div>
 	<div id="changes-panel" hidden>
 		<div id="changes-head">
@@ -1719,8 +1725,8 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 	<div id="editor">
 		<div id="composer-pastes" class="composer-pastes" hidden></div>
 		<div id="composer-images" class="composer-images" hidden></div>
-		<textarea id="input" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Ask Comonad…  @ to reference code · /help for commands"></textarea>
-		<div id="mention" class="mention-menu" role="listbox" aria-label="Reference a workspace item" hidden>
+		<textarea id="input" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Ask Comonad…  @ to reference code · / for commands"></textarea>
+		<div id="mention" class="mention-menu" role="listbox" aria-label="Composer suggestions" hidden>
 			<div id="mention-head" class="mention-head" hidden></div>
 			<div id="mention-list"></div>
 		</div>

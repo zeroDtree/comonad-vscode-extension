@@ -10,7 +10,6 @@ import { isInside } from '../lib/sandbox';
 import { modelContextDigest, type ContextForm } from '../lib/prompt';
 import { turnsOf } from '../lib/turns';
 import type { AttachmentPart, Message, ModelContext, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
-import { sanitizeWorkflowRun, type WorkflowRun } from '../lib/workflow';
 
 /** Session persistence and the active-session pointer. One JSON document per chat. */
 
@@ -55,8 +54,6 @@ export function canRewrite(session: Session, index: number): boolean {
 }
 
 export interface Cursor {
-	/** `tool` is a suspended tool call; `gate` is a workflow stage waiting for approval. */
-	kind?: 'tool' | 'gate';
 	node: string;
 	payload: unknown;
 	step: number;
@@ -101,8 +98,6 @@ export interface Session {
 	transcript: Message[];
 	turnIndex: number;
 	cursor: Cursor | null;
-	/** The last workflow run of this chat, for the stage strip and a suspended gate. */
-	workflow?: WorkflowRun;
 	marks: Mark[];
 	/**
 	 * Workspace-relative forward-slash paths this chat created: file-tool writes and conservatively
@@ -387,7 +382,6 @@ export class SessionStore {
 			createdAt: now,
 			updatedAt: now,
 			cursor: null,
-			workflow: undefined,
 			marks: [],
 			// A fork is a new chat: the files its parent created are not its own to delete unreviewed.
 			created: [],
@@ -425,7 +419,7 @@ export class SessionStore {
 		const transcript = sanitizeMessages(stored).filter((message) => message?.summarized !== true);
 		const legacy = (session as Session & { summary?: { text?: unknown; at?: unknown } }).summary;
 		const modelContext = normalizeModelContext(session.modelContext, transcript) ?? legacyModelContext(legacy, legacyHead);
-		const { summary: _legacy, ...rest } = session as Session & { summary?: unknown };
+		const { summary: _legacy, workflow: _workflow, ...rest } = session as Session & { summary?: unknown; workflow?: unknown };
 		return {
 			...rest,
 			title: session.title || UNTITLED,
@@ -448,7 +442,6 @@ export class SessionStore {
 			modelContext,
 			turnIndex: session.turnIndex ?? 0,
 			cursor: sanitizeCursor(session.cursor ?? null),
-			workflow: sanitizeWorkflowRun(session.workflow),
 			// Marks from the shadow-snapshot era have no journal to restore to, so they are dropped.
 			marks: (session.marks ?? []).filter((mark) => typeof mark.entryCount === 'number'),
 			created: uniqueCreated(
@@ -551,37 +544,14 @@ function sanitizeCursor(cursor: Cursor | null): Cursor | null {
 		next.trailer = sanitizeMessages(state.trailer);
 	}
 	// `Set` is not JSON: a cursor written by the turn pipeline carries `{}` here, and a resumed
-	// turn would crash on `writes.add`. Revive both sets from their arrays.
+	// turn would crash on `writes.add`. Revive it from its array.
 	if (state.writes !== undefined) {
 		next.writes = new Set(Array.isArray(state.writes) ? state.writes.filter((path): path is string => typeof path === 'string') : []);
 	}
-	if (state.diagnosticBaseline !== undefined) {
-		next.diagnosticBaseline = new Set(
-			Array.isArray(state.diagnosticBaseline)
-				? state.diagnosticBaseline.filter((line): line is string => typeof line === 'string')
-				: [],
-		);
-	}
-	const policy = state.basePolicy;
-	if (policy && typeof policy === 'object') {
-		const stored = policy as SessionPolicy;
-		next.basePolicy = { ...stored, workMode: asWorkMode(stored.workMode), approval: asApproval(stored.approval) };
-	}
-	const workflow = sanitizeWorkflowRun(state.workflow);
-	if (workflow) {
-		next.workflow = workflow;
-	} else {
-		delete next.workflow;
-	}
-	const kind =
-		cursor.kind === 'tool' || cursor.kind === 'gate'
-			? cursor.kind
-			: Array.isArray(cursor.payload)
-				? 'tool'
-				: cursor.payload && typeof cursor.payload === 'object' && ('title' in cursor.payload || 'body' in cursor.payload)
-					? 'gate'
-					: undefined;
-	return { ...cursor, ...(kind ? { kind } : {}), state: next };
+	// A cursor written while workflows existed may carry their state; it is dead weight now.
+	delete next.workflow;
+	delete next.basePolicy;
+	return { ...cursor, state: next };
 }
 
 declare module 'cordis' {
@@ -839,7 +809,6 @@ export class Sessions extends Service {
 		session.transcript = session.transcript.slice(0, length);
 		session.marks = session.marks.filter((mark) => mark.length <= session.transcript.length);
 		session.cursor = null;
-		session.workflow = undefined;
 		this.invalidateModelContext(session, session.transcript.length);
 		this.save(session);
 		this.changed(id);
@@ -859,7 +828,6 @@ export class Sessions extends Service {
 		}
 		session.transcript = session.transcript.slice(0, index);
 		session.marks = session.marks.filter((mark) => mark.length < index);
-		session.workflow = undefined;
 		this.invalidateModelContext(session, session.transcript.length);
 		this.save(session);
 		this.changed(session.id);
@@ -901,7 +869,6 @@ export class Sessions extends Service {
 		const replay = { text: message.content, attachments: message.attachments, replaced: [...session.transcript] };
 		session.transcript = session.transcript.slice(0, at);
 		session.marks = session.marks.filter((mark) => mark.length <= session.transcript.length);
-		session.workflow = undefined;
 		this.invalidateModelContext(session, session.transcript.length);
 		this.save(session);
 		return replay;

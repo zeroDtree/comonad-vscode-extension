@@ -962,8 +962,8 @@
 		paintJump();
 	});
 
-	// The footer (workflow strip, todos, the changes panel) and the panel's own size take room from
-	// the transcript without scrolling it: a reader at the end keeps seeing the end.
+	// The footer (todos, the changes panel) and the panel's own size take room from the transcript
+	// without scrolling it: a reader at the end keeps seeing the end.
 	if (typeof ResizeObserver === 'function') {
 		const follow = new ResizeObserver(() => scroll());
 		follow.observe(messagesEl);
@@ -2187,7 +2187,7 @@
 				'<div class="welcome-workspace"><span class="welcome-label">Workspace</span><code>' +
 				esc(workspace || 'no folder open') +
 				'</code></div>' +
-				'<div class="welcome-keys"><span><code>/help</code> for commands</span><span><code>@</code> to reference code</span></div>',
+				'<div class="welcome-keys"><span><code>/</code> for commands</span><span><code>@</code> to reference code</span></div>',
 		);
 	}
 
@@ -2854,19 +2854,11 @@
 		root.className = 'msg approval';
 		root.dataset.id = message.id;
 		root.dataset.session = message.sessionId || '';
-		root.innerHTML = message.gate
-			? '<div class="approval-card gate"><div class="a-title">⏸ ' +
-				esc(message.gate.title || 'Approve the next stage') +
-				'</div><div class="a-reason">' +
-				esc(message.reason || '') +
-				'</div><pre class="gate-body">' +
-				esc(message.gate.body || '') +
-				'</pre><div class="actions"><button class="primary" data-d="allow">Approve</button><button class="ghost" data-d="deny">Deny</button></div></div>'
-			: '<div class="approval-card"><div class="a-title">⚠ Approval required</div><div class="a-reason">' +
-				esc(message.reason || '') +
-				'</div><ul class="calls">' +
-				calls +
-				'</ul><div class="actions"><button class="primary" data-d="allow">Allow once</button><button data-d="always">Always allow</button><button class="ghost" data-d="deny">Deny</button></div></div>';
+		root.innerHTML = '<div class="approval-card"><div class="a-title">⚠ Approval required</div><div class="a-reason">' +
+			esc(message.reason || '') +
+			'</div><ul class="calls">' +
+			calls +
+			'</ul><div class="actions"><button class="primary" data-d="allow">Allow once</button><button data-d="always">Always allow</button><button class="ghost" data-d="deny">Deny</button></div></div>';
 		// The question belongs to the turn that asked it, so it sits with that turn's steps.
 		if (live) {
 			live.turn._steps.appendChild(root);
@@ -3281,7 +3273,6 @@
 		refreshTip();
 		const detail = [state.detail, state.suspended ? '⏸ waiting for approval — send /resume' : ''].filter(Boolean).join('  ·  ');
 		$('status').textContent = detail;
-		renderWorkflow(state.workflow);
 		renderTodos();
 		if (state.runningSessionId) {
 			runningSession = state.runningSessionId;
@@ -3372,111 +3363,6 @@
 			'\n\nClick to pick the books this chat scans';
 	}
 
-	/* ------------------------------------------------------------- workflow strip */
-
-	/** The run the strip is drawing, and the stage whose detail is open. */
-	let lastWorkflow = null;
-	let workflowOpen = null;
-
-	const WORKFLOW_GLYPH = {
-		done: '✔',
-		running: '◐',
-		failed: '✕',
-		skipped: '–',
-		pending: '○',
-		waiting: '⏸',
-	};
-
-	function workflowDetail(run, stageId) {
-		const stage = (run.definition.stages || []).find((entry) => entry.id === stageId);
-		const state = (run.stages || {})[stageId];
-		if (!stage || !state) {
-			return '';
-		}
-		const parts = [];
-		if (state.summary) {
-			parts.push(esc(state.summary));
-		}
-		if (state.check && Array.isArray(state.check.checks)) {
-			for (const check of state.check.checks) {
-				parts.push(
-					'<span class="wf-check ' +
-						esc(check.status) +
-						'">' +
-						esc((check.status === 'passed' ? '✔' : '✕') + ' ' + (check.label || '')) +
-						'</span>' +
-						(check.output ? '<pre>' + esc(check.output) + '</pre>' : ''),
-				);
-			}
-		}
-		return parts.join('');
-	}
-
-	function renderWorkflow(run) {
-		lastWorkflow = run || null;
-		const node = $('workflow');
-		if (!node) {
-			return;
-		}
-		if (!run || !Array.isArray(run.order) || !run.order.length) {
-			workflowOpen = null;
-			node.hidden = true;
-			node.innerHTML = '';
-			return;
-		}
-		if (workflowOpen && !run.order.includes(workflowOpen)) {
-			workflowOpen = null;
-		}
-		const stages = run.stages || {};
-		const definition = run.definition || { stages: [] };
-		const chips = run.order
-			.map((id) => {
-				const stage = (definition.stages || []).find((entry) => entry.id === id) || { title: id, run: 'agent' };
-				const state = stages[id] || { status: 'pending' };
-				const waiting = run.pendingGate && run.pendingGate.after === id;
-				const glyph = waiting ? '⏸' : WORKFLOW_GLYPH[state.status] || '○';
-				const icon = stage.run === 'checks' ? '🛡 ' : '';
-				return (
-					'<button type="button" class="wf-chip ' +
-					esc(state.status) +
-					(waiting ? ' waiting' : '') +
-					'" data-stage="' +
-					esc(id) +
-					'" title="' +
-					esc((stage.title || id) + ' — ' + (waiting ? 'waiting for approval' : state.status)) +
-					'">' +
-					glyph +
-					' ' +
-					esc(icon + (stage.title || id)) +
-					'</button>'
-				);
-			})
-			.join('<span class="wf-arrow" aria-hidden="true">→</span>');
-		const detail = workflowOpen ? workflowDetail(run, workflowOpen) : '';
-		const status = run.status === 'failed' ? 'Failed' : run.status === 'waiting' ? 'Waiting' : run.status === 'stopped' ? 'Stopped' : run.status === 'done' ? 'Done' : 'Running';
-		node.hidden = false;
-		node.innerHTML =
-			'<div class="wf-head"><span class="wf-title">Workflow · ' +
-			esc(run.name || run.workflowId || '') +
-			'</span><span class="wf-status ' +
-			esc(run.status || '') +
-			'">' +
-			esc(status) +
-			'</span></div><div class="wf-stages">' +
-			chips +
-			'</div>' +
-			(detail ? '<div class="wf-detail">' + detail + '</div>' : '');
-	}
-
-	$('workflow').addEventListener('click', (event) => {
-		const chip = event.target.closest('.wf-chip');
-		if (!chip || !lastWorkflow) {
-			return;
-		}
-		workflowOpen = workflowOpen === chip.dataset.stage ? null : chip.dataset.stage;
-		renderWorkflow(lastWorkflow);
-	});
-
 	function renderTodos() {
 		const list = (state && state.todos) || [];
 		const node = $('todos');
@@ -3508,6 +3394,11 @@
 			case 'state':
 				state = message;
 				renderState();
+				// A plugin mounting or a command file changing repaints the open `/` menu in place.
+				if (mention && mention.mode === 'command') {
+					mention.items = commandRows(mention.query);
+					renderMention();
+				}
 				break;
 			case 'toggleHistory':
 				// The title-bar icon (comonad.toggleHistory) flips the chat list.
@@ -3566,7 +3457,6 @@
 			case 'turn-start':
 				runningSession = message.sessionId || runningSession;
 				setRunning(true);
-				renderWorkflow(null);
 				beginTurn(message);
 				break;
 			case 'turn-resume': {
@@ -3601,9 +3491,6 @@
 				break;
 			case 'reasoning':
 				appendReasoning(message.text);
-				break;
-			case 'workflow':
-				renderWorkflow(message.workflow);
 				break;
 			case 'tool-start':
 				toolStart(message);
@@ -3686,7 +3573,10 @@
 		scroll();
 	});
 
-	/* ------------------------------------------------------------------ @ references */
+	/* ------------------------------------------------------------------ composer picker */
+
+	// One floating list serves both the `@` reference picker and the `/` command menu: only one can
+	// be open, and the arrow, Tab, Enter and Escape keys mean the same thing in both.
 
 	const MENTION_CATEGORIES = [
 		{ kind: 'mode', mode: 'file', label: 'Files', description: 'Search workspace files' },
@@ -3694,6 +3584,29 @@
 		{ kind: 'mode', mode: 'symbol', label: 'Symbols', description: 'Search code symbols' },
 		{ kind: 'mode', mode: 'selection', label: 'Current selection', description: 'Use the code selected in the editor' },
 	];
+
+	const PICKER_LABELS = { command: 'Commands', file: 'Files', folder: 'Folders', symbol: 'Symbols', selection: 'Selection' };
+	const PICKER_ICONS = { mode: '›', selection: '↔', file: 'F', folder: 'D', symbol: 'S' };
+	const PICKER_EMPTY = { command: 'No matching commands', symbol: 'Type to search symbols' };
+
+	/**
+	 * The `/` menu's rows. Commands arrive with `state`, so filtering is local: the list is small and
+	 * the menu must answer at typing speed. Prefix matches rank above substring matches.
+	 */
+	function commandRows(query) {
+		const commands = state && Array.isArray(state.commands) ? state.commands : [];
+		const needle = query.toLowerCase();
+		const matches = needle ? commands.filter((command) => command.name.toLowerCase().includes(needle)) : commands;
+		const prefix = needle ? matches.filter((command) => command.name.toLowerCase().startsWith(needle)) : [];
+		const rest = needle ? matches.filter((command) => !command.name.toLowerCase().startsWith(needle)) : matches;
+		return [...prefix, ...rest].slice(0, 50).map((command) => ({
+			kind: 'command',
+			name: command.name,
+			label: '/' + command.name,
+			description: [command.hint, command.description || (command.custom ? 'Custom command' : '')].filter(Boolean).join(' · '),
+			token: '/' + command.name,
+		}));
+	}
 
 	/** Whether `@` may start a reference after this character. Mirrors the parser's boundary. */
 	function mentionBoundary(previous) {
@@ -3724,22 +3637,15 @@
 		mentionEl.hidden = false;
 		mentionHead.hidden = mention.mode === 'categories';
 		if (mention.mode !== 'categories') {
-			const label =
-				mention.mode === 'file'
-					? 'Files'
-					: mention.mode === 'folder'
-						? 'Folders'
-						: mention.mode === 'symbol'
-							? 'Symbols'
-							: 'Selection';
-			mentionHead.textContent = label + (mention.query ? ' · ' + mention.query : '');
+			mentionHead.textContent = PICKER_LABELS[mention.mode] + (mention.query ? ' · ' + mention.query : '');
 		}
 		mentionList.innerHTML = '';
 		const rows = mentionRows();
 		if (!rows.length) {
 			const empty = document.createElement('div');
 			empty.className = 'mention-hint';
-			empty.textContent = mention.hint || (mention.mode === 'symbol' ? 'Type to search symbols' : 'No matches');
+			const waiting = mention.mode === 'command' && !state ? 'Commands are still loading…' : PICKER_EMPTY[mention.mode];
+			empty.textContent = mention.hint || waiting || 'No matches';
 			mentionList.appendChild(empty);
 			return;
 		}
@@ -3750,17 +3656,20 @@
 			row.className = 'mention-row' + (index === mention.active ? ' active' : '');
 			row.setAttribute('role', 'option');
 			row.setAttribute('aria-selected', String(index === mention.active));
-			const icon = document.createElement('span');
-			icon.className = 'mention-icon';
-			icon.textContent =
-				item.kind === 'mode' ? '›' : item.kind === 'selection' ? '↔' : item.kind === 'file' ? 'F' : item.kind === 'folder' ? 'D' : 'S';
+			// A command's label already starts with `/`; it needs no icon column.
+			if (item.kind !== 'command') {
+				const icon = document.createElement('span');
+				icon.className = 'mention-icon';
+				icon.textContent = PICKER_ICONS[item.kind] || 'S';
+				row.append(icon);
+			}
 			const label = document.createElement('span');
 			label.className = 'mention-label';
 			label.textContent = item.label;
 			const detail = document.createElement('span');
 			detail.className = 'mention-detail';
 			detail.textContent = item.description || '';
-			row.append(icon, label, detail);
+			row.append(label, detail);
 			if (item.token) {
 				row.title = item.token;
 			}
@@ -3785,12 +3694,12 @@
 	}
 
 	function requestMention(immediate) {
-		if (!mention || mention.mode === 'categories' || mention.composing) {
+		if (!mention || mention.mode === 'categories' || mention.mode === 'command' || mention.composing) {
 			return;
 		}
 		clearTimeout(mention.timer);
 		const send = () => {
-			if (!mention || mention.mode === 'categories') {
+			if (!mention || mention.mode === 'categories' || mention.mode === 'command') {
 				return;
 			}
 			mention.id += 1;
@@ -3818,6 +3727,18 @@
 			return;
 		}
 		mention.caret = caret;
+		if (mention.mode === 'command') {
+			// Commands are in `state`: filter here, and never ask the host for a row it already sent.
+			const changed = raw !== mention.query;
+			mention.query = raw;
+			mention.items = commandRows(raw);
+			if (changed) {
+				mention.active = 0;
+				mention.hint = '';
+			}
+			renderMention();
+			return;
+		}
 		if (!raw) {
 			mention.mode = 'categories';
 			mention.query = '';
@@ -3866,14 +3787,14 @@
 		}
 	}
 
-	function openMention(start, caret) {
+	function openMention(mode, start, caret) {
 		closeMention();
 		mention = {
-			mode: 'categories',
+			mode,
 			query: '',
 			start,
 			caret,
-			items: [],
+			items: mode === 'command' ? commandRows('') : [],
 			hint: '',
 			active: 0,
 			id: 0,
@@ -3933,8 +3854,15 @@
 				closeMention();
 				return false;
 			}
+			const row = rows[Math.max(0, Math.min(mention.active, rows.length - 1))];
+			// Enter on the exact name runs it: completing `/help` again would make the user press
+			// Enter twice for the command they already typed.
+			if (event.key === 'Enter' && mention.mode === 'command' && row.name.toLowerCase() === mention.query.toLowerCase()) {
+				closeMention();
+				return false;
+			}
 			event.preventDefault();
-			acceptMention(rows[Math.max(0, Math.min(mention.active, rows.length - 1))]);
+			acceptMention(row);
 			return true;
 		}
 		return false;
@@ -4385,18 +4313,25 @@
 			updateMention();
 			return;
 		}
-		if (event.isComposing || event.inputType !== 'insertText' || event.data !== '@') {
+		if (event.isComposing || event.inputType !== 'insertText') {
 			return;
 		}
 		const caret = input.selectionStart;
 		const at = caret - 1;
-		if (
-			at >= 0 &&
-			input.value[at] === '@' &&
-			mentionBoundary(at === 0 ? undefined : input.value[at - 1]) &&
-			input.value[at + 1] !== '"'
-		) {
-			openMention(at, caret);
+		if (event.data === '@') {
+			if (
+				at >= 0 &&
+				input.value[at] === '@' &&
+				mentionBoundary(at === 0 ? undefined : input.value[at - 1]) &&
+				input.value[at + 1] !== '"'
+			) {
+				openMention('categories', at, caret);
+			}
+			return;
+		}
+		// A slash starts a command only at the start of the prompt, where `slashName()` looks for it.
+		if (event.data === '/' && at >= 0 && input.value[at] === '/' && !input.value.slice(0, at).trim()) {
+			openMention('command', at, caret);
 		}
 	});
 	input.addEventListener('compositionstart', () => {

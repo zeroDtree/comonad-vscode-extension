@@ -47,10 +47,8 @@ import {
 import { applyPromptLayout } from '../lib/prompt-layout';
 import type {
 	AgentSpawnRequest,
-	ApprovalDecision,
 	AttachmentPart,
 	Capability,
-	DiagnosticLine,
 	ImageAttachment,
 	Message,
 	ModelContext,
@@ -62,8 +60,6 @@ import type {
 	ToolSpec,
 } from '../lib/types';
 import type { GenerationTrigger } from '../lib/generations';
-import type { WorkflowRun, WorkflowStage } from '../lib/workflow';
-import type { Workflows } from './workflow';
 import type { ToolOutcome } from './tools';
 import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
@@ -115,8 +111,6 @@ export interface TurnInput {
 	trigger?: GenerationTrigger;
 	/** Re-run the existing prompt at this transcript index, discarding it and every later turn. */
 	rewriteAt?: number;
-	/** Per-turn workflow choice: `off`, `always`, or a workflow id. */
-	workflow?: 'off' | 'always' | string;
 	/**
 	 * Called after UserPromptSubmit allowed the turn and before the transcript is cut. The surface
 	 * restores files here and announces the turn. Return false to cancel with nothing changed.
@@ -149,27 +143,13 @@ interface Turn {
 interface RunState {
 	ref: TurnRef;
 	sessionId: string;
-	/** The user's prompt, kept for the workflow stage directives. Empty for a replay-only generation. */
-	prompt: string;
-	/** `/workflow`'s per-turn override: `off`, `always`, or a workflow id. */
-	workflowOverride?: string;
 	/** The chat whose journal, provenance and review collect this run's writes. */
 	rootSessionId: string;
 	/** The subagent's name, for the audit trail; absent on the main agent. */
 	agentName?: string;
 	/** Workspace-relative files this run wrote through the tracked file tools. */
 	writes: Set<string>;
-	/** The turn's policy before a workflow stage narrowed it; finish writes this back to the chat. */
-	basePolicy?: SessionPolicy;
 	policy: SessionPolicy;
-	/** The workflow this turn runs, when the workflow plugin resolved one. */
-	workflow?: WorkflowRun;
-	/** Transcript length when the current workflow stage began. */
-	stageMark?: number;
-	/** Graph-step count when the current stage began, for the turn-wide budget. */
-	stageBaseStep?: number;
-	/** Editor errors that already existed when the workflow started; checks report only new ones. */
-	diagnosticBaseline?: Set<string>;
 	/** The model this turn already had to send without images (a reset, not a capability verdict). */
 	imagesOff?: string;
 	transcript: Message[];
@@ -683,8 +663,6 @@ export class Agent extends Service {
 			const state: RunState = {
 				ref,
 				sessionId: session.id,
-				prompt: text,
-				workflowOverride: input.workflow,
 				rootSessionId: session.id,
 				writes: new Set(),
 				policy: session.policy,
@@ -739,7 +717,11 @@ export class Agent extends Service {
 	async resume(sessionId: string, options: { surface?: string; signal?: AbortSignal } = {}): Promise<TurnResult> {
 		const session = this.ctx.sessions.require(sessionId);
 		const cursor = session.cursor;
-		if (!cursor) {
+		if (!cursor || !Array.isArray(cursor.payload)) {
+			if (cursor) {
+				session.cursor = null;
+				this.ctx.sessions.save(session);
+			}
 			return { sessionId, text: 'This session has no suspended turn.' };
 		}
 		const state = cursor.state as RunState;
@@ -749,42 +731,18 @@ export class Agent extends Service {
 			return { sessionId, text: 'Error: a turn is already running in this chat.' };
 		}
 		try {
-			const kind = cursor.kind ?? (Array.isArray(cursor.payload) ? 'tool' : 'gate');
-			let answer: ApprovalDecision;
-			if (kind === 'gate') {
-				const gate = gateFrom(cursor.payload);
-				answer = await this.ctx.approval.request({
-					calls: [],
-					gate,
-					reason: gate.title,
-					surface: options.surface,
-					sessionId,
-					signal: turn.signal,
-				});
-			} else {
-				const calls = Array.isArray(cursor.payload) ? (cursor.payload as ToolCall[]) : [];
-				answer = await this.ctx.approval.request({
-					calls,
-					reason: 'resume the suspended turn',
-					surface: options.surface,
-					sessionId,
-					signal: turn.signal,
-				});
-			}
+			const answer = await this.ctx.approval.request({
+				calls: cursor.payload as ToolCall[],
+				reason: 'resume the suspended turn',
+				surface: options.surface,
+				sessionId,
+				signal: turn.signal,
+			});
 			// A stop during the resume prompt leaves the original suspension intact and resumable.
 			if (turn.signal.aborted) {
 				return { sessionId, text: '', stopped: true };
 			}
-			state.basePolicy = session.policy;
 			state.policy = session.policy;
-			// A tool suspended in a workflow stage resumes under that stage's policy, not the base one.
-			const workflows = this.workflows();
-			if (kind === 'tool' && state.workflow && workflows) {
-				const stage = state.workflow.definition.stages.find((entry) => entry.id === state.workflow?.current);
-				if (stage) {
-					state.policy = workflows.policy(state.basePolicy, stage);
-				}
-			}
 			state.ref.surface = options.surface ?? state.ref.surface;
 			this.ctx.sessions.verifyModelContext(session);
 			// A manual summary may have moved the model context while the turn was suspended. Rebuild
@@ -801,7 +759,6 @@ export class Agent extends Service {
 			session.cursor = null;
 			this.ctx.sessions.save(session);
 			return await this.execute(session, state, turn, {
-				kind,
 				node: cursor.node,
 				value: answer !== 'deny',
 				payload: cursor.payload,
@@ -1252,58 +1209,8 @@ export class Agent extends Service {
 		try {
 			// Journal backfill can be slow on a remote filesystem; it must not outlive a Stop.
 			await abortable(signal, this.backfillCreated(session, state.policy.workingDirectory));
-			state.basePolicy ??= state.policy;
-			const workflows = this.workflows();
 
-			// A gate resumed after a reload asks once more, then continues the same run.
-			if (resume?.kind === 'gate') {
-				if (!workflows || !state.workflow) {
-					session.cursor = null;
-					return { sessionId: session.id, text: 'Error: the workflow that was waiting is no longer available.' };
-				}
-				if (resume.value === true) {
-					state.workflow = workflows.approve(state.workflow);
-					this.saveWorkflow(session, state);
-					return await this.runWorkflow(session, state, turn, workflows, undefined);
-				}
-				state.workflow = workflows.finalize(workflows.deny(state.workflow));
-				this.saveWorkflow(session, state);
-				this.finish(session, state);
-				return { sessionId: session.id, text: lastAssistant(state.transcript)?.content ?? '' };
-			}
-
-			if (!state.workflow && resume === undefined) {
-				const run = workflows?.resolve({
-					override: state.workflowOverride,
-					prompt: state.prompt,
-					trigger: state.trigger,
-					policy: state.policy,
-					toolsEnabled: state.toolsEnabled !== false,
-					subagent: state.filter !== undefined,
-					composed: !state.foldable,
-					hasTools: this.ctx.tools.visible(state.policy).length > 0,
-				});
-				if (run) {
-					state.workflow = run;
-					state.basePolicy = state.policy;
-					state.diagnosticBaseline = new Set(this.ctx.host.diagnostics().map(diagnosticKey));
-					this.saveWorkflow(session, state);
-				} else if (state.workflowOverride && state.workflowOverride !== 'off') {
-					this.notice(state.ref, 'That workflow cannot run here: check its stages, graphs and the session policy.');
-				}
-			}
-
-			if (state.workflow) {
-				if (!workflows) {
-					state.workflow = undefined;
-					session.cursor = null;
-					this.ctx.sessions.save(session);
-					return { sessionId: session.id, text: 'Error: this turn was running a workflow, but the workflow plugin is not loaded.' };
-				}
-				return await this.runWorkflow(session, state, turn, workflows, resume?.kind === 'tool' ? resume : undefined);
-			}
-
-			const outcome = await this.runStage(session, state, turn, undefined, resume, state.policy.maxSteps);
+			const outcome = await this.runStage(session, state, turn, resume);
 			state = outcome.state;
 			if (outcome.status === 'aborted') {
 				return this.aborted(session, state);
@@ -1316,7 +1223,7 @@ export class Agent extends Service {
 					...state,
 					messages: [...state.messages, { role: 'user', content: `(hook) ${stop.reason ?? 'keep working'}` }],
 				};
-				const again = await this.runStage(session, state, turn, undefined, undefined, state.policy.maxSteps);
+				const again = await this.runStage(session, state, turn);
 				state = again.state;
 				if (again.status === 'aborted') {
 					return this.aborted(session, state);
@@ -1330,16 +1237,6 @@ export class Agent extends Service {
 			}
 			this.ctx.log.message(`turn failed: ${describe(error)}`);
 			this.ctx.audit.write(session.id, { kind: 'error', message: describe(error) });
-			if (state.workflow) {
-				state.workflow = {
-					...state.workflow,
-					status: 'failed',
-					error: describe(error),
-					endedAt: Date.now(),
-					pendingGate: undefined,
-				};
-				this.saveWorkflow(session, state);
-			}
 			// A swipe or a regenerate that failed keeps the exchange it replaced: the chat is left with
 			// the reply it had, not with a prompt whose answer was thrown away.
 			if (state.restore) {
@@ -1350,23 +1247,21 @@ export class Agent extends Service {
 	}
 
 	/**
-	 * One graph run, with the tool-approval suspensions it can contain. Nothing about turns, stages,
-	 * Stop hooks or transcripts belongs here: the caller decides when the whole turn is over.
+	 * One graph run, with the tool-approval suspensions it can contain. Nothing about turns, Stop
+	 * hooks or transcripts belongs here: the caller decides when the whole turn is over.
 	 */
 	private async runStage(
 		session: Session,
 		state: RunState,
 		turn: Turn,
-		graphId?: string,
 		resume?: ResumeCursor,
-		maxSteps?: number,
 	): Promise<{ status: 'done' | 'aborted'; state: RunState; step: number }> {
 		const signal = turn.signal;
 		let cursor = resume;
 		for (;;) {
-			const graph = graphId ? this.ctx.graphs.get<RunState>(graphId) : this.graph();
+			const graph = this.graph();
 			const outcome = await runGraph(graph, state, {
-				maxSteps: maxSteps ?? state.policy.maxSteps,
+				maxSteps: state.policy.maxSteps,
 				resume: cursor,
 				signal,
 				choose: (request: SoftRequest) => this.ctx.llm.choose(state.policy.model, request, signal),
@@ -1386,7 +1281,7 @@ export class Agent extends Service {
 			// The suspension is where a turn can sit for a long time: write down everything it has
 			// done first, so the chat shows the work while the approval question is open.
 			this.persistTranscript(session, state);
-			session.cursor = { kind: 'tool', node: outcome.node, payload: outcome.payload, step: outcome.step, state };
+			session.cursor = { node: outcome.node, payload: outcome.payload, step: outcome.step, state };
 			this.ctx.sessions.save(session);
 			const answer = calls.length
 				? await this.ctx.approval.request({
@@ -1406,250 +1301,8 @@ export class Agent extends Service {
 				this.notice(state.ref, `Added allow rule: ${rule}`);
 			}
 			session.cursor = null;
-			cursor = { kind: 'tool', node: outcome.node, value: answer !== 'deny', payload: outcome.payload, step: outcome.step };
+			cursor = { node: outcome.node, value: answer !== 'deny', payload: outcome.payload, step: outcome.step };
 		}
-	}
-
-	/**
-	 * The outer workflow loop. Stages are graph runs; checks are host runs; a gate is the only place
-	 * the user enters. Stop and finish happen once, after the loop, never per stage.
-	 */
-	private async runWorkflow(session: Session, state: RunState, turn: Turn, workflows: Workflows, resume?: ResumeCursor): Promise<TurnResult> {
-		const signal = turn.signal;
-		let cursor = resume;
-		for (;;) {
-			const run = state.workflow!;
-			const cap = state.basePolicy?.maxSteps ?? state.policy.maxSteps ?? 0;
-			if (cap > 0 && run.steps >= cap) {
-				state.workflow = workflows.finalize({ ...run, status: 'failed', error: `step budget exhausted (${cap})` });
-				this.saveWorkflow(session, state);
-				this.finish(session, state);
-				return { sessionId: session.id, text: lastAssistant(state.transcript)?.content ?? '' };
-			}
-			const step = workflows.next(run);
-			if (step.kind === 'finish') {
-				break;
-			}
-			if (step.kind === 'gate') {
-				const allowed = await this.askGate(session, state, turn);
-				if (signal.aborted) {
-					return this.aborted(session, state);
-				}
-				if (!allowed) {
-					state.workflow = workflows.finalize(workflows.deny(state.workflow!));
-					this.saveWorkflow(session, state);
-					this.finish(session, state);
-					return { sessionId: session.id, text: lastAssistant(state.transcript)?.content ?? '' };
-				}
-				state.workflow = workflows.approve(state.workflow!);
-				this.saveWorkflow(session, state);
-				continue;
-			}
-			if (step.kind === 'checks') {
-				state.workflow = workflows.beginCheck(state.workflow!, step.stage.id);
-				this.saveWorkflow(session, state);
-				const report = await workflows.check(state.workflow!, step.stage, {
-					base: state.basePolicy ?? state.policy,
-					workspace: (state.basePolicy ?? state.policy).workingDirectory,
-					sessionId: session.id,
-					writes: [...state.writes],
-					diagnosticBaseline: state.diagnosticBaseline ?? new Set(),
-					signal,
-				});
-				if (signal.aborted) {
-					return this.aborted(session, state);
-				}
-				state.workflow = workflows.afterCheck(state.workflow!, step.stage, report);
-				this.saveWorkflow(session, state);
-				continue;
-			}
-
-			const stage = step.stage;
-			const running = state.workflow!.stages[stage.id]?.status === 'running';
-			if (!running) {
-				state.workflow = workflows.enter(state.workflow!, stage.id);
-				state = this.applyStage(state, stage);
-				state.stageBaseStep = cursor?.step ?? 0;
-				this.saveWorkflow(session, state);
-			} else {
-				// A tool suspended inside this stage resumes under the stage's policy, not the base one.
-				state.policy = workflows.policy(state.basePolicy ?? state.policy, stage);
-			}
-			const outcome = await this.runStage(
-				session,
-				state,
-				turn,
-				stage.graph,
-				cursor,
-				this.stageBudget(state, stage, cursor?.step ?? 0),
-			);
-			cursor = undefined;
-			state = outcome.state;
-			if (outcome.status === 'aborted') {
-				return this.aborted(session, state);
-			}
-			const summary = this.stageOutput(state);
-			const plan = stage.id === 'plan' ? summary || this.planOutput(state) : '';
-			const base = workflows.finish(state.workflow!, stage.id, summary);
-			state.workflow = {
-				...base,
-				changed: [...state.writes],
-				...(stage.id === 'research' && summary ? { notes: summary } : {}),
-				...(plan ? { plan } : {}),
-				steps: base.steps + Math.max(0, outcome.step - (state.stageBaseStep ?? 0)),
-			};
-			// A plan written through `write_plan` has no assistant text; the gate still shows it.
-			if (plan && state.workflow.pendingGate?.after === stage.id) {
-				state.workflow = { ...state.workflow, pendingGate: { ...state.workflow.pendingGate, body: plan } };
-			}
-			state.stageMark = undefined;
-			state.stageBaseStep = undefined;
-			this.saveWorkflow(session, state);
-			const turnCap = state.basePolicy?.maxSteps ?? state.policy.maxSteps ?? 0;
-			if (turnCap > 0 && state.workflow.steps >= turnCap) {
-				state.workflow = workflows.finalize({
-					...state.workflow,
-					status: 'failed',
-					error: `step budget exhausted (${turnCap})`,
-				});
-				this.saveWorkflow(session, state);
-				this.finish(session, state);
-				return { sessionId: session.id, text: lastAssistant(state.transcript)?.content ?? '' };
-			}
-		}
-
-		// One Stop hook for the whole turn. A blocking hook gets one more pass through the last
-		// agent stage, so a workflow does not quietly ignore the same contract a normal turn honors.
-		signal.throwIfAborted();
-		const stop = await this.fireStop(session, state, signal);
-		if (stop.blocked) {
-			const last = this.lastAgentStage(state.workflow!);
-			if (last) {
-				state = {
-					...state,
-					messages: [...state.messages, { role: 'user', content: `(hook) ${stop.reason ?? 'keep working'}` }],
-				};
-				state.workflow = workflows.enter(state.workflow!, last.id);
-				state = this.applyStage(state, last);
-				state.stageBaseStep = 0;
-				this.saveWorkflow(session, state);
-				const outcome = await this.runStage(session, state, turn, last.graph, undefined, this.stageBudget(state, last));
-				state = outcome.state;
-				if (outcome.status === 'aborted') {
-					return this.aborted(session, state);
-				}
-				state.workflow = workflows.finish(state.workflow!, last.id, this.stageOutput(state));
-				state.stageMark = undefined;
-				this.saveWorkflow(session, state);
-			}
-		}
-		state.workflow = workflows.finalize(state.workflow!);
-		this.saveWorkflow(session, state);
-		this.finish(session, state);
-		return { sessionId: session.id, text: lastAssistant(state.transcript)?.content ?? '' };
-	}
-
-	private workflows(): Workflows | undefined {
-		return this.ctx.get('workflows') as Workflows | undefined;
-	}
-
-	/** Applies a stage's policy and adds its request-only directive to the message list. */
-	private applyStage(state: RunState, stage: WorkflowStage): RunState {
-		const workflows = this.workflows();
-		if (!workflows || !state.workflow) {
-			return state;
-		}
-		const policy = workflows.policy(state.basePolicy ?? state.policy, stage);
-		const directive = workflows.directive(state.workflow, stage);
-		const messages = state.messages.filter((message) => !(message.role === 'user' && message.content.startsWith('(workflow)')));
-		const message: Message = { role: 'user', content: directive, at: Date.now() };
-		messages.push(message);
-		return { ...state, policy, messages, trailer: [message], stageMark: state.transcript.length };
-	}
-
-	/**
-	 * The stage's graph-step budget: its own cap when it has one, bounded by what is left of the
-	 * turn's cap. A resumed graph starts its step counter at the cursor's step, so the remaining
-	 * allowance is added to that start rather than replacing it.
-	 */
-	private stageBudget(state: RunState, stage: WorkflowStage, cursorStep = 0): number {
-		const turnCap = state.basePolicy?.maxSteps ?? state.policy.maxSteps ?? 0;
-		const own = stage.steps && stage.steps > 0 ? stage.steps : 0;
-		if (turnCap <= 0) {
-			return own;
-		}
-		const remaining = Math.max(0, turnCap - (state.workflow?.steps ?? 0));
-		const allowed = remaining + cursorStep;
-		return own > 0 ? Math.min(own, allowed) : allowed;
-	}
-
-	/** The last assistant text the current stage produced. */
-	private stageOutput(state: RunState): string {
-		return lastAssistant(state.transcript.slice(state.stageMark ?? 0))?.content ?? '';
-	}
-
-	/** A plan the model wrote through `write_plan` instead of in its reply. */
-	private planOutput(state: RunState): string {
-		for (let index = state.transcript.length - 1; index >= (state.stageMark ?? 0); index -= 1) {
-			const message = state.transcript[index];
-			if (message?.role !== 'assistant') {
-				continue;
-			}
-			for (const call of message.toolCalls ?? []) {
-				if (call.name !== 'write_plan') {
-					continue;
-				}
-				try {
-					const args = JSON.parse(call.arguments) as { content?: unknown };
-					if (typeof args.content === 'string' && args.content.trim()) {
-						return args.content;
-					}
-				} catch {
-					// A malformed call is the model's; the stage summary still stands.
-				}
-			}
-		}
-		return '';
-	}
-
-	private lastAgentStage(run: WorkflowRun): WorkflowStage | undefined {
-		for (const id of [...run.order].reverse()) {
-			const stage = run.definition.stages.find((entry) => entry.id === id);
-			if (stage?.run === 'agent') {
-				return stage;
-			}
-		}
-		return undefined;
-	}
-
-	/** Parks the turn on a workflow gate, with a cursor a reload can resume. */
-	private async askGate(session: Session, state: RunState, turn: Turn): Promise<boolean> {
-		const gate = state.workflow?.pendingGate;
-		if (!gate) {
-			return true;
-		}
-		session.cursor = {
-			kind: 'gate',
-			node: '',
-			payload: { title: gate.title, body: gate.body },
-			step: 0,
-			state,
-		};
-		this.saveWorkflow(session, state);
-		const answer = await this.ctx.approval.request({
-			calls: [],
-			gate: { title: gate.title, body: gate.body },
-			reason: gate.title,
-			surface: state.ref.surface,
-			sessionId: session.id,
-			signal: turn.signal,
-		});
-		if (turn.signal.aborted) {
-			return false;
-		}
-		session.cursor = null;
-		this.ctx.sessions.save(session);
-		return answer !== 'deny';
 	}
 
 	private fireStop(session: Session, state: RunState, signal: AbortSignal) {
@@ -1662,28 +1315,10 @@ export class Agent extends Service {
 		);
 	}
 
-	/** Persists the workflow snapshot and tells the chat to redraw its stage strip. */
-	private saveWorkflow(session: Session, state: RunState): void {
-		session.workflow = state.workflow;
-		this.ctx.sessions.save(session);
-		if (state.workflow) {
-			this.ctx.emit('agent/workflow', state.ref, state.workflow);
-			this.ctx.audit.write(session.id, {
-				kind: 'workflow',
-				workflowId: state.workflow.workflowId,
-				stage: state.workflow.current,
-				status: state.workflow.status,
-			});
-		}
-	}
-
 	/** The clean end of a stopped turn: no Stop hook, no stale reply, a wire-valid transcript. */
 	private aborted(session: Session, state: RunState): TurnResult {
 		this.settleCancelledCalls(state);
 		session.cursor = null;
-		if (state.workflow) {
-			state.workflow = { ...state.workflow, status: 'stopped', pendingGate: undefined, endedAt: Date.now() };
-		}
 		this.finish(session, state, { aborted: true });
 		const reply = lastAssistant(state.transcript.slice(state.prior.length))?.content.trim() ?? '';
 		return { sessionId: session.id, text: reply, stopped: true };
@@ -1786,9 +1421,7 @@ export class Agent extends Service {
 			session.turnIndex += 1;
 		}
 		session.cursor = null;
-		// A workflow stage may have narrowed the policy; the chat keeps the policy it had before it.
-		session.policy = state.basePolicy ?? state.policy;
-		session.workflow = state.workflow;
+		session.policy = state.policy;
 		this.ctx.sessions.invalidateModelContext(session, session.transcript.length);
 		this.ctx.sessions.save(session);
 		if (!SILENT_TRIGGERS.has(state.trigger)) {
@@ -2502,7 +2135,6 @@ export class Agent extends Service {
 				const state: RunState = {
 					ref: { sessionId: subId },
 					sessionId: subId,
-					prompt: request.prompt,
 					rootSessionId: parent.rootSessionId,
 					agentName: agent?.name ?? 'explore',
 					writes: new Set(),
@@ -2805,18 +2437,4 @@ function parseArguments(text: string): unknown {
 
 function clip(text: string, limit: number): string {
 	return text.length > limit ? `${text.slice(0, limit)}…` : text;
-}
-
-/** The key a check's diagnostic baseline uses; the same spelling in the service and the cursor. */
-function diagnosticKey(line: DiagnosticLine): string {
-	return `${line.file}:${line.line}:${line.column} ${line.message}`;
-}
-
-/** A gate from an untrusted cursor payload. */
-function gateFrom(payload: unknown): { title: string; body: string } {
-	const record = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
-	return {
-		title: typeof record.title === 'string' && record.title.trim() ? record.title : 'Approve the next stage',
-		body: typeof record.body === 'string' ? record.body : '',
-	};
 }

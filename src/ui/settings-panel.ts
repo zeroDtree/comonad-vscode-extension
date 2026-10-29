@@ -966,7 +966,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       </div>
       <div class="field">
         <label for="steps">Max steps</label>
-        <p class="hint">Maximum graph steps per turn. 0 means no limit. A workflow stage uses its own budget when it sets one, bounded by this number.</p>
+        <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
         <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
       </div>
     </div>
@@ -1075,9 +1075,15 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <p class="hint">Steps a subagent may take when Subagent steps is Custom. 0 means no limit.</p>
         <input id="subagent-steps" class="control" type="number" min="0" data-key="subagentSteps" />
       </div>
+      <p class="hint" id="subagent-budget-note"></p>
     </div>
-    <p class="group-note">Read-only tools are always available. <b>Files</b> grants the tracked write tools (<code>write_file</code>, <code>apply_patch</code>, <code>apply_edits</code>); <b>Test</b> grants <code>run_shell_test</code>, whose workspace is read-only and whose only writable place is the scratch directory. Full shell and plan writes are never granted to a subagent. The agent's own <code>tools</code> list still selects which tools it uses, and the parent mode must allow the capability too. Changes apply to the next spawn.</p>
-    <table id="subagent-rows"></table>
+    <h2 class="group-title">Agents</h2>
+    <p class="group-note">Every subagent can use read-only tools. The grants below add the ability to write files and run tests; full shell and plan writes are never granted. Changes apply to the next spawn.</p>
+    <div id="subagent-rows"></div>
+    <details class="help-fold">
+      <summary>How permissions work</summary>
+      <p class="group-note">Read-only tools are always available. <b>Write files</b> grants the tracked write tools (<code>write_file</code>, <code>apply_patch</code>, <code>apply_edits</code>); <b>Run tests</b> grants <code>run_shell_test</code>, whose workspace is read-only and whose only writable place is the scratch directory. Full shell and plan writes are never granted to a subagent. The agent's own <code>tools</code> list still selects which tools it uses, and the parent mode must allow the capability too. Changes apply to the next spawn.</p>
+    </details>
   </section>
 
 ${paneSections}

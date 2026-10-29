@@ -18,7 +18,9 @@ The title bar has three controls: **Recent Chats**, **Settings** and **New Sessi
 
 ## Composer
 
-Type a prompt, a slash command, or `@` to reference code. `Enter` sends; `Shift+Enter` adds a line.
+Type a prompt, a slash command, or `@` to reference code. Typing `/` at the start of a prompt opens
+the command picker — the same list, keys and filters as the `@` picker, with each command's
+description and argument hint. `Enter` sends; `Shift+Enter` adds a line.
 Paste or drop images to attach them (up to six per message, 4 MiB each, 12 MiB total). A text paste
 of 20,000 characters or more becomes a **Pasted text** chip above the input and travels as a text
 attachment (a single paste keeps up to 200,000 characters), so the composer stays small and typing

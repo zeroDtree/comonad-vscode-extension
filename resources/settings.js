@@ -52,7 +52,8 @@
 	const panes = new Map();
 	let paneSlices = {};
 	const lastNote = new Map();
-	/** What a pane's script is handed: the channel, the store, and where its own updates go. */
+	/** What a pane's script is handed: the channel, the store, and where its own updates go. A pane
+	 *  that keeps a private draft registers `isDirty`, which the Close button asks before discarding. */
 	window.comonadPanes = {
 		store,
 		post: (id, message) => post({ type: 'pane', pane: id, message }),
@@ -264,11 +265,9 @@
 			const group = title.nextElementSibling;
 			title.hidden = Boolean(query) && (!group || group.hidden);
 		}
-		// The Subagents tab is a table, not a stack of `.field` rows.
-		for (const row of document.querySelectorAll('section[data-pane="subagents"] #subagent-rows tr')) {
-			if (!row.querySelector('th')) {
-				row.hidden = Boolean(query) && !row.textContent.toLowerCase().includes(query);
-			}
+		// The Subagents tab is a list of agent cards, not a stack of `.field` rows.
+		for (const card of document.querySelectorAll('section[data-pane="subagents"] #subagent-rows .subagent-card')) {
+			card.hidden = Boolean(query) && !card.textContent.toLowerCase().includes(query);
 		}
 	}
 	if (search) {
@@ -370,38 +369,44 @@
 		}
 	}
 
-	/** The Subagents tab: its step budget and one row per catalog agent, with the grant each
-	 *  capability needs. */
+	/** The Subagents tab: its step budget and one card per catalog agent, with the grant each
+	 *  capability needs. The tools live behind an expander so the list stays scannable. */
 	function renderSubagents() {
 		const config = state.config;
 		put($('subagent-steps-mode'), config.subagentStepsMode);
 		put($('subagent-steps'), String(config.subagentSteps));
 		syncSubagentSteps();
 		const data = state.subagents;
-		const table = $('subagent-rows');
-		if (!data || !table) {
+		const list = $('subagent-rows');
+		if (!data || !list) {
 			return;
 		}
-		table.innerHTML = '';
-		const head = document.createElement('tr');
-		for (const label of ['Agent', 'Source', 'Read', 'Files', 'Test', 'Tools']) {
-			const th = document.createElement('th');
-			th.textContent = label;
-			head.append(th);
-		}
-		const thead = document.createElement('thead');
-		thead.append(head);
-		const tbody = document.createElement('tbody');
-		table.append(thead, tbody);
+		list.innerHTML = '';
 		for (const agent of data.agents || []) {
-			const row = document.createElement('tr');
-			const name = document.createElement('td');
+			const card = document.createElement('div');
+			card.className = 'subagent-card';
+
+			const head = document.createElement('div');
+			head.className = 'subagent-head';
+			const name = document.createElement('span');
 			name.className = 'subagent-name';
 			name.textContent = agent.name;
-			const description = document.createElement('div');
+			const source = document.createElement('span');
+			source.className = 'subagent-src';
+			source.textContent = agent.builtin ? 'built-in' : 'custom';
+			// The effective capability, spelled out — not a bare ✓ the reader has to interpret.
+			const caps = document.createElement('span');
+			caps.className = 'subagent-caps';
+			const cap = agent.files && agent.test ? 'Write + Test' : agent.files ? 'Write' : agent.test ? 'Test' : 'Read-only';
+			caps.textContent = cap;
+			head.append(name, source, caps);
+			card.append(head);
+
+			const description = document.createElement('p');
 			description.className = 'subagent-note';
 			description.textContent = agent.description || 'No description.';
-			name.append(description);
+			card.append(description);
+
 			const notes = [];
 			if (agent.files && !agent.canFiles) {
 				notes.push('Files is granted, but no tracked write tool is available.');
@@ -416,23 +421,20 @@
 				notes.push('run_shell_test is listed but not granted.');
 			}
 			if (notes.length) {
-				const note = document.createElement('div');
-				note.className = 'subagent-note';
+				const note = document.createElement('p');
+				note.className = 'subagent-note subagent-warn';
 				note.textContent = notes.join(' ');
-				name.append(note);
+				card.append(note);
 			}
-			const source = document.createElement('td');
-			source.textContent = agent.builtin ? 'built-in' : 'custom';
-			const read = document.createElement('td');
-			read.className = 'subagent-check';
-			read.textContent = '✓';
-			row.append(name, source, read);
-			for (const [key, allowed] of [
-				['files', agent.canFiles],
-				['test', agent.canTest],
+
+			const grants = document.createElement('div');
+			grants.className = 'row subagent-grants';
+			for (const [key, allowed, label] of [
+				['files', agent.canFiles, 'Write files'],
+				['test', agent.canTest, 'Run tests'],
 			]) {
-				const cell = document.createElement('td');
-				cell.className = 'subagent-check';
+				const wrap = document.createElement('label');
+				wrap.className = 'check';
 				const box = document.createElement('input');
 				box.type = 'checkbox';
 				box.checked = Boolean(agent[key]);
@@ -441,14 +443,42 @@
 				box.disabled = !allowed && !agent[key];
 				box.title = allowed ? '' : key === 'files' ? 'No tracked write tool is available to this agent.' : 'run_shell_test is not available to this agent.';
 				box.addEventListener('change', () => saveSubagent(agent, key, box.checked));
-				cell.append(box);
-				row.append(cell);
+				wrap.append(box, document.createTextNode(' ' + label));
+				grants.append(wrap);
 			}
-			const tools = document.createElement('td');
-			tools.className = 'subagent-tools';
-			tools.textContent = (agent.tools || []).join(', ') || '—';
-			row.append(tools);
-			tbody.append(row);
+			// The tool list is a wrapped flow of chips behind a toggle: the row stays one line, and
+			// opened, the chips take a full-width second line (`flex-basis: 100%`). Both the toggle
+			// and the list are direct flex items of the grant row — a `details` dissolved into the
+			// row with `display: contents` cannot work here, because its UA slot stops the list's
+			// percentage basis from resolving against the row, leaving the chips inline beside the
+			// checkboxes instead of on their own line.
+			const toolNames = agent.tools || [];
+			const count = toolNames.length + (toolNames.length === 1 ? ' tool' : ' tools');
+			const toggle = document.createElement('button');
+			toggle.type = 'button';
+			toggle.className = 'subagent-tools-toggle';
+			toggle.setAttribute('aria-expanded', 'false');
+			toggle.textContent = '▸ ' + count;
+			const flow = document.createElement('div');
+			flow.className = 'subagent-tool-list';
+			flow.hidden = true;
+			if (!toolNames.length) {
+				flow.textContent = '—';
+			}
+			for (const tool of toolNames) {
+				const chip = document.createElement('code');
+				chip.textContent = tool;
+				flow.append(chip);
+			}
+			toggle.addEventListener('click', () => {
+				const open = flow.hidden;
+				flow.hidden = !open;
+				toggle.setAttribute('aria-expanded', String(open));
+				toggle.textContent = (open ? '▾ ' : '▸ ') + count;
+			});
+			grants.append(toggle, flow);
+			card.append(grants);
+			list.append(card);
 		}
 	}
 
@@ -469,12 +499,32 @@
 	}
 
 	// The budget input only applies to `custom`: leaving it enabled under `inherit` would invite edits
-	// that never take effect.
+	// that never take effect. The effective line says what the current settings actually resolve to,
+	// so the reader never has to guess whether the greyed-out number is the one in force.
 	const syncSubagentSteps = () => {
 		const mode = $('subagent-steps-mode');
 		const steps = $('subagent-steps');
 		if (mode && steps) {
 			steps.disabled = mode.value === 'inherit';
+		}
+		const note = $('subagent-budget-note');
+		if (!note || !state || !state.config) {
+			return;
+		}
+		const config = state.config;
+		// The DOM value wins for the mode (a change event lands before the next state push), but the
+		// number comes from state so a just-pushed Max steps is reflected immediately.
+		const inherit = (mode ? mode.value : config.subagentStepsMode) === 'inherit';
+		if (inherit) {
+			const budget = Number(config.maxSteps) || 0;
+			note.textContent = budget
+				? `Effective: ${budget} steps — inherited from Agent → Max steps.`
+				: 'Effective: unlimited steps — inherited from Agent → Max steps (0 = no limit).';
+		} else {
+			const budget = Number(steps && steps.value) || 0;
+			note.textContent = budget
+				? `Effective: ${budget} steps per subagent (Custom).`
+				: 'Effective: unlimited steps per subagent (Custom, 0 = no limit).';
 		}
 	};
 	$('subagent-steps-mode').addEventListener('change', syncSubagentSteps);
@@ -552,7 +602,15 @@
 	}
 
 	$('save').addEventListener('click', save);
-	$('close').addEventListener('click', () => post({ type: 'close' }));
+	// Close drops unsaved edits: the form's own dirty flag, and any pane that reports its own
+	// (a plugin editor may keep a private draft), so a half-edited pane is never lost silently.
+	$('close').addEventListener('click', () => {
+		const paneDirty = [...panes.values()].some((handlers) => typeof handlers.isDirty === 'function' && handlers.isDirty());
+		if ((dirty || paneDirty) && !window.confirm('Close Settings and discard the unsaved changes?')) {
+			return;
+		}
+		post({ type: 'close' });
+	});
 
 	/* ------------------------------------------------- working directory picker */
 

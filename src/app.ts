@@ -25,7 +25,6 @@ import { referencesPlugin } from './services/references';
 import { tokenizersPlugin } from './services/tokenizers';
 import { toolsPlugin } from './services/tools';
 import { usagePlugin } from './services/usage';
-import { workflowPlugin } from './services/workflow';
 import { fsTools } from './tools/fs';
 import { mathTools } from './tools/math';
 import { agentTools, askTools, memoryTools, skillTools } from './tools/misc';
@@ -88,7 +87,6 @@ export const PLUGINS: Record<string, Plugin> = {
 	commands: commandsPlugin,
 	graph: graphPlugin,
 	agent: agentPlugin,
-	workflow: workflowPlugin,
 	'provider-openai': openaiPlugin,
 	'tools-fs': fsTools,
 	'tools-shell': shellTools,
@@ -151,8 +149,6 @@ export const ROWS: PluginRow[] = [
 	// The graph engine: the agent's loop is compiled by this plugin from the editable Mermaid source.
 	{ id: 'graph', group: 'kernel' },
 	{ id: 'agent', group: 'kernel' },
-	// Workflows sit above the turn: the agent asks this service for the next stage and runs it.
-	{ id: 'workflow', group: 'kernel' },
 
 	// The model adapter: every profile is an OpenAI-compatible endpoint (DeepSeek by default).
 	{ id: 'provider-openai', group: 'model' },

@@ -203,14 +203,6 @@ export interface TodoItem {
 	status: 'pending' | 'in_progress' | 'completed';
 }
 
-/** One editor diagnostic the host can report, with an absolute file path. */
-export interface DiagnosticLine {
-	file: string;
-	line: number;
-	column: number;
-	message: string;
-}
-
 export interface BackgroundTask {
 	id: string;
 	command: string;
@@ -330,6 +322,4 @@ export interface ApprovalRequest {
 	/** The chat that owns the request; a surface shows the card only for that chat. */
 	sessionId: string;
 	surface?: string;
-	/** A workflow gate: the surface shows the body and offers Approve / Deny, with no Always. */
-	gate?: { title: string; body: string };
 }

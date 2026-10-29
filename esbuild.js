@@ -168,7 +168,7 @@ async function main() {
 						'src/test/extension.test.ts',
 						'src/test/activation.test.ts',
 						'src/test/cancellation.test.ts',
-						'src/test/workflow.test.ts',
+						'src/test/graph.test.ts',
 					],
 					outdir: 'out/test',
 					sourcemap: true,

@@ -12,12 +12,8 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 ### Highlights
 
-- **Graphs and workflows are plugins.** The graph engine now owns named Mermaid graphs, a node/route
-  registry and a dedicated **Graph** tab with a live preview. A new **Workflow** plugin composes those
-  graphs into user-editable stages, gates and host checks. The shipped **Standard coding task** is
-  Research → Plan (approval) → Implement → Verify → Review; verification reads fresh editor errors
-  in the files this turn wrote and runs the commands you configure, then sends failures back to the
-  repair stage. Customize both in Settings; `/workflow [id] [task]` runs one for a single turn.
+- **Graphs are plugins.** The graph engine now owns named Mermaid graphs, a node/route registry and a
+  dedicated **Graph** tab with a live preview. Edit the source in Settings → Graph.
 - **Compaction no longer rewrites the chat.** The canonical transcript is kept in full; a summary
   card and model-context coverage live beside it. Original turns expand from the card, older turns
   page in on demand, and restore points no longer move. `/summarize --rebuild` can rewrite the
@@ -53,7 +49,9 @@ Highlights are below; the full implementation notes are linked at the end. The u
 - **Remote SSH, WSL and Dev Containers** are first-class; credentials stay client-side and model calls
   originate on the remote host.
 - **Images, `@` references and in-place prompt editing** make the chat a working surface, not just a
-  log.
+  log. Typing `/` at the start of a prompt opens the same picker for every registered command and
+  every `.comonad/commands/*.md`, with descriptions and argument hints, filtered as you type; Enter
+  on an exact name runs it and Tab completes it.
 - **The SillyTavern content layer** is complete enough to move cards, books, personas and presets
   between the two tools, and it ships as an optional plugin.
 - **Every feature is a plugin** — including the tool tree and the journal — and a plugin can be

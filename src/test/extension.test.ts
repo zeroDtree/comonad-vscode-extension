@@ -127,7 +127,6 @@ import { INJECTION_POSITION } from 'comonad-plugin-tavern/lib/prompts';
 import { PROMPT_LIBRARY_KEY } from 'comonad-plugin-tavern/lib/preset';
 import { tavernSettings, TAVERN_SETTING_KEYS, WI_SETTINGS_DEFAULTS } from 'comonad-plugin-tavern/lib/settings';
 import { GRAPH_SETTING_KEYS } from '../services/graph';
-import { WORKFLOW_SETTING_KEYS } from '../services/workflow';
 import { embedTexts } from 'comonad-plugin-tavern/lib/vectors';
 import { webPlan } from '../services/web-tokenizers';
 import type { GenerationTrigger, WorldEntry } from 'comonad-plugin-tavern/lib/types';
@@ -2246,7 +2245,7 @@ suite('Comonad domain', () => {
 
 	test('a setting is written to the scope that already holds it, else the user’s own', () => {
 		// A project value shadows the user value; writing the user one would leave the panel reading
-		// the project's old value back, which is how saving a workflow looked like it undid itself.
+		// the project's old value back, which is how saving a setting looked like it undid itself.
 		assert.strictEqual(settingsTarget({ workspaceValue: { enabled: true } }), vscode.ConfigurationTarget.Workspace);
 		assert.strictEqual(settingsTarget({ workspaceFolderValue: { enabled: true } }), vscode.ConfigurationTarget.WorkspaceFolder);
 		assert.strictEqual(
@@ -2272,7 +2271,7 @@ suite('Comonad domain', () => {
 		assert.strictEqual(manifest.capabilities?.untrustedWorkspaces?.supported, 'limited', 'project plugins and hooks need trust');
 		const declared = new Set(Object.keys(manifest.contributes.configuration.properties).map((key) => key.replace(/^comonad\./, '')));
 		// The kernel reads its own keys; the tavern layer's keys are its own list, in its own package.
-		const read = new Set<string>([...CONFIG_KEYS, ...TAVERN_SETTING_KEYS, ...GRAPH_SETTING_KEYS, ...WORKFLOW_SETTING_KEYS]);
+		const read = new Set<string>([...CONFIG_KEYS, ...TAVERN_SETTING_KEYS, ...GRAPH_SETTING_KEYS]);
 		// A setting the manifest declares but no code reads is a setting the user cannot change: the
 		// panel writes it and nothing comes back. Every `comonad.tavern*` and `comonad.wi*` setting was
 		// in exactly that state.
@@ -2322,7 +2321,7 @@ suite('Comonad domain', () => {
 			'host', 'log', 'settings',
 		]);
 		// Helpers and pane factories take the caller's context; they are not plugins and declare no inject.
-		const helpers = new Set(['graph-pane.ts', 'workflow-pane.ts', 'journal-actions.ts', 'mentions.ts']);
+		const helpers = new Set(['graph-pane.ts', 'journal-actions.ts', 'mentions.ts']);
 		const scanned: string[] = [];
 		for (const file of readdirSync(dir).filter((name) => name.endsWith('.ts') && !helpers.has(name))) {
 			const source = readFileSync(join(dir, file), 'utf8');
@@ -3382,6 +3381,32 @@ suite('Cordis kernel', () => {
 		}
 	});
 
+	test('the command menu merges registered and custom commands, the registered one owning a shared name', async () => {
+		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
+		try {
+			await kernel.ctx.plugin(slashCommands);
+			const builtin = kernel.ctx.commands.suggestions().find((row) => row.name === 'plan');
+			assert.ok(builtin && !builtin.custom && builtin.hint === '[task]', 'a built-in row carries its argument hint');
+
+			const dir = join(kernel.host.workspace(), '.comonad', 'commands');
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, 'explain.md'), '---\ndescription: Explain a file\nargument-hint: <path>\n---\nRead $ARGUMENTS.\n');
+			// A custom file under a registered name never runs: `handle()` resolves the spec first.
+			writeFileSync(join(dir, 'plan.md'), '---\ndescription: shadowed\n---\nnot this\n');
+			await kernel.ctx.catalog.reload();
+
+			const rows = kernel.ctx.commands.suggestions();
+			const explain = rows.find((row) => row.name === 'explain');
+			assert.ok(explain?.custom === true, 'the custom command is in the menu');
+			assert.strictEqual(explain.description, 'Explain a file');
+			assert.strictEqual(explain.hint, '<path>');
+			const plan = rows.find((row) => row.name === 'plan');
+			assert.ok(plan && !plan.custom && plan.description !== 'shadowed', 'the registered command owns the name');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('the tavern is an installable plugin: the shipped tree has no row for it, and mounting one brings it back', async () => {
 		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
 		try {
@@ -3554,30 +3579,19 @@ suite('Cordis kernel', () => {
 			assert.ok(!escaped.includes('<script>alert(1)</script>'), 'a pane cannot close the attribute and open a script');
 			assert.match(escaped, /&lt;b&gt;no&lt;\/b&gt;/, 'and its label is text, not markup');
 
-			// The graph and workflow plugins contribute their own panes, with their own clients.
+			// The graph plugin contributes its own pane, with its own client.
 			await kernel.ctx.plugin(panesPlugin);
 			await new Promise((resolve) => setTimeout(resolve, 0));
 			const panes = kernel.ctx.panes.list();
 			const graph = panes.find((entry) => entry.id === 'graph');
-			const workflow = panes.find((entry) => entry.id === 'workflow');
 			assert.ok(graph, 'the graph plugin registered its tab');
-			assert.ok(workflow, 'the workflow plugin registered its tab');
-			assert.ok((graph?.order ?? 100) < (workflow?.order ?? 100), 'graph comes before workflow');
-			const pluginsDocument = settingsDocument(panel.webview, vscode.Uri.file(root), 'workflow', panes);
+			const pluginsDocument = settingsDocument(panel.webview, vscode.Uri.file(root), 'graph', panes);
 			assert.match(pluginsDocument, /data-tab="graph"/);
-			assert.match(pluginsDocument, /data-tab="workflow"/);
 			assert.match(pluginsDocument, /<section data-pane="graph" hidden>/);
-			assert.match(pluginsDocument, /<section data-pane="workflow" hidden>/);
 			assert.match(pluginsDocument, /id="g-source"/, 'the graph editor is in the graph pane');
-			assert.match(pluginsDocument, /id="w-pipeline"/, 'the workflow pipeline is in the workflow pane');
 			const paneHost = { uri: () => '', refresh: () => undefined };
 			const graphState = graph?.controller?.(paneHost).state() as { graphs?: unknown[] } | undefined;
 			assert.ok(graphState?.graphs?.length, 'the graph pane reads the compiled graph list');
-			const workflowState = workflow?.controller?.(paneHost).state() as
-				| { library?: { workflows?: unknown[] }; graphs?: unknown[] }
-				| undefined;
-			assert.ok(workflowState?.library?.workflows?.length, 'the workflow pane reads the shipped library');
-			assert.ok(workflowState?.graphs?.length, 'and the graphs its stages may pick');
 		} finally {
 			panel.dispose();
 			await kernel.dispose();
@@ -9305,13 +9319,16 @@ suite('Explicit references', () => {
 		}
 	});
 
-	test('the chat document has a reference picker and the assets style it', () => {
+	test('the chat document has a picker for references and slash commands', () => {
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.css'), 'utf8');
 		const js = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.js'), 'utf8');
 		assert.ok(panel.includes('id="mention"'), 'the picker is in the document');
+		assert.ok(panel.includes('commands: ctx.commands.suggestions()'), 'the state carries the command menu');
 		assert.ok(css.includes('.mention-menu') && css.includes('.ref-token'));
 		assert.ok(js.includes('mentionQuery') && js.includes('mentionResults') && js.includes('compositionstart'));
+		assert.ok(js.includes('function commandRows(') && js.includes("mention.mode === 'command'"), 'the picker completes commands');
+		assert.ok(js.includes("event.data === '/'"), 'a slash opens it at the start of the prompt');
 	});
 
 	test('the chat carries a read-only subagent session overlay', () => {
