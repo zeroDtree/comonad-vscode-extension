@@ -9,6 +9,7 @@ import { tokenizersPlugin } from '../services/tokenizers';
 import { logPlugin } from '../services/log';
 import { settingsPlugin } from '../services/settings';
 import { auditPlugin } from '../services/audit';
+import { decisionsPlugin } from '../services/decisions';
 import { sessionsPlugin } from '../services/sessions';
 import { attachmentsPlugin } from '../services/attachments';
 import { referencesPlugin } from '../services/references';
@@ -149,6 +150,7 @@ export async function createTestKernel(
 		'tasks',
 		'approval',
 		'audit',
+		'decisions',
 		'log',
 		'commands',
 		'graphs',
@@ -160,6 +162,7 @@ export async function createTestKernel(
 		child.plugin(logPlugin);
 		child.plugin(settingsPlugin);
 		child.plugin(auditPlugin);
+		child.plugin(decisionsPlugin);
 		child.plugin(sessionsPlugin);
 		child.plugin(attachmentsPlugin);
 		child.plugin(referencesPlugin);

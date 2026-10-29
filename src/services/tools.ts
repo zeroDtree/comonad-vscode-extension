@@ -74,6 +74,8 @@ declare module 'cordis' {
  * effect of that plugin: unmount the plugin and its tools disappear.
  */
 export class Tools extends Service {
+	static inject = ['approval'];
+
 	private readonly specs = new Map<string, ToolSpec>();
 
 	constructor(ctx: Context) {
@@ -155,31 +157,51 @@ export class Tools extends Service {
 
 	async invoke(call: ToolCall, ctx: ToolContext): Promise<ToolOutcome> {
 		ctx.signal.throwIfAborted();
+		// A second-line refusal is a policy decision too, even though the gate above normally
+		// catches it first. Record it so a direct or resumed dispatch never loses the reason.
+		const refuseTrace = (theme: 'capability' | 'network', reason: string, matchedRule: string): void => {
+			ctx.traceStep?.({ layer: theme, decision: 'deny', matchedRule, reason });
+			ctx.traceDenied?.(reason);
+		};
 		const tool = this.get(call.name);
 		if (!tool) {
-			return { content: `Error: unknown tool ${call.name}`, isError: true };
+			const reason = `unknown tool ${call.name}`;
+			refuseTrace('capability', reason, 'unknown');
+			return { content: `Error: ${reason}`, isError: true };
 		}
 		if (!this.isEnabled(call.name)) {
-			return { content: `Error: tool ${call.name} is switched off in Prompts`, isError: true };
+			const reason = `tool ${call.name} is switched off in Prompts`;
+			refuseTrace('capability', reason, 'tool-switch');
+			return { content: `Error: ${reason}`, isError: true };
 		}
 		if (!capabilityAllowed(tool.capability, ctx.policy.workMode)) {
-			return { content: `Error: tool ${call.name} is not allowed in mode ${ctx.policy.workMode}`, isError: true };
+			const reason = `tool ${call.name} is not allowed in mode ${ctx.policy.workMode}`;
+			refuseTrace('capability', reason, tool.capability);
+			return { content: `Error: ${reason}`, isError: true };
 		}
 		if (tool.needsNetwork && !ctx.policy.network) {
-			return { content: 'Error: network is disabled for this session', isError: true };
+			const reason = 'network is disabled for this session';
+			refuseTrace('network', reason, 'off');
+			return { content: `Error: ${reason}`, isError: true };
 		}
 		if (tool.needsWorkspace && !hasWorkspace(ctx.policy)) {
-			return { content: 'Error: this session has no working directory', isError: true };
+			const reason = 'this session has no working directory';
+			refuseTrace('capability', reason, 'working-directory');
+			return { content: `Error: ${reason}`, isError: true };
 		}
 		if (unavailableInSandbox(tool, ctx.policy)) {
-			return { content: `Error: tool ${call.name} cannot run under sandbox mode ${ctx.policy.sandboxMode}`, isError: true };
+			const reason = `tool ${call.name} cannot run under sandbox mode ${ctx.policy.sandboxMode}`;
+			refuseTrace('capability', reason, `sandbox:${ctx.policy.sandboxMode}`);
+			return { content: `Error: ${reason}`, isError: true };
 		}
 		let args: unknown = {};
 		if (call.arguments.trim()) {
 			try {
 				args = JSON.parse(call.arguments) as unknown;
 			} catch {
-				return { content: `Error: arguments for ${call.name} are not valid JSON`, isError: true };
+				const reason = `arguments for ${call.name} are not valid JSON`;
+				ctx.traceDenied?.(reason);
+				return { content: `Error: ${reason}`, isError: true };
 			}
 		}
 		// The policy pipeline, named and shaped as the harness names and shapes it: a plugin may
@@ -197,20 +219,51 @@ export class Tools extends Service {
 			Promise.resolve(this.ctx.waterfall('tools/pre-execute', exec, () => ({ kind: 'allow' }) as PreToolDecision)),
 		);
 		if (decision.kind === 'deny') {
+			ctx.traceStep?.({
+				layer: 'plugin',
+				decision: 'deny',
+				matchedRule: 'tools/pre-execute',
+				reason: decision.reason ?? `plugin refused ${call.name}`,
+			});
+			ctx.traceDenied?.(decision.reason ?? `plugin refused ${call.name}`);
 			return this.refuse(exec, decision.reason);
 		}
 		if (decision.kind === 'ask') {
+			ctx.traceStep?.({
+				layer: 'plugin',
+				decision: 'ask',
+				matchedRule: 'tools/pre-execute',
+				reason: decision.reason ?? `confirm ${call.name}`,
+			});
 			// No surface is claimed: whichever surface is up answers, and with none up this denies.
 			const answer = await this.ctx.approval.request({
 				calls: [call],
 				reason: decision.reason ?? `confirm ${call.name}`,
 				signal: exec.signal,
 				sessionId: ctx.sessionId,
+				response: ctx.policy.approvalResponse,
 			});
 			if (answer === 'deny') {
-				return this.refuse(exec, decision.reason ?? `${call.name} was not approved`);
+				const reason = decision.reason ?? `${call.name} was not approved`;
+				ctx.traceStep?.({
+					layer: 'response',
+					decision: 'deny',
+					matchedRule: ctx.policy.approvalResponse,
+					reason,
+				});
+				ctx.traceDenied?.(reason);
+				return this.refuse(exec, reason);
 			}
+			ctx.traceStep?.({
+				layer: 'response',
+				decision: 'allow',
+				matchedRule: ctx.policy.approvalResponse,
+				reason: 'the approval surface allowed the call',
+			});
 		}
+		// The sandbox step and dispatch_started belong at the true dispatch point: after the
+		// PreToolUse hook, the plugin gate and its approval, immediately before the tool body.
+		ctx.traceDispatch?.(`sandbox mode ${ctx.policy.sandboxMode}`);
 		const outcome = await abortable(
 			exec.signal,
 			Promise.resolve(this.ctx.waterfall('tools/execute', exec, () => this.dispatch(tool, exec, args, ctx))),

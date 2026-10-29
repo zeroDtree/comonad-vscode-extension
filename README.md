@@ -6,8 +6,9 @@ file it writes, and asks before anything leaves the sandbox.
 
 - **Local-first.** Keys live in `SecretStorage`; sessions, checkpoints and logs stay on the machine
   that runs the agent.
-- **Auditable by construction.** Typed graph events, a capability gate and an audit log; file writes
-  are journaled per file, so nothing is silently overwritten.
+- **Auditable by construction.** Typed graph events, a capability gate and an audit log; every tool
+  call carries a reconstructable decision trace (`/audit <call_id>`), and file writes are journaled
+  per file, so nothing is silently overwritten.
 - **Extensible as a plugin tree.** The kernel, tools, model adapters and UI are plugins on one
   [Cordis](https://github.com/cordiverse/cordis) context. Turn a row off, configure it, or mount your
   own.

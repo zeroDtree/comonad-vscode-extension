@@ -23,6 +23,7 @@ const HELP = [
 	'| `/status` | mode, model, workspace, sandbox, usage |',
 	'| `/cost` | token usage for today and this session |',
 	'| `/permissions` | show mode capabilities and permission rules |',
+	'| `/audit [call_id]` | show a tool call\'s decision trace, or the recent terminals |',
 	'| `/model` | switch the active model |',
 	'| `/init` | create a COMONAD.md project instruction file |',
 	'| `/export` | export this session as markdown |',
@@ -144,6 +145,16 @@ export function slashCommands(ctx: Context): void {
 		return { done: true };
 	});
 
+	register(
+		'audit',
+		'Show the decision trace for a tool call',
+		(args, surface) => {
+			surface.markdown(auditText(ctx, args.trim()));
+			return { done: true };
+		},
+		'[call_id]',
+	);
+
 	register('permissions', 'Show capabilities and permission rules', (_args, surface) => {
 		const config = ctx.settings.get();
 		surface.markdown(
@@ -211,7 +222,67 @@ export function slashCommands(ctx: Context): void {
 	register('quiet', 'Generate a reply without adding it to the transcript', (args) => ({ done: false, text: args, trigger: 'quiet' }), '[text]');
 
 }
-slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage', 'host', 'tools'];
+slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage', 'host', 'tools', 'decisions'];
+
+/** `/audit`: recent terminal events, or one call's path from its terminal back to the root. */
+export function auditText(ctx: Context, callId: string): string {
+	const cell = (value: unknown): string => String(value ?? '').replaceAll('|', '\\|').replace(/\s+/g, ' ').trim() || '—';
+	const time = (at: number): string => new Date(at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
+	if (!callId) {
+		const events = ctx.decisions.recent(20);
+		if (!events.length) {
+			return 'No decision traces recorded yet.';
+		}
+		return [
+			'**Recent decision terminals**',
+			'',
+			'| time | event | tool | call id | reason |',
+			'| --- | --- | --- | --- | --- |',
+			...events.map((event) => `| ${time(event.timestamp)} | ${cell(event.event)} | ${cell(event.tool_name)} | \`${cell(event.call_id)}\` | ${cell(event.reason)} |`),
+			'',
+			'Use `/audit <call_id>` to reconstruct one path.',
+		].join('\n');
+	}
+	const view = ctx.decisions.reconstruct(callId);
+	if (!view) {
+		return `No decision trace for \`${callId}\`.`;
+	}
+	const terminal = view.terminal
+		? `**Terminal:** \`${view.terminal.event}\` at ${time(view.terminal.timestamp)}${view.terminal.reason ? ` — ${cell(view.terminal.reason)}` : ''}`
+		: '**Terminal:** none (suspended or incomplete)';
+	const context = view.context ?? {};
+	const lines = [
+		`**Decision trace** \`${view.callId}\`${context.toolName ? ` — ${cell(context.toolName)}` : ''}`,
+		terminal,
+		...(context.providerCallId ? [`**Provider call:** \`${cell(context.providerCallId)}\` · session \`${cell(context.sessionId)}\` · turn ${context.turn ?? '—'}`] : []),
+		...(view.nodes[0]?.policy_revision ? [`**Policy revision:** \`${view.nodes[0].policy_revision}\``] : []),
+		'',
+		'| # | layer | decision | matched rule | reason |',
+		'| --- | --- | --- | --- | --- |',
+		...view.nodes.map(
+			(node, index) =>
+				`| ${index + 1} | ${cell(node.layer)} | ${cell(node.decision)} | ${cell(node.matched_rule)} | ${cell(node.reason)} |`,
+		),
+	];
+	if (view.policy) {
+		const policy = view.policy;
+		lines.push(
+			'',
+			`**Policy:** mode \`${policy.workMode}\` · tool approval \`${policy.approval}\` · response \`${policy.approvalResponse}\` · network \`${policy.network ? 'on' : 'off'}\` · sandbox \`${policy.sandboxMode}\``,
+			`**Rules:** deny ${policy.rules.deny.length} · ask ${policy.rules.ask.length} · allow ${policy.rules.allow.length} · denied reads ${policy.denyReadPaths.length}`,
+		);
+		if (policy.rules.deny.length || policy.rules.ask.length || policy.rules.allow.length) {
+			lines.push(
+				'```text',
+				...policy.rules.deny.map((rule) => `deny  ${rule}`),
+				...policy.rules.ask.map((rule) => `ask   ${rule}`),
+				...policy.rules.allow.map((rule) => `allow ${rule}`),
+				'```',
+			);
+		}
+	}
+	return lines.join('\n');
+}
 
 async function statusText(ctx: Context): Promise<string> {
 	const config = ctx.settings.get();

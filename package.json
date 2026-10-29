@@ -181,6 +181,11 @@
         "category": "Comonad"
       },
       {
+        "command": "comonad.showDecisionTrace",
+        "title": "Comonad: Show Decision Trace",
+        "category": "Comonad"
+      },
+      {
         "command": "comonad.pickPreset",
         "title": "Comonad: Select Preset",
         "category": "Comonad"

@@ -172,6 +172,11 @@ scratch 和工作区 `.comonad/tmp` —— 时，目标才算本会话所有。`
 | Read only | `ro` | `whitelist_accept` | off | `read-only` |
 | Full access | `aw` | `universal_accept` | on | `danger-full-access` |
 
+## 决策轨迹
+
+每个进入管线的调用都会留下决策轨迹：实际到达的每层一个节点，被拒绝或进入 dispatch 时写一个终态
+事件。`/audit <call_id>` 从终态回溯到根节点，并给出策略 revision 和快照。详见[决策轨迹](/zh/guide/audit)。
+
 ## 工作区信任
 
 项目插件、hooks 和指令文件在不受信任的工作区中不会被加载。工具调用仍遵循配置的审批策略和 OS 沙箱。

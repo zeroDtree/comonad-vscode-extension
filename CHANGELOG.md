@@ -31,6 +31,12 @@ Highlights are below; the full implementation notes are linked at the end. The u
   on a step budget unless one is set.
 - **Stop actually stops** the turn, its process tree and its pending approval; background tasks stay
   independent.
+- **Decision traces and authorization audit.** Every tool call that reaches the policy pipeline
+  writes one immutable node per layer actually traversed and one terminal event (`denied` or
+  `dispatch_started`). Nodes link by `parent_id`; the terminal names the head, so `/audit <call_id>`
+  (or **Comonad: Show Decision Trace**) reconstructs the exact path after the fact. Each node carries
+  a `policy_revision`, and the effective policy snapshot is stored once per revision. Trace writes
+  are best effort and never fail a turn. See [Decision trace](docs/guide/audit.md).
 - **One runtime policy pipeline.** Capability, network access, user rules, the tool approval policy,
   the approval response policy and the sandbox mode now run in a fixed order. The new
   `comonad.approvalResponse` (`ask`/`never`) decides who answers a confirmation, and

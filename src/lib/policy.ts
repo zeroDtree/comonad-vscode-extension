@@ -251,12 +251,35 @@ export interface GateEnvironment {
 /** Which layer decided. The sandbox is the executor's layer and is not a gate decision. */
 export type PolicyStage = 'capability' | 'network' | 'rules' | 'approval';
 
+/**
+ * Every layer a decision trace can name. The first six are the runtime policy pipeline; `hook` and
+ * `plugin` are the execution gates that can still stop an allowed call before its body runs.
+ */
+export type PolicyLayer = PolicyStage | 'response' | 'sandbox' | 'hook' | 'plugin';
+
+export type PolicyDecision = 'allow' | 'ask' | 'deny' | 'no_match';
+
+/** One layer's decision, as the gate or an execution gate reached it. */
+export interface PolicyStep {
+	layer: PolicyLayer;
+	decision: PolicyDecision;
+	matchedRule: string;
+	reason: string;
+}
+
 export interface GateResult {
 	decision: 'allow' | 'confirm' | 'reject';
 	reason: string;
 	stage: PolicyStage;
 	/** A confirmation a subagent's delegated approval must not answer. */
 	escalated?: boolean;
+	/** Every layer actually reached, in order, ending with the layer that decided. */
+	steps: PolicyStep[];
+}
+
+/** The batch view: one result per call, plus the aggregate decision the graph routes on. */
+export interface GateBatchResult extends GateResult {
+	calls: GateResult[];
 }
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
@@ -279,96 +302,148 @@ export function gateCall(
 	rules: RuleSet,
 	env: GateEnvironment,
 ): GateResult {
+	const steps: PolicyStep[] = [];
+	const pass = (layer: PolicyLayer, matchedRule: string, reason: string): void => {
+		steps.push({ layer, decision: 'allow', matchedRule, reason });
+	};
+	const noMatch = (layer: PolicyLayer, reason: string): void => {
+		steps.push({ layer, decision: 'no_match', matchedRule: '', reason });
+	};
+	const decide = (
+		decision: 'allow' | 'confirm' | 'reject',
+		stage: PolicyStage,
+		layer: PolicyLayer,
+		fact: PolicyDecision,
+		matchedRule: string,
+		reason: string,
+		escalated = false,
+	): GateResult => {
+		steps.push({ layer, decision: fact, matchedRule, reason });
+		return escalated ? { decision, reason, stage, steps, escalated: true } : { decision, reason, stage, steps };
+	};
+
 	// 1. Capability.
 	if (!tool) {
-		return { decision: 'reject', reason: `unknown tool: ${call.name}`, stage: 'capability' };
+		return decide('reject', 'capability', 'capability', 'deny', 'unknown', `unknown tool: ${call.name}`);
 	}
 	if (!capabilityAllowed(tool.capability, policy.workMode)) {
-		return {
-			decision: 'reject',
-			reason: `tool ${call.name} (${tool.capability}) is not allowed in mode ${policy.workMode}`,
-			stage: 'capability',
-		};
+		return decide(
+			'reject',
+			'capability',
+			'capability',
+			'deny',
+			tool.capability,
+			`tool ${call.name} (${tool.capability}) is not allowed in mode ${policy.workMode}`,
+		);
 	}
 	if (tool.needsWorkspace && !policy.workingDirectory.trim()) {
-		return { decision: 'reject', reason: `tool ${call.name} needs a working directory`, stage: 'capability' };
+		return decide('reject', 'capability', 'capability', 'deny', 'working-directory', `tool ${call.name} needs a working directory`);
 	}
 	// A shell capability is only honest when the sandbox can enforce it. Without an OS sandbox the
 	// only mode that can run a command is the explicit full-access mode; every other mode refuses.
 	if (isShellCapability(tool.capability) && env.sandbox === 'none' && policy.sandboxMode !== 'danger-full-access') {
-		return {
-			decision: 'reject',
-			reason: `${call.name} needs an OS sandbox; only sandbox mode danger-full-access can run commands on this host`,
-			stage: 'capability',
-		};
+		return decide(
+			'reject',
+			'capability',
+			'capability',
+			'deny',
+			`sandbox:${policy.sandboxMode}`,
+			`${call.name} needs an OS sandbox; only sandbox mode danger-full-access can run commands on this host`,
+		);
 	}
 	// A read-only shell promises an OS-enforced read-only view. The full-access mode may run a
 	// writable shell unconfined, but it cannot make that promise.
 	if (tool.capability === 'shell_ro' && env.sandbox === 'none') {
-		return {
-			decision: 'reject',
-			reason: `${call.name} needs an OS sandbox to keep the shell read-only; none is available`,
-			stage: 'capability',
-		};
+		return decide(
+			'reject',
+			'capability',
+			'capability',
+			'deny',
+			'sandbox:none',
+			`${call.name} needs an OS sandbox to keep the shell read-only; none is available`,
+		);
 	}
 	// The test shell's whole contract is a workspace that stays read-only while its scratch tree is
 	// writable. A sandbox mode that refuses every write cannot keep it.
 	if (tool.capability === 'shell_test' && env.sandbox === 'none') {
-		return {
-			decision: 'reject',
-			reason: `${call.name} needs an OS sandbox to keep the workspace read-only; none is available`,
-			stage: 'capability',
-		};
+		return decide(
+			'reject',
+			'capability',
+			'capability',
+			'deny',
+			'sandbox:none',
+			`${call.name} needs an OS sandbox to keep the workspace read-only; none is available`,
+		);
 	}
 	if (tool.capability === 'shell_test' && !sandboxAllowsWrites(policy.sandboxMode)) {
-		return {
-			decision: 'reject',
-			reason: `${call.name} needs a writable scratch tree; sandbox mode ${policy.sandboxMode} refuses every write`,
-			stage: 'capability',
-		};
+		return decide(
+			'reject',
+			'capability',
+			'capability',
+			'deny',
+			`sandbox:${policy.sandboxMode}`,
+			`${call.name} needs a writable scratch tree; sandbox mode ${policy.sandboxMode} refuses every write`,
+		);
 	}
 	// With no OS sandbox, the network access policy would be unenforceable for an unconfined shell.
 	if (isShellCapability(tool.capability) && env.sandbox === 'none' && !policy.network) {
-		return {
-			decision: 'reject',
-			reason: `${call.name} needs an OS sandbox to enforce the network access policy; turn network on or install a sandbox`,
-			stage: 'capability',
-		};
+		return decide(
+			'reject',
+			'capability',
+			'capability',
+			'deny',
+			'sandbox:none',
+			`${call.name} needs an OS sandbox to enforce the network access policy; turn network on or install a sandbox`,
+		);
 	}
 	if (writesWorkspace(tool.capability) && !sandboxAllowsWrites(policy.sandboxMode)) {
-		return {
-			decision: 'reject',
-			reason: `${call.name} writes files; sandbox mode ${policy.sandboxMode} refuses every write`,
-			stage: 'capability',
-		};
+		return decide(
+			'reject',
+			'capability',
+			'capability',
+			'deny',
+			tool.capability,
+			`${call.name} writes files; sandbox mode ${policy.sandboxMode} refuses every write`,
+		);
 	}
 	// A tool that runs outside the OS sandbox cannot satisfy any mode but the explicit full access
 	// one; no rule or policy can make it sandboxed after the fact.
 	if ((tool.unsandboxed === true || tool.name.endsWith('_unsandboxed')) && policy.sandboxMode !== 'danger-full-access') {
-		return {
-			decision: 'reject',
-			reason: `${call.name} runs outside the OS sandbox; only sandbox mode danger-full-access can run it`,
-			stage: 'capability',
-		};
+		return decide(
+			'reject',
+			'capability',
+			'capability',
+			'deny',
+			'unsandboxed',
+			`${call.name} runs outside the OS sandbox; only sandbox mode danger-full-access can run it`,
+		);
 	}
+	pass('capability', tool.capability, `mode ${policy.workMode} grants ${tool.capability}`);
 
 	// 2. Network.
-	if (tool.needsNetwork && !policy.network) {
-		return { decision: 'reject', reason: `tool ${call.name} requires network, which is off`, stage: 'network' };
+	if (tool.needsNetwork) {
+		if (!policy.network) {
+			return decide('reject', 'network', 'network', 'deny', 'off', `tool ${call.name} requires network, which is off`);
+		}
+		pass('network', 'on', 'the network access policy is on');
+	} else {
+		noMatch('network', 'the tool does not use the network');
 	}
 
 	// 3. User rules, in the order the document defines: deny, then ask, then allow.
 	const denied = rules.deny.find((rule) => ruleMatches(rule, call, tool));
 	if (denied) {
-		return { decision: 'reject', reason: `deny rule ${ruleText(denied)} blocks ${call.name}`, stage: 'rules' };
+		return decide('reject', 'rules', 'rules', 'deny', ruleText(denied), `deny rule ${ruleText(denied)} blocks ${call.name}`);
 	}
-	if (rules.ask.some((rule) => ruleMatches(rule, call, tool))) {
-		return { decision: 'confirm', reason: `ask rule matches ${call.name}`, stage: 'rules', escalated: true };
+	const asked = rules.ask.find((rule) => ruleMatches(rule, call, tool));
+	if (asked) {
+		return decide('confirm', 'rules', 'rules', 'ask', ruleText(asked), `ask rule matches ${call.name}`, true);
 	}
 	const allowed = rules.allow.find((rule) => ruleMatches(rule, call, tool));
 	if (allowed) {
-		return { decision: 'allow', reason: `allow rule ${ruleText(allowed)}`, stage: 'rules' };
+		return decide('allow', 'rules', 'rules', 'allow', ruleText(allowed), `allow rule ${ruleText(allowed)}`);
 	}
+	noMatch('rules', 'no user rule matched');
 
 	// 4. Tool approval policy: reached only when all three rule lists were silent.
 	const danger = (): boolean =>
@@ -387,47 +462,70 @@ export function gateCall(
 		);
 	switch (policy.approval) {
 		case 'manual':
-			return { decision: 'confirm', reason: 'manual approval', stage: 'approval' };
+			return decide('confirm', 'approval', 'approval', 'ask', 'manual', 'manual approval');
 		case 'whitelist_accept':
 			if (whitelistedByDefault(tool.capability)) {
-				return { decision: 'allow', reason: `whitelist runs ${tool.capability} calls`, stage: 'approval' };
+				return decide('allow', 'approval', 'approval', 'allow', `whitelist:${tool.capability}`, `whitelist runs ${tool.capability} calls`);
 			}
-			return { decision: 'confirm', reason: `whitelist policy asks for ${call.name}`, stage: 'approval' };
+			return decide('confirm', 'approval', 'approval', 'ask', 'whitelist:other', `whitelist policy asks for ${call.name}`);
 		case 'blacklist_reject':
 			if (blacklistedByDefault(tool.capability)) {
-				return { decision: 'reject', reason: `blacklist policy rejects ${tool.capability} calls`, stage: 'approval' };
+				return decide(
+					'reject',
+					'approval',
+					'approval',
+					'deny',
+					`blacklist:${tool.capability}`,
+					`blacklist policy rejects ${tool.capability} calls`,
+				);
 			}
 			if (danger()) {
-				return {
-					decision: 'confirm',
-					reason: `dangerous command requires explicit confirmation (${call.name})`,
-					stage: 'approval',
-					escalated: true,
-				};
+				return decide(
+					'confirm',
+					'approval',
+					'approval',
+					'ask',
+					'blacklist:dangerous',
+					`dangerous command requires explicit confirmation (${call.name})`,
+					true,
+				);
 			}
-			return { decision: 'allow', reason: `blacklist policy runs ${call.name}`, stage: 'approval' };
+			return decide('allow', 'approval', 'approval', 'allow', 'blacklist:other', `blacklist policy runs ${call.name}`);
 		case 'universal_accept':
 			if (danger()) {
-				return {
-					decision: 'confirm',
-					reason: `dangerous command requires explicit confirmation (${call.name})`,
-					stage: 'approval',
-					escalated: true,
-				};
+				return decide(
+					'confirm',
+					'approval',
+					'approval',
+					'ask',
+					'universal_accept:dangerous',
+					`dangerous command requires explicit confirmation (${call.name})`,
+					true,
+				);
 			}
-			return { decision: 'allow', reason: 'approval policy accepts every call', stage: 'approval' };
+			return decide('allow', 'approval', 'approval', 'allow', 'universal_accept', 'approval policy accepts every call');
 		case 'universal_reject':
-			return { decision: 'reject', reason: 'approval policy rejects every call no rule matched', stage: 'approval' };
+			return decide(
+				'reject',
+				'approval',
+				'approval',
+				'deny',
+				'universal_reject',
+				'approval policy rejects every call no rule matched',
+			);
 	}
 }
 
-function ruleText(rule: PolicyRule): string {
+/** The canonical text of a user rule, shared by matching, `matched_rule` and the policy snapshot. */
+export function ruleText(rule: PolicyRule): string {
 	return rule.pattern ? `${rule.tool}(${rule.pattern})` : rule.tool;
 }
 
 /**
  * The batch view of `gateCall`: a rejection anywhere rejects the batch, otherwise a confirmation
- * anywhere confirms it. Escalation is carried so a delegated approval cannot answer it.
+ * anywhere confirms it. Every call is evaluated so every call owns a complete trace; the aggregate
+ * keeps the deciding call's reason and steps, and carries escalation so a delegated approval cannot
+ * answer it.
  */
 export function gateCalls(
 	calls: ToolCall[],
@@ -435,18 +533,24 @@ export function gateCalls(
 	policy: SessionPolicy,
 	rules: RuleSet,
 	env: GateEnvironment,
-): GateResult {
-	let confirm: GateResult | undefined;
-	for (const call of calls) {
-		const gate = gateCall(call, lookup(call.name), policy, rules, env);
-		if (gate.decision === 'reject') {
-			return gate;
-		}
-		if (gate.decision === 'confirm') {
-			confirm = confirm ? { ...confirm, escalated: confirm.escalated === true || gate.escalated === true } : gate;
-		}
+): GateBatchResult {
+	const results = calls.map((call) => gateCall(call, lookup(call.name), policy, rules, env));
+	const reject = results.find((gate) => gate.decision === 'reject');
+	if (reject) {
+		return { ...reject, calls: results };
 	}
-	return confirm ?? { decision: 'allow', reason: 'allowed by policy', stage: 'approval' };
+	const confirm = results.find((gate) => gate.decision === 'confirm');
+	if (confirm) {
+		const escalated = results.some((gate) => gate.escalated === true);
+		return escalated ? { ...confirm, escalated: true, calls: results } : { ...confirm, calls: results };
+	}
+	return {
+		decision: 'allow',
+		reason: 'allowed by policy',
+		stage: 'approval',
+		steps: results[0]?.steps ?? [],
+		calls: results,
+	};
 }
 
 /** Short capability names for the flow tab's mode legend, so it cannot drift from the table. */

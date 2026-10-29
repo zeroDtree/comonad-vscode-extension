@@ -11,6 +11,7 @@ import { auditPlugin } from './services/audit';
 import { catalogPlugin } from './services/catalog';
 import { checkpointsPlugin } from './services/checkpoints';
 import { commandsPlugin } from './services/commands';
+import { decisionsPlugin } from './services/decisions';
 import { graphPlugin } from './services/graph';
 import { hooksPlugin } from './services/hooks';
 import { llmPlugin } from './services/llm';
@@ -70,6 +71,7 @@ export const PLUGINS: Record<string, Plugin> = {
 	// imports every row below may make, so it has to have run before any of them are loaded.
 	harness: harnessCompat,
 	audit: auditPlugin,
+	decisions: decisionsPlugin,
 	sessions: sessionsPlugin,
 	attachments: attachmentsPlugin,
 	references: referencesPlugin,
@@ -123,6 +125,7 @@ export const ROWS: PluginRow[] = [
 
 	// Kernel services.
 	{ id: 'audit', group: 'kernel' },
+	{ id: 'decisions', group: 'kernel' },
 	{ id: 'sessions', group: 'kernel' },
 	// Image bytes live outside the session JSON; the store is what both the read tool and the composer
 	// hand their pictures to.

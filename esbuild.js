@@ -169,6 +169,7 @@ async function main() {
 						'src/test/activation.test.ts',
 						'src/test/cancellation.test.ts',
 						'src/test/graph.test.ts',
+						'src/test/trace.test.ts',
 					],
 					outdir: 'out/test',
 					sourcemap: true,

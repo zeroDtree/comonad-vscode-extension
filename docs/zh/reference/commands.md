@@ -16,6 +16,7 @@
 | `/status` | Work mode、审批策略、Sandbox mode、模型、工作区与用量 |
 | `/cost` | 今天与会话的 token 用量 |
 | `/permissions` | 能力与完整策略：用户规则、审批策略和 Sandbox mode |
+| `/audit [call_id]` | 最近终态事件，或某个工具调用的授权路径 |
 | `/model` | 切换当前模型 |
 | `/continue` | 续写最后一条消息 |
 | `/impersonate` | 替你写下一句话 |

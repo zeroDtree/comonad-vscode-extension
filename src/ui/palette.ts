@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import type { ApprovalDecision } from '../lib/types';
 import { registerCommand } from './register';
+import { auditText } from './slash';
 
 /**
  * VS Code command palette bridge plus the fallback approval dialog. Surfaces answer
@@ -25,6 +26,8 @@ export function palette(ctx: Context): void {
 		);
 		return picked === 'Allow' ? 'allow' : picked === 'Always allow' ? 'always' : 'deny';
 	});
+
+	registerCommand(ctx, 'comonad.showDecisionTrace', () => showDecisionTrace(ctx));
 
 	registerCommand(ctx, 'comonad.stop', () => {
 		if (!ctx.agent.stop()) {
@@ -55,4 +58,27 @@ export function palette(ctx: Context): void {
 		void vscode.window.showInformationMessage(`Comonad: working directory set to ${path}`);
 	});
 }
-palette.inject = ['agent', 'sessions', 'settings', 'log'];
+palette.inject = ['agent', 'sessions', 'settings', 'log', 'decisions'];
+
+/** Pick a recent terminal event and open its decision path as a read-only Markdown document. */
+async function showDecisionTrace(ctx: Context): Promise<void> {
+	const events = ctx.decisions.recent(20);
+	if (!events.length) {
+		void vscode.window.showInformationMessage('Comonad: no decision traces recorded yet.');
+		return;
+	}
+	const picked = await vscode.window.showQuickPick(
+		events.map((event) => ({
+			label: `${event.event === 'dispatch_started' ? '$(play)' : '$(circle-slash)'} ${event.tool_name ?? 'tool'}`,
+			description: event.call_id,
+			detail: `${new Date(event.timestamp).toISOString()}${event.reason ? ` — ${event.reason}` : ''}`,
+			callId: event.call_id,
+		})),
+		{ title: 'Comonad decision trace', ignoreFocusOut: true, matchOnDescription: true, matchOnDetail: true },
+	);
+	if (!picked) {
+		return;
+	}
+	const document = await vscode.workspace.openTextDocument({ content: auditText(ctx, picked.callId), language: 'markdown' });
+	await vscode.window.showTextDocument(document, { preview: true });
+}

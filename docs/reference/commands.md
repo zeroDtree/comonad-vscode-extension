@@ -23,6 +23,7 @@ a command — elsewhere it is ordinary text.
 | `/status` | Work mode, approval policies, sandbox mode, model, workspace and usage |
 | `/cost` | Token usage for today and the session |
 | `/permissions` | Capabilities and the full policy: rules, approval policies and sandbox mode |
+| `/audit [call_id]` | Recent decision terminals, or one tool call's authorization path |
 | `/model` | Switch the active model |
 | `/continue` | Carry the last message on |
 | `/impersonate` | Write your next message for you |

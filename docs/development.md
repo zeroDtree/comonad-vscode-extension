@@ -38,8 +38,8 @@ src/
   main.ts       activate/deactivate
   app.ts        the plugin tree
   host.ts       the VS Code Host contract
-  lib/          pure domain: policy, graph, sandbox, prompt, diff, references
-  services/     Cordis services: agent, tools, llm, sessions, checkpoints, mcp, hooks, …
+  lib/          pure domain: policy, trace, graph, sandbox, prompt, diff, references
+  services/     Cordis services: agent, tools, decisions, llm, sessions, checkpoints, mcp, hooks, …
   llm/          OpenAI-compatible adapter
   tools/        tool plugins
   ui/           chat panel, participant, settings, views, commands

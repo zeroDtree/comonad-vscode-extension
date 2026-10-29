@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Domain types shared by the agent kernel. This module must not import `vscode` or `cordis`. */
 
+import type { PolicyStep } from './policy';
 import type { SandboxMode, SandboxOptions } from './sandbox';
 
 export type { SandboxMode } from './sandbox';
@@ -265,6 +266,12 @@ export interface ToolContext {
 	noteCreatedDir?(path: string): void;
 	/** Note that `path` no longer exists, dropping it and its descendants from provenance. */
 	noteDeleted?(path: string): void;
+	/** Append one execution-gate decision to this call's decision trace. */
+	traceStep?(step: PolicyStep): void;
+	/** Write this call's terminal denial; the trace service ignores a second terminal. */
+	traceDenied?(reason: string): void;
+	/** Append the sandbox step and write `dispatch_started`, just before the tool body runs. */
+	traceDispatch?(reason: string): void;
 }
 
 export interface JsonSchema {

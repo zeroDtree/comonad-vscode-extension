@@ -191,6 +191,13 @@ The layers can be combined into presets: **Ask**, **Plan**, **Auto**, **Read onl
 | Read only | `ro` | `whitelist_accept` | off | `read-only` |
 | Full access | `aw` | `universal_accept` | on | `danger-full-access` |
 
+## Decision trace
+
+Every call that reaches the pipeline leaves a decision trace: one node per layer actually reached,
+plus a terminal event when the call is denied or enters dispatch. `/audit <call_id>` reconstructs
+the path from the terminal back to the root, with the policy revision and snapshot. See
+[Decision trace](/guide/audit).
+
 ## Workspace Trust
 
 Project plugins, hooks and instruction files are not loaded in untrusted workspaces. Tool calls still
