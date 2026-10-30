@@ -10,14 +10,15 @@ export const DEFAULT_GRAPH_SOURCE = `%% default: agent
 %% graph: agent
 flowchart TD
   %% start: llm
-  llm["llm.complete"] -->|route: agent.after-llm| reject["agent.reject"]
-  llm -->|route: agent.after-llm| confirm["agent.confirm"]
-  llm -->|route: agent.after-llm| tools["agent.tools"]
+  llm["llm.complete"] -->|route: agent.after-llm| calls["agent.calls"]
   llm -->|route: agent.after-llm| End
-  reject --> llm
-  confirm -->|route: agent.after-confirm| tools
-  confirm -->|route: agent.after-confirm| reject
+  calls --> gate["agent.gate"]
+  gate -->|route: agent.gate| tools["agent.tools"]
+  gate -->|route: agent.gate| approval["agent.approval"]
+  gate -->|route: agent.gate| reject["agent.reject"]
+  approval --> gate
   tools --> llm
+  reject --> llm
 `;
 
 interface DraftNode {

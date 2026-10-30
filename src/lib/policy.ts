@@ -313,9 +313,10 @@ export type PolicyStage = 'capability' | 'network' | 'rules' | 'approval';
 
 /**
  * Every layer a decision trace can name. The first six are the runtime policy pipeline; `hook` and
- * `plugin` are the execution gates that can still stop an allowed call before its body runs.
+ * `plugin` are the execution gates that can still stop an allowed call before its body runs, and
+ * `authorization` is the executor refusing a call the gate never allowed.
  */
-export type PolicyLayer = PolicyStage | 'response' | 'sandbox' | 'hook' | 'plugin';
+export type PolicyLayer = PolicyStage | 'response' | 'sandbox' | 'hook' | 'plugin' | 'authorization';
 
 export type PolicyDecision = 'allow' | 'ask' | 'deny' | 'no_match';
 
@@ -600,7 +601,7 @@ export function ruleText(rule: PolicyRule): string {
  * answer it.
  */
 export function gateCalls(
-	calls: ToolCall[],
+	calls: readonly ToolCall[],
 	lookup: (name: string) => ToolSpec | undefined,
 	policy: SessionPolicy,
 	rules: RuleSet,
@@ -622,6 +623,107 @@ export function gateCalls(
 		stage: 'approval',
 		steps: results[0]?.steps ?? [],
 		calls: results,
+	};
+}
+
+/** The closed vocabulary the gate maps onto graph targets. */
+export type PolicyOutcome = 'allow' | 'confirm' | 'reject';
+
+/** One layer's record inside a policy result: the same fact a decision trace stores. */
+export type PolicyTrace = PolicyStep;
+
+/** One call as the policy saw it: its decision and every layer that led there. */
+export interface PolicyCallResult {
+	callId: string;
+	decision: PolicyOutcome;
+	traces: PolicyTrace[];
+}
+
+/** The batch decision the gate routes on, plus each call's own decision and trace. */
+export interface PolicyResult {
+	outcome: PolicyOutcome;
+	reason: string;
+	calls: PolicyCallResult[];
+	/** A confirmation a delegated agent's approval response must answer, never the user. */
+	escalated?: boolean;
+}
+
+/** Everything the policy needs; it knows nothing about graphs, nodes or routes. */
+export interface PolicyInput {
+	calls: readonly ToolCall[];
+	lookup: (name: string) => ToolSpec | undefined;
+	policy: SessionPolicy;
+	rules: RuleSet;
+	env: GateEnvironment;
+	/** Whether this turn offers tools at all (the core layout's Tools block or a preset's row). */
+	toolsEnabled: boolean;
+	/** Whether a tool is switched on in Prompts. */
+	toolEnabled: (name: string) => boolean;
+	/** A delegated agent's extra restriction; present only for a subagent. */
+	delegated?: (tool: ToolSpec) => boolean;
+}
+
+/**
+ * The whole tool policy for one batch: turn-level switches, the delegated agent's allowlist, then
+ * the per-call pipeline in `gateCalls`. The graph's gate calls this once and maps `outcome` onto a
+ * target; nothing here mutates state or knows which node comes next.
+ */
+export function evaluatePolicy(input: PolicyInput): PolicyResult {
+	const rejectAll = (reason: string, matchedRule: string): PolicyResult => ({
+		outcome: 'reject',
+		reason,
+		calls: input.calls.map((call) => ({
+			callId: call.id,
+			decision: 'reject',
+			traces: [{ layer: 'capability', decision: 'deny', matchedRule, reason }],
+		})),
+	});
+	if (!input.toolsEnabled) {
+		return rejectAll('the Tools entry is off', 'tools-switch');
+	}
+	const disabled = input.calls.find((call) => !input.toolEnabled(call.name));
+	if (disabled) {
+		return rejectAll(`tool ${disabled.name} is switched off in Prompts`, 'tool-switch');
+	}
+	const delegated = input.delegated;
+	if (delegated) {
+		const unavailable = input.calls.find((call) => {
+			const tool = input.lookup(call.name);
+			return !tool || !delegated(tool);
+		});
+		if (unavailable) {
+			return rejectAll(`tool ${unavailable.name} is not available to this subagent`, 'subagent');
+		}
+	}
+	const batch = gateCalls(input.calls, input.lookup, input.policy, input.rules, input.env);
+	const calls = input.calls.map((call, index): PolicyCallResult => ({
+		callId: call.id,
+		decision: batch.calls[index]?.decision ?? batch.decision,
+		traces: batch.calls[index]?.steps ?? batch.steps,
+	}));
+	if (delegated && batch.decision === 'confirm') {
+		// A delegated agent has a fixed `never` approval response: any confirmation is denied
+		// without asking, even when the child's own approval policy asked for one.
+		const reason = `${batch.reason}; the subagent approval response policy denies without asking`;
+		return {
+			outcome: 'reject',
+			reason,
+			calls: calls.map((call): PolicyCallResult => ({
+				...call,
+				decision: 'reject',
+				traces: [
+					...call.traces,
+					{ layer: 'response', decision: 'deny', matchedRule: input.policy.approvalResponse, reason },
+				],
+			})),
+			...(batch.escalated ? { escalated: true } : {}),
+		};
+	}
+	return {
+		outcome: batch.decision,
+		reason: batch.reason,
+		calls,
+		...(batch.escalated ? { escalated: true } : {}),
 	};
 }
 

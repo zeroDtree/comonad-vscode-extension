@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { issueAuthorization } from '../lib/authorization';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { limitEffort } from '../lib/effort';
@@ -926,7 +927,7 @@ suite('Comonad domain', () => {
 		const kernel = await createTestKernel({ config: { sandboxMode: 'workspace-write' as const } });
 		try {
 			await kernel.ctx.plugin(vscodeTools);
-			const outcome = await kernel.ctx.tools.invoke(call('apply_edits', { path: '../escape.txt', edits: [] }), directToolContext(kernel));
+			const outcome = await kernel.ctx.tools.invoke(call('apply_edits', { path: '../escape.txt', edits: [] }), directToolContext(kernel, ['1']));
 			assert.strictEqual(outcome.isError, true);
 			assert.match(outcome.content, /cannot write outside the workspace/);
 		} finally {
@@ -941,7 +942,7 @@ suite('Comonad domain', () => {
 			writeFileSync(join(kernel.host.workspace(), 'patch.txt'), 'content\n');
 			const outcome = await kernel.ctx.tools.invoke(
 				call('apply_patch', { path: 'patch.txt', old: 'missing', new: 'replacement' }),
-				directToolContext(kernel),
+				directToolContext(kernel, ['1']),
 			);
 			assert.strictEqual(outcome.isError, true);
 			assert.match(outcome.content, /old text was not found/);
@@ -1396,7 +1397,7 @@ suite('Comonad domain', () => {
 			await kernel.ctx.plugin(shellTools);
 			const workspace = kernel.host.workspace();
 			const scratch = join(kernel.host.storage.tmp, 'shell', 'test');
-			const context = { ...directToolContext(kernel), scratchDirectory: scratch };
+			const context = { ...directToolContext(kernel, ['t']), scratchDirectory: scratch };
 			const command = (text: string): ToolCall => ({ id: 't', name: 'run_shell_test', arguments: JSON.stringify({ command: text, description: 'test' }) });
 
 			const wrote = await kernel.ctx.tools.invoke(command('printf hi > "$COMONAD_SCRATCH/out.txt"'), context);
@@ -5374,6 +5375,57 @@ suite('Cordis kernel', () => {
 			await kernel.dispose();
 		}
 	});
+
+	test('a custom graph that wires around the gate cannot run a tool', async () => {
+		const graph = `%% default: agent
+
+%% graph: agent
+flowchart TD
+  %% start: llm
+  llm["llm.complete"] -->|route: agent.after-llm| calls["agent.calls"]
+  llm -->|route: agent.after-llm| End
+  calls --> tools["agent.tools"]
+  tools --> llm
+`;
+		const kernel = await createTestKernel({ config: { mode: 'ro', approval: 'universal_accept', graph } });
+		try {
+			let ran = 0;
+			let seen = '';
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					const answer = request.messages.find((message) => message.role === 'tool');
+					if (answer) {
+						seen = answer.content;
+						return { message: { role: 'assistant', content: 'done' }, toolCalls: [] };
+					}
+					const toolCall: ToolCall = { id: 'c1', name: 'probe_read', arguments: '{}' };
+					return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall] };
+				},
+			});
+			await kernel.ctx.plugin(
+				toolset([
+					{
+						name: 'probe_read',
+						description: '',
+						parameters: objectSchema({}),
+						capability: 'ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						execute: async () => {
+							ran += 1;
+							return 'ran';
+						},
+					},
+				]),
+			);
+			await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			assert.strictEqual(ran, 0, 'the tool never ran');
+			assert.match(seen, /not authorized by the tool policy/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
 });
 
 /* ------------------------------------------------------------------ the SillyTavern port */
@@ -6624,6 +6676,7 @@ suite('Tavern content', () => {
 			assert.ok(tool, 'the tool is registered');
 			const context = {
 				sessionId: 'lore',
+				batch: 0,
 				workspace: '',
 				policy: policy(),
 				signal: new AbortController().signal,
@@ -10219,10 +10272,14 @@ function pdfOf(pages: readonly string[]): Buffer {
 }
 
 /** Run a read-capability tool without a whole turn. */
-function directToolContext(kernel: Awaited<ReturnType<typeof createTestKernel>>) {
+function directToolContext(kernel: Awaited<ReturnType<typeof createTestKernel>>, callIds: readonly string[] = []) {
 	const signal = new AbortController().signal;
+	const sessionId = 'images';
+	const batch = 0;
 	return {
-		sessionId: 'images',
+		sessionId,
+		batch,
+		authorization: issueAuthorization({ sessionId, batch, callIds }),
 		workspace: kernel.host.workspace(),
 		policy: kernel.ctx.agent.policyFor(),
 		signal,

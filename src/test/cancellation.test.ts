@@ -41,6 +41,7 @@ function alive(pid: number): boolean {
 function context(kernel: Awaited<ReturnType<typeof createTestKernel>>, signal: AbortSignal): ToolContext {
 	return {
 		sessionId: 'cancel',
+		batch: 0,
 		workspace: kernel.host.workspace(),
 		policy: kernel.ctx.agent.policyFor(),
 		signal,

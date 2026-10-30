@@ -586,6 +586,9 @@ function sanitizeCursor(cursor: Cursor | null): Cursor | null {
 	// A cursor written while workflows existed may carry their state; it is dead weight now.
 	delete next.workflow;
 	delete next.basePolicy;
+	// A tool authorization is a live capability, not durable state: its in-process registry cannot
+	// survive a cursor round-trip, and the resumed gate must issue a fresh one.
+	delete next.authorization;
 	return { ...cursor, state: next };
 }
 

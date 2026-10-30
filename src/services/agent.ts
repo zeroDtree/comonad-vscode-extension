@@ -38,14 +38,16 @@ import {
 	asCapabilities,
 	callTarget,
 	capabilitiesOf,
-	gateCalls,
+	evaluatePolicy,
 	isShellCapability,
 	MODE_CAPS,
 	MODE_LABELS,
 	SANDBOX_LABELS,
 	suggestAllowRule,
+	type PolicyOutcome,
 	type PolicyStep,
 } from '../lib/policy';
+import { issueAuthorization, verifyAuthorization, type ToolAuthorization } from '../lib/authorization';
 import { sandboxReads, workspaceTempDir, writeScopeFor } from '../lib/sandbox';
 import {
 	buildSubagentPolicy,
@@ -187,7 +189,14 @@ interface RunState {
 	/** The chat turn this run belongs to, recorded on every trace. */
 	turn: number;
 	gateReason: string;
-	confirmed: boolean | null;
+	/** The current tool batch; an authorization is bound to it. */
+	batch: number;
+	/** The user's answer to this batch's approval, when the gate asked for one. */
+	approval?: { allowed: boolean; reason: string };
+	/** The gate's final decision for this batch. */
+	outcome?: PolicyOutcome;
+	/** The gate's single-use grant for an allowed batch; the tools node consumes it. */
+	authorization?: ToolAuthorization;
 	filter?: { allow?: string[] };
 	/**
 	 * Whether this turn may offer tools at all: the preset's Tools row under ST, the core layout's
@@ -706,7 +715,7 @@ export class Agent extends Service {
 				filter: session.subagent ? { allow: session.policy.tools ?? [] } : undefined,
 				turn: session.turnIndex,
 				gateReason: '',
-				confirmed: null,
+				batch: 0,
 				toolsEnabled,
 				samplers: tavern?.samplers,
 				trigger,
@@ -777,17 +786,12 @@ export class Agent extends Service {
 				return { sessionId, text: '', stopped: true };
 			}
 			state.policy = session.policy;
-			if (answer === 'deny') {
-				this.respondTraces(
-					state,
-					'deny',
-					state.policy.approvalResponse === 'never'
+			const approvalReason =
+				answer === 'deny'
+					? state.policy.approvalResponse === 'never'
 						? 'the approval response policy denies without asking'
-						: 'the approval surface denied the resumed call',
-				);
-			} else {
-				this.respondTraces(state, 'allow', 'the approval surface allowed the resumed call');
-			}
+						: 'the approval surface denied the resumed call'
+					: 'the approval surface allowed the resumed call';
 			state.ref.surface = options.surface ?? state.ref.surface;
 			this.ctx.sessions.verifyModelContext(session);
 			// A manual summary may have moved the model context while the turn was suspended. Rebuild
@@ -805,7 +809,7 @@ export class Agent extends Service {
 			this.ctx.sessions.save(session);
 			return await this.execute(session, state, turn, {
 				node: cursor.node,
-				value: answer !== 'deny',
+				value: { allowed: answer !== 'deny', reason: approvalReason },
 				payload: cursor.payload,
 				step: cursor.step,
 			});
@@ -1341,24 +1345,24 @@ export class Agent extends Service {
 			if (signal.aborted) {
 				return { status: 'aborted', state, step: outcome.step };
 			}
-			if (answer === 'deny') {
-				this.respondTraces(
-					state,
-					'deny',
-					state.policy.approvalResponse === 'never'
+			const approvalReason =
+				answer === 'deny'
+					? state.policy.approvalResponse === 'never'
 						? 'the approval response policy denies without asking'
-						: 'the approval surface denied the call',
-				);
-			} else {
-				this.respondTraces(state, 'allow', 'the approval surface allowed the call');
-			}
+						: 'the approval surface denied the call'
+					: 'the approval surface allowed the call';
 			if (answer === 'always' && calls[0]) {
 				const rule = suggestAllowRule(calls[0], this.ctx.tools.get(calls[0].name));
 				await this.ctx.settings.addAllowRule(rule).catch(() => undefined);
 				this.notice(state.ref, `Added allow rule: ${rule}`);
 			}
 			session.cursor = null;
-			cursor = { node: outcome.node, value: answer !== 'deny', payload: outcome.payload, step: outcome.step };
+			cursor = {
+				node: outcome.node,
+				value: { allowed: answer !== 'deny', reason: approvalReason },
+				payload: outcome.payload,
+				step: outcome.step,
+			};
 		}
 	}
 
@@ -1557,11 +1561,28 @@ export class Agent extends Service {
 			return { ...state, toolCalls: completion.toolCalls, traces: undefined };
 		});
 
-		nodes.set('agent.confirm', async (state, runtime) => {
+		nodes.set('agent.calls', async (state) => ({
+			...state,
+			batch: state.batch + 1,
+			approval: undefined,
+			outcome: undefined,
+			authorization: undefined,
+			gateReason: '',
+			traces: undefined,
+		}));
+
+		nodes.set('agent.approval', async (state, runtime) => {
 			if (!runtime.resuming) {
 				runtime.suspend(state.toolCalls);
 			}
-			return { ...state, confirmed: runtime.resume === true };
+			const answer = runtime.resume as { allowed?: boolean; reason?: string } | undefined;
+			return {
+				...state,
+				approval: {
+					allowed: answer?.allowed === true,
+					reason: answer?.reason ?? 'the approval surface denied the call',
+				},
+			};
 		});
 
 		nodes.set('agent.reject', async (state) => {
@@ -1577,6 +1598,45 @@ export class Agent extends Service {
 		});
 
 		nodes.set('agent.tools', async (state, runtime) => {
+			// The gate is the only issuer. Consume its grant here: a second visit to this node, a
+			// resumed cursor, or a custom graph that routed around the gate has none, and every call
+			// is answered as unauthorized instead of running.
+			const authorization = state.authorization;
+			state.authorization = undefined;
+			const authorized =
+				Boolean(authorization) &&
+				state.toolCalls.every((call) =>
+					verifyAuthorization(authorization, { sessionId: state.sessionId, batch: state.batch, callId: call.id }),
+				);
+			if (!authorized) {
+				const reason = 'the tool call was not authorized by the tool policy';
+				const messages = state.toolCalls.map((call): Message => ({
+					role: 'tool',
+					toolCallId: call.id,
+					content: `Error: ${reason}`,
+					at: Date.now(),
+				}));
+				if (state.traces) {
+					state.toolCalls.forEach((_call, index) => {
+						this.denyTrace(state, index, reason, {
+							layer: 'authorization',
+							decision: 'deny',
+							matchedRule: 'authorization',
+							reason,
+						});
+					});
+				} else {
+					const rules = state.policy.rules ?? this.ctx.settings.rules();
+					this.denyWithoutGate(state, reason, policySnapshot(state.policy, rules), 'authorization', 'authorization');
+				}
+				return {
+					...state,
+					toolCalls: [],
+					traces: undefined,
+					messages: [...state.messages, ...messages],
+					transcript: [...state.transcript, ...messages],
+				};
+			}
 			const results = new Array<Message | null>(state.toolCalls.length).fill(null);
 			const stopped = (call: ToolCall): Message => ({
 				role: 'tool',
@@ -1658,7 +1718,7 @@ export class Agent extends Service {
 					try {
 						outcome = await this.ctx.tools.invoke(
 							{ ...call, arguments: args },
-							this.toolContext(state, runtime.signal, state.traces?.[index] ? index : undefined),
+							this.toolContext(state, runtime.signal, authorization, state.traces?.[index] ? index : undefined),
 						);
 					} catch (error) {
 						if (runtime.signal.aborted) {
@@ -1749,50 +1809,14 @@ export class Agent extends Service {
 			};
 		});
 
-		routes.set('agent.after-llm', (state) => {
-			if (state.toolCalls.length === 0) {
-				return 'end';
-			}
-			// The call is revalidated against a parent that may have tightened during the request.
+		nodes.set('agent.gate', async (state) => {
+			// A parent tightening lands before the gate reads the call, including while the approval
+			// was open: a grant the parent no longer allows must not run.
 			this.refreshSubagentPolicy(state);
 			// The turn's own rules, not the current settings: a delegated agent carries its snapshot,
 			// and a main turn keeps the rules it started with.
 			const rules = state.policy.rules ?? this.ctx.settings.rules();
 			const snapshot = policySnapshot(state.policy, rules);
-			// A silent generation is offered no tools, so a call it makes anyway is dropped with its turn: the
-			// reply is what it wrote, and nothing is run on its behalf.
-			if (SILENT_TRIGGERS.has(state.trigger)) {
-				this.denyWithoutGate(state, 'a silent generation drops tool calls', snapshot, 'silent-generation');
-				return 'end';
-			}
-			// The Tools entry is the whole turn's switch: a call made anyway is answered as rejected and
-			// never reaches the tool. The model then gets its own turn to reply without one.
-			if (state.toolsEnabled === false) {
-				state.gateReason = 'the Tools entry is off';
-				this.denyWithoutGate(state, state.gateReason, snapshot, 'tools-switch');
-				return 'reject';
-			}
-			// A tool switched off in the Prompts tab is treated like an unknown one: it was not offered,
-			// and a call invented for it must not run.
-			const off = state.toolCalls.find((call) => !this.ctx.tools.isEnabled(call.name));
-			if (off) {
-				state.gateReason = `tool ${off.name} is switched off in Prompts`;
-				this.denyWithoutGate(state, state.gateReason, snapshot, 'tool-switch');
-				return 'reject';
-			}
-			// A subagent may only call what its grant and definition offered it; a call invented for a
-			// hidden tool is refused here, before the gate has a chance to read a rule for it.
-			if (state.filter) {
-				const unavailable = state.toolCalls.find((call) => {
-					const tool = this.ctx.tools.get(call.name);
-					return !tool || !this.subagentToolAllowed(state, tool);
-				});
-				if (unavailable) {
-					state.gateReason = `tool ${unavailable.name} is not available to this subagent`;
-					this.denyWithoutGate(state, state.gateReason, snapshot, 'subagent');
-					return 'reject';
-				}
-			}
 			const workspace = state.policy.workingDirectory;
 			const created = new Set(this.createdInSession(state));
 			const createdDirs = new Set(this.createdDirsInSession(state));
@@ -1836,40 +1860,98 @@ export class Agent extends Service {
 			const temp = workspace.trim() ? workspaceTempDir(workspace) : undefined;
 			const inTree = (root: string | undefined, target: string): boolean =>
 				Boolean(root && (resolve(target) === resolve(root) || insideRealWorkspace(root, target)));
-			const gate = gateCalls(state.toolCalls, (name) => this.ctx.tools.get(name), state.policy, rules, {
-				sandbox: this.ctx.host.sandboxKind(),
-				created: process.platform === 'win32' ? undefined : created,
-				createdDirs: process.platform === 'win32' ? undefined : createdDirs,
-				deletionStaysInside:
-					process.platform === 'win32' ? undefined : (target) => insideRealWorkspace(workspace, target),
-				deletionScratch: process.platform === 'win32' ? undefined : (target) => inTree(scratch, target) || inTree(temp, target),
+			const result = evaluatePolicy({
+				calls: state.toolCalls,
+				lookup: (name) => this.ctx.tools.get(name),
+				policy: state.policy,
+				rules,
+				env: {
+					sandbox: this.ctx.host.sandboxKind(),
+					created: process.platform === 'win32' ? undefined : created,
+					createdDirs: process.platform === 'win32' ? undefined : createdDirs,
+					deletionStaysInside:
+						process.platform === 'win32' ? undefined : (target) => insideRealWorkspace(workspace, target),
+					deletionScratch: process.platform === 'win32' ? undefined : (target) => inTree(scratch, target) || inTree(temp, target),
+				},
+				toolsEnabled: state.toolsEnabled !== false,
+				toolEnabled: (name) => this.ctx.tools.isEnabled(name),
+				delegated: state.filter ? (tool) => this.subagentToolAllowed(state, tool) : undefined,
 			});
-			this.beginTraces(state, gate.calls, snapshot);
-			state.gateReason = gate.reason;
-			if (gate.decision === 'allow') {
-				return 'tools';
+			// The first pass opens one chain per call; the resumed pass reuses them and appends the
+			// answer to the decision that asked for it.
+			if (!state.traces) {
+				this.beginTraces(state, result.calls, snapshot);
 			}
-			// A delegated agent has a fixed `never` approval response: any confirmation is denied
-			// without asking, even when the child's own approval policy asked for one.
-			if (gate.decision === 'confirm' && state.filter) {
-				state.gateReason = `${gate.reason}; the subagent approval response policy denies without asking`;
-				this.respondTraces(state, 'deny', state.gateReason, state.policy.approvalResponse);
-				return 'reject';
+			let outcome = result.outcome;
+			let reason = result.reason;
+			if (state.approval) {
+				this.respondTraces(state, state.approval.allowed ? 'allow' : 'deny', state.approval.reason);
 			}
-			if (gate.decision === 'reject') {
-				gate.calls.forEach((callGate, index) => {
+			if (result.outcome === 'reject') {
+				// A policy rejection always wins, even when the user approved; the resumed pass records
+				// the layer that tightened so the trace explains the reversal.
+				const deciding = result.calls.find((call) => call.decision === 'reject')?.traces.at(-1);
+				result.calls.forEach((call, index) => {
+					if (state.approval?.allowed && deciding) {
+						this.appendTraceStep(state, index, deciding);
+					}
 					this.denyTrace(
 						state,
 						index,
-						callGate.decision === 'reject' ? callGate.reason : `batch rejected: ${gate.reason}`,
+						call.decision === 'reject' ? (deciding?.reason ?? result.reason) : `batch rejected: ${result.reason}`,
 					);
 				});
-				return 'reject';
+			} else if (state.approval && !state.approval.allowed) {
+				outcome = 'reject';
+				// The model sees both why the call reached approval and why it was denied.
+				reason =
+					state.approval.reason === result.reason
+						? result.reason
+						: `${result.reason}; ${state.approval.reason}`;
+			} else if (state.approval?.allowed && outcome === 'confirm') {
+				outcome = 'allow';
 			}
-			return 'confirm';
+			state.gateReason = reason;
+			state.outcome = outcome;
+			state.authorization =
+				outcome === 'allow'
+					? issueAuthorization({
+							sessionId: state.sessionId,
+							batch: state.batch,
+							callIds: state.toolCalls.map((call) => call.id),
+						})
+					: undefined;
+			return state;
 		});
 
-		routes.set('agent.after-confirm', (state) => (state.confirmed ? 'tools' : 'reject'));
+		routes.set('agent.after-llm', (state) => {
+			if (state.toolCalls.length === 0) {
+				return 'end';
+			}
+			// The call is revalidated against a parent that may have tightened during the request.
+			this.refreshSubagentPolicy(state);
+			// A silent generation is offered no tools, so a call it makes anyway is dropped with its
+			// turn: the reply is what it wrote, and nothing is run on its behalf. Its transcript is
+			// discarded afterwards, so the unanswered calls never reach the chat record.
+			if (SILENT_TRIGGERS.has(state.trigger)) {
+				const rules = state.policy.rules ?? this.ctx.settings.rules();
+				this.denyWithoutGate(
+					state,
+					'a silent generation drops tool calls',
+					policySnapshot(state.policy, rules),
+					'silent-generation',
+				);
+				return 'end';
+			}
+			return 'calls';
+		});
+
+		routes.set('agent.gate', (state) => {
+			if (!state.outcome) {
+				throw new Error('agent.gate ran without an outcome');
+			}
+			return state.outcome === 'allow' ? 'tools' : state.outcome === 'confirm' ? 'approval' : 'reject';
+		});
 
 		return { nodes, routes };
 	}
@@ -1927,21 +2009,27 @@ export class Agent extends Service {
 	}
 
 	/** Opens one chain per call, in the same order as `state.toolCalls`. */
-	private beginTraces(state: RunState, gates: readonly { steps: PolicyStep[] }[], snapshot: PolicySnapshot): void {
+	private beginTraces(state: RunState, calls: readonly { traces: PolicyStep[] }[], snapshot: PolicySnapshot): void {
 		state.traces = state.toolCalls.map((call, index) =>
-			this.ctx.decisions.begin(this.traceContext(state, call), gates[index]?.steps ?? [], snapshot),
+			this.ctx.decisions.begin(this.traceContext(state, call), calls[index]?.traces ?? [], snapshot),
 		);
 	}
 
 	/**
-	 * A denial reached before the gate (tools off, a call the subagent may not see, a silent
-	 * generation) still gets a truthful capability node, so no model-issued call is invisible.
+	 * A denial reached before the gate (silent generation, a missing authorization) still gets a
+	 * truthful node, so no model-issued call is invisible.
 	 */
-	private denyWithoutGate(state: RunState, reason: string, snapshot: PolicySnapshot, matchedRule = 'capability'): void {
+	private denyWithoutGate(
+		state: RunState,
+		reason: string,
+		snapshot: PolicySnapshot,
+		matchedRule = 'capability',
+		layer: PolicyStep['layer'] = 'capability',
+	): void {
 		state.traces = state.toolCalls.map((call) => {
 			const trace = this.ctx.decisions.begin(
 				this.traceContext(state, call),
-				[{ layer: 'capability', decision: 'deny', matchedRule, reason }],
+				[{ layer, decision: 'deny', matchedRule, reason }],
 				snapshot,
 			);
 			this.ctx.decisions.terminal(trace, 'denied', reason);
@@ -2031,9 +2119,16 @@ export class Agent extends Service {
 		return !state.filter.allow || state.filter.allow.includes(tool.name);
 	}
 
-	private toolContext(state: RunState, signal: AbortSignal, traceIndex?: number): ToolContext {
+	private toolContext(
+		state: RunState,
+		signal: AbortSignal,
+		authorization: ToolAuthorization | undefined,
+		traceIndex?: number,
+	): ToolContext {
 		return {
 			sessionId: state.sessionId,
+			batch: state.batch,
+			authorization,
 			workspace: state.policy.workingDirectory,
 			policy: state.policy,
 			signal,
@@ -2438,7 +2533,7 @@ export class Agent extends Service {
 					toolCalls: [],
 					turn: child.turnIndex,
 					gateReason: '',
-					confirmed: null,
+					batch: 0,
 					filter: { allow },
 					// A subagent is an ordinary generation of its own; nothing about it is swiped or quieted.
 					trigger: 'normal',

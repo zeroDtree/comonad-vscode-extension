@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context, type Plugin } from 'cordis';
+import { verifyAuthorization } from '../lib/authorization';
 import { abortable } from '../lib/cancel';
 import { capabilityAllowed, writesWorkspace } from '../lib/policy';
 import { mergeToolLayout } from '../lib/prompt-layout';
@@ -162,10 +163,17 @@ export class Tools extends Service {
 		ctx.signal.throwIfAborted();
 		// A second-line refusal is a policy decision too, even though the gate above normally
 		// catches it first. Record it so a direct or resumed dispatch never loses the reason.
-		const refuseTrace = (theme: 'capability' | 'network', reason: string, matchedRule: string): void => {
+		const refuseTrace = (theme: 'capability' | 'network' | 'authorization', reason: string, matchedRule: string): void => {
 			ctx.traceStep?.({ layer: theme, decision: 'deny', matchedRule, reason });
 			ctx.traceDenied?.(reason);
 		};
+		// The gate is the only issuer. A custom graph that routes around it reaches the executor
+		// without a grant, and the call is refused instead of running.
+		if (!verifyAuthorization(ctx.authorization, { sessionId: ctx.sessionId, batch: ctx.batch, callId: call.id })) {
+			const reason = `tool ${call.name} was not authorized by the tool policy`;
+			refuseTrace('authorization', reason, 'authorization');
+			return { content: `Error: ${reason}`, isError: true };
+		}
 		const tool = this.get(call.name);
 		if (!tool) {
 			const reason = `unknown tool ${call.name}`;

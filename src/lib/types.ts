@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Domain types shared by the agent kernel. This module must not import `vscode` or `cordis`. */
 
+import type { ToolAuthorization } from './authorization';
 import type { PolicyStep, RuleSet } from './policy';
 import type { SandboxMode, SandboxOptions } from './sandbox';
 
@@ -255,6 +256,10 @@ export interface ToolContext {
 	sessionId: string;
 	/** The tool call being dispatched, when known; a spawned subagent links its session to it. */
 	callId?: string;
+	/** The turn's tool batch, which the authorization is bound to. */
+	batch: number;
+	/** The gate-issued, single-use grant for this call; the executor refuses a call without one. */
+	authorization?: ToolAuthorization;
 	workspace: string;
 	policy: SessionPolicy;
 	signal: AbortSignal;

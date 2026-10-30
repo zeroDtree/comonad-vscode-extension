@@ -14,6 +14,11 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 - **Graphs are plugins.** The graph engine now owns named Mermaid graphs, a node/route registry and a
   dedicated **Graph** tab with a live preview. Edit the source in Settings → Graph.
+- **The tool loop is a gate, not a route.** The shipped graph is now `llm → calls → gate →
+  {tools, approval, reject}`; `agent.approval` returns to the gate, which re-evaluates the batch
+  after the answer. The policy is a pure decision module and the only issuer of a single-use tool
+  authorization; the executor refuses a call without one, so a custom graph cannot route around
+  the rules. Stored graphs that name the old nodes fall back to the shipped loop.
 - **Compaction no longer rewrites the chat.** The canonical transcript is kept in full; a summary
   card and model-context coverage live beside it. Original turns expand from the card, older turns
   page in on demand, and restore points no longer move. `/summarize --rebuild` can rewrite the
