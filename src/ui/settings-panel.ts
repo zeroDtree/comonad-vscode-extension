@@ -872,6 +872,7 @@ const TAB_ICONS = {
 	agent: tabIcon(
 		'<rect x="3" y="5" width="10" height="7" rx="2"/><path d="M8 2.3v2.7M5.7 8.1h.01M10.3 8.1h.01M6.2 11.9v1.6M9.8 11.9v1.6"/>',
 	),
+	policies: tabIcon('<path d="M8 2.2 12.5 4v3.2c0 2.8-1.8 5-4.5 5.6-2.7-.6-4.5-2.8-4.5-5.6V4z"/><path d="M5.8 7.6 7.3 9l3-3"/>'),
 	ui: tabIcon(
 		'<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M2.5 6h11M6 6v7"/>',
 	),
@@ -923,7 +924,8 @@ ${paneStyles.map((src) => `<link rel="stylesheet" href="${src}" />`).join('\n')}
   <aside id="side">
     <input id="search" class="control" type="search" placeholder="Search settings" spellcheck="false" autocomplete="off" />
     <nav id="tabs" role="tablist" aria-orientation="vertical" aria-label="Comonad settings">
-${tabButton('agent', 'Agent', 'Agent — model, policy, workspace', TAB_ICONS.agent)}
+${tabButton('agent', 'Agent', 'Agent — model, workspace, conversation', TAB_ICONS.agent)}
+${tabButton('policies', 'Policies', 'Policies — the runtime policy pipeline', TAB_ICONS.policies)}
 ${tabButton('ui', 'UI', 'UI — how the conversation is displayed', TAB_ICONS.ui)}
 ${tabButton('subagents', 'Subagents', 'Subagents — step budget and per-agent capability grants', TAB_ICONS.subagents)}
 ${paneTabs}
@@ -946,6 +948,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
   <main id="content">
   <section data-pane="agent">
     <h1 class="page-title">Agent</h1>
+    <p class="group-note">Work mode, network, user rules, approvals and sandbox live in the <strong>Policies</strong> tab.</p>
     <h2 class="group-title">Model</h2>
     <div class="group">
       <div class="field">
@@ -984,6 +987,24 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <input id="plans" class="control" type="text" data-key="planDirectory" spellcheck="false" placeholder=".comonad/plans" />
       </div>
     </div>
+    <h2 class="group-title">Conversation</h2>
+    <div class="group">
+      <div class="field">
+        <label for="context">Context</label>
+        <p class="hint">What the model actually receives: rendered text, token counts or raw form.</p>
+        <select id="context" class="control" data-key="contextForm"></select>
+      </div>
+      <div class="field">
+        <label for="steps">Max steps</label>
+        <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
+        <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
+      </div>
+    </div>
+  </section>
+
+  <section data-pane="policies" hidden>
+    <h1 class="page-title">Policies</h1>
+    <p class="group-note">Every tool call walks these layers in order. The first layer that stops it ends the call; a call that reaches the end runs under the sandbox.</p>
     <h2 class="group-title">1 · Capability</h2>
     <div class="group">
       <div class="field">
@@ -991,7 +1012,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <p class="hint">The capability set a turn may use at all. A call outside it never reaches the later layers.</p>
         <select id="mode" class="control" data-key="mode"></select>
       </div>
-      <p class="group-note">Every tool call walks the numbered layers below in order. The first layer that stops the call ends it: 1 capability → 2 network → 3 user rules → 4 tool approval → 5 approval response → 6 sandbox.</p>
     </div>
     <h2 class="group-title">2 · Network</h2>
     <div class="group">
@@ -1049,19 +1069,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       </div>
       <p class="group-note">A workspace-write shell gets a temporary directory at <code>.comonad/tmp</code>. The test shell (<code>run_shell_test</code>) writes only <code>.comonad/scratch/&lt;session&gt;</code>, exposed as <code>$COMONAD_SCRATCH</code> with <code>TMPDIR</code>, <code>HOME</code> and <code>XDG_CACHE_HOME</code> pointing there. Workspace-read also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
       <p class="group-note" id="environment-note"></p>
-    </div>
-    <h2 class="group-title">Conversation</h2>
-    <div class="group">
-      <div class="field">
-        <label for="context">Context</label>
-        <p class="hint">What the model actually receives: rendered text, token counts or raw form.</p>
-        <select id="context" class="control" data-key="contextForm"></select>
-      </div>
-      <div class="field">
-        <label for="steps">Max steps</label>
-        <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
-        <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
-      </div>
     </div>
   </section>
 

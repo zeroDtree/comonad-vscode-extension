@@ -56,7 +56,7 @@ read_file(./.env)
 fetch_url(domain:example.com)
 ```
 
-在 **Comonad: Open Settings → Agent → User rules** 中编辑，一行一条。三个列表按以下顺序检查：
+在 **Comonad: Open Settings → Policies → User rules** 中编辑，一行一条。三个列表按以下顺序检查：
 
 1. **deny** —— 拒绝该调用；
 2. **ask** —— 询问；

@@ -559,7 +559,7 @@
 	}
 
 	for (const node of document.querySelectorAll('[data-key]')) {
-		const live = node.closest('section[data-pane="agent"], section[data-pane="ui"], section[data-pane="subagents"]') !== null;
+		const live = node.closest('section[data-pane="agent"], section[data-pane="policies"], section[data-pane="ui"], section[data-pane="subagents"]') !== null;
 		const draft = () => {
 			markDirty();
 		};

@@ -42,8 +42,9 @@ Highlights are below; the full implementation notes are linked at the end. The u
   `comonad.approvalResponse` (`ask`/`never`) decides who answers a confirmation, and
   `comonad.sandboxMode` (`workspace-read`, `read-only`, `workspace-write`, `danger-full-access`)
   replaces `confineRead`/`confineWrite`. A user rule that matches settles the call; the approval
-  policy is consulted only when none of `deny`/`ask`/`allow` matched. The settings panel, chat
-  footer, `/permissions`, `/status` and the flow diagram all show the same six layers.
+  policy is consulted only when none of `deny`/`ask`/`allow` matched. A dedicated **Policies** tab
+  groups the six layers in their decision order; the chat footer, `/permissions`, `/status` and the
+  flow diagram show the same six layers.
 - **Shell calls** take a model-chosen timeout and keep loopback available when network is off. With
   no OS sandbox, shell commands are refused unless the sandbox mode is `danger-full-access`; the
   read-only and test shells always need an OS sandbox.

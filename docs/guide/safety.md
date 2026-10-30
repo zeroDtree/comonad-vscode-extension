@@ -58,7 +58,7 @@ read_file(./.env)
 fetch_url(domain:example.com)
 ```
 
-Edit them in **Comonad: Open Settings → Agent → User rules**, one rule per line. The lists are
+Edit them in **Comonad: Open Settings → Policies → User rules**, one rule per line. The lists are
 checked in this order:
 
 1. **deny** — the call is rejected;

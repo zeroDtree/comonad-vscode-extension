@@ -3681,6 +3681,8 @@ suite('Cordis kernel', () => {
 			assert.match(document, /id="approval-response"[^>]*data-key="approvalResponse"/, 'the approval response policy control');
 			assert.match(document, /id="sandbox-mode"[^>]*data-key="sandboxMode"/, 'the sandbox mode control');
 			assert.match(document, /User rules/, 'the rule lists are named as the pipeline names them');
+			assert.match(document, /data-tab="policies"/, 'the policies tab is a core tab');
+			assert.match(document, /<section data-pane="policies" hidden>/, 'with its own section');
 			assert.match(document, /data-tab="subagents"/, 'the subagents tab is a core tab');
 			assert.match(document, /<section data-pane="subagents" hidden>/, 'with its own section');
 			assert.match(document, /id="subagent-rows"/, 'holding the grant matrix');
