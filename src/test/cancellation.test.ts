@@ -414,14 +414,21 @@ suite('Cancellation', () => {
 	});
 
 	test('run_shell stops a command when the turn signal aborts', async () => {
-		const kernel = await createTestKernel();
+		// This checks the abort path, not the sandbox; full access keeps it runnable without bwrap.
+		const kernel = await createTestKernel({ config: { sandboxMode: 'danger-full-access', network: true } });
 		try {
 			await kernel.ctx.plugin(shellTools);
 			const spec = kernel.ctx.tools.get('run_shell');
 			assert.ok(spec);
 			const controller = new AbortController();
 			const started = Date.now();
-			const running = spec.execute({ command: 'sleep 30' }, context(kernel, controller.signal));
+			const base = context(kernel, controller.signal);
+			// Pass the full-access policy on the call itself as well: this test needs a runnable
+			// command on a CI host with no bwrap, and it is about the abort, not the sandbox.
+			const running = spec.execute(
+				{ command: 'sleep 30' },
+				{ ...base, policy: { ...base.policy, sandboxMode: 'danger-full-access', network: true } },
+			);
 			setTimeout(() => controller.abort(), 100);
 			const result = await within(running, 3_000);
 			assert.match(String(result), /exit_code:/);
