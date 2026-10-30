@@ -12,7 +12,6 @@
 	const mentionEl = $('mention');
 	const mentionHead = $('mention-head');
 	const mentionList = $('mention-list');
-	const networkChip = $('network');
 	const environmentChip = $('environment');
 	const changesPanel = $('changes-panel');
 	const changesTitle = $('changes-title');
@@ -27,17 +26,6 @@
 	const scopeButton = $('chats-scope');
 	const jumpButton = $('jump-latest');
 	const tip = $('tip');
-
-	const FORMS = [
-		['rendered', 'Rendered', 'folded thoughts, tool cards'],
-		['token', 'Token', 'assistant text only'],
-		['raw', 'Raw', 'the full record'],
-	];
-	const CONTEXTS = [
-		{ id: 'rendered', label: 'Rendered', description: 'text, thoughts and tool results' },
-		{ id: 'token', label: 'Token', description: 'assistant text only' },
-		{ id: 'raw', label: 'Raw', description: 'the full record' },
-	];
 
 	/* ------------------------------------------------------------------ tooltips */
 
@@ -211,10 +199,6 @@
 	const generationPill = setupPill('generate', () => undefined);
 	const approvalPill = setupPill('approval', (approval) => vscode.postMessage({ type: 'setApproval', approval }));
 	const sandboxPill = setupPill('sandbox', (sandboxMode) => vscode.postMessage({ type: 'setSandboxMode', sandboxMode }));
-	const contextPill = setupPill('context', (context) => vscode.postMessage({ type: 'setContext', context }));
-	// Display is global: it re-renders the whole transcript instead of one reply at a time.
-	const displayPill = setupPill('display', (display) => vscode.postMessage({ type: 'setDisplay', display }));
-	const DISPLAYS = FORMS.map(([id, label, description]) => ({ id, label, description }));
 
 	/* The model pill: Reasoning effort, Context budget and Model, Cursor-style. */
 
@@ -3227,8 +3211,6 @@
 		fillPill(modePill, state.modes, state.mode, 'Work mode — what the agent may do');
 		fillPill(approvalPill, state.approvals, state.approval, 'Tool approval policy — what happens to a call no rule matched');
 		fillPill(sandboxPill, state.sandboxes, state.sandboxMode, 'Sandbox mode — how far reads and writes may reach');
-		fillPill(contextPill, CONTEXTS, state.context, 'Context — what this chat sends back to the model');
-		fillPill(displayPill, DISPLAYS, currentView(), 'Display — how every turn is shown');
 		fillGenerations();
 		Object.assign(tavernState, state.tavern || {});
 		renderLore();
@@ -3260,9 +3242,6 @@
 		modelState.contextWindow = Number(state.contextWindow) || 0;
 		modelState.windowTokens = Number(state.windowTokens) || 0;
 		updateModelPill();
-		networkChip.classList.toggle('is-on', Boolean(state.network));
-		networkChip.dataset.tip =
-			'Network access policy — allow network tools and network inside the shell sandbox\nCurrent: ' + (state.network ? 'on' : 'off');
 		const noSandbox = state.sandbox === 'none';
 		environmentChip.hidden = !noSandbox;
 		environmentChip.textContent = noSandbox ? (state.remote ? 'remote · no sandbox' : 'no OS sandbox') : '';
@@ -4408,7 +4387,6 @@
 		pinned = true;
 		scroll(true);
 	});
-	networkChip.addEventListener('click', () => vscode.postMessage({ type: 'toggleNetwork' }));
 	changesToggle.addEventListener('click', () => {
 		changesOpen = !changesOpen;
 		renderChanges(pendingChanges, reviewedChanges);

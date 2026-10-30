@@ -1770,24 +1770,6 @@ footer {
 	opacity: 0.65;
 }
 
-/* The Context (↑) and Display (👁) pills take the same values, so each one leads with an icon. */
-.pill-icon {
-	display: inline-flex;
-	flex: none;
-	align-items: center;
-	opacity: 0.65;
-}
-
-.pill-icon svg {
-	width: 12px;
-	height: 12px;
-	fill: none;
-	stroke: currentColor;
-	stroke-width: 1.2;
-	stroke-linecap: round;
-	stroke-linejoin: round;
-}
-
 .pill-trigger .chev {
 	font-size: 9px;
 	opacity: 0.5;
@@ -1896,7 +1878,7 @@ footer {
 	max-width: none;
 }
 
-/* Work mode, approval, context and network: their own row under the input box. */
+/* Work mode, approval, sandbox and the environment note: their own row under the input box. */
 #pills {
 	display: flex;
 	align-items: center;
@@ -1905,7 +1887,6 @@ footer {
 	margin-top: 8px;
 }
 
-#network,
 #environment {
 	padding: 2px 9px;
 	border-radius: 10px;
@@ -1913,12 +1894,6 @@ footer {
 	background: transparent;
 	border: 1px solid var(--vscode-dropdown-border, rgba(128, 128, 128, 0.3));
 	opacity: 0.75;
-}
-
-#network.is-on {
-	opacity: 1;
-	border-color: var(--vscode-focusBorder, rgba(128, 128, 128, 0.6));
-	background: var(--vscode-inputOption-activeBackground, rgba(128, 128, 128, 0.18));
 }
 
 #environment {

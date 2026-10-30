@@ -1079,7 +1079,7 @@
             "raw"
           ],
           "default": "rendered",
-          "markdownDescription": "What a chat sends back to the model: `rendered` trims long tool output, `token` sends only user/assistant text, `raw` sends the full record. New chats start here; the composer's Context pill changes the current chat and saves the pick here."
+          "markdownDescription": "What a chat sends back to the model: `rendered` trims long tool output, `token` sends only user/assistant text, `raw` sends the full record. Changing it in Settings applies to the active chat and is the default for new chats."
         },
         "comonad.displayForm": {
           "type": "string",
@@ -1089,7 +1089,7 @@
             "raw"
           ],
           "default": "rendered",
-          "markdownDescription": "How a reply is shown: `rendered` folds thoughts and draws each tool call as a card, `token` shows assistant text only, `raw` shows the full record. New replies start here; the tabs above a reply switch just that reply."
+          "markdownDescription": "How the transcript is shown: `rendered` folds thoughts and draws each tool call as a card, `token` shows assistant text only, `raw` shows the full record. The whole transcript is drawn this way; change it in Settings."
         },
         "comonad.toolCard": {
           "type": "string",

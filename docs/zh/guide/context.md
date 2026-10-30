@@ -43,7 +43,7 @@
 
 ## 模型看到什么
 
-**Context** 药丸作用于最近 tail；摘要始终包含，不会被过滤掉：
+**Context** 设置（设置 → Agent → Context）作用于最近 tail；摘要始终包含，不会被过滤掉：
 
 | 形态 | 发送内容 |
 | --- | --- |
@@ -51,7 +51,7 @@
 | Token | 摘要 + 仅用户与 assistant 文本 |
 | Raw | 摘要 + 完整的最近记录 |
 
-**Display** 只改变你看到的内容；Context 改变模型收到的内容。
+**Display** 设置（设置 → UI → Display）只改变你看到的内容；Context 改变模型收到的内容。
 
 ## 引用与附件
 

@@ -268,6 +268,18 @@ export function settingsPanel(ctx: Context): void {
 				await ctx.settings.update(key, value);
 			}
 		}
+		// The composer's Context pill used to write the chat and this setting together. With the
+		// pill gone, a Settings pick must reach the active chat too, or `session.contextForm`
+		// would keep shadowing the new default.
+		if (Object.hasOwn(patch, 'contextForm')) {
+			const session = ctx.sessions.active();
+			const form = ctx.settings.get().contextForm;
+			if (session && session.contextForm !== form) {
+				session.contextForm = form;
+				ctx.sessions.save(session);
+				ctx.sessions.changed(session.id);
+			}
+		}
 		if (patch.mcpServers && typeof patch.mcpServers === 'object') {
 			await ctx.settings.update('mcpServers', patch.mcpServers);
 			await ctx.mcp.reload();
@@ -991,7 +1003,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     <div class="group">
       <div class="field">
         <label for="context">Context</label>
-        <p class="hint">What the model actually receives: rendered text, token counts or raw form.</p>
+        <p class="hint">What the model actually receives: rendered text, token counts or raw form. Applies to the active chat and is the default for new chats.</p>
         <select id="context" class="control" data-key="contextForm"></select>
       </div>
       <div class="field">

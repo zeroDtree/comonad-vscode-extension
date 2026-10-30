@@ -41,13 +41,13 @@ Secondary Side Bar。同样的会话也可以在 VS Code 内置聊天视图里�
 | **Mode** | agent 能做什么 —— 见[安全](/zh/guide/safety) |
 | **Tool approval** | 没有规则匹配时如何处理调用 |
 | **Sandbox** | OS 强制的读写范围（Sandbox mode） |
-| **Context** | 这个聊天回传给模型的内容：Rendered、Token、Raw |
-| **Display** | 整个转录如何绘制 |
-| **Network** | Network access policy：网络工具与 shell 内的网络 |
 | **Tool cards** | 工具卡初始状态：collapsed（默认）、preview、open |
 
-这里的每个选择都会写回对应的 `comonad.*` 设置，所以新建聊天会沿用同样的模型、思考强度、
-上下文窗口和表单。
+这里的每个选择都会写回对应的 `comonad.*` 设置，所以新建聊天会沿用同样的策略。
+
+**Context**、**Display** 和 **Network** 在设置中配置：Context 在 **Agent**，Display 在 **UI**，
+Network 在 **Policies**（或使用 **Comonad: Toggle Network** 命令）。修改 Context 会作用于当前
+聊天，并作为新聊天的默认值。
 
 **Tool cards** 就是 `comonad.toolCard` 设置，三档：
 
@@ -72,7 +72,7 @@ Secondary Side Bar。同样的会话也可以在 VS Code 内置聊天视图里�
 - **子 Agent 的调用可以打开它的会话。** 子 Agent 一创建，`agent` 工具卡上就会出现 **Open session**；
   点开后是只读覆盖层，显示子 Agent 的提示词、步骤和工具结果，并随执行过程更新；**← Back** 回到原聊天，
   原聊天不受影响。
-- **Display** 切换整个转录：**Rendered** 折叠思考并绘制工具卡，**Token** 只显示 assistant 文本和调用数，
+- **Display**（设置 → UI）切换整个转录：**Rendered** 折叠思考并绘制工具卡，**Token** 只显示 assistant 文本和调用数，
   **Raw** 以纯文本显示完整记录。
 
 ### 编辑与重新生成

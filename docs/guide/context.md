@@ -52,8 +52,8 @@ Run `/summarize [notes]` (aliases `/compress`, `/compact`) to extend the summary
 
 ## What the model sees
 
-The **Context** pill decides what a chat sends back. It applies to the recent tail; the summary is
-always included, so it cannot be filtered away:
+The **Context** setting (Settings → Agent → Context) decides what a chat sends back. It applies to
+the recent tail; the summary is always included, so it cannot be filtered away:
 
 | Form | What is sent |
 | --- | --- |
@@ -61,7 +61,8 @@ always included, so it cannot be filtered away:
 | Token | Summary + only user and assistant text |
 | Raw | Summary + the full recent record |
 
-The **Display** pill only changes what you see; Context changes what the model receives.
+The **Display** setting (Settings → UI → Display) only changes what you see; Context changes what
+the model receives.
 
 ## References and attachments
 

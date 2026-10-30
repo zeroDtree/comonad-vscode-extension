@@ -14,7 +14,6 @@ import {
 import { asReasoningEffort } from '../lib/effort';
 import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES } from '../lib/images';
 import { APPROVAL_LABELS, MODE_LABELS, SANDBOX_LABELS } from '../lib/policy';
-import type { ContextForm } from '../lib/prompt';
 import { turnsOf, type Step, type Turn } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
 import type { Approval, ApprovalDecision, AttachmentPart, SandboxMode, WorkMode } from '../lib/types';
@@ -203,7 +202,6 @@ export function chatPanel(ctx: Context): void {
 			sandbox: ctx.host.sandboxKind(),
 			sandboxMode: config.sandboxMode,
 			remote: ctx.host.remoteName() ?? null,
-			context: session?.contextForm ?? config.contextForm,
 			display: config.displayForm,
 			toolCard: config.toolCard,
 			reasoningEffort: effort,
@@ -1371,23 +1369,6 @@ export function chatPanel(ctx: Context): void {
 						await ctx.settings.applyPolicy({ sandboxMode: message.sandboxMode as SandboxMode });
 					}
 					break;
-				case 'setContext': {
-					// The control is the chat's, but the pick is also the default for the next chat:
-					// a setting changed here outlives the session it was made in.
-					const form = asForm(message.context);
-					const session = ctx.sessions.active();
-					if (session) {
-						session.contextForm = form;
-						ctx.sessions.save(session);
-						ctx.sessions.changed(session.id);
-					}
-					await ctx.settings.update('contextForm', form);
-					break;
-				}
-				case 'setDisplay':
-					// One control for the whole transcript, so every reply renders the same way.
-					await ctx.settings.update('displayForm', asForm(message.display));
-					break;
 				case 'setReasoningEffort': {
 					// Persist the pick as well: a new chat starts from the settings, so the effort
 					// chosen here carries over instead of snapping back to `auto`.
@@ -1412,9 +1393,6 @@ export function chatPanel(ctx: Context): void {
 					await ctx.settings.update('contextWindow', window);
 					break;
 				}
-				case 'toggleNetwork':
-					await ctx.settings.applyPolicy({ network: !ctx.settings.get().network });
-					break;
 				case 'setModel': {
 					const model = String(message.model ?? 'auto');
 					if (!(await ctx.llm.keyReady(model))) {
@@ -1659,11 +1637,6 @@ function splitChoices(labels: Record<string, string>): { id: string; label: stri
 	});
 }
 
-function asForm(value: unknown): ContextForm {
-	return value === 'token' || value === 'raw' ? value : 'rendered';
-}
-
-
 function trimTitle(title: string): string {
 	return title.length > 42 ? `${title.slice(0, 42)}…` : title;
 }
@@ -1766,21 +1739,6 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 			<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="pill-label"></span><span class="chev">▾</span></button>
 			<div class="pill-menu" hidden></div>
 		</div>
-		<div class="pill" data-control="context">
-			<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false">
-				<span class="pill-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 13.2V3.4"/><path d="M3.9 7.5L8 3.4l4.1 4.1"/></svg></span>
-				<span class="pill-label"></span><span class="chev">▾</span>
-			</button>
-			<div class="pill-menu" hidden></div>
-		</div>
-		<div class="pill" data-control="display">
-			<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false">
-				<span class="pill-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M1.7 8S4.1 4.2 8 4.2 14.3 8 14.3 8 11.9 11.8 8 11.8 1.7 8 1.7 8z"/><circle cx="8" cy="8" r="1.8"/></svg></span>
-				<span class="pill-label"></span><span class="chev">▾</span>
-			</button>
-			<div class="pill-menu" hidden></div>
-		</div>
-		<button id="network" type="button">Network</button>
 		<span id="environment" hidden></span>
 	</div>
 	<div id="status"></div>

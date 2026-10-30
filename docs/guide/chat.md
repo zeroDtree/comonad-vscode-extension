@@ -44,13 +44,14 @@ Below the input:
 | **Mode** | What the agent may do at all — see [Safety](/guide/safety) |
 | **Tool approval** | What happens to a call no rule matched |
 | **Sandbox** | The OS-enforced read and write range |
-| **Context** | What this chat sends back: Rendered, Token or Raw |
-| **Display** | How the whole transcript is drawn |
-| **Network** | Network access policy: tools and shell network |
 | **Tool cards** | How a tool card starts: collapsed (default), preview or open |
 
 Every pick is written back to the matching `comonad.*` setting, so a new chat starts with the same
-model, effort, context window and forms.
+policy.
+
+**Context**, **Display** and **Network** are set in Settings instead: Context under **Agent**,
+Display under **UI**, and Network under **Policies** (or with **Comonad: Toggle Network**).
+Changing Context applies to the active chat and is the default for new chats.
 
 **Tool cards** is the `comonad.toolCard` setting. Its three modes:
 
@@ -79,7 +80,7 @@ its shape.
 - **A subagent call opens its conversation.** An `agent` card carries **Open session** as soon as the
   child exists. It opens a read-only overlay with the subagent's prompt, steps and tool results, and
   follows the run as it works; **← Back** returns to the parent chat unchanged.
-- **Display** switches the whole transcript: **Rendered** folds thoughts and draws tool cards,
+- **Display** (Settings → UI) switches the whole transcript: **Rendered** folds thoughts and draws tool cards,
   **Token** shows assistant text plus a call count, **Raw** shows the full record as plain text.
 
 ### Editing and regenerating
