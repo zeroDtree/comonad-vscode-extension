@@ -133,7 +133,7 @@ export class Tools extends Service {
 			.filter((entry) => entry.enabled)
 			.map((entry) => entry.tool)
 			.filter((tool) => {
-				if (!capabilityAllowed(tool.capability, policy.workMode)) {
+				if (!capabilityAllowed(tool.capability, policy)) {
 					return false;
 				}
 				if (tool.needsNetwork && !policy.network) {
@@ -143,6 +143,9 @@ export class Tools extends Service {
 					return false;
 				}
 				if (unavailableInSandbox(tool, policy)) {
+					return false;
+				}
+				if (policy.tools && !policy.tools.includes(tool.name)) {
 					return false;
 				}
 				if (filter?.allow && !filter.allow.includes(tool.name)) {
@@ -174,7 +177,7 @@ export class Tools extends Service {
 			refuseTrace('capability', reason, 'tool-switch');
 			return { content: `Error: ${reason}`, isError: true };
 		}
-		if (!capabilityAllowed(tool.capability, ctx.policy.workMode)) {
+		if (!capabilityAllowed(tool.capability, ctx.policy)) {
 			const reason = `tool ${call.name} is not allowed in mode ${ctx.policy.workMode}`;
 			refuseTrace('capability', reason, tool.capability);
 			return { content: `Error: ${reason}`, isError: true };
@@ -192,6 +195,13 @@ export class Tools extends Service {
 		if (unavailableInSandbox(tool, ctx.policy)) {
 			const reason = `tool ${call.name} cannot run under sandbox mode ${ctx.policy.sandboxMode}`;
 			refuseTrace('capability', reason, `sandbox:${ctx.policy.sandboxMode}`);
+			return { content: `Error: ${reason}`, isError: true };
+		}
+		// The delegated tool allowlist is rechecked at the executor, not only when the model was offered
+		// the tool: a resuming cursor or a custom graph can carry a call the policy no longer grants.
+		if (ctx.policy.tools && !ctx.policy.tools.includes(tool.name)) {
+			const reason = `tool ${call.name} is not delegated to this agent`;
+			refuseTrace('capability', reason, 'delegation');
 			return { content: `Error: ${reason}`, isError: true };
 		}
 		let args: unknown = {};

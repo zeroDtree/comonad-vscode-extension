@@ -71,7 +71,11 @@ Comonad 把某个键写回**已经声明该键的作用域**：项目没有声�
 
 只读工具始终可用。只有 `files` 和 `test` 两种授权；`run_shell`、`start_shell` 和计划写入永远不会授予
 子 Agent。Agent 定义还必须列出使用该能力的工具；没有 `tools` 列表的定义视为只读。父模式仍需允许该
-能力。内置 `implement` 默认获得两种授权；其它内置和所有自定义 Agent 默认只读，需显式配置。见
+能力。内置 `implement` 默认获得两种授权；其它内置和所有自定义 Agent 默认只读，需显式配置。
+
+委派继承父级有效策略，只能收紧。子级的工具审批策略是独立的（默认 `whitelist_accept`），审批应答固定
+为 `never`：任何需要询问的调用都会被拒绝。因此可写 Agent 需要继承的 allow 规则，或在 `agent` 调用上
+传 `approval: "universal_accept"`。子会话保存完整有效策略、revision 和父会话。见
 [安全](/zh/guide/safety#子-agent)。
 
 步数：`comonad.subagentStepsMode` 默认 `custom`，每个子 Agent 花费 `comonad.subagentSteps`（40）个图步；

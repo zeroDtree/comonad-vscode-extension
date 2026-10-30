@@ -87,7 +87,8 @@ requires.
 
 The revision is a short SHA-256 of the effective policy:
 
-- work mode, network access, tool approval policy, approval response policy and sandbox mode;
+- work mode, the effective capability set and a delegated tool allowlist;
+- network access, tool approval policy, approval response policy and sandbox mode;
 - the three user-rule lists, in their effective order;
 - the deny-read paths, sorted.
 

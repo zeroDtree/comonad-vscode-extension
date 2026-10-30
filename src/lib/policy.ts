@@ -107,8 +107,29 @@ export function presetPolicy(preset: string): PresetPolicy {
 	}
 }
 
-export function capabilityAllowed(capability: Capability, mode: WorkMode): boolean {
-	return MODE_CAPS[mode].has(capability);
+export const ALL_CAPABILITIES: readonly Capability[] = ['ro', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'];
+
+/** A capability list from a session or a delegation: known values only, de-duplicated. */
+export function asCapabilities(value: unknown): Capability[] | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const seen = new Set<Capability>();
+	for (const item of value) {
+		if (typeof item === 'string' && (ALL_CAPABILITIES as readonly string[]).includes(item)) {
+			seen.add(item as Capability);
+		}
+	}
+	return [...seen];
+}
+
+/** The effective capabilities of a policy: the explicit set, or the mode's own set. */
+export function capabilitiesOf(policy: Pick<SessionPolicy, 'workMode' | 'capabilities'>): ReadonlySet<Capability> {
+	return new Set(policy.capabilities ?? MODE_CAPS[policy.workMode]);
+}
+
+export function capabilityAllowed(capability: Capability, policy: Pick<SessionPolicy, 'workMode' | 'capabilities'>): boolean {
+	return capabilitiesOf(policy).has(capability);
 }
 
 /**
@@ -154,6 +175,45 @@ export function parseRule(text: string): PolicyRule | null {
 export function parseRules(config: { allow?: readonly string[]; ask?: readonly string[]; deny?: readonly string[] } | undefined): RuleSet {
 	const parse = (list: readonly string[] | undefined) => (list ?? []).map(parseRule).filter((rule): rule is PolicyRule => rule !== null);
 	return { allow: parse(config?.allow), ask: parse(config?.ask), deny: parse(config?.deny) };
+}
+
+/** A rule set read from a session snapshot: parsed objects, sanitized against `parseRule`'s grammar. */
+export function asRuleSet(value: unknown): RuleSet | undefined {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return undefined;
+	}
+	const source = value as Record<string, unknown>;
+	const list = (raw: unknown): PolicyRule[] => {
+		if (!Array.isArray(raw)) {
+			return [];
+		}
+		const rules: PolicyRule[] = [];
+		for (const item of raw) {
+			if (typeof item === 'string') {
+				const rule = parseRule(item);
+				if (rule) {
+					rules.push(rule);
+				}
+				continue;
+			}
+			if (!item || typeof item !== 'object' || Array.isArray(item)) {
+				continue;
+			}
+			const rule = item as Record<string, unknown>;
+			const tool = rule.tool;
+			const pattern = rule.pattern;
+			if (
+				typeof tool === 'string' &&
+				/^[A-Za-z_][\w.-]*$/.test(tool) &&
+				(pattern === undefined || typeof pattern === 'string') &&
+				(pattern === undefined || pattern.trim() !== '')
+			) {
+				rules.push(pattern === undefined ? { tool } : { tool, pattern: pattern.trim() });
+			}
+		}
+		return rules;
+	};
+	return { allow: list(source.allow), ask: list(source.ask), deny: list(source.deny) };
 }
 
 function normalizeTarget(value: string): string {
@@ -326,14 +386,26 @@ export function gateCall(
 	if (!tool) {
 		return decide('reject', 'capability', 'capability', 'deny', 'unknown', `unknown tool: ${call.name}`);
 	}
-	if (!capabilityAllowed(tool.capability, policy.workMode)) {
+	if (!capabilityAllowed(tool.capability, policy)) {
 		return decide(
 			'reject',
 			'capability',
 			'capability',
 			'deny',
 			tool.capability,
-			`tool ${call.name} (${tool.capability}) is not allowed in mode ${policy.workMode}`,
+			`tool ${call.name} (${tool.capability}) is not allowed in ${
+				policy.tools ? 'the delegated capability set' : `mode ${policy.workMode}`
+			}`,
+		);
+	}
+	if (policy.tools && !policy.tools.includes(tool.name)) {
+		return decide(
+			'reject',
+			'capability',
+			'capability',
+			'deny',
+			'delegation',
+			`tool ${call.name} is not delegated to this agent`,
 		);
 	}
 	if (tool.needsWorkspace && !policy.workingDirectory.trim()) {

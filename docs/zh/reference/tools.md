@@ -22,7 +22,10 @@
 插件时返回安装提示，不会把字节当成 UTF-8 文本。
 
 `agent` 调用会创建一个隐藏的子会话。运行期间它的工具卡上会出现 **Open session**；只读覆盖层会显示
-子 Agent 的提示词、步骤和工具结果，并随执行过程更新。
+子 Agent 的提示词、步骤和工具结果，并随执行过程更新。调用可以用 `capabilities`、`network`、
+`sandboxMode` 和 `approval` 收窄子级；子级的审批应答固定为 `never`，因此任何需要询问的策略都会直接
+拒绝。子级默认审批是 `whitelist_accept`；委派可写 Agent 时请传 `approval: "universal_accept"`，或让
+父级 allow 规则被继承。Spawn 与 Fork 使用相同策略，只在上下文上不同。
 
 ## Shell 工具
 

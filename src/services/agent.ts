@@ -32,9 +32,30 @@ import {
 } from '../lib/graph';
 import { instructionBody, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, type Completion } from '../lib/openai';
-import { callTarget, gateCalls, isShellCapability, MODE_LABELS, suggestAllowRule, type PolicyStep } from '../lib/policy';
+import {
+	ALL_CAPABILITIES,
+	APPROVAL_LABELS,
+	asCapabilities,
+	callTarget,
+	capabilitiesOf,
+	gateCalls,
+	isShellCapability,
+	MODE_CAPS,
+	MODE_LABELS,
+	SANDBOX_LABELS,
+	suggestAllowRule,
+	type PolicyStep,
+} from '../lib/policy';
 import { sandboxReads, workspaceTempDir, writeScopeFor } from '../lib/sandbox';
-import { policySnapshot, type CallTrace, type PolicySnapshot, type TraceContext } from '../lib/trace';
+import {
+	buildSubagentPolicy,
+	parentFacts,
+	SUBAGENT_CAPABILITIES,
+	SUBAGENT_WRITE_CAPABILITIES,
+	tightenSubagentPolicy,
+	type DelegationConstraints,
+} from '../lib/subagent';
+import { policyRevision, policySnapshot, type CallTrace, type PolicySnapshot, type TraceContext } from '../lib/trace';
 import { creationTargets, directoryTargets, rmTargets } from '../lib/shell';
 import {
 	COMONAD_BLOCK,
@@ -49,7 +70,6 @@ import { applyPromptLayout } from '../lib/prompt-layout';
 import type {
 	AgentSpawnRequest,
 	AttachmentPart,
-	Capability,
 	ImageAttachment,
 	Message,
 	ModelContext,
@@ -197,16 +217,6 @@ interface RunState {
 
 const MAX_SUBAGENT_DEPTH = 2;
 
-/**
- * The capabilities a subagent may ever hold. Full shell writes and plan writes are never among
- * them: a subagent's project changes go through tracked file tools, and its shell writes only the
- * scratch directory. The settings grant can narrow this set, never widen it.
- */
-const SUBAGENT_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>(['ro', 'shell_ro', 'rw', 'shell_test']);
-
-/** The two capabilities a grant controls; a definition must also name a tool using one. */
-const SUBAGENT_WRITE_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>(['rw', 'shell_test']);
-
 /** What a continue says as the user when the preset has no `continue_nudge_prompt` of its own. */
 /**
  * The generation types that write nothing into the chat and run no tools: an impersonation streams into the
@@ -320,6 +330,8 @@ export class Agent extends Service {
 		const config = this.ctx.settings.get();
 		return {
 			workMode: config.mode,
+			capabilities: [...MODE_CAPS[config.mode]],
+			rules: this.ctx.settings.rules(),
 			approval: config.approval,
 			approvalResponse: config.approvalResponse,
 			network: config.network,
@@ -445,7 +457,19 @@ export class Agent extends Service {
 		try {
 			// A surface can stop the turn before the first await; nothing below should start.
 			turn.signal.throwIfAborted();
-			session.policy = { ...session.policy, ...this.policyFor(), ...(input.policy ?? {}) };
+			if (session.subagent && session.parentId) {
+				// A delegated session keeps its snapshot; a parent that is still present may only
+				// tighten it further. Settings do not overwrite it.
+				session.policy = this.tightenChildSession(session) ?? session.policy;
+			} else {
+				const policy = { ...session.policy, ...this.policyFor(), ...(input.policy ?? {}) };
+				// A slash command can replace the mode for this turn; the capability set follows it unless
+				// the caller supplied an explicit set.
+				if (input.policy?.workMode && input.policy.capabilities === undefined) {
+					policy.capabilities = [...MODE_CAPS[input.policy.workMode]];
+				}
+				session.policy = policy;
+			}
 			if (session.modelContext && !this.ctx.sessions.verifyModelContext(session)) {
 				this.notice(ref, 'The stored summary no longer matches the chat; it was dropped from the model context.');
 			}
@@ -669,7 +693,8 @@ export class Agent extends Service {
 			const state: RunState = {
 				ref,
 				sessionId: session.id,
-				rootSessionId: session.id,
+				rootSessionId: session.parentId ?? session.id,
+				agentName: session.subagent,
 				writes: new Set(),
 				policy: session.policy,
 				transcript: seeded,
@@ -678,6 +703,7 @@ export class Agent extends Service {
 				trailer,
 				modelContextVersion: session.modelContext?.version,
 				toolCalls: [],
+				filter: session.subagent ? { allow: session.policy.tools ?? [] } : undefined,
 				turn: session.turnIndex,
 				gateReason: '',
 				confirmed: null,
@@ -1485,6 +1511,9 @@ export class Agent extends Service {
 		const routes = new Map<string, RouteFn<RunState>>();
 
 		nodes.set('llm.complete', async (state, runtime) => {
+			// A parent tightening lands before the next request, so the model never sees a tool the
+			// child no longer holds.
+			this.refreshSubagentPolicy(state);
 			// A subagent is shown only the read-only tools on its list; the model never learns of a write tool.
 			// A silent generation (an impersonation or a quiet turn) writes nothing down and is offered no
 			// tools at all: a tool it called would run for real, and its reply is thrown away afterwards.
@@ -1724,7 +1753,11 @@ export class Agent extends Service {
 			if (state.toolCalls.length === 0) {
 				return 'end';
 			}
-			const rules = this.ctx.settings.rules();
+			// The call is revalidated against a parent that may have tightened during the request.
+			this.refreshSubagentPolicy(state);
+			// The turn's own rules, not the current settings: a delegated agent carries its snapshot,
+			// and a main turn keeps the rules it started with.
+			const rules = state.policy.rules ?? this.ctx.settings.rules();
 			const snapshot = policySnapshot(state.policy, rules);
 			// A silent generation is offered no tools, so a call it makes anyway is dropped with its turn: the
 			// reply is what it wrote, and nothing is run on its behalf.
@@ -1816,17 +1849,12 @@ export class Agent extends Service {
 			if (gate.decision === 'allow') {
 				return 'tools';
 			}
-			// A subagent runs inside a pre-approved, filtered tool set: ordinary confirmations are
-			// resolved by delegation. An escalated one — a dangerous command, or a rule the user
-			// wrote to ask about — needs the user, and a subagent cannot ask, so it is refused rather
-			// than parked on a surface that will never answer it.
+			// A delegated agent has a fixed `never` approval response: any confirmation is denied
+			// without asking, even when the child's own approval policy asked for one.
 			if (gate.decision === 'confirm' && state.filter) {
-				if (gate.escalated) {
-					state.gateReason = `${gate.reason}; a subagent cannot ask you`;
-					this.respondTraces(state, 'deny', state.gateReason, 'subagent_cannot_ask');
-					return 'reject';
-				}
-				return 'tools';
+				state.gateReason = `${gate.reason}; the subagent approval response policy denies without asking`;
+				this.respondTraces(state, 'deny', state.gateReason, state.policy.approvalResponse);
+				return 'reject';
 			}
 			if (gate.decision === 'reject') {
 				gate.calls.forEach((callGate, index) => {
@@ -1844,6 +1872,47 @@ export class Agent extends Service {
 		routes.set('agent.after-confirm', (state) => (state.confirmed ? 'tools' : 'reject'));
 
 		return { nodes, routes };
+	}
+
+	/**
+	 * Re-applies the parent's current restrictions to a live child. The child snapshot only ever
+	 * narrows, so a parent that later relaxes its own policy cannot widen the child. A running turn
+	 * picks this up before its next model request and before its next gate.
+	 */
+	private refreshSubagentPolicy(state: RunState): void {
+		if (!state.filter) {
+			return;
+		}
+		const session = this.subagentSessions.get(state.sessionId) ?? this.ctx.sessions.get(state.sessionId);
+		if (!session) {
+			return;
+		}
+		const next = this.tightenChildSession(session);
+		if (!next) {
+			return;
+		}
+		state.policy = next;
+		state.filter = { allow: next.tools ?? [] };
+	}
+
+	/** The tightened policy of one child session, persisted when its revision changes. */
+	private tightenChildSession(session: Session): SessionPolicy | undefined {
+		const parent = session.parentId ? this.ctx.sessions.get(session.parentId) : undefined;
+		if (!parent) {
+			return undefined;
+		}
+		const facts = parentFacts(parent.policy, this.policyFor());
+		const next = tightenSubagentPolicy(session.policy, facts, (policy) => this.ctx.tools.visible(policy).map((tool) => tool.name));
+		const rules = next.rules ?? this.ctx.settings.rules();
+		const revision = policyRevision(policySnapshot(next, rules));
+		if (revision === session.policyRevision) {
+			return undefined;
+		}
+		session.policy = next;
+		session.policyRevision = revision;
+		this.ctx.sessions.save(session);
+		this.ctx.emit('subagent/changed', session.id);
+		return next;
 	}
 
 	/** The context every trace record carries, so a call id resolves to a chat and a model call. */
@@ -1956,7 +2025,7 @@ export class Agent extends Service {
 		if (!state.filter) {
 			return true;
 		}
-		if (!SUBAGENT_CAPABILITIES.has(tool.capability)) {
+		if (!SUBAGENT_CAPABILITIES.includes(tool.capability)) {
 			return false;
 		}
 		return !state.filter.allow || state.filter.allow.includes(tool.name);
@@ -2210,20 +2279,43 @@ export class Agent extends Service {
 		// The unnamed spawn is the `explore` agent, by name: `agents[0]` is whatever sorts first once
 		// a user has agents of their own, and that would silently make one of them the default.
 		const agent = definition ?? this.ctx.catalog.agent('explore');
-		// A subagent's writes belong to the chat that spawned it, and never reach outside the workspace.
-		// A full-access parent is narrowed to workspace-write for its children; a narrower parent is
-		// inherited as it is, because a sandbox mode can only ever tighten.
-		const policy: SessionPolicy = {
-			...parent.policy,
-			model: agent?.model || parent.policy.model,
-			sandboxMode: parent.policy.sandboxMode === 'danger-full-access' ? 'workspace-write' : parent.policy.sandboxMode,
+		// A delegation can only narrow: validate every field here rather than trusting the model's JSON.
+		if (
+			request.capabilities !== undefined &&
+			(!Array.isArray(request.capabilities) ||
+				request.capabilities.some((capability) => typeof capability !== 'string' || !(ALL_CAPABILITIES as readonly string[]).includes(capability)))
+		) {
+			return 'Error: invalid capabilities for a subagent delegation';
+		}
+		if (request.network !== undefined && typeof request.network !== 'boolean') {
+			return 'Error: the subagent network constraint must be a boolean';
+		}
+		if (request.sandboxMode !== undefined && !Object.hasOwn(SANDBOX_LABELS, request.sandboxMode)) {
+			return 'Error: invalid sandbox mode for a subagent delegation';
+		}
+		if (request.approval !== undefined && !Object.hasOwn(APPROVAL_LABELS, request.approval)) {
+			return 'Error: invalid approval policy for a subagent delegation';
+		}
+		const capabilities = request.capabilities === undefined ? undefined : asCapabilities(request.capabilities);
+		const constraints: DelegationConstraints = {
+			...(capabilities ? { capabilities } : {}),
+			...(typeof request.network === 'boolean' ? { network: request.network } : {}),
+			...(request.sandboxMode ? { sandboxMode: request.sandboxMode } : {}),
+			...(request.approval ? { approval: request.approval } : {}),
 		};
+		// The candidate carries the effective capabilities/network/sandbox/rules; its tool list is
+		// computed against the registry before the final policy (and its revision) is written.
+		const parentPolicy: SessionPolicy = {
+			...parent.policy,
+			rules: parent.policy.rules ?? this.ctx.settings.rules(),
+		};
+		const candidate = buildSubagentPolicy(parentPolicy, constraints, undefined, agent?.model || parent.policy.model);
 		const grant = subagentGrant(this.ctx.settings.get(), agent?.name ?? 'explore', agent?.builtin === true);
 		// The settings grant is the authorization; the definition's tools are the selection. Both, plus
 		// the parent's own allow list (for a nested spawn), and the hard subagent cap.
 		const listed = this.ctx.tools
-			.visible(policy)
-			.filter((tool) => SUBAGENT_CAPABILITIES.has(tool.capability))
+			.visible(candidate)
+			.filter((tool) => SUBAGENT_CAPABILITIES.includes(tool.capability))
 			.filter((tool) => !parent.filter?.allow || parent.filter.allow.includes(tool.name))
 			.filter((tool) => tool.capability !== 'rw' || (grant.files && tool.trackedWrite === true))
 			.filter((tool) => tool.capability !== 'shell_test' || grant.test)
@@ -2234,9 +2326,11 @@ export class Agent extends Service {
 			? allowedToolsFor(agent, listed)
 			: listed.filter((name) => {
 					const capability = this.ctx.tools.get(name)?.capability;
-					return capability === undefined || !SUBAGENT_WRITE_CAPABILITIES.has(capability);
+					return capability === undefined || !SUBAGENT_WRITE_CAPABILITIES.includes(capability);
 				});
-		const writeCapable = allow.some((name) => SUBAGENT_WRITE_CAPABILITIES.has(this.ctx.tools.get(name)?.capability ?? 'ro'));
+		const policy: SessionPolicy = { ...candidate, tools: allow };
+		const revision = policyRevision(policySnapshot(policy, policy.rules ?? this.ctx.settings.rules()));
+		const writeCapable = allow.some((name) => SUBAGENT_WRITE_CAPABILITIES.includes(this.ctx.tools.get(name)?.capability ?? 'ro'));
 		// A background run has no live turn to journal against and nobody to review its diff.
 		if (request.background && writeCapable) {
 			return 'Error: a write-capable subagent must run in the foreground; background subagents are read-only';
@@ -2293,6 +2387,7 @@ export class Agent extends Service {
 					parentId: parent.sessionId,
 					subagent: agent?.name ?? 'explore',
 					transcript: subTranscript,
+					policyRevision: revision,
 				});
 				this.subagentSessions.set(subId, child);
 				let latest = subTranscript;
@@ -2531,7 +2626,7 @@ export class Agent extends Service {
 		push(
 			COMONAD_BLOCK.identity,
 			[
-				`Mode: ${MODE_LABELS[session.policy.workMode] ?? session.policy.workMode}; approval: ${session.policy.approval}; approval response: ${session.policy.approvalResponse}; network: ${session.policy.network ? 'on' : 'off'}; sandbox: ${session.policy.sandboxMode}.`,
+				`Mode: ${MODE_LABELS[session.policy.workMode] ?? session.policy.workMode} (capabilities: ${[...capabilitiesOf(session.policy)].join(', ') || 'none'}); approval: ${session.policy.approval}; approval response: ${session.policy.approvalResponse}; network: ${session.policy.network ? 'on' : 'off'}; sandbox: ${session.policy.sandboxMode}.`,
 				`Today: ${new Date().toISOString().slice(0, 10)}.`,
 			].join('\n'),
 		);

@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
 import { asAttachments, attachmentIdOf } from '../lib/attachments';
 import { asReasoningEffort } from '../lib/effort';
-import { asApproval, asApprovalResponse, asWorkMode } from '../lib/policy';
+import { asApproval, asApprovalResponse, asCapabilities, asRuleSet, asWorkMode } from '../lib/policy';
 import { asSandboxMode, DEFAULT_SANDBOX_MODE, isInside } from '../lib/sandbox';
 import { modelContextDigest, type ContextForm } from '../lib/prompt';
 import { turnsOf } from '../lib/turns';
@@ -115,6 +115,8 @@ export interface Session {
 	parentId?: string;
 	/** The subagent definition that owns this session. */
 	subagent?: string;
+	/** The effective policy fingerprint this session was created or last tightened under. */
+	policyRevision?: string;
 	/** The subagent run has finished. */
 	subagentDone?: boolean;
 	/** Tool call id → subagent session id: what lets an `agent` card open the child conversation. */
@@ -159,6 +161,20 @@ export function safeId(id: string): string {
 		throw new Error(`invalid session id: ${id}`);
 	}
 	return id;
+}
+
+/** A delegated tool allowlist read from a session: names only, bounded and de-duplicated. */
+function toolNames(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const seen = new Set<string>();
+	for (const item of value) {
+		if (typeof item === 'string' && item.trim() && item.length <= 200) {
+			seen.add(item.trim());
+		}
+	}
+	return [...seen].slice(0, 256);
 }
 
 /** Provenance is an approval shortcut, not a record: bound it so a long session stays a JSON file. */
@@ -420,6 +436,15 @@ export class SessionStore {
 		const legacy = (session as Session & { summary?: { text?: unknown; at?: unknown } }).summary;
 		const modelContext = normalizeModelContext(session.modelContext, transcript) ?? legacyModelContext(legacy, legacyHead);
 		const { summary: _legacy, workflow: _workflow, ...rest } = session as Session & { summary?: unknown; workflow?: unknown };
+		// A delegated session fails closed on a missing or damaged capability/tool snapshot: falling
+		// back to the mode's full set would silently widen a child.
+		const delegated = Boolean(session.subagent || session.parentId);
+		const capabilities =
+			session.policy?.capabilities === undefined
+				? delegated
+					? []
+					: undefined
+				: (asCapabilities(session.policy.capabilities) ?? []);
 		return {
 			...rest,
 			title: session.title || UNTITLED,
@@ -428,10 +453,18 @@ export class SessionStore {
 			policy: {
 				...session.policy,
 				workMode: asWorkMode(session.policy?.workMode),
+				capabilities,
+				// A delegated session cannot fall back to the live settings for rules: that could grant
+				// an allow it never held. Empty rules are the fail-closed snapshot.
+				rules: delegated ? (asRuleSet(session.policy?.rules) ?? { allow: [], ask: [], deny: [] }) : asRuleSet(session.policy?.rules),
+				tools: delegated ? (toolNames(session.policy?.tools) ?? []) : toolNames(session.policy?.tools),
+				network: session.policy?.network === true,
 				approval: asApproval(session.policy?.approval),
-				approvalResponse: asApprovalResponse(session.policy?.approvalResponse),
-				sandboxMode: asSandboxMode(session.policy?.sandboxMode, DEFAULT_SANDBOX_MODE),
+				// A delegated session can never ask a surface, whatever the file says.
+				approvalResponse: delegated ? 'never' : asApprovalResponse(session.policy?.approvalResponse),
+				sandboxMode: asSandboxMode(session.policy?.sandboxMode, delegated ? 'workspace-read' : DEFAULT_SANDBOX_MODE),
 			},
+			policyRevision: typeof session.policyRevision === 'string' ? session.policyRevision : undefined,
 			// Only a string is a workspace; a hand-edited value falls back to the directory the chat ran
 			// in, which is what the history uses for sessions written before the field existed.
 			workspace: typeof session.workspace === 'string' ? session.workspace : undefined,
@@ -702,7 +735,11 @@ export class Sessions extends Service {
 	 * A subagent's own conversation: persisted immediately, hidden from the history, and never the
 	 * active chat. Its parent records the tool-call link that opens it.
 	 */
-	createChild(policy: SessionPolicy, id: string, init: { title: string; parentId: string; subagent: string; transcript: Message[] }): Session {
+	createChild(
+		policy: SessionPolicy,
+		id: string,
+		init: { title: string; parentId: string; subagent: string; transcript: Message[]; policyRevision?: string },
+	): Session {
 		const config = this.ctx.settings.get();
 		const session = this.store.build(policy, id, {
 			contextForm: config.contextForm,
@@ -714,6 +751,7 @@ export class Sessions extends Service {
 		session.parentId = init.parentId;
 		session.subagent = init.subagent;
 		session.subagentDone = false;
+		session.policyRevision = init.policyRevision;
 		session.transcript = [...init.transcript];
 		session.turnIndex = init.transcript.some((message) => message.role === 'user') ? 1 : 0;
 		this.store.save(session);

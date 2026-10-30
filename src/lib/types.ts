@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Domain types shared by the agent kernel. This module must not import `vscode` or `cordis`. */
 
-import type { PolicyStep } from './policy';
+import type { PolicyStep, RuleSet } from './policy';
 import type { SandboxMode, SandboxOptions } from './sandbox';
 
 export type { SandboxMode } from './sandbox';
@@ -174,7 +174,14 @@ export interface SwipeInfo {
 }
 
 export interface SessionPolicy {
+	/** The selected mode. It is what the UI shows; `capabilities` is what the gate enforces. */
 	workMode: WorkMode;
+	/** The effective capability set. Absent falls back to `MODE_CAPS[workMode]`. */
+	capabilities?: Capability[];
+	/** The effective user rules. Absent falls back to the global settings. */
+	rules?: RuleSet;
+	/** A delegated agent's tool allowlist. Absent means every visible tool is allowed. */
+	tools?: string[];
 	approval: Approval;
 	/** Who answers an approval request: a surface (`ask`) or nobody (`never`). */
 	approvalResponse: ApprovalResponse;
@@ -229,6 +236,14 @@ export interface AgentSpawnRequest {
 	background?: boolean;
 	/** Share the parent conversation context instead of starting fresh. */
 	fork?: boolean;
+	/** Further narrow the parent's capability set; never widens it. */
+	capabilities?: Capability[];
+	/** `false` turns network off; `true` or absent inherits, and never turns it on. */
+	network?: boolean;
+	/** A sandbox ceiling; the child gets the stricter of this and the parent's sandbox. */
+	sandboxMode?: SandboxMode;
+	/** The child's own tool approval policy; defaults to whitelist_accept. */
+	approval?: Approval;
 	/** The parent's tool call, so its card can link to the child session. */
 	callId?: string;
 	signal: AbortSignal;

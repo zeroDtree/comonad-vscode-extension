@@ -2,7 +2,7 @@
 import type { Context } from 'cordis';
 import { abortable } from '../lib/cancel';
 import { appendMemory, memoryDir, readMemory } from '../lib/instructions';
-import { objectSchema } from '../lib/types';
+import { objectSchema, type Approval, type Capability, type SandboxMode } from '../lib/types';
 import { toolset } from '../services/tools';
 
 /** Interaction tools: user questions, subagents, skills and memory. */
@@ -35,7 +35,7 @@ export const agentTools = toolset([
 	{
 		name: 'agent',
 		description:
-			'Delegate a focused task to a subagent that runs in its own context window and reports back a summary. Use for exploration, planning, review or implementation.',
+			'Delegate a focused task to a subagent that runs in its own context window and reports back a summary. The child inherits the parent policy but only narrows it. Its approval response is always never, so any tool call that asks is denied: a write-capable agent needs an inherited allow rule or approval: "universal_accept" on the delegation.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -46,18 +46,54 @@ export const agentTools = toolset([
 				agent: { type: 'string', description: 'Agent name: explore, plan, review, implement, or a custom agent.' },
 				background: { type: 'boolean' },
 				fork: { type: 'boolean', description: 'Give the subagent a copy of this conversation for extra context.' },
+				capabilities: {
+					type: 'array',
+					items: { type: 'string', enum: ['ro', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'] },
+					description: 'Further narrow the capabilities the child inherits. It can never add one.',
+				},
+				network: {
+					type: 'boolean',
+					description: 'false turns network off for the child. true or absent inherits the parent; it never turns network on.',
+				},
+				sandboxMode: {
+					type: 'string',
+					enum: ['workspace-read', 'read-only', 'workspace-write', 'danger-full-access'],
+					description: 'A sandbox ceiling. The child gets the stricter of this and the parent sandbox.',
+				},
+				approval: {
+					type: 'string',
+					enum: ['manual', 'whitelist_accept', 'blacklist_reject', 'universal_accept', 'universal_reject'],
+					description:
+						'The child tool approval policy, independent of the parent. Defaults to whitelist_accept. Because the child approval response is always never, a policy that asks denies the call.',
+				},
 			},
 			['prompt'],
 		),
 		async execute(args, ctx) {
-			const { prompt, description, agent, background, fork } = args as {
+			const { prompt, description, agent, background, fork, capabilities, network, sandboxMode, approval } = args as {
 				prompt: string;
 				description?: string;
 				agent?: string;
 				background?: boolean;
 				fork?: boolean;
+				capabilities?: Capability[];
+				network?: boolean;
+				sandboxMode?: SandboxMode;
+				approval?: Approval;
 			};
-			return ctx.spawnAgent({ prompt, description, agent, background, fork, callId: ctx.callId, signal: ctx.signal });
+			return ctx.spawnAgent({
+				prompt,
+				description,
+				agent,
+				background,
+				fork,
+				capabilities,
+				network,
+				sandboxMode,
+				approval,
+				callId: ctx.callId,
+				signal: ctx.signal,
+			});
 		},
 	},
 ]);

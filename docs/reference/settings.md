@@ -78,7 +78,13 @@ Read-only tools are always available. `files` and `test` are the only grants; `r
 `start_shell` and plan writes are never granted to a subagent. The agent definition must also list a
 tool using the capability; a definition without a `tools` list is read-only. The parent mode still
 has to allow the capability. Built-in `implement` defaults to both grants; every other built-in and
-every custom agent is read-only until configured. See [Safety](/guide/safety#subagents).
+every custom agent is read-only until configured.
+
+A delegation inherits the parent's effective policy and can only narrow it. Its tool approval policy
+is separate (default `whitelist_accept`) and its approval response is fixed `never`: any call it
+would ask about is denied. A write-capable agent therefore needs an inherited allow rule or
+`approval: "universal_accept"` on the `agent` call. The child session stores the full effective
+policy, its revision and its parent. See [Safety](/guide/safety#subagents).
 
 Steps: `comonad.subagentStepsMode` defaults to `custom`, where each subagent spends
 `comonad.subagentSteps` (40) graph steps; `inherit` gives it the turn's `maxSteps` instead. A

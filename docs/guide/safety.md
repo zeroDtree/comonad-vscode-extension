@@ -131,14 +131,34 @@ always need an OS sandbox, because their promises cannot be kept without one. Th
 
 ## Subagents
 
-A subagent's effective tools are the intersection of four things:
+A subagent runs the same six layers with its **own effective policy**, built when the delegation
+starts. It can only narrow the parent:
 
-1. the parent mode's capabilities;
-2. the per-agent grant in `comonad.subagents` (**Settings → Subagents**);
-3. the agent definition's `tools` list;
-4. the hard subagent cap.
+| Policy | What the child gets |
+| --- | --- |
+| Work mode | parent effective capabilities ∩ the delegation's capability filter ∩ the hard cap (`ro`, `shell_ro`, `rw`, `shell_test`) |
+| Network | parent switch; the delegation may turn it off, never on |
+| User rules | all ancestor rules; `deny` > `ask` > `allow` |
+| Tool approval | the delegation's own policy, default `whitelist_accept` |
+| Approval response | fixed `never` |
+| Sandbox | the stricter of the parent sandbox and the delegation's ceiling |
 
-The hard cap means a subagent **never** gets `shell_rw` or `rw_plan`:
+Spawn and Fork share exactly this policy; only their context differs. The full snapshot, its policy
+revision, the parent and the creation time are saved in the child session. A running child is
+re-tightened before its next model request and its next gate; a parent that later loosens does not
+widen it. A cold resume reads the recorded snapshot.
+
+Consequences:
+
+- A parent in `ro` refuses every child write.
+- A parent with network off keeps it off for the child.
+- An ancestor `deny` beats any child `allow` (rules run before the approval policy).
+- An ancestor `ask` produces a confirmation, and the child's fixed `never` response denies it.
+- Any child approval policy that asks denies the call; no approval card is shown.
+- Parent tightening applies to later calls; a process already running keeps the sandbox it started
+  with.
+
+The grant, the definition and the hard cap still select the tools:
 
 - `files` grants only tracked file tools (`write_file`, `apply_patch`, `apply_edits`).
 - `test` grants `run_shell_test`.
@@ -150,10 +170,15 @@ The hard cap means a subagent **never** gets `shell_rw` or `rw_plan`:
 - A subagent's file writes are journaled under the **parent chat**, so they appear in its review,
   inline diff and Git Changes.
 - Write-capable subagents run in the foreground, one at a time. A background subagent is read-only.
-- An `ask` rule is escalated, and a subagent cannot answer it, so the call is refused rather than
-  auto-approved.
-- Under `manual`, approving the `agent` call is the approval for that subagent's listed tools. Use
-  `deny` (or `ask`) rules to stop a specific call inside a subagent.
+
+Because the default child approval is `whitelist_accept` and its response is always `never`, a
+delegated write asks and is then denied. To let a write-capable agent work, pass
+`approval: "universal_accept"` on the `agent` call, or add an inherited allow rule for the tool.
+The delegation accepts `capabilities`, `network`, `sandboxMode` and `approval` to narrow the child.
+
+The `agent` call itself is just another tool, gated by the parent policy. Under an accept policy it
+can start a child without a card; add an `ask` or `deny` rule for `agent` if you want to review the
+delegation's approval policy before it runs.
 
 ## Command timeout
 

@@ -121,14 +121,31 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
 
 ## 子 Agent
 
-子 Agent 的实际工具是四者的交集：
+子 Agent 运行同样的六层，但使用**自己的有效策略**。委派开始时构建，只能收紧父级：
 
-1. 父模式的能力；
-2. `comonad.subagents` 中的逐 Agent 授权（**Settings → Subagents**）；
-3. Agent 定义里的 `tools` 列表；
-4. 子 Agent 的硬上限。
+| 策略 | 子级得到的策略 |
+| --- | --- |
+| Work mode | 父级有效能力集合 ∩ 委派能力过滤 ∩ 硬上限（`ro`、`shell_ro`、`rw`、`shell_test`） |
+| Network | 父级开关；委派可以关闭，不能打开 |
+| User rule | 全部祖先规则；`deny` > `ask` > `allow` |
+| Tool approval | 委派单独指定的策略，默认 `whitelist_accept` |
+| Approval response | 固定 `never` |
+| Sandbox | 父级沙箱与委派上限中更严格者 |
 
-硬上限意味着子 Agent **永远**拿不到 `shell_rw` 或 `rw_plan`：
+Spawn 与 Fork 共用完全相同的策略，只在上下文上不同。完整快照、策略 revision、父会话和创建时间保存在
+子会话中。运行中的子级在下一次模型请求和下一次 gate 前重新收紧；父级事后放宽不会放宽子级。冷恢复读取
+保存的快照。
+
+由此：
+
+- 父级为 `ro` 时，子级写入被拒绝。
+- 父级关闭网络时，子级保持关闭。
+- 祖先 `deny` 胜过子级 `allow`（规则在审批策略之前执行）。
+- 祖先 `ask` 产生确认，而子级固定的 `never` 应答直接拒绝。
+- 子级审批策略要求询问时，调用直接拒绝，不显示审批卡。
+- 父级收紧只作用于后续调用；已经启动的进程保持启动时的沙箱。
+
+授权、定义和硬上限仍然决定工具范围：
 
 - `files` 只授予可跟踪的文件工具（`write_file`、`apply_patch`、`apply_edits`）。
 - `test` 授予 `run_shell_test`。
@@ -138,9 +155,13 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
 - 项目文件覆盖内置名称时，不会继承该内置 Agent 的默认授权。
 - 子 Agent 的文件写入记在**父聊天**的 journal 下，因此出现在它的 review、inline diff 和 Git Changes 中。
 - 可写子 Agent 在前台运行，一次一个。后台子 Agent 是只读的。
-- `ask` 规则会被升级，子 Agent 无法回答，因此调用被拒绝而不是自动批准。
-- 在 `manual` 下，批准 `agent` 调用就是对子 Agent 列出工具的批准。用 `deny`（或 `ask`）规则阻止子 Agent
-  内的特定调用。
+
+子级默认审批是 `whitelist_accept`，应答固定 `never`，所以委派的写入会先询问再被拒绝。要让可写 Agent
+工作，请在 `agent` 调用上传 `approval: "universal_accept"`，或添加继承的 allow 规则。委派还接受
+`capabilities`、`network`、`sandboxMode` 和 `approval` 来收窄子级。
+
+`agent` 调用本身也是普通工具，受父级策略约束。在 accept 策略下它可能无卡启动子级；如果希望在委派
+执行前审查子级审批策略，请为 `agent` 添加 `ask` 或 `deny` 规则。
 
 ## 命令超时
 

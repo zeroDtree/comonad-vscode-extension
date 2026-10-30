@@ -23,7 +23,11 @@ as image content. With the **PDF documents** plugin it reads PDFs as page-marked
 decoding the bytes as UTF-8.
 
 An `agent` call creates a hidden child session. Its card carries **Open session** while it runs; the
-read-only overlay shows the subagent's prompt, steps and tool results and follows the run live.
+read-only overlay shows the subagent's prompt, steps and tool results and follows the run live. The
+call can narrow the child with `capabilities`, `network`, `sandboxMode` and `approval`; the child's
+approval response is always `never`, so a policy that asks denies the call. The default child
+approval is `whitelist_accept`; pass `approval: "universal_accept"` (or inherit an allow rule) when
+delegating a write-capable agent. Spawn and Fork use the same policy; only their context differs.
 
 ## Shell tools
 

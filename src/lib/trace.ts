@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { createHash } from 'node:crypto';
-import { ruleText, type PolicyDecision, type PolicyLayer, type RuleSet } from './policy';
-import type { Approval, ApprovalResponse, SandboxMode, SessionPolicy, WorkMode } from './types';
+import { capabilitiesOf, ruleText, type PolicyDecision, type PolicyLayer, type RuleSet } from './policy';
+import type { Approval, ApprovalResponse, Capability, SandboxMode, SessionPolicy, WorkMode } from './types';
 
 /**
  * Decision-trace records. A tool call walks the policy layers once; every node is an immutable
@@ -12,8 +12,12 @@ import type { Approval, ApprovalResponse, SandboxMode, SessionPolicy, WorkMode }
 
 /** The effective policy a revision names. Stored once per revision, beside the nodes. */
 export interface PolicySnapshot {
-	version: 1;
+	version: 2;
 	workMode: WorkMode;
+	/** The effective set, not merely the mode: a delegated agent carries a subset. */
+	capabilities: Capability[];
+	/** A delegated agent's tool allowlist; absent when every visible tool is allowed. */
+	tools?: string[];
 	approval: Approval;
 	approvalResponse: ApprovalResponse;
 	network: boolean;
@@ -108,12 +112,17 @@ export interface DecisionView {
 
 /** The policy facts a revision identifies. Rules are kept in their effective order. */
 export function policySnapshot(
-	policy: Pick<SessionPolicy, 'workMode' | 'approval' | 'approvalResponse' | 'network' | 'sandboxMode' | 'denyReadPaths'>,
+	policy: Pick<
+		SessionPolicy,
+		'workMode' | 'capabilities' | 'tools' | 'approval' | 'approvalResponse' | 'network' | 'sandboxMode' | 'denyReadPaths'
+	>,
 	rules: RuleSet,
 ): PolicySnapshot {
 	return {
-		version: 1,
+		version: 2,
 		workMode: policy.workMode,
+		capabilities: [...capabilitiesOf(policy)].sort(),
+		...(policy.tools ? { tools: [...policy.tools].sort() } : {}),
 		approval: policy.approval,
 		approvalResponse: policy.approvalResponse,
 		network: policy.network,

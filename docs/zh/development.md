@@ -36,7 +36,7 @@ src/
   main.ts       activate/deactivate
   app.ts        插件树
   host.ts       VS Code Host 契约
-  lib/          纯领域：policy、trace、graph、sandbox、prompt、diff、references
+  lib/          纯领域：policy、subagent、trace、graph、sandbox、prompt、diff、references
   services/     Cordis 服务：agent、tools、decisions、llm、sessions、checkpoints、mcp、hooks…
   llm/          OpenAI 兼容适配器
   tools/        工具插件

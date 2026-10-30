@@ -497,7 +497,7 @@ export function settingsPanel(ctx: Context): void {
 						? undefined
 						: !policy
 							? 'no active chat'
-							: !capabilityAllowed(tool.capability, policy.workMode)
+							: !capabilityAllowed(tool.capability, policy)
 								? `not in ${mode} mode`
 								: tool.needsNetwork && !policy.network
 									? 'network is off'
@@ -1110,6 +1110,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     </div>
     <h2 class="group-title">Agents</h2>
     <p class="group-note">Every subagent can use read-only tools. The grants below add the ability to write files and run tests; full shell and plan writes are never granted. Changes apply to the next spawn.</p>
+    <p class="group-note">A delegation inherits the parent policy and can only narrow it. Its approval response is always <code>never</code>, so a call it would ask about is denied; a write-capable agent needs an inherited allow rule or <code>approval: "universal_accept"</code> on the delegation.</p>
     <div id="subagent-rows"></div>
     <details class="help-fold">
       <summary>How permissions work</summary>

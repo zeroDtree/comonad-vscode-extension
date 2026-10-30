@@ -37,6 +37,13 @@ Highlights are below; the full implementation notes are linked at the end. The u
   (or **Comonad: Show Decision Trace**) reconstructs the exact path after the fact. Each node carries
   a `policy_revision`, and the effective policy snapshot is stored once per revision. Trace writes
   are best effort and never fail a turn. See [Decision trace](docs/guide/audit.md).
+- **Subagents have their own effective policy.** A delegation inherits the parent policy and can
+  only narrow it: capabilities intersect, network is an AND, sandbox takes the stricter mode, ancestor
+  rules accumulate their restrictions, and the child's tool approval is set separately. Its approval
+  response is always `never`, so an ask is denied without a card; a write-capable agent needs an
+  inherited allow rule or `approval: "universal_accept"` on the delegation. Spawn and Fork share the
+  policy, the snapshot is persisted with a policy revision, and a running child is tightened by
+  later parent restrictions (but never widened). See [Safety](docs/guide/safety.md#subagents).
 - **One runtime policy pipeline.** Capability, network access, user rules, the tool approval policy,
   the approval response policy and the sandbox mode now run in a fixed order. The new
   `comonad.approvalResponse` (`ask`/`never`) decides who answers a confirmation, and

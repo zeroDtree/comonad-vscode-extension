@@ -269,6 +269,8 @@ export function auditText(ctx: Context, callId: string): string {
 		lines.push(
 			'',
 			`**Policy:** mode \`${policy.workMode}\` · tool approval \`${policy.approval}\` · response \`${policy.approvalResponse}\` · network \`${policy.network ? 'on' : 'off'}\` · sandbox \`${policy.sandboxMode}\``,
+			`**Capabilities:** ${(policy.capabilities ?? []).join(', ') || 'none'}`,
+			...(policy.tools ? [`**Tools:** ${policy.tools.join(', ') || '(none)'}`] : []),
 			`**Rules:** deny ${policy.rules.deny.length} · ask ${policy.rules.ask.length} · allow ${policy.rules.allow.length} · denied reads ${policy.denyReadPaths.length}`,
 		);
 		if (policy.rules.deny.length || policy.rules.ask.length || policy.rules.allow.length) {

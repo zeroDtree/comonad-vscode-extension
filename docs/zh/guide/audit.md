@@ -84,7 +84,8 @@
 
 revision 是有效策略的短 SHA-256：
 
-- Work mode、Network access、Tool approval、Approval response、Sandbox mode；
+- Work mode、有效能力集合和委派工具白名单；
+- Network access、Tool approval、Approval response 和 Sandbox mode；
 - 三个用户规则列表，按实际生效顺序；
 - deny-read 路径，排序后。
 
