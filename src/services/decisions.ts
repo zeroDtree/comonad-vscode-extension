@@ -228,7 +228,16 @@ export class Decisions extends Service {
 			mkdirSync(dir, { recursive: true });
 			appendFileSync(join(dir, `${day}.jsonl`), `${JSON.stringify(record)}\n`);
 		} catch (error) {
-			this.ctx.log.message(`decisions: could not write trace: ${describe(error)}`);
+			this.warn(`decisions: could not write trace: ${describe(error)}`);
+		}
+	}
+
+	/** A log may itself be gone after the kernel is disposed; auditing must never throw then. */
+	private warn(message: string): void {
+		try {
+			this.ctx.log.message(message);
+		} catch {
+			// The tree is already gone; the trace failure is not worth an unhandled rejection.
 		}
 	}
 
@@ -248,7 +257,7 @@ export class Decisions extends Service {
 			try {
 				text = readFileSync(join(dir, file), 'utf8');
 			} catch (error) {
-				this.ctx.log.message(`decisions: could not read ${file}: ${describe(error)}`);
+				this.warn(`decisions: could not read ${file}: ${describe(error)}`);
 				continue;
 			}
 			for (const line of text.split('\n')) {

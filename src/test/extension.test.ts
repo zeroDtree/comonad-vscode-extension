@@ -1305,7 +1305,9 @@ suite('Comonad domain', () => {
 	});
 
 	test('run_shell notes files its command creates and proves removals', async () => {
-		const kernel = await createTestKernel();
+		// This exercises provenance, not the sandbox: run it under the explicit full-access mode so a
+		// Linux host with no bwrap can still execute the command.
+		const kernel = await createTestKernel({ config: { sandboxMode: 'danger-full-access', network: true } });
 		try {
 			await kernel.ctx.plugin(shellTools);
 			const spec = kernel.ctx.tools.get('run_shell');
@@ -1412,7 +1414,8 @@ suite('Comonad domain', () => {
 	});
 
 	test('run_shell kills a command that outlives the model-chosen timeout', async () => {
-		const kernel = await createTestKernel();
+		// As above: this checks the deadline, and full access keeps it runnable without an OS sandbox.
+		const kernel = await createTestKernel({ config: { sandboxMode: 'danger-full-access', network: true } });
 		try {
 			await kernel.ctx.plugin(shellTools);
 			const spec = kernel.ctx.tools.get('run_shell');
