@@ -958,40 +958,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         </div>
       </div>
     </div>
-    <h2 class="group-title">Policy</h2>
-    <div class="group">
-      <div class="field">
-        <label for="mode">Work mode</label>
-        <p class="hint">What a turn may do at all — the capability set behind every tool call.</p>
-        <select id="mode" class="control" data-key="mode"></select>
-      </div>
-      <div class="field">
-        <label for="approval">Tool approval policy</label>
-        <p class="hint">Applied only when no user rule matched. It decides which calls run, which ask, and which are rejected.</p>
-        <select id="approval" class="control" data-key="approval"></select>
-      </div>
-      <div class="field">
-        <label for="approval-response">Approval response policy</label>
-        <p class="hint">Who answers a request the tool approval policy raised. <code>ask</code> sends it to the chat surface and denies when no surface answers; <code>never</code> denies every request outright.</p>
-        <select id="approval-response" class="control" data-key="approvalResponse"></select>
-      </div>
-      <div class="field">
-        <label for="context">Context</label>
-        <p class="hint">What the model actually receives: rendered text, token counts or raw form.</p>
-        <select id="context" class="control" data-key="contextForm"></select>
-      </div>
-      <div class="field">
-        <label for="network">Network access policy</label>
-        <p class="hint">On: network tools and network inside the shell sandbox may run. Off: both are refused; loopback stays available inside the sandbox so local test servers work.</p>
-        <label class="check"><input type="checkbox" id="network" data-key="network" /></label>
-      </div>
-      <div class="field">
-        <label for="steps">Max steps</label>
-        <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
-        <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
-      </div>
-      <p class="group-note">Every tool call walks the layers in order: Work mode → Network access → User rules → Tool approval policy → Approval response policy → Sandbox mode. The first layer that stops the call ends it.</p>
-    </div>
     <h2 class="group-title">Workspace</h2>
     <div class="group">
       <div class="field">
@@ -1018,7 +984,58 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <input id="plans" class="control" type="text" data-key="planDirectory" spellcheck="false" placeholder=".comonad/plans" />
       </div>
     </div>
-    <h2 class="group-title">Sandbox</h2>
+    <h2 class="group-title">1 · Capability</h2>
+    <div class="group">
+      <div class="field">
+        <label for="mode">Work mode</label>
+        <p class="hint">The capability set a turn may use at all. A call outside it never reaches the later layers.</p>
+        <select id="mode" class="control" data-key="mode"></select>
+      </div>
+      <p class="group-note">Every tool call walks the numbered layers below in order. The first layer that stops the call ends it: 1 capability → 2 network → 3 user rules → 4 tool approval → 5 approval response → 6 sandbox.</p>
+    </div>
+    <h2 class="group-title">2 · Network</h2>
+    <div class="group">
+      <div class="field">
+        <label for="network">Network access policy</label>
+        <p class="hint">On: network tools and network inside the shell sandbox may run. Off: both are refused; loopback stays available inside the sandbox so local test servers work.</p>
+        <label class="check"><input type="checkbox" id="network" data-key="network" /></label>
+      </div>
+    </div>
+    <h2 class="group-title">3 · User rules</h2>
+    <div class="group">
+      <div class="field">
+        <label for="rules-deny">Deny</label>
+        <p class="hint">Checked first and rejects the call, whatever the tool approval policy says.</p>
+        <textarea id="rules-deny" class="control" data-key="deny" spellcheck="false" rows="3" placeholder="run_shell(rm:*)"></textarea>
+      </div>
+      <div class="field">
+        <label for="rules-ask">Ask</label>
+        <p class="hint">Checked second and asks you, even under an accept policy.</p>
+        <textarea id="rules-ask" class="control" data-key="ask" spellcheck="false" rows="3" placeholder="run_shell(git push:*)"></textarea>
+      </div>
+      <div class="field">
+        <label for="rules-allow">Allow</label>
+        <p class="hint">Checked last and runs the call without asking. One rule per line: <code>tool</code> or <code>tool(pattern)</code> — <code>run_shell(npm run test:*)</code>, <code>read_file(./.env)</code>, <code>fetch_url(domain:example.com)</code>. “Always allow” in the approval prompt appends here. The later layers are consulted only when none of the three lists matches.</p>
+        <textarea id="rules-allow" class="control" data-key="allow" spellcheck="false" rows="3" placeholder="run_shell(npm run test:*)"></textarea>
+      </div>
+    </div>
+    <h2 class="group-title">4 · Tool approval</h2>
+    <div class="group">
+      <div class="field">
+        <label for="approval">Tool approval policy</label>
+        <p class="hint">Applied only when no user rule matched. It decides which calls run, which ask, and which are rejected.</p>
+        <select id="approval" class="control" data-key="approval"></select>
+      </div>
+    </div>
+    <h2 class="group-title">5 · Approval response</h2>
+    <div class="group">
+      <div class="field">
+        <label for="approval-response">Approval response policy</label>
+        <p class="hint">Who answers a request the tool approval policy raised. <code>ask</code> sends it to the chat surface and denies when no surface answers; <code>never</code> denies every request outright.</p>
+        <select id="approval-response" class="control" data-key="approvalResponse"></select>
+      </div>
+    </div>
+    <h2 class="group-title">6 · Sandbox</h2>
     <div class="group">
       <div class="field">
         <label for="sandbox-mode">Sandbox mode</label>
@@ -1033,22 +1050,17 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       <p class="group-note">A workspace-write shell gets a temporary directory at <code>.comonad/tmp</code>. The test shell (<code>run_shell_test</code>) writes only <code>.comonad/scratch/&lt;session&gt;</code>, exposed as <code>$COMONAD_SCRATCH</code> with <code>TMPDIR</code>, <code>HOME</code> and <code>XDG_CACHE_HOME</code> pointing there. Workspace-read also hides files like <code>~/.gitconfig</code> and <code>~/.npmrc</code> from git and npm. Changes on this tab apply immediately; a running turn keeps its policy, so they take effect from the next message.</p>
       <p class="group-note" id="environment-note"></p>
     </div>
-    <h2 class="group-title">User rules</h2>
+    <h2 class="group-title">Conversation</h2>
     <div class="group">
       <div class="field">
-        <label for="rules-deny">Deny</label>
-        <p class="hint">Checked first and rejects the call, whatever the tool approval policy says.</p>
-        <textarea id="rules-deny" class="control" data-key="deny" spellcheck="false" rows="3" placeholder="run_shell(rm:*)"></textarea>
+        <label for="context">Context</label>
+        <p class="hint">What the model actually receives: rendered text, token counts or raw form.</p>
+        <select id="context" class="control" data-key="contextForm"></select>
       </div>
       <div class="field">
-        <label for="rules-ask">Ask</label>
-        <p class="hint">Checked second and asks you, even under an accept policy.</p>
-        <textarea id="rules-ask" class="control" data-key="ask" spellcheck="false" rows="3" placeholder="run_shell(git push:*)"></textarea>
-      </div>
-      <div class="field">
-        <label for="rules-allow">Allow</label>
-        <p class="hint">Checked last and runs the call without asking. One rule per line: <code>tool</code> or <code>tool(pattern)</code> — <code>run_shell(npm run test:*)</code>, <code>read_file(./.env)</code>, <code>fetch_url(domain:example.com)</code>. “Always allow” in the approval prompt appends here. The tool approval policy is consulted only when none of the three lists matches.</p>
-        <textarea id="rules-allow" class="control" data-key="allow" spellcheck="false" rows="3" placeholder="run_shell(npm run test:*)"></textarea>
+        <label for="steps">Max steps</label>
+        <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
+        <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
       </div>
     </div>
   </section>
