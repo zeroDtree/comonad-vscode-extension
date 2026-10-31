@@ -727,30 +727,6 @@ export function evaluatePolicy(input: PolicyInput): PolicyResult {
 	};
 }
 
-/** Short capability names for the flow tab's mode legend, so it cannot drift from the table. */
-const CAP_SHORT: Record<Capability, string> = {
-	ro: 'read files',
-	rw: 'write files',
-	shell_ro: 'read-only shell',
-	shell_test: 'test shell (scratch only)',
-	shell_rw: 'full shell',
-	rw_plan: 'plan files',
-};
-
-/** One `Name — calls it grants` line per mode, for the flow tab's legend. */
-export function modeCapabilities(): string[] {
-	return (Object.keys(MODE_CAPS) as WorkMode[]).map((mode) => {
-		const [name] = MODE_LABELS[mode].split(' — ');
-		const caps = [...MODE_CAPS[mode]].map((capability) => CAP_SHORT[capability]).join(', ');
-		return `${name} — ${caps || 'no tools'}`;
-	});
-}
-
-/** One line per sandbox mode, for the flow tab's legend. */
-export function sandboxCapabilities(): string[] {
-	return (Object.keys(SANDBOX_LABELS) as SandboxMode[]).map((mode) => SANDBOX_LABELS[mode]);
-}
-
 /**
  * Mermaid source for the tool-call pipeline, generated from the tables above so the diagram shown
  * in the settings panel's Flow tab cannot drift from `gateCall`.

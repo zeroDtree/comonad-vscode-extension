@@ -1015,22 +1015,6 @@ button.icon.danger:hover {
 	cursor: pointer;
 }
 
-/* The flow tab's mode legend: `Name — calls it grants` per mode. */
-.legend {
-	list-style: none;
-	margin: 8px 0 0;
-	padding: 0;
-	display: flex;
-	flex-wrap: wrap;
-	gap: 4px 16px;
-	font-size: 12px;
-	opacity: 0.85;
-}
-
-.legend li {
-	white-space: nowrap;
-}
-
 /* ------------------------------------------------------------------ tables */
 
 table {

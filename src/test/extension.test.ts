@@ -17,15 +17,12 @@ import {
 	gateCalls,
 	gateFlow,
 	isDangerous,
-	modeCapabilities,
 	MODE_CAPS,
 	MODE_LABELS,
 	parseRule,
 	parseRules,
 	presetPolicy,
 	ruleMatches,
-	SANDBOX_LABELS,
-	sandboxCapabilities,
 	suggestAllowRule,
 	type GateEnvironment,
 } from '../lib/policy';
@@ -3940,15 +3937,6 @@ suite('Cordis kernel', () => {
 			.sort();
 		assert.deepStrictEqual(actual, expected, 'each outcome carries its own colour');
 
-		const legend = modeCapabilities();
-		assert.strictEqual(legend.length, Object.keys(MODE_CAPS).length);
-		for (const mode of Object.keys(MODE_CAPS) as WorkMode[]) {
-			const name = MODE_LABELS[mode].split(' — ')[0]!;
-			assert.ok(legend.some((line) => line.startsWith(`${name} — `)), `legend names mode ${mode}`);
-		}
-		assert.ok(legend.some((line) => line.endsWith('no tools')), 'legend says the chat mode has no tools');
-		const sandboxes = sandboxCapabilities();
-		assert.deepStrictEqual(sandboxes, Object.values(SANDBOX_LABELS));
 		assert.strictEqual(Object.keys(APPROVAL_RESPONSE_LABELS).length, 2);
 	});
 

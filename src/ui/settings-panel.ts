@@ -13,11 +13,9 @@ import {
 	APPROVAL_RESPONSE_LABELS,
 	capabilityAllowed,
 	gateFlow,
-	modeCapabilities,
 	MODE_LABELS,
 	parseRule,
 	SANDBOX_LABELS,
-	sandboxCapabilities,
 } from '../lib/policy';
 import { type ContextForm } from '../lib/prompt';
 import { estimateTokens } from '../lib/tokens';
@@ -409,7 +407,6 @@ export function settingsPanel(ctx: Context): void {
 				description: tool.description,
 			})),
 			flow: gateFlow(),
-			modeLegend: [...modeCapabilities(), ...sandboxCapabilities()],
 			workspace: config.workingDirectory,
 			home: ctx.settings.home(),
 			environment: { remote: ctx.host.remoteName() ?? '', sandbox: ctx.host.sandboxKind() },
@@ -1167,12 +1164,6 @@ ${paneSections}
 
     <div data-inspect-pane="flow">
       <div class="group">
-        <div class="field">
-          <label>Tool Policy Flow</label>
-          <p class="hint">Every call walks the layers in order and leaves at the first one that stops it: capability, network, user rules, tool approval policy, approval response policy, then the sandbox. The framed parts are the layers you configure.</p>
-          <ul class="legend" id="flow-legend"></ul>
-          <p class="hint">Red ends the call, amber asks you first, green runs without asking.</p>
-        </div>
         <div id="flow" class="diagram"></div>
       </div>
     </div>

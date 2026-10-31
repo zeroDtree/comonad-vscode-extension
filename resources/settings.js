@@ -884,20 +884,6 @@
 		}
 	}
 
-	/** The modes and what they grant, as a caption above the gate flow. */
-	function renderLegend() {
-		const node = $('flow-legend');
-		node.innerHTML = '';
-		for (const line of state.modeLegend || []) {
-			const [name, detail] = String(line).split(' — ');
-			const item = document.createElement('li');
-			const strong = document.createElement('strong');
-			strong.textContent = name;
-			item.append(strong, detail ? ' — ' + detail : '');
-			node.append(item);
-		}
-	}
-
 	/**
 	 * The plugin list: what each plugin is, where it came from, and whether it is loaded. A plugin
 	 * that is enabled can be turned off here — the host writes that into the workspace's `cordis.yml`
@@ -1365,7 +1351,6 @@
 				break;
 			case 'inspect':
 				renderPluginDeps();
-				renderLegend();
 				break;
 			default:
 				break;
