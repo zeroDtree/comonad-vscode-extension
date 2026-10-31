@@ -12,8 +12,8 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 ### Highlights
 
-- **Graphs are plugins.** The graph engine now owns named Mermaid graphs, a node/route registry and a
-  dedicated **Graph** tab with a live preview. Edit the source in Settings → Graph.
+- **Graphs are plugins.** The graph engine now owns named Mermaid graphs and a node/route registry.
+  The source lives in `comonad.graph`; empty uses the shipped `agent` loop.
 - **The tool loop is a gate, not a route.** The shipped graph is now `llm → calls → gate →
   {tools, approval, reject}`; `agent.approval` returns to the gate, which re-evaluates the batch
   after the answer. The policy is a pure decision module and the only issuer of a single-use tool
@@ -31,7 +31,7 @@ Highlights are below; the full implementation notes are linked at the end. The u
   no longer render those images — there is no compatibility layer.
 - **Tool cards** now carry the model's one-line description, the command utilities, an optional
   preview and a copy menu; `comonad.toolCard` starts them collapsed (the default), preview or open.
-- **The step budget is optional.** `comonad.maxSteps` — the Graph tab's **Max steps** — now caps
+- **The step budget is optional.** `comonad.maxSteps` — the Agent tab's **Max steps** — now caps
   the turn instead of being ignored; it defaults to 0 (no limit), so a long tool loop never stops
   on a step budget unless one is set.
 - **Stop actually stops** the turn, its process tree and its pending approval; background tasks stay

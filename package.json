@@ -332,12 +332,6 @@
         "icon": "$(gear)"
       },
       {
-        "command": "comonad.openGraph",
-        "title": "Comonad: Open Graph Settings",
-        "category": "Comonad",
-        "icon": "$(type-hierarchy)"
-      },
-      {
         "command": "comonad.toggleHistory",
         "title": "Comonad: Recent Chats",
         "category": "Comonad",
@@ -790,7 +784,7 @@
         "comonad.graph": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Mermaid source for the Graph plugin's named agent loops. Empty uses the shipped `agent` graph. Edit it in Settings → Graph."
+          "markdownDescription": "Mermaid source for the Graph plugin's named agent loops. Empty uses the shipped `agent` graph. Set it in `settings.json`."
         },
         "comonad.model": {
           "type": "string",

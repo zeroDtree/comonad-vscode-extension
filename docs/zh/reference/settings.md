@@ -51,7 +51,7 @@ Comonad 把某个键写回**已经声明该键的作用域**：项目没有声�
 
 | 键 | 默认 | 用途 |
 | --- | --- | --- |
-| `comonad.graph` | 内置 `agent` 图 | Graph 插件的多图 Mermaid 源；空值使用内置图。在 **Settings → Graph** 编辑。 |
+| `comonad.graph` | 内置 `agent` 图 | Graph 插件的多图 Mermaid 源；空值使用内置图。在 `settings.json` 中设置。 |
 
 每个回合只运行默认图；命名图仍可供插件通过 `ctx.graphs.get(id)` 使用。详见[图](/zh/guide/graphs)。
 

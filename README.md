@@ -12,9 +12,9 @@ file it writes, and asks before anything leaves the sandbox.
 - **Extensible as a plugin tree.** The kernel, tools, model adapters and UI are plugins on one
   [Cordis](https://github.com/cordiverse/cordis) context. Turn a row off, configure it, or mount your
   own.
-- **The agent loop is a graph.** Edit named Mermaid loops in **Settings → Graph**: the turn's own
-  loop, the tools it calls and the routes between them. Plugins can register nodes and routes beside
-  the shipped `agent` graph.
+- **The agent loop is a graph.** The turn's own loop, the tools it calls and the routes between them
+  are a named Mermaid graph. Set `comonad.graph` to replace the shipped `agent` loop; plugins can
+  register nodes and routes beside it.
 
 ## Install
 

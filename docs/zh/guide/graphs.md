@@ -1,13 +1,14 @@
 # 图
 
 回合的内层循环是一张编译后的 Mermaid 图：模型调用、策略闸门、审批挂起、工具步骤以及它们之间的
-路由。**Settings → Graph** 是 Graph 插件的面板。一个源文件可以包含多个命名图：
+路由。源文件存放在 `comonad.graph` 设置中；空值使用内置的 `agent` 循环。一个源文件可以包含多个
+命名图：
 
 ```mermaid
 %% default: agent
 
 %% graph: agent
-flowchart TD
+flowchart LR
   %% start: llm
   llm["llm.complete"] -->|route: agent.after-llm| calls["agent.calls"]
   llm -->|route: agent.after-llm| End
@@ -35,16 +36,11 @@ flowchart TD
 - `agent.approval` 挂起回合，恢复后回到 `agent.gate` 重新决策：策略拒绝或用户拒绝优先，审批通过
   则把 `confirm` 解析为 `allow`。
 
-## 编辑
+## 配置
 
-面板一次编辑一个图：
-
-- 选择器提供 **Set default**、**Duplicate**、**Delete** 和 **+ New**。
-- **Whole source** 在同一个缓冲区中编辑整个源文件，而不是选中的图。
-- **Validate** 在 **Save** 写入 `comonad.graph` 前检查源文件；**Use shipped default** 清空设置，
-  回到内置的 `agent` 图。
-- 预览实时渲染选中的图，并列出插件注册的 node 实现和 route。Agent 标签页的 **Max steps** 限制
-  整个回合的步数（`0` 表示无限制）。
+在 `settings.json` 中设置 `comonad.graph` 为 Mermaid 源文件。空值使用内置循环；无法解析或编译的
+源文件会被记录，并回退到内置循环。`comonad.maxSteps` 限制整个回合的步数（`0` 表示无限制）。
+插件通过 `ctx.graphs` 注册 node 实现和 route，因此自定义图可以使用已加载插件提供的任何实现。
 
 ## 插件
 

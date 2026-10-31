@@ -1,14 +1,14 @@
 # Graphs
 
 The inner loop of a turn is a compiled Mermaid graph: the model call, the policy gate, the approval
-suspension, the tool step and the routes between them. **Settings → Graph** is the Graph plugin's
-pane. A source may hold several named graphs:
+suspension, the tool step and the routes between them. The source lives in the `comonad.graph`
+setting; an empty value uses the shipped `agent` loop. A source may hold several named graphs:
 
 ```mermaid
 %% default: agent
 
 %% graph: agent
-flowchart TD
+flowchart LR
   %% start: llm
   llm["llm.complete"] -->|route: agent.after-llm| calls["agent.calls"]
   llm -->|route: agent.after-llm| End
@@ -39,16 +39,12 @@ named graphs remain available to plugins through `ctx.graphs.get(id)`.
 - `agent.approval` suspends the run and returns to `agent.gate`, which re-evaluates the batch: a
   policy rejection or a user denial wins, while an approval turns `confirm` into `allow`.
 
-## Editing
+## Configuring
 
-The pane edits one graph at a time:
-
-- The picker holds **Set default**, **Duplicate**, **Delete** and **+ New**.
-- **Whole source** edits every graph in one buffer instead of the selected one.
-- **Validate** checks the source before **Save** writes `comonad.graph`; **Use shipped default**
-  clears the setting back to the shipped `agent` loop.
-- The preview renders the selected graph live, and lists the node implementations and routes plugins
-  registered. **Max steps** in the Agent tab caps the whole turn (`0` means no limit).
+Set `comonad.graph` in `settings.json` to a Mermaid source. An empty value uses the shipped loop; a
+source that fails to parse or compile is logged and the shipped loop runs instead. `comonad.maxSteps`
+caps the whole turn (`0` means no limit). Plugins register node implementations and routes on
+`ctx.graphs`, so a custom graph can use any implementation the loaded plugins provide.
 
 ## Plugins
 

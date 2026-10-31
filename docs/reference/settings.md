@@ -55,7 +55,7 @@ UI.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `comonad.graph` | shipped `agent` loop | Mermaid source for the Graph plugin's named graphs; empty uses the shipped graph. Edit it in **Settings → Graph**. |
+| `comonad.graph` | shipped `agent` loop | Mermaid source for the Graph plugin's named graphs; empty uses the shipped graph. Set it in `settings.json`. |
 
 Only the default graph runs a turn; named graphs remain available to plugins through
 `ctx.graphs.get(id)`. See [Graphs](/guide/graphs).

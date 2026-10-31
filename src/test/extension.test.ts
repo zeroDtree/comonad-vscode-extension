@@ -2437,7 +2437,7 @@ suite('Comonad domain', () => {
 			'host', 'log', 'settings',
 		]);
 		// Helpers and pane factories take the caller's context; they are not plugins and declare no inject.
-		const helpers = new Set(['graph-pane.ts', 'journal-actions.ts', 'mentions.ts']);
+		const helpers = new Set(['journal-actions.ts', 'mentions.ts']);
 		const scanned: string[] = [];
 		for (const file of readdirSync(dir).filter((name) => name.endsWith('.ts') && !helpers.has(name))) {
 			const source = readFileSync(join(dir, file), 'utf8');
@@ -3699,20 +3699,6 @@ suite('Cordis kernel', () => {
 			const escaped = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [hostile]);
 			assert.ok(!escaped.includes('<script>alert(1)</script>'), 'a pane cannot close the attribute and open a script');
 			assert.match(escaped, /&lt;b&gt;no&lt;\/b&gt;/, 'and its label is text, not markup');
-
-			// The graph plugin contributes its own pane, with its own client.
-			await kernel.ctx.plugin(panesPlugin);
-			await new Promise((resolve) => setTimeout(resolve, 0));
-			const panes = kernel.ctx.panes.list();
-			const graph = panes.find((entry) => entry.id === 'graph');
-			assert.ok(graph, 'the graph plugin registered its tab');
-			const pluginsDocument = settingsDocument(panel.webview, vscode.Uri.file(root), 'graph', panes);
-			assert.match(pluginsDocument, /data-tab="graph"/);
-			assert.match(pluginsDocument, /<section data-pane="graph" hidden>/);
-			assert.match(pluginsDocument, /id="g-source"/, 'the graph editor is in the graph pane');
-			const paneHost = { uri: () => '', refresh: () => undefined };
-			const graphState = graph?.controller?.(paneHost).state() as { graphs?: unknown[] } | undefined;
-			assert.ok(graphState?.graphs?.length, 'the graph pane reads the compiled graph list');
 		} finally {
 			panel.dispose();
 			await kernel.dispose();
