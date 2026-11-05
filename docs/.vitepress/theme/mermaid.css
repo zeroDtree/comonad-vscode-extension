@@ -1,5 +1,5 @@
 /* Wide ELK flowcharts: keep native size, scroll horizontally inside the doc column. */
-.vp-doc .vp-mermaid {
+.vp-doc .mermaid {
   margin: 1.25rem 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -7,7 +7,7 @@
   padding: 0.25rem 0;
 }
 
-.vp-doc .vp-mermaid svg {
+.vp-doc .mermaid svg {
   display: block;
   max-width: none !important;
   height: auto;
@@ -18,16 +18,16 @@
  * inside Mermaid's foreignObject labels and shrinks the line after <br>, so
  * descenders (g, p, y) get clipped and the subtitle looks garbled.
  */
-.vp-doc .vp-mermaid foreignObject,
-.vp-doc .vp-mermaid foreignObject div,
-.vp-doc .vp-mermaid foreignObject span {
+.vp-doc .mermaid foreignObject,
+.vp-doc .mermaid foreignObject div,
+.vp-doc .mermaid foreignObject span {
   box-sizing: content-box;
   font-style: normal;
   text-rendering: auto;
 }
 
-.vp-doc .vp-mermaid .nodeLabel,
-.vp-doc .vp-mermaid .edgeLabel {
+.vp-doc .mermaid .nodeLabel,
+.vp-doc .mermaid .edgeLabel {
   font-family: Inter, "PingFang SC", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
   line-height: 1.45;
 }
