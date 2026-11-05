@@ -1,5 +1,7 @@
 <template>
-  <div v-html="svg" :class="props.class"></div>
+  <div class="vp-mermaid" :class="props.class">
+    <div v-html="svg"></div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -23,11 +25,11 @@ const mermaidPageTheme = toRaw(page.value).frontmatter.mermaidTheme as string | 
 async function renderChart(): Promise<void> {
   const dark = document.documentElement.classList.contains('dark')
   const config = { ...mermaidConfig }
+  config.look = 'neo'
   if (mermaidPageTheme) {
     config.theme = mermaidPageTheme
-  }
-  if (dark) {
-    config.theme = 'dark'
+  } else {
+    config.theme = dark ? 'redux-dark-color' : 'redux-color'
   }
   mermaid.initialize(config)
   const code = decodeURIComponent(props.graph)
@@ -40,7 +42,7 @@ onMounted(async () => {
   observer = new MutationObserver(() => {
     void renderChart()
   })
-  observer.observe(document.documentElement, { attributes: true })
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
   await renderChart()
 })
 

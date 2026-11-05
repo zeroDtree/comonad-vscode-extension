@@ -1,0 +1,14 @@
+/* Wide ELK flowcharts: keep native size, scroll horizontally inside the doc column. */
+.vp-doc .vp-mermaid {
+  margin: 1.25rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.25rem 0;
+}
+
+.vp-doc .vp-mermaid svg {
+  display: block;
+  max-width: none !important;
+  height: auto;
+}

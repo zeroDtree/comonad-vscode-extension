@@ -4,14 +4,14 @@ Six layers decide whether a tool call runs, in order. The first layer to stop a 
 call that reaches the end runs inside the configured sandbox.
 
 ```mermaid
-flowchart LR
-  Call["Tool call"] --> Cap{"Capability<br/>+ network"}
+flowchart TB
+  Call["Tool call"] --> Cap{"Capability + network"}
   Cap -->|no| Reject["Reject"]
   Cap -->|yes| Rule{"User rules<br/>deny / ask / allow"}
   Rule -->|deny| Reject
-  Rule -->|ask| Response{"Approval<br/>response policy"}
+  Rule -->|ask| Response{"Approval response policy"}
   Rule -->|allow| Sandbox["Sandbox mode"]
-  Rule -->|no match| Approval{"Tool approval<br/>policy"}
+  Rule -->|no match| Approval{"Tool approval policy"}
   Approval -->|reject| Reject
   Approval -->|ask| Response
   Approval -->|run| Sandbox

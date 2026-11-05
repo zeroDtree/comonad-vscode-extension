@@ -3,14 +3,14 @@
 六层机制按顺序决定一次工具调用是否运行。第一个阻止调用的层即结束流程；走到最后的调用在配置的沙箱中执行。
 
 ```mermaid
-flowchart LR
-  Call["工具调用"] --> Cap{"能力<br/>+ 网络"}
+flowchart TB
+  Call["工具调用"] --> Cap{"能力 + 网络"}
   Cap -->|否| Reject["拒绝"]
   Cap -->|是| Rule{"用户规则<br/>deny / ask / allow"}
   Rule -->|deny| Reject
-  Rule -->|ask| Response{"审批响应<br/>策略"}
+  Rule -->|ask| Response{"审批响应策略"}
   Rule -->|allow| Sandbox["Sandbox mode"]
-  Rule -->|未命中| Approval{"工具审批<br/>策略"}
+  Rule -->|未命中| Approval{"工具审批策略"}
   Approval -->|拒绝| Reject
   Approval -->|询问| Response
   Approval -->|执行| Sandbox
