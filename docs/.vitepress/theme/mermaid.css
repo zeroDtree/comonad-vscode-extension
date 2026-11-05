@@ -12,3 +12,22 @@
   max-width: none !important;
   height: auto;
 }
+
+/*
+ * VitePress sets `* { box-sizing: border-box }`. That rule matches the HTML
+ * inside Mermaid's foreignObject labels and shrinks the line after <br>, so
+ * descenders (g, p, y) get clipped and the subtitle looks garbled.
+ */
+.vp-doc .vp-mermaid foreignObject,
+.vp-doc .vp-mermaid foreignObject div,
+.vp-doc .vp-mermaid foreignObject span {
+  box-sizing: content-box;
+  font-style: normal;
+  text-rendering: auto;
+}
+
+.vp-doc .vp-mermaid .nodeLabel,
+.vp-doc .vp-mermaid .edgeLabel {
+  font-family: Inter, "PingFang SC", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.45;
+}

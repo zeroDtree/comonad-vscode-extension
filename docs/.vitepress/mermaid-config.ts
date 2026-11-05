@@ -9,6 +9,9 @@ export const mermaidConfig: MermaidConfig = {
   theme: 'redux-color',
   themeVariables: {
     fontSize: '15px',
+    // Redux themes name "Recursive Variable", which is not loaded here. A missing
+    // face plus VitePress's border-box reset clips the line after <br>.
+    fontFamily: 'Inter, "PingFang SC", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif',
   },
   flowchart: {
     useMaxWidth: false,
