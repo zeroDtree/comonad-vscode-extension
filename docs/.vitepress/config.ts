@@ -11,6 +11,12 @@ const config = withMermaid(
     lastUpdated: true,
     srcExclude: ['internal/**'],
     head: [['meta', { name: 'theme-color', content: '#0f1116' }]],
+    mermaid: {
+      layout: 'elk',
+      elk: {
+        lineHops: 'arc',
+      },
+    },
     themeConfig: {
       socialLinks: [{ icon: 'github', link: GITHUB }],
       editLink: {
@@ -137,5 +143,19 @@ const include = config.vite?.optimizeDeps?.include
 if (include) {
   config.vite!.optimizeDeps!.include = include.filter((id) => id !== 'debug')
 }
+
+// Mermaid 12 loads ELK via elkjs/lib/elk.bundled.js (CJS/UMD). Vite dev serves it
+// as native ESM and render fails silently; pre-bundle with interop (prod build is fine).
+config.vite ??= {}
+config.vite.optimizeDeps ??= {}
+config.vite.optimizeDeps.include = [
+  ...(config.vite.optimizeDeps.include ?? []),
+  'mermaid',
+  'elkjs/lib/elk.bundled.js',
+]
+config.vite.optimizeDeps.needsInterop = [
+  ...(config.vite.optimizeDeps.needsInterop ?? []),
+  'elkjs/lib/elk.bundled.js',
+]
 
 export default config
