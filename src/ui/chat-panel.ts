@@ -117,6 +117,19 @@ export function chatPanel(ctx: Context): void {
 		void vscode.commands.executeCommand('setContext', 'comonad.chatFocused', focusedClients.size > 0);
 	};
 
+	/**
+	 * The chat surfaces this window has met. `comonad.chatPanel` is an editor or floating chat that is
+	 * open right now. `comonad.chatUsed` latches once either surface exists: the Cmd+L keybinding
+	 * pairs it with `!auxiliaryBarVisible`, so a collapsed side bar keeps the chord, while a side bar
+	 * showing another agent's container (`activeAuxiliary` names it) does not.
+	 */
+	let chatUsed = false;
+	const syncActive = (): void => {
+		chatUsed = chatUsed || panel !== null || view !== null;
+		void vscode.commands.executeCommand('setContext', 'comonad.chatPanel', panel !== null);
+		void vscode.commands.executeCommand('setContext', 'comonad.chatUsed', chatUsed);
+	};
+
 	/** Reveal a guest and put the caret in it, declaring it focused until it says otherwise. */
 	const focusGuest = (webview: vscode.Webview): void => {
 		focusedClients.add(webview);
@@ -1502,9 +1515,11 @@ export function chatPanel(ctx: Context): void {
 		created.onDidDispose(() => {
 			detach(created.webview);
 			panel = null;
+			syncActive();
 		});
 		panel = created;
 		attach(created.webview);
+		syncActive();
 		if (options.popOut || ctx.settings.get().chatWindow) {
 			void popOut();
 		}
@@ -1523,6 +1538,7 @@ export function chatPanel(ctx: Context): void {
 					view = null;
 				}
 				detach(webviewView.webview);
+				syncActive();
 			});
 			webviewView.onDidChangeVisibility(() => {
 				if (webviewView.visible) {
@@ -1537,6 +1553,7 @@ export function chatPanel(ctx: Context): void {
 				}
 			});
 			attach(webviewView.webview);
+			syncActive();
 		},
 	};
 	ctx.effect(() => {
@@ -1618,9 +1635,11 @@ export function chatPanel(ctx: Context): void {
 		panel?.dispose();
 		panel = null;
 		view = null;
+		chatUsed = false;
 		focusedClients.clear();
 		pendingReferences = [];
 		syncFocus();
+		syncActive();
 	});
 	registerCommand(ctx, 'comonad.openChat', () => openChat());
 	registerCommand(ctx, 'comonad.referenceSelection', () => referenceSelection());

@@ -662,7 +662,7 @@
         "command": "comonad.referenceSelection",
         "key": "ctrl+l",
         "mac": "cmd+l",
-        "when": "editorTextFocus && editorHasSelection"
+        "when": "(comonad.chatPanel || activeAuxiliary == workbench.view.extension.comonadChat || activeViewlet == workbench.view.extension.comonadChat || (comonad.chatUsed && !auxiliaryBarVisible)) && editorTextFocus && editorHasSelection"
       }
     ],
     "configuration": {

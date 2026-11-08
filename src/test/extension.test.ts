@@ -3993,6 +3993,13 @@ suite('Cordis kernel', () => {
 		// With no selection the chord must fall through to VS Code's select-line command.
 		assert.match(String(binding.when), /editorTextFocus/);
 		assert.match(String(binding.when), /editorHasSelection/);
+		// The chord follows the chat's side bar: `activeAuxiliary` names the container it currently
+		// shows, so switching that bar to another agent's chat releases Cmd+L even though Comonad's
+		// webview is still alive behind it. A collapsed bar keeps the chord once the chat has been
+		// used, and an open Comonad panel keeps it regardless of the side bar.
+		assert.match(String(binding.when), /activeAuxiliary == workbench\.view\.extension\.comonadChat/);
+		assert.match(String(binding.when), /comonad\.chatPanel/);
+		assert.match(String(binding.when), /comonad\.chatUsed && !auxiliaryBarVisible/);
 	});
 
 	test('the rule lists the Agent tab edits are the ones the gate uses', async () => {

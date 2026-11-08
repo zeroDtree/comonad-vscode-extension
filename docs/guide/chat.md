@@ -116,9 +116,12 @@ selection**. A chosen item becomes a token:
 @symbol:src/auth.ts:AuthService
 ```
 
-Select code in an editor and press `Cmd+L` (`Ctrl+L`) to append its token to the chat. References are
-resolved when the turn runs, with numbered lines, sandbox read scope and deny rules applied. A missing
-or denied reference becomes an error note instead of failing the turn.
+With the chat showing in the window's side bar, select code in an editor and press `Cmd+L` (`Ctrl+L`)
+to append its token to the chat. The chord follows that side bar: switching it to another agent's chat
+releases `Cmd+L`, a collapsed side bar keeps it once Comonad has been used, and an open Comonad chat
+panel keeps it regardless. References are resolved when the turn runs, with numbered lines, sandbox
+read scope and deny rules applied. A missing or denied reference becomes an error note instead of
+failing the turn.
 
 Resolved references are **part of that user message**: they are kept in the transcript, survive a
 reload, and are reused by swipe/regenerate/edit. They are a snapshot — a later turn does not re-read
