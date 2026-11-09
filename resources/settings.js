@@ -1227,7 +1227,6 @@
 		const plugins = state.plugins || { rows: [], project: '', user: '', writable: '', trusted: true };
 		$('plugins-project').textContent = plugins.project || '(no workspace folder)';
 		$('plugins-user').textContent = plugins.user || '(no home)';
-		$('plugins-writable').textContent = plugins.writable || 'nowhere (a toggle would have no file to go in)';
 		$('plugins-reload').disabled = !plugins.project && !plugins.user;
 		$('plugins-note').textContent = plugins.trusted
 			? ''

@@ -395,6 +395,8 @@ export function settingsPanel(ctx: Context): void {
 				dependencies,
 				project: String(pluginHost()?.projectFile ?? ''),
 				user: String(pluginHost()?.userFile ?? ''),
+				// Not shown as a row any more, but the toggle/uninstall buttons need to know a write
+				// has a file to land in.
 				writable: String(pluginHost()?.patchFile ?? ''),
 				trusted: Boolean(ctx.host.trusted()),
 			},
@@ -1273,9 +1275,9 @@ ${paneSections}
         <p class="hint">
           Everything Comonad is made of, in load order. A plugin comes from the extension's own list,
           from the workspace's <span class="mono">cordis.yml</span> when it is trusted, or from yours —
-          a later file overrides an earlier one. Turning a plugin off writes into the config file marked
-          <strong>writes</strong> — the same change you could make by hand, and the same place a plugin
-          of your own is mounted from.
+          a later file overrides an earlier one. Turning a plugin off writes into the workspace's list
+          when the workspace is trusted, or into yours otherwise — the same change you could make by
+          hand, and the same place a plugin of your own is mounted from.
         </p>
         <div class="plugin-config">
           <div class="plugin-config-head">
@@ -1287,8 +1289,6 @@ ${paneSections}
             <dd class="mono" id="plugins-user"></dd>
             <dt>workspace</dt>
             <dd class="mono" id="plugins-project"></dd>
-            <dt>writes</dt>
-            <dd class="mono" id="plugins-writable"></dd>
           </dl>
         </div>
         <div class="row">
