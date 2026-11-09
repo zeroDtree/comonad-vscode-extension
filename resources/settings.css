@@ -234,13 +234,10 @@ body.resizing {
 	container-type: inline-size;
 }
 
-/* The top of the content column, common to every tab: where a save lands. The negative margins
-   cancel `#content`'s padding so the bar reaches the panel's edges; the opaque background keeps
-   the tab content from showing through while the column is scrolled. */
+/* The top of the content column, common to every tab: where a save lands. It scrolls with the
+   column like the rest of the page; the negative margins cancel `#content`'s padding so the bar
+   reaches the panel's edges. */
 .scope-bar {
-	position: sticky;
-	top: 0;
-	z-index: 5;
 	margin: -22px -36px 18px;
 	padding: 14px 36px 8px;
 	background: var(--vscode-editor-background, var(--vscode-sideBar-background));
