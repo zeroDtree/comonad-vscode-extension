@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Comonad settings webview — tabs over the `comonad.*` config, saved with the header Save button.
+// Comonad settings webview — tabs over Comonad's settings, saved to the scope the selector names.
 (function () {
 	'use strict';
 
@@ -26,18 +26,38 @@
 		node.textContent = text || '';
 		node.className = isError ? 'error' : '';
 	};
+	// The scope selector names where a write lands.
+	const SCOPE_HINTS = {
+		user: 'Changes apply globally and become the default for every workspace.',
+		workspace: 'Applies only to this workspace, overriding the matching user values.',
+	};
+	const SCOPE_TITLES = {
+		user: 'User — global defaults for every workspace',
+		workspace: 'Workspace — this workspace only',
+	};
+	let activeScope = (vscode.getState() || {}).settingsScope || 'user';
+	let scopeInfo = { folderOpen: false, trusted: false };
+	const scopeAvailable = (scope) => scope === 'user' || Boolean(scopeInfo.folderOpen && scopeInfo.trusted);
+	const scopeFile = (scope) => {
+		const files = (state && state.settingsFiles) || {};
+		return scope === 'user' ? files.user || '~/.comonad/settings.json' : files.workspace || '';
+	};
+
 	// Save owns the draft tabs only (Graph, ST): the Agent and UI tabs save themselves, and Prompts
-	// and MCP have their own buttons. With nothing pending it is disabled, so it never looks like a
-	// no-op command.
+	// and MCP have their own buttons. With nothing pending it stays disabled.
+	const syncSave = () => {
+		const save = $('save');
+		save.disabled = !dirty;
+		save.classList.toggle('is-dirty', dirty);
+		save.title = 'Save — write the draft pane tabs to the selected scope';
+	};
 	const markDirty = () => {
 		dirty = true;
-		$('save').classList.add('is-dirty');
-		$('save').disabled = false;
+		syncSave();
 	};
 	const clearDirty = () => {
 		dirty = false;
-		$('save').classList.remove('is-dirty');
-		$('save').disabled = true;
+		syncSave();
 	};
 	clearDirty();
 
@@ -81,6 +101,50 @@
 			handlers.render(paneSlices[id]);
 		}
 	}
+
+	/* ------------------------------------------------------------- scope selector */
+
+	/**
+	 * Draws the selector for one scope and remembers it. `validate` is what a state push uses: a
+	 * persisted workspace scope falls back to User when the window has no trusted folder.
+	 */
+	function showScope(scope, validate) {
+		if (scope !== 'user' && scope !== 'workspace') {
+			scope = 'user';
+		}
+		if (validate && !scopeAvailable(scope)) {
+			scope = 'user';
+		}
+		activeScope = scope;
+		store.set({ settingsScope: scope });
+		const unavailable = scopeInfo.folderOpen
+			? 'Trust this workspace to use workspace settings.'
+			: 'Open a folder to use workspace settings.';
+		for (const button of document.querySelectorAll('#scope-tabs .scope-tab')) {
+			const name = button.dataset.scope;
+			const on = name === scope;
+			const available = scopeAvailable(name);
+			button.classList.toggle('is-on', on);
+			button.setAttribute('aria-selected', String(on));
+			button.disabled = !available;
+			button.title = available ? SCOPE_TITLES[name] : unavailable;
+		}
+		const path = $('scope-path');
+		const file = scopeFile(scope);
+		path.textContent = file || 'Open a folder to use workspace settings';
+		path.title = file ? 'Open ' + file + ' in the editor' : '';
+		path.disabled = !file;
+		$('scope-hint').textContent = scopeAvailable(scope) ? SCOPE_HINTS[scope] : unavailable;
+		syncSave();
+	}
+
+	for (const button of document.querySelectorAll('#scope-tabs .scope-tab')) {
+		button.addEventListener('click', () => showScope(button.dataset.scope, true));
+	}
+	$('scope-path').addEventListener('click', () => {
+		post({ type: 'openConfig', scope: activeScope });
+	});
+	showScope(activeScope, false);
 
 	/* ------------------------------------------------------------------ tabs */
 
@@ -498,7 +562,7 @@
 		// Optimistic local copy: a second click before the state push must build on this one.
 		state.subagents.grants = grants;
 		state.subagents.agents = state.subagents.agents.map((entry) => (entry.name === agent.name ? { ...entry, [key]: value } : entry));
-		post({ type: 'saveSubagents', subagents: grants });
+		post({ type: 'saveSubagents', subagents: grants, scope: activeScope });
 	}
 
 	// The budget input only applies to `custom`: leaving it enabled under `inherit` would invite edits
@@ -555,7 +619,7 @@
 
 	/** The Agent, UI and Subagents tabs' live save: one control, one key, no draft. */
 	function saveAgent(key, value) {
-		post({ type: 'saveAgent', config: { [key]: value } });
+		post({ type: 'saveAgent', config: { [key]: value }, scope: activeScope });
 	}
 
 	for (const node of document.querySelectorAll('[data-key]')) {
@@ -589,7 +653,7 @@
 	$('model-add').addEventListener('click', () => post({ type: 'configureModel' }));
 
 	function save() {
-		const payload = { type: 'save', config: collectDraft() };
+		const payload = { type: 'save', config: collectDraft(), scope: activeScope };
 		const mcp = $('mcp').value;
 		if (mcp !== mcpSeen) {
 			try {
@@ -732,9 +796,186 @@
 
 	/* ------------------------------------------------------------------ diagrams */
 
-	// Mermaid measures its container, so both diagrams are drawn while their tab is visible.
-	function drawDiagram(node, source, name) {
+	/**
+	 * The enlarged diagram. The inline view is bounded by the pane, so the sheet holds a clone of the
+	 * svg and scales it from its viewBox: the toolbar zooms, the body scrolls, and Escape (or the
+	 * backdrop, or the close button) puts it away. The clone keeps the diagram's id on purpose — the
+	 * mermaid stylesheet scopes itself with `#<id>`, so stripping it would open an unstyled copy.
+	 */
+	const diagramZoom = (() => {
+		const MIN = 0.25;
+		const MAX = 4;
+		const STEP = 1.25;
+		const PAD = 20; // `.zoom-body`'s padding, per side
+		let sheet = null;
+		let stage = null;
+		let readout = null;
+		let source = null;
+		let width = 0;
+		let height = 0;
+		let scale = 1;
+
+		function paint() {
+			stage.style.width = Math.round(width * scale) + 'px';
+			stage.style.height = Math.round(height * scale) + 'px';
+			readout.textContent = Math.round(scale * 100) + '%';
+		}
+
+		function setScale(next) {
+			scale = Math.max(MIN, Math.min(MAX, next));
+			paint();
+		}
+
+		function zoomBy(factor) {
+			if (sheet) {
+				setScale(scale * factor);
+			}
+		}
+
+		/** Scale the diagram to fill the sheet's width: the largest legible starting view. */
+		function fitWidth() {
+			const body = sheet && sheet.querySelector('.zoom-body');
+			if (body) {
+				setScale((body.clientWidth - PAD * 2) / width);
+			}
+		}
+
+		/** Scale the whole diagram into view, height included. */
+		function fitAll() {
+			const body = sheet && sheet.querySelector('.zoom-body');
+			if (body) {
+				setScale(Math.min((body.clientWidth - PAD * 2) / width, (body.clientHeight - PAD * 2) / height));
+			}
+		}
+
+		function close() {
+			if (!sheet) {
+				return;
+			}
+			sheet.remove();
+			sheet = null;
+			stage = null;
+			readout = null;
+			// The svg itself is not focusable; the container that owns the click/key handling is.
+			const previous = source && source.closest('.diagram');
+			source = null;
+			if (previous && previous.isConnected) {
+				previous.focus();
+			}
+		}
+
+		function toolButton(bar, text, label, action) {
+			const node = document.createElement('button');
+			node.type = 'button';
+			node.className = 'zoom-button';
+			node.textContent = text;
+			node.title = label;
+			node.setAttribute('aria-label', label);
+			node.addEventListener('click', action);
+			bar.append(node);
+		}
+
+		function open(svg, label) {
+			close();
+			const view = svg.viewBox && svg.viewBox.baseVal;
+			width = (view && view.width) || svg.getBoundingClientRect().width;
+			height = (view && view.height) || svg.getBoundingClientRect().height;
+			if (!width || !height) {
+				return;
+			}
+			source = svg;
+			scale = 1;
+
+			sheet = document.createElement('div');
+			sheet.className = 'zoom';
+			sheet.tabIndex = -1;
+			sheet.setAttribute('role', 'dialog');
+			sheet.setAttribute('aria-modal', 'true');
+			sheet.setAttribute('aria-label', label);
+			sheet.addEventListener('keydown', (event) => {
+				if (event.key === 'Escape') {
+					event.preventDefault();
+					close();
+				} else if (event.key === '+' || event.key === '=') {
+					event.preventDefault();
+					zoomBy(STEP);
+				} else if (event.key === '-') {
+					event.preventDefault();
+					zoomBy(1 / STEP);
+				} else if (event.key === '0') {
+					event.preventDefault();
+					fitAll();
+				}
+			});
+			// Ctrl/Cmd + wheel is the zoom gesture a reader already knows from an image viewer; a
+			// plain wheel keeps scrolling the sheet, as it should.
+			sheet.addEventListener(
+				'wheel',
+				(event) => {
+					if (event.ctrlKey || event.metaKey) {
+						event.preventDefault();
+						zoomBy(event.deltaY < 0 ? STEP : 1 / STEP);
+					}
+				},
+				{ passive: false },
+			);
+
+			const bar = document.createElement('div');
+			bar.className = 'zoom-bar';
+			const title = document.createElement('span');
+			title.className = 'zoom-title';
+			title.textContent = label;
+			bar.append(title);
+			toolButton(bar, '−', 'Zoom out', () => zoomBy(1 / STEP));
+			readout = document.createElement('span');
+			readout.className = 'zoom-pct';
+			bar.append(readout);
+			toolButton(bar, '+', 'Zoom in', () => zoomBy(STEP));
+			toolButton(bar, 'Fit', 'Fit the whole diagram', fitAll);
+			toolButton(bar, '×', 'Close the enlarged view', close);
+
+			const body = document.createElement('div');
+			body.className = 'zoom-body';
+			body.addEventListener('click', (event) => {
+				if (event.target === body) {
+					close();
+				}
+			});
+			stage = document.createElement('div');
+			stage.className = 'zoom-stage';
+			const clone = svg.cloneNode(true);
+			clone.removeAttribute('tabindex');
+			clone.removeAttribute('role');
+			clone.removeAttribute('aria-label');
+			stage.append(clone);
+			body.append(stage);
+
+			sheet.append(bar, body);
+			document.body.append(sheet);
+			fitWidth();
+			sheet.focus();
+		}
+
+		return { open, close };
+	})();
+
+	/** Put a diagram node back to its plain state before drawing into it again. */
+	function resetDiagram(node) {
+		diagramZoom.close();
 		node.innerHTML = '';
+		node.classList.remove('is-zoomable');
+		node.removeAttribute('role');
+		node.removeAttribute('aria-label');
+		node.removeAttribute('title');
+		node.removeAttribute('tabindex');
+		node.onclick = null;
+		node.onpointerdown = null;
+		node.onkeydown = null;
+	}
+
+	// Mermaid measures its container, so both diagrams are drawn while their tab is visible.
+	function drawDiagram(node, source, name, label) {
+		resetDiagram(node);
 		if (!source) {
 			return Promise.resolve(false);
 		}
@@ -750,6 +991,15 @@
 				securityLevel: 'strict',
 				suppressErrorRendering: true,
 				theme: document.body.classList.contains('vscode-light') ? 'default' : 'dark',
+				// Mermaid 12 bundles ELK and defaults to it; name it so a future default change cannot
+				// quietly take the routing away. ELK gives the gate flow orthogonal channels instead of
+				// dagre's staircase, and `lineHops` arcs the lower edge at every crossing, so a reader
+				// can see which line runs through and which one gives way. Curved edges are skipped by
+				// the hop pass, which is another reason to keep `curve: 'linear'`.
+				layout: 'elk',
+				elk: {
+					lineHops: 'arc',
+				},
 				// The gate flow is a long chain: keep the ranks tight and let its labels use the full row.
 				flowchart: {
 					nodeSpacing: 16,
@@ -765,6 +1015,38 @@
 				.render(name, source)
 				.then((result) => {
 					container.innerHTML = result.svg;
+					const svg = container.querySelector('svg');
+					if (svg) {
+						// The whole diagram is the button: a click anywhere on it opens the enlarged
+						// view, and the container is a real focus stop so Enter and Space do the same.
+						const title = label || 'diagram';
+						node.classList.add('is-zoomable');
+						node.title = 'Click to enlarge';
+						node.tabIndex = 0;
+						node.setAttribute('role', 'button');
+						node.setAttribute('aria-label', 'Enlarge the ' + title + ' diagram');
+						// Assignment, not addEventListener: a redraw must not stack another handler on
+						// the node, which outlives the svg it used to hold. A press that travelled is a
+						// scrollbar drag or a text selection, not a click, so it does not open the sheet.
+						let downX = -1;
+						let downY = -1;
+						node.onpointerdown = (event) => {
+							downX = event.clientX;
+							downY = event.clientY;
+						};
+						node.onclick = (event) => {
+							if (downX >= 0 && (Math.abs(event.clientX - downX) > 4 || Math.abs(event.clientY - downY) > 4)) {
+								return;
+							}
+							diagramZoom.open(svg, title);
+						};
+						node.onkeydown = (event) => {
+							if (event.key === 'Enter' || event.key === ' ') {
+								event.preventDefault();
+								diagramZoom.open(svg, title);
+							}
+						};
+					}
 					return true;
 				})
 				.catch((error) => {
@@ -787,7 +1069,7 @@
 			return;
 		}
 		flowSource = state.flow;
-		drawDiagram($('flow'), state.flow, 'flow-diagram').then((drawn) => {
+		drawDiagram($('flow'), state.flow, 'flow-diagram', 'Tool Policy Flow').then((drawn) => {
 			flowDrawn = drawn;
 		});
 	}
@@ -800,7 +1082,7 @@
 		const node = $('pg-deps');
 		node.innerHTML = '';
 		const head = document.createElement('tr');
-		for (const header of ['plugin', 'layer', 'provides', 'service', 'provider', 'state']) {
+		for (const header of ['plugin', 'layer', 'provides', 'state']) {
 			const th = document.createElement('th');
 			th.textContent = header;
 			head.append(th);
@@ -822,24 +1104,8 @@
 			provides.textContent = row.provides.join(', ');
 			provides.className = 'mono';
 			tr.append(provides);
-			// The service and its provider are two aligned lines per requirement: a reader can see at
-			// a glance which plugin each service comes from — or that nothing provides it.
-			const service = document.createElement('td');
-			service.className = 'mono pg-service';
-			const provider = document.createElement('td');
-			provider.className = 'mono pg-provider';
-			for (const require of row.requires) {
-				const needed = document.createElement('div');
-				needed.textContent = require.name;
-				service.append(needed);
-				const from = document.createElement('div');
-				from.textContent = require.provider ?? (require.external ? '(built in)' : 'not provided');
-				if (!require.provider && !require.external) {
-					from.className = 'pg-missing';
-				}
-				provider.append(from);
-			}
-			tr.append(service, provider);
+			// The services a plugin needs and who provides them live in the dependency tree below:
+			// the row stays one line per plugin, and the click is what asks for the wiring.
 			const status = document.createElement('td');
 			status.textContent = row.loaded ? 'loaded' : row.enabled ? (row.error || '').startsWith('pending') ? 'waiting' : 'failed' : 'off';
 			if (row.error) {
@@ -856,12 +1122,70 @@
 
 	/* ------------------------------------------------------------------ mcp & tools */
 
-	$('mcp-save').addEventListener('click', () => post({ type: 'saveMcp', json: $('mcp').value }));
+	$('mcp-save').addEventListener('click', () => post({ type: 'saveMcp', json: $('mcp').value, scope: activeScope }));
 	$('mcp-reload').addEventListener('click', () => post({ type: 'reloadMcp' }));
 	$('plugins-reload').addEventListener('click', () => post({ type: 'plugins', action: 'reload' }));
 	$('plugins-install').addEventListener('click', () => post({ type: 'plugins', action: 'install' }));
 
+	/**
+	 * The hover note a table row can carry. `title` is not enough for it: the native tooltip waits
+	 * close to a second and is only raised by the element that carries the attribute, so the cells
+	 * under the pointer stay blank. This one is a fixed, pointer-transparent card that opens from
+	 * any point over the row — fast enough to feel immediate, delayed enough not to flash when the
+	 * pointer merely passes through.
+	 */
+	const rowTip = (() => {
+		const DELAY = 120;
+		const GAP = 12;
+		let node = null;
+		let timer = 0;
+		const place = (x, y) => {
+			const rect = node.getBoundingClientRect();
+			const left = x + GAP + rect.width > innerWidth - 8 ? x - GAP - rect.width : x + GAP;
+			const top = y + GAP + rect.height > innerHeight - 8 ? y - GAP - rect.height : y + GAP;
+			node.style.left = `${Math.max(8, left)}px`;
+			node.style.top = `${Math.max(8, top)}px`;
+		};
+		return {
+			show(text, x, y) {
+				if (!node) {
+					node = document.createElement('div');
+					node.className = 'row-tip';
+					node.setAttribute('role', 'tooltip');
+					node.hidden = true;
+					document.body.append(node);
+				}
+				clearTimeout(timer);
+				timer = setTimeout(() => {
+					node.textContent = text;
+					node.hidden = false;
+					place(x, y);
+				}, DELAY);
+			},
+			move(x, y) {
+				if (node && !node.hidden) {
+					place(x, y);
+				}
+			},
+			hide() {
+				clearTimeout(timer);
+				if (node) {
+					node.hidden = true;
+				}
+			},
+		};
+	})();
+
+	// The note floats free of its table, so a scroll would strand it over other content: put it away
+	// on any scroll. Capture, because the panes scroll inside their own container, not the window.
+	document.addEventListener('scroll', rowTip.hide, true);
+
+	/**
+	 * A read-only table. A row is its cell array, or `{ title, cells }` when the row carries a hover
+	 * note. The Tools tab puts a tool's description there — too long to sit in a column of its own.
+	 */
 	function table(node, headers, rows) {
+		rowTip.hide();
 		node.innerHTML = '';
 		const head = document.createElement('tr');
 		for (const header of headers) {
@@ -872,7 +1196,15 @@
 		node.append(head);
 		for (const row of rows) {
 			const tr = document.createElement('tr');
-			for (const cell of row) {
+			if (row.title) {
+				// The note is visual first; aria-description keeps it in the accessibility tree for
+				// anyone who cannot hover, without replacing the row's own name the way aria-label would.
+				tr.setAttribute('aria-description', row.title);
+				tr.addEventListener('pointerenter', (event) => rowTip.show(row.title, event.clientX, event.clientY));
+				tr.addEventListener('pointermove', (event) => rowTip.move(event.clientX, event.clientY));
+				tr.addEventListener('pointerleave', () => rowTip.hide());
+			}
+			for (const cell of row.cells ?? row) {
 				const td = document.createElement('td');
 				td.textContent = cell.text;
 				if (cell.mono) {
@@ -974,13 +1306,15 @@
 			{ text: String(item.tools) },
 			{ text: item.error || '' },
 		]));
-		table($('tools'), ['tool', 'capability', 'network', 'workspace', 'description'], (state.tools || []).map((tool) => [
-			{ text: tool.name, mono: true },
-			{ text: tool.capability },
-			{ text: tool.network ? 'yes' : '' },
-			{ text: tool.workspace ? 'yes' : '' },
-			{ text: tool.description },
-		]));
+		table($('tools'), ['tool', 'capability', 'network', 'workspace'], (state.tools || []).map((tool) => ({
+			title: tool.description,
+			cells: [
+				{ text: tool.name, mono: true },
+				{ text: tool.capability },
+				{ text: tool.network ? 'yes' : '' },
+				{ text: tool.workspace ? 'yes' : '' },
+			],
+		})));
 	}
 
 	/* ------------------------------------------------------------------ prompts */
@@ -1289,6 +1623,7 @@
 			type: 'savePrompts',
 			prompts: promptLayout.comonad.map((row) => ({ id: row.id, enabled: row.enabled !== false, prefix: row.prefix })),
 			toolPrompts: promptLayout.tools.map((row) => ({ name: row.name, enabled: row.enabled !== false })),
+			scope: activeScope,
 		});
 	}
 
@@ -1374,6 +1709,8 @@
 			case 'state':
 				state = message;
 				paneSlices = message.panes || {};
+				scopeInfo = { folderOpen: Boolean(message.folderOpen), trusted: Boolean(message.trusted) };
+				showScope(activeScope, true);
 				renderActive();
 				if (!ready) {
 					ready = true;

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { join } from 'node:path';
 import type { SandboxKind } from '../lib/sandbox';
+import type { SettingsScope } from '../lib/settings-file';
+
+export type { SettingsScope };
 
 /**
  * The Host contract: everything the kernel needs from its embedding environment,
@@ -24,9 +27,15 @@ export interface Host {
 	home(): string;
 	workspace(): string;
 	trusted(): boolean;
-	/** Raw values of the `comonad.*` settings section. */
+	/** Effective settings: the user file with the trusted workspace file merged over it. */
 	config(): Record<string, unknown>;
-	update(key: string, value: unknown): Promise<void>;
+	/**
+	 * Writes one key. With no scope it goes where it already lives: the trusted workspace file when
+	 * it declares the key, else the user file.
+	 */
+	update(key: string, value: unknown, scope?: SettingsScope): Promise<void>;
+	/** The file a scope writes; '' for the workspace scope when no folder is open. */
+	settingsPath(scope: SettingsScope): string;
 	secret(id: string): Promise<string | undefined>;
 	setSecret(id: string, value: string): Promise<void>;
 	deleteSecret(id: string): Promise<void>;

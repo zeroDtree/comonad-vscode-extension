@@ -168,9 +168,9 @@ in trusted workspaces, and exit code 2 blocks.
 | Instructions | `COMONAD.md`, `AGENTS.md`, `.comonad/instructions.md` | Hierarchical; trusted workspaces only |
 | Rules | `.comonad/rules/*.md` | Loaded into the system prompt |
 | Skills | `.comonad/skills/<name>/SKILL.md` | Listed in the prompt, loaded on demand |
-| Subagents | `.comonad/agents/*.md` + `comonad.subagents` | Frontmatter selects the tools; settings grant the writes |
+| Subagents | `.comonad/agents/*.md` + `subagents` (settings) | Frontmatter selects the tools; settings grant the writes |
 | Commands | `.comonad/commands/*.md` | Custom slash commands |
-| MCP | `comonad.mcpServers` | stdio or streamable HTTP; per-server capability and overrides |
+| MCP | `mcpServers` (settings) | stdio or streamable HTTP; per-server capability and overrides |
 | Memory | Agent-owned `MEMORY.md` | Loaded into the prompt, edited with the `memory` tool |
 
 ### Subagents
@@ -188,11 +188,11 @@ Implement the change. Use the file tools for every project write; run_shell_test
 scratch directory.
 ```
 
-The frontmatter **selects** tools. Writes also need a **grant** in `comonad.subagents` (Settings →
+The frontmatter **selects** tools. Writes also need a **grant** in the `subagents` setting (Settings →
 Subagents):
 
 ```json
-{ "comonad.subagents": { "writer": { "files": true, "test": true } } }
+{ "subagents": { "writer": { "files": true, "test": true } } }
 ```
 
 Read-only tools need no grant. `files` enables only tracked file tools (`write_file`, `apply_patch`,
@@ -201,16 +201,16 @@ granted to a subagent. A definition without a `tools` list is read-only. The par
 the capability too. See [Safety](/guide/safety#subagents).
 
 `maxTurns` (default 20) bounds the child's graph budget at two steps per turn, with a minimum of
-four steps. It can tighten `comonad.subagentStepsMode`/`comonad.subagentSteps` but never loosen
-them; see [Settings](/reference/settings#subagents).
+four steps. It can tighten `subagentStepsMode`/`subagentSteps` but never loosen them; see
+[Settings](/reference/settings#subagents).
 
 ### MCP
 
-MCP servers are configured in `comonad.mcpServers`:
+MCP servers are configured in the `mcpServers` setting of the [settings file](/reference/settings):
 
 ```json
 {
-  "comonad.mcpServers": {
+  "mcpServers": {
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],

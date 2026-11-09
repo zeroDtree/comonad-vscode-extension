@@ -47,7 +47,7 @@ action. Stopping a turn does not stop background tasks.
 
 ## MCP
 
-MCP servers are configured in `comonad.mcpServers`. Each server can set `capability`, `writeTools`,
+MCP servers are configured in the `mcpServers` setting of the [settings file](/reference/settings). Each server can set `capability`, `writeTools`,
 `exclude` and per-tool `overrides`. Tools appear as `server__tool` and pass through the same policy
 gate as built-ins. See [Extending](/guide/extend#mcp).
 

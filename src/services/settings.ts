@@ -6,7 +6,7 @@ import type { ContextForm } from '../lib/prompt';
 import { parsePromptLayout, parseToolLayout, type PromptBlockSetting, type ToolPromptSetting } from '../lib/prompt-layout';
 import { asSandboxMode, DEFAULT_SANDBOX_MODE } from '../lib/sandbox';
 import type { Approval, ApprovalResponse, Capability, ReasoningEffort, SandboxMode, WorkMode } from '../lib/types';
-import type { Host } from './host';
+import type { Host, SettingsScope } from './host';
 
 /** Typed view over the `comonad.*` settings section. */
 
@@ -550,8 +550,8 @@ export class Settings extends Service {
 	}
 
 	/** Writes one key through to the host store — the kernel's own, or a plugin's. */
-	async update(key: string, value: unknown): Promise<void> {
-		await this.host.update(key, value);
+	async update(key: string, value: unknown, scope?: SettingsScope): Promise<void> {
+		await this.host.update(key, value, scope);
 		this.ctx.emit('settings/changed');
 	}
 

@@ -171,6 +171,7 @@ async function main() {
 						'src/test/cancellation.test.ts',
 						'src/test/graph.test.ts',
 						'src/test/policy.test.ts',
+						'src/test/settings-file.test.ts',
 						'src/test/trace.test.ts',
 						'src/test/subagent.test.ts',
 					],

@@ -160,9 +160,9 @@ Hooks 在生命周期点运行：`SessionStart`、`UserPromptSubmit`、`PreToolU
 | 指令 | `COMONAD.md`、`AGENTS.md`、`.comonad/instructions.md` | 分层加载；仅受信任工作区 |
 | 规则 | `.comonad/rules/*.md` | 进入系统提示 |
 | Skills | `.comonad/skills/<name>/SKILL.md` | 提示中列出，按需加载 |
-| 子 Agent | `.comonad/agents/*.md` + `comonad.subagents` | frontmatter 选择工具；设置授予写能力 |
+| 子 Agent | `.comonad/agents/*.md` + `subagents`（设置） | frontmatter 选择工具；设置授予写能力 |
 | 命令 | `.comonad/commands/*.md` | 自定义 slash 命令 |
-| MCP | `comonad.mcpServers` | stdio 或 streamable HTTP；逐服务器能力与覆盖 |
+| MCP | `mcpServers`（设置） | stdio 或 streamable HTTP；逐服务器能力与覆盖 |
 | 记忆 | agent 自己的 `MEMORY.md` | 进入提示，用 `memory` 工具编辑 |
 
 ### 子 Agent
@@ -179,10 +179,10 @@ maxTurns: 20
 实现改动。所有项目写入都走文件工具；run_shell_test 只写 scratch 目录。
 ```
 
-frontmatter **选择**工具；写能力还需要 `comonad.subagents` 中的**授权**（Settings → Subagents）：
+frontmatter **选择**工具；写能力还需要 `subagents` 设置中的**授权**（Settings → Subagents）：
 
 ```json
-{ "comonad.subagents": { "writer": { "files": true, "test": true } } }
+{ "subagents": { "writer": { "files": true, "test": true } } }
 ```
 
 只读工具不需要授权。`files` 只启用可跟踪的文件工具（`write_file`、`apply_patch`、`apply_edits`）；
@@ -190,15 +190,15 @@ frontmatter **选择**工具；写能力还需要 `comonad.subagents` 中的**�
 列表的定义视为只读。父模式也必须允许该能力。见[安全](/zh/guide/safety#子-agent)。
 
 `maxTurns`（默认 20）按每回合两图步、最少四步来收紧子 Agent 的图步预算；它只能收紧
-`comonad.subagentStepsMode`/`comonad.subagentSteps`，不能放宽。见[设置](/zh/reference/settings#子-agent)。
+`subagentStepsMode`/`subagentSteps`，不能放宽。见[设置](/zh/reference/settings#子-agent)。
 
 ### MCP
 
-MCP 服务器在 `comonad.mcpServers` 中配置：
+MCP 服务器在[设置文件](/zh/reference/settings)的 `mcpServers` 设置中配置：
 
 ```json
 {
-  "comonad.mcpServers": {
+  "mcpServers": {
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],

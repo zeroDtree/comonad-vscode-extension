@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context, type Fiber } from 'cordis';
 import type { SandboxKind } from '../lib/sandbox';
+import { defaultWriteScope, type SettingsScope } from '../lib/settings-file';
 import { hostStorage, type Host } from '../services/host';
 import { tokenizersPlugin } from '../services/tokenizers';
 import { logPlugin } from '../services/log';
@@ -33,7 +34,12 @@ import { agentPlugin } from '../services/agent';
  */
 
 export interface FakeHost extends Host {
+	/** The user's own settings layer; tests mutate this directly. */
 	values: Record<string, unknown>;
+	/** The workspace layer, merged over the user layer. */
+	workspaceValues: Record<string, unknown>;
+	/** Every scoped write, so a test can assert where the panel put a key. */
+	writes: Array<{ key: string; value: unknown; scope: SettingsScope }>;
 	/** The environment the kernel sees; tests set a provider key here. */
 	envValues: Record<string, string>;
 	/** The secrets the kernel sees; tests seed legacy keys here. */
@@ -55,17 +61,34 @@ export function fakeHost(root: string, values: Record<string, unknown>, workspac
 	const secrets = new Map<string, string>();
 	// Empty on purpose: a machine with DEEPSEEK_API_KEY exported must not change what tests see.
 	const envValues: Record<string, string> = {};
+	const workspaceValues: Record<string, unknown> = {};
+	const writes: FakeHost['writes'] = [];
+	const store = (scope: SettingsScope): Record<string, unknown> => {
+		if (scope === 'workspace') {
+			if (!workspace) {
+				throw new Error('Open a workspace folder before using workspace settings.');
+			}
+			return workspaceValues;
+		}
+		return values;
+	};
 	const host: FakeHost = {
 		values,
+		workspaceValues,
+		writes,
 		storage: hostStorage(root),
 		extensionUri: undefined,
 		home: () => join(root, 'home'),
 		workspace: () => workspace,
 		trusted: () => true,
-		config: () => values,
-		update: async (key, value) => {
-			values[key] = value;
+		config: () => ({ ...values, ...workspaceValues }),
+		update: async (key, value, scope) => {
+			const target = scope ?? defaultWriteScope(key, workspaceValues);
+			store(target)[key] = value;
+			writes.push({ key, value, scope: target });
 		},
+		settingsPath: (scope) =>
+			scope === 'workspace' ? (workspace ? join(workspace, '.comonad', 'settings.json') : '') : join(root, 'home', '.comonad', 'settings.json'),
 		secret: async (id) => secrets.get(id),
 		setSecret: async (id, value) => void secrets.set(id, value),
 		deleteSecret: async (id) => void secrets.delete(id),

@@ -1,8 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { chmodSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { sandboxKind } from './lib/sandbox';
+import {
+	defaultWriteScope,
+	mergeSettings,
+	migrateLegacySettings,
+	readSettings,
+	settingsFile,
+	writeSettings,
+	type SettingsScope,
+} from './lib/settings-file';
+import { describe } from './lib/util';
 import { hostStorage, type Host } from './services/host';
 
 /** The VS Code implementation of the Host contract. This is the only vscode-bound core module. */
@@ -11,32 +23,7 @@ export interface HostConfig {
 	extension: vscode.ExtensionContext;
 }
 
-/** The scopes `WorkspaceConfiguration.inspect()` reports a value in; the effective one is a folder's. */
-export interface SettingsScopes {
-	workspaceFolderValue?: unknown;
-	workspaceValue?: unknown;
-}
-
-/**
- * Where a settings write lands: the scope that already holds the key, else the user's own settings.
- *
- * A project that declares a key in `.vscode/settings.json` shadows the user value, so writing only
- * the user value would leave the panel reading the project's old one — a save would look like it did
- * nothing. Editing the key where it already lives makes the change visible on the next read. A key no
- * project declares goes to the user's settings: one configuration follows every window, and opening
- * the panel does not write a `.vscode/settings.json` entry by itself.
- */
-export function settingsTarget(scopes: SettingsScopes): vscode.ConfigurationTarget {
-	if (scopes.workspaceFolderValue !== undefined) {
-		return vscode.ConfigurationTarget.WorkspaceFolder;
-	}
-	if (scopes.workspaceValue !== undefined) {
-		return vscode.ConfigurationTarget.Workspace;
-	}
-	return vscode.ConfigurationTarget.Global;
-}
-
-/** Every `comonad.*` key the manifest declares, kernel and plugin keys alike: what the section holds. */
+/** Every `comonad.*` key the manifest declares, kernel and plugin keys alike: what an import reads. */
 function declaredKeys(): string[] {
 	const manifest = vscode.extensions.getExtension('comonad.comonad')?.packageJSON as
 		| { contributes?: { configuration?: { properties?: Record<string, unknown> } } }
@@ -52,32 +39,110 @@ export function host(ctx: Context, config: HostConfig): void {
 	const output = vscode.window.createOutputChannel('Comonad');
 	ctx.effect(() => () => output.dispose());
 
+	// `COMONAD_HOME` moves the user's library — and therefore their settings file — into a home of
+	// its own; the test host sets it so a developer's real `~/.comonad` is never read.
+	const home = (): string => process.env.COMONAD_HOME?.trim() || homedir();
+	const workspace = (): string => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+	const trusted = (): boolean => vscode.workspace.isTrusted;
+	const fileOf = (scope: SettingsScope): string => settingsFile(home(), workspace(), scope);
+	/** The manifest's key list is the import registry; the files themselves are the store. */
+	const keys = declaredKeys();
+	/** Saves made by this process, so the watchers do not answer them as external edits. */
+	const written = new Map<string, string>();
+	let cached: Record<string, unknown> | undefined;
+
+	const invalidate = (): void => {
+		cached = undefined;
+	};
+
+	const readLayer = (file: string, label: string): Record<string, unknown> => {
+		const result = readSettings(file);
+		if (result.error) {
+			output.appendLine(`settings: ${label}: ${result.error}`);
+		}
+		return result.data;
+	};
+
+	/** The effective record: user file first, the trusted workspace file over it. */
+	const readConfig = (): Record<string, unknown> => {
+		if (!cached) {
+			const user = readLayer(fileOf('user'), 'user settings');
+			const project = workspace() && trusted() ? readLayer(fileOf('workspace'), 'workspace settings') : {};
+			cached = mergeSettings(user, project);
+		}
+		return cached;
+	};
+
+	/** Writes one scope file and remembers the text, so its watcher event is recognisable. */
+	const writeScope = (file: string, data: Record<string, unknown>): void => {
+		const result = writeSettings(file, data);
+		if (result.backup) {
+			output.appendLine(`settings: ${file} was not valid JSON; copied it to ${result.backup}`);
+		}
+		if (file === fileOf('user') && process.platform !== 'win32') {
+			// MCP headers and env can hold tokens; the user's file is theirs alone.
+			try {
+				chmodSync(file, 0o600);
+			} catch {
+				// Best effort: a filesystem that cannot chmod still gets the content.
+			}
+		}
+		try {
+			written.set(file, readFileSync(file, 'utf8'));
+		} catch {
+			// The watcher will simply treat the next event as an external edit.
+		}
+		invalidate();
+	};
+
+	const requireWritable = (scope: SettingsScope): string => {
+		const file = fileOf(scope);
+		if (!file) {
+			throw new Error('Open a workspace folder before using workspace settings.');
+		}
+		if (scope === 'workspace' && !trusted()) {
+			throw new Error('Trust this workspace before using workspace settings.');
+		}
+		return file;
+	};
+
+	const update: Host['update'] = async (key, value, scope) => {
+		const project = workspace() && trusted() ? readSettings(fileOf('workspace')).data : undefined;
+		const target = scope ?? defaultWriteScope(key, project);
+		const file = requireWritable(target);
+		const existing = readSettings(file).data;
+		writeScope(file, { ...existing, [key]: value });
+	};
+
+	// The one-time import of VS Code's explicitly-set `comonad.*` values. It runs before the host is
+	// provided, so the very first `settings.get()` already sees the new files.
+	const importLegacy = (): void => {
+		try {
+			const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+			const section = folder ? vscode.workspace.getConfiguration('comonad', folder) : vscode.workspace.getConfiguration('comonad');
+			migrateLegacySettings({
+				markerFile: join(extension.globalStorageUri.fsPath, 'settings-migration.json'),
+				userFile: fileOf('user'),
+				workspaceFile: fileOf('workspace'),
+				keys,
+				inspect: (key) => section.inspect(key),
+				trusted: trusted(),
+			});
+		} catch (error) {
+			output.appendLine(`settings: legacy import failed: ${describe(error)}`);
+		}
+	};
+	importLegacy();
+
 	const service: Host = {
 		storage: hostStorage(extension.globalStorageUri.fsPath),
 		extensionUri: extension.extensionUri,
-		// `COMONAD_HOME` moves everything Comonad keeps in a home of its own — the plugin library and its
-		// rows, the harness shims, the catalog, the instruction layers. The test host sets it so the
-		// plugins you run, and the rows you wrote for them, never change what a test sees.
-		home: () => process.env.COMONAD_HOME?.trim() || homedir(),
-		workspace: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
-		trusted: () => vscode.workspace.isTrusted,
-		config: () => {
-			const section = vscode.workspace.getConfiguration('comonad');
-			const record: Record<string, unknown> = {};
-			// The manifest is the one list of what the section holds — the kernel's keys and a plugin's
-			// own alike — so a key a plugin reads is a key the host reports, with no kernel list to update.
-			for (const key of declaredKeys()) {
-				const value = section.get(key);
-				if (value !== undefined) {
-					record[key] = value;
-				}
-			}
-			return record;
-		},
-		update: async (key, value) => {
-			const section = vscode.workspace.getConfiguration('comonad');
-			await section.update(key, value, settingsTarget(section.inspect(key) ?? {}));
-		},
+		home,
+		workspace,
+		trusted,
+		config: () => ({ ...readConfig() }),
+		update,
+		settingsPath: fileOf,
 		secret: (id) => Promise.resolve(extension.secrets.get(id)),
 		setSecret: (id, value) => Promise.resolve(extension.secrets.store(id, value)),
 		deleteSecret: (id) => Promise.resolve(extension.secrets.delete(id)),
@@ -98,13 +163,51 @@ export function host(ctx: Context, config: HostConfig): void {
 	ctx.log.attach({ write: (line) => output.appendLine(line), show: () => output.show() });
 	ctx.log.message(`host: ${vscode.env.remoteName ? `remote (${vscode.env.remoteName})` : 'local'} · sandbox: ${sandboxKind()}`);
 
+	/** A file change we did not make: drop the cache and let every surface read again. */
+	const external = (uri: vscode.Uri): void => {
+		let text: string | undefined;
+		try {
+			text = readFileSync(uri.fsPath, 'utf8');
+		} catch {
+			text = undefined;
+		}
+		if (text !== undefined && written.get(uri.fsPath) === text) {
+			return;
+		}
+		invalidate();
+		ctx.emit('settings/file-changed');
+		ctx.emit('settings/changed');
+	};
+
 	ctx.effect(() => {
-		const subscription = vscode.workspace.onDidChangeConfiguration((event) => {
-			if (event.affectsConfiguration('comonad')) {
-				ctx.emit('settings/changed');
-			}
+		// The user's file lives outside the workspace; the workspace pattern follows folder changes.
+		const userWatcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(vscode.Uri.file(home()), '.comonad/settings.json'),
+		);
+		const projectWatcher = vscode.workspace.createFileSystemWatcher('**/.comonad/settings.json');
+		for (const watcher of [userWatcher, projectWatcher]) {
+			watcher.onDidCreate(external);
+			watcher.onDidChange(external);
+			watcher.onDidDelete(external);
+		}
+		const folders = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+			importLegacy();
+			invalidate();
+			ctx.emit('settings/file-changed');
+			ctx.emit('settings/changed');
 		});
-		return () => subscription.dispose();
+		const trust = vscode.workspace.onDidGrantWorkspaceTrust(() => {
+			importLegacy();
+			invalidate();
+			ctx.emit('settings/file-changed');
+			ctx.emit('settings/changed');
+		});
+		return () => {
+			userWatcher.dispose();
+			projectWatcher.dispose();
+			folders.dispose();
+			trust.dispose();
+		};
 	});
 }
 host.inject = ['log'];

@@ -772,7 +772,7 @@ export class Plugins extends Service {
 	 * restart the whole tree — an open panel, a running turn and a watched folder are not collateral —
 	 * while a row's own change still lands at once.
 	 *
-	 * This is what the panel's **Apply the list again** does, and what a row toggle does after it writes
+	 * This is what the panel's **Refresh from config** does, and what a row toggle does after it writes
 	 * the file: the two are the same operation, which is why the button's copy says the change it makes is
 	 * the one you could make by hand. What it cannot see is a plugin's *code* — a row nobody edited keeps
 	 * the mount it had, so rebuilding a plugin and pressing the button leaves the old bundle running.

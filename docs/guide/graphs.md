@@ -41,10 +41,11 @@ named graphs remain available to plugins through `ctx.graphs.get(id)`.
 
 ## Configuring
 
-Set `comonad.graph` in `settings.json` to a Mermaid source. An empty value uses the shipped loop; a
-source that fails to parse or compile is logged and the shipped loop runs instead. `comonad.maxSteps`
-caps the whole turn (`0` means no limit). Plugins register node implementations and routes on
-`ctx.graphs`, so a custom graph can use any implementation the loaded plugins provide.
+Set `graph` in the User (`~/.comonad/settings.json`) or Workspace
+(`<workspace>/.comonad/settings.json`) settings file to a Mermaid source. An empty value uses the
+shipped loop; a source that fails to parse or compile is logged and the shipped loop runs instead.
+`maxSteps` caps the whole turn (`0` means no limit). Plugins register node implementations and routes
+on `ctx.graphs`, so a custom graph can use any implementation the loaded plugins provide.
 
 ## Plugins
 

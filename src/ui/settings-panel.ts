@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { randomBytes } from 'node:crypto';
 import { readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
@@ -18,6 +19,7 @@ import {
 	SANDBOX_LABELS,
 } from '../lib/policy';
 import { type ContextForm } from '../lib/prompt';
+import { ensureSettingsFile, settingsDisplayPath, type SettingsScope } from '../lib/settings-file';
 import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
@@ -27,6 +29,9 @@ import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
 /** Webview settings panel: the core tabs, plus whatever panes plugins register. */
+
+/** A message's scope, defaulting to the user's own file when an older client sends none. */
+const panelScope = (value: unknown): SettingsScope => (value === 'workspace' ? 'workspace' : 'user');
 
 const DISPLAY_LABELS: Record<ContextForm, string> = {
 	rendered: 'Rendered — folded thoughts, tool cards',
@@ -231,7 +236,7 @@ export function settingsPanel(ctx: Context): void {
 	 * sends one control at a time, the Save button sends the draft panes, and neither may write a
 	 * stale value for something it does not own.
 	 */
-	const apply = async (patch: Record<string, unknown>): Promise<void> => {
+	const apply = async (patch: Record<string, unknown>, scope: SettingsScope): Promise<void> => {
 		const current = ctx.settings.get();
 		const next: Record<string, unknown> = { ...normalizeAgentPatch(patch, current) };
 		if (Object.hasOwn(patch, 'maxSteps')) {
@@ -257,14 +262,21 @@ export function settingsPanel(ctx: Context): void {
 			};
 		}
 		Object.assign(next, panePatch(patch));
+		const mcpServers =
+			patch.mcpServers && typeof patch.mcpServers === 'object'
+				? (patch.mcpServers as Record<string, unknown>)
+				: undefined;
 		// Pane keys live outside the kernel's `Config`, so what is compared against is the raw store
 		// under the defaulted view: a kernel key reads exactly as it always did, and a pane's own key
 		// against the value the host reports for it.
 		const seen: Record<string, unknown> = { ...ctx.host.config(), ...current };
 		for (const [key, value] of Object.entries(next)) {
 			if (!same(seen[key], value)) {
-				await ctx.settings.update(key, value);
+				await ctx.settings.update(key, value, scope);
 			}
+		}
+		if (mcpServers) {
+			await ctx.settings.update('mcpServers', mcpServers, scope);
 		}
 		// The composer's Context pill used to write the chat and this setting together. With the
 		// pill gone, a Settings pick must reach the active chat too, or `session.contextForm`
@@ -278,8 +290,7 @@ export function settingsPanel(ctx: Context): void {
 				ctx.sessions.changed(session.id);
 			}
 		}
-		if (patch.mcpServers && typeof patch.mcpServers === 'object') {
-			await ctx.settings.update('mcpServers', patch.mcpServers);
+		if (mcpServers) {
 			await ctx.mcp.reload();
 		}
 	};
@@ -409,6 +420,12 @@ export function settingsPanel(ctx: Context): void {
 			flow: gateFlow(),
 			workspace: config.workingDirectory,
 			home: ctx.settings.home(),
+			settingsFiles: {
+				user: settingsDisplayPath(ctx.host.settingsPath('user'), homedir()),
+				workspace: settingsDisplayPath(ctx.host.settingsPath('workspace'), homedir()),
+			},
+			folderOpen: Boolean(ctx.settings.workspace()),
+			trusted: ctx.host.trusted(),
 			environment: { remote: ctx.host.remoteName() ?? '', sandbox: ctx.host.sandboxKind() },
 		});
 		void refreshModels();
@@ -572,26 +589,41 @@ export function settingsPanel(ctx: Context): void {
 				case 'close':
 					panel.dispose();
 					return;
-				case 'save':
-					await apply((message.config ?? {}) as Record<string, unknown>);
-					void panel.webview.postMessage({ type: 'ok', message: 'Saved.' });
+				case 'save': {
+					const scope = panelScope(message.scope);
+					const patch: Record<string, unknown> = { ...((message.config ?? {}) as Record<string, unknown>) };
+					if (message.mcpServers !== undefined) {
+						patch.mcpServers = message.mcpServers;
+					}
+					await apply(patch, scope);
+					const file = settingsDisplayPath(ctx.host.settingsPath(scope), homedir());
+					void panel.webview.postMessage({ type: 'ok', message: `Saved to ${file}.` });
 					break;
+				}
 				case 'saveAgent':
 					// No `ok`: that reply clears the Save button's dirty ring, which belongs to the
 					// draft tabs. The state push after the write redraws the Agent controls.
-					await apply((message.config ?? {}) as Record<string, unknown>);
+					await apply((message.config ?? {}) as Record<string, unknown>, panelScope(message.scope));
 					break;
 				case 'saveSubagents':
-					await ctx.settings.update('subagents', sanitizeSubagentGrants(message.subagents));
+					await ctx.settings.update(
+						'subagents',
+						sanitizeSubagentGrants(message.subagents),
+						panelScope(message.scope),
+					);
 					break;
 				case 'configureModel':
 					await vscode.commands.executeCommand('comonad.configureModel');
 					break;
 				case 'saveMcp': {
 					const parsed = JSON.parse(String(message.json ?? '{}')) as Record<string, unknown>;
-					await ctx.settings.update('mcpServers', parsed);
+					const scope = panelScope(message.scope);
+					await ctx.settings.update('mcpServers', parsed, scope);
 					await ctx.mcp.reload();
-					void panel.webview.postMessage({ type: 'ok', message: 'MCP servers updated.' });
+					void panel.webview.postMessage({
+						type: 'ok',
+						message: `MCP servers updated in ${settingsDisplayPath(ctx.host.settingsPath(scope), homedir())}.`,
+					});
 					break;
 				}
 				case 'reloadMcp':
@@ -620,6 +652,7 @@ export function settingsPanel(ctx: Context): void {
 					break;
 				}
 				case 'savePrompts': {
+					const scope = panelScope(message.scope);
 					const incoming = parsePromptLayout(message.prompts);
 					// Under ST the rows mirror the preset's order and switches. Only the prefixes are the
 					// core layout's to change; saving the mirror as the fallback order would overwrite it.
@@ -635,12 +668,26 @@ export function settingsPanel(ctx: Context): void {
 							seen.add(entry.name);
 						}
 					}
-					await ctx.settings.update('prompts', prompts);
-					await ctx.settings.update('toolPrompts', nextTools);
+					await ctx.settings.update('prompts', prompts, scope);
+					await ctx.settings.update('toolPrompts', nextTools, scope);
 					// Not the generic `ok`: that also clears the form's dirty flag, which belongs to the
 					// other tabs and may hold edits this save does not write.
 					void panel.webview.postMessage({ type: 'prompts', prompts: await promptsSlice(), saved: true });
 					break;
+				}
+				case 'openConfig': {
+					const scope = panelScope(message.scope);
+					const file = ctx.host.settingsPath(scope);
+					if (!file) {
+						throw new Error('Open a workspace folder before using workspace settings.');
+					}
+					if (scope === 'workspace' && !ctx.host.trusted()) {
+						throw new Error('Trust this workspace before using workspace settings.');
+					}
+					ensureSettingsFile(file);
+					const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+					await vscode.window.showTextDocument(document, { preview: false });
+					return;
 				}
 				case 'openTab':
 					open(String(message.tab ?? 'agent'));
@@ -955,6 +1002,17 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
   <div id="side-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the settings sidebar" tabindex="0"></div>
 
   <main id="content">
+  <div id="scope-bar" class="scope-bar">
+    <div class="scope-row">
+      <span class="scope-title">&#9881;&#65039; Setting Scope:</span>
+      <div id="scope-tabs" class="scope-tabs" role="tablist" aria-label="Where settings are saved">
+        <button class="scope-tab" type="button" role="tab" data-scope="user" aria-selected="true" title="User — global defaults for every workspace"><span class="scope-icon" aria-hidden="true">&#128100;</span><span>User</span></button>
+        <button class="scope-tab" type="button" role="tab" data-scope="workspace" aria-selected="false" title="Workspace — this workspace only"><span class="scope-icon" aria-hidden="true">&#128193;</span><span>Workspace</span></button>
+      </div>
+      <button id="scope-path" class="link scope-path" type="button" title="Open the settings file in the editor"></button>
+    </div>
+    <p id="scope-hint" class="hint scope-hint"></p>
+  </div>
   <section data-pane="agent">
     <h1 class="page-title">Agent</h1>
     <p class="group-note">Work mode, network, user rules, approvals and sandbox live in the <strong>Policies</strong> tab.</p>
@@ -1174,12 +1232,9 @@ ${paneSections}
           <label>Plugins</label>
           <p class="hint">
             What the tree is wired with, plugin by plugin: what each one <strong>provides</strong> (a
-            service other plugins can inject), the services it <strong>needs</strong>, who provides each —
-            a plugin id, <span class="mono">(built in)</span> for the services Comonad mounts before the
-            tree — <span class="mono">host</span>, <span class="mono">log</span> and
-            <span class="mono">settings</span>, which are not plugins and have nothing to turn off — or
-            <span class="mono">not provided</span> when nothing does, and its state. Pick a plugin to
-            see who depends on it and the whole chain that goes down with it.
+            service other plugins can inject) and its state. Pick a plugin for its dependency tree: the
+            services it <strong>needs</strong> and who provides each, what it waits for when nobody does,
+            and the whole chain that goes down with it.
           </p>
           <table id="pg-deps"></table>
         </div>
@@ -1217,15 +1272,27 @@ ${paneSections}
         <label>Plugin list</label>
         <p class="hint">
           Everything Comonad is made of, in load order. A plugin comes from the extension's own list,
-          from <span class="mono" id="plugins-project"></span> (this workspace, when it is trusted) or
-          from <span class="mono" id="plugins-user"></span> (yours, shared by every window). Turning a
-          plugin off writes into <span class="mono" id="plugins-writable"></span> and applies the list
-          again — the same change you could make by hand, and the same place a plugin of your own is
-          mounted from.
+          from the workspace's <span class="mono">cordis.yml</span> when it is trusted, or from yours —
+          a later file overrides an earlier one. Turning a plugin off writes into the config file marked
+          <strong>writes</strong> — the same change you could make by hand, and the same place a plugin
+          of your own is mounted from.
         </p>
+        <div class="plugin-config">
+          <div class="plugin-config-head">
+            <span class="plugin-config-title">Config files</span>
+            <button class="secondary" id="plugins-reload" type="button" title="Re-read the config files and apply only the rows that changed; plugins that did not change keep running">Refresh from config</button>
+          </div>
+          <dl class="plugin-config-rows">
+            <dt>user</dt>
+            <dd class="mono" id="plugins-user"></dd>
+            <dt>workspace</dt>
+            <dd class="mono" id="plugins-project"></dd>
+            <dt>writes</dt>
+            <dd class="mono" id="plugins-writable"></dd>
+          </dl>
+        </div>
         <div class="row">
           <button class="secondary" id="plugins-install" type="button" title="Install — copy a plugin into your library and add its entry">Install…</button>
-          <button class="secondary" id="plugins-reload" type="button">Apply the list again</button>
           <span class="hint" id="plugins-note"></span>
         </div>
         <table id="plugins"></table>
@@ -1238,13 +1305,13 @@ ${paneSections}
     <div class="group">
       <div class="field">
         <label>Tools</label>
-        <p class="hint">Every registered tool with what it needs. The work mode decides which capabilities exist; the tool approval policy and sandbox mode decide what happens to a call.</p>
+        <p class="hint">Every registered tool with what it needs. The work mode decides which capabilities exist; the tool approval policy and sandbox mode decide what happens to a call. Hover a row for the tool's description.</p>
         <table id="tools"></table>
       </div>
     </div>
   </section>
   </main>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.min.js"></script>
 <script nonce="${nonce}" src="${script}" data-tab="${tab}"></script>
 ${paneScripts.map((src) => `<script nonce="${nonce}" src="${src}"></script>`).join('\n')}
 </body>

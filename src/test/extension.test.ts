@@ -176,7 +176,6 @@ import { contentController } from 'comonad-plugin-tavern/panel/controller';
 import { settingsDocument, settingsPanel } from '../ui/settings-panel';
 import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
-import { settingsTarget } from '../host';
 import { McpConnection } from '../services/mcp';
 import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, estimateMessages, countRaw, estimateTokens, encodingForModel, guesstimate, setEncoder } from '../lib/tokens';
 
@@ -2356,19 +2355,29 @@ suite('Comonad domain', () => {
 		assert.match(guest, /checked\('timeout-override', config\.commandTimeoutOverride\)/, 'the guest renders it');
 	});
 
-	test('a setting is written to the scope that already holds it, else the user’s own', () => {
-		// A project value shadows the user value; writing the user one would leave the panel reading
-		// the project's old value back, which is how saving a setting looked like it undid itself.
-		assert.strictEqual(settingsTarget({ workspaceValue: { enabled: true } }), vscode.ConfigurationTarget.Workspace);
-		assert.strictEqual(settingsTarget({ workspaceFolderValue: { enabled: true } }), vscode.ConfigurationTarget.WorkspaceFolder);
-		assert.strictEqual(
-			settingsTarget({ workspaceFolderValue: { enabled: true }, workspaceValue: { enabled: true } }),
-			vscode.ConfigurationTarget.WorkspaceFolder,
-			'the folder value is the one that wins on read',
-		);
-		// A key no project declares goes to the user: one configuration follows every window, and
-		// opening the panel never writes a `.vscode/settings.json` entry by itself.
-		assert.strictEqual(settingsTarget({}), vscode.ConfigurationTarget.Global);
+	test('a write without a scope follows the layer that already owns the key', async () => {
+		const kernel = await createTestKernel();
+		try {
+			// The workspace file shadows the user value; writing the user one would leave the panel
+			// reading the workspace's old value back, which is how saving looked like it undid itself.
+			kernel.host.workspaceValues.model = 'workspace-model';
+			await kernel.ctx.settings.update('model', 'next');
+			assert.strictEqual(kernel.host.workspaceValues.model, 'next', 'the owning workspace layer is written');
+			assert.strictEqual(kernel.host.values.model, 'auto', 'the user layer keeps its own value');
+
+			// A key no project owns goes to the user: one configuration follows every window.
+			await kernel.ctx.settings.update('network', true);
+			assert.strictEqual(kernel.host.values.network, true);
+			assert.strictEqual(kernel.host.workspaceValues.network, undefined);
+
+			// An explicit scope is obeyed even when the other layer owns the key.
+			await kernel.ctx.settings.update('model', 'user-model', 'user');
+			assert.strictEqual(kernel.host.values.model, 'user-model');
+			assert.strictEqual(kernel.host.workspaceValues.model, 'next');
+			assert.deepStrictEqual(kernel.host.writes.at(-1), { key: 'model', value: 'user-model', scope: 'user' });
+		} finally {
+			await kernel.dispose();
+		}
 	});
 
 	test('every setting the manifest declares is one the code actually reads', () => {
@@ -3674,6 +3683,16 @@ suite('Cordis kernel', () => {
 			assert.match(document, /<section data-pane="st" hidden>/, 'and a section of its own');
 			assert.match(document, /id="st-pane"/, 'holding the markup it brought');
 			assert.match(document, /id="side-resizer"/, 'the sidebar has a resize sash');
+			assert.match(document, /id="scope-bar"/, 'the scope selector is common to every tab');
+			assert.match(document, /Setting Scope:/, 'and names itself');
+			assert.match(document, /data-scope="user"/, 'with the user scope');
+			assert.match(document, /data-scope="workspace"/, 'and the workspace scope');
+			assert.match(document, /id="scope-path"/, 'the file path is a control of its own');
+			assert.match(document, /id="scope-hint"/, 'with the scope’s explanation under it');
+			assert.ok(
+				document.indexOf('id="scope-bar"') < document.indexOf('<section data-pane="agent">'),
+				'the selector precedes the tab content',
+			);
 			assert.match(document, /class="tab-icon"/, 'and every tab carries an icon');
 			const scripts = [...document.matchAll(/<script nonce="[^"]*" src="([^"]+)"/g)].map((match) => basename(decodeURIComponent(match[1])));
 			assert.deepStrictEqual(scripts, ['settings.js', 'worldinfo.js', 'persona.js', 'content.js', 'st.js'], 'the host’s client comes first, and the pane’s last');
@@ -3690,6 +3709,15 @@ suite('Cordis kernel', () => {
 			const hostScript = readFileSync(join(root, 'resources', 'settings.js'), 'utf8');
 			assert.match(hostScript, /function renderSubagents\(/, 'the client draws the matrix');
 			assert.match(hostScript, /type: 'saveSubagents'/, 'and saves a grant');
+			assert.match(hostScript, /settingsScope/, 'the guest remembers the chosen scope');
+			assert.match(hostScript, /Changes apply globally/, 'the user hint says what it affects');
+			assert.match(hostScript, /Applies only to this workspace/, 'the workspace hint says what it overrides');
+			assert.match(hostScript, /scope: activeScope/, 'every save payload carries the selected scope');
+			assert.match(hostScript, /type: 'openConfig'/, 'and the path asks the host to open the file');
+
+			const panelSource = readFileSync(join(root, 'src', 'ui', 'settings-panel.ts'), 'utf8');
+			assert.match(panelSource, /case 'openConfig'/, 'the host opens the file the path names');
+			assert.match(panelSource, /settingsFiles/, 'and the state names both files');
 
 			// A tab and its markup are the pane's own strings, so they are escaped rather than trusted.
 			const hostile = { ...pane, id: 'x"><script>alert(1)</script>', label: '<b>no</b>', title: '" onload="alert(1)' };

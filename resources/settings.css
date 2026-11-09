@@ -234,6 +234,105 @@ body.resizing {
 	container-type: inline-size;
 }
 
+/* The top of the content column, common to every tab: where a save lands. The negative margins
+   cancel `#content`'s padding so the bar reaches the panel's edges; the opaque background keeps
+   the tab content from showing through while the column is scrolled. */
+.scope-bar {
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	margin: -22px -36px 18px;
+	padding: 14px 36px 8px;
+	background: var(--vscode-editor-background, var(--vscode-sideBar-background));
+	border-bottom: 1px solid var(--st-border-soft);
+}
+
+.scope-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+	max-width: 860px;
+}
+
+.scope-title {
+	font-size: var(--st-text);
+	color: var(--st-muted);
+	white-space: nowrap;
+}
+
+.scope-tabs {
+	display: inline-flex;
+	align-items: center;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius);
+	overflow: hidden;
+	background: var(--st-surface-2);
+}
+
+.scope-tab {
+	height: var(--st-row);
+	padding: 0 10px;
+	border: 0;
+	border-right: 1px solid var(--st-border-soft);
+	background: transparent;
+	color: var(--st-muted);
+	font: inherit;
+	font-size: var(--st-text);
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	white-space: nowrap;
+}
+
+.scope-tab:last-child {
+	border-right: 0;
+}
+
+.scope-tab:hover:not(:disabled) {
+	background: var(--st-hover);
+	color: var(--vscode-foreground);
+}
+
+.scope-tab.is-on {
+	background: var(--st-accent-bg);
+	color: var(--st-accent-fg);
+}
+
+.scope-tab:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.scope-tab:focus-visible {
+	outline: 1px solid var(--st-accent);
+	outline-offset: -1px;
+}
+
+.scope-icon {
+	font-size: 13px;
+	line-height: 1;
+}
+
+#scope-path {
+	height: var(--st-row);
+	display: inline-flex;
+	align-items: center;
+	font-family: var(--st-mono);
+	font-size: var(--st-small);
+	max-width: 46%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#scope-hint {
+	margin: 8px 0 0;
+	max-width: 860px;
+}
+
 .page-title {
 	font-size: 21px;
 	font-weight: 600;
@@ -841,6 +940,116 @@ button.icon.danger:hover {
 	height: auto;
 }
 
+/* The flow fills its card: the group is the only frame, so it draws no padding ring and the diagram
+   no second border inside it. Two frames with a gutter between them was the only thing separating
+   the same box from itself. */
+[data-inspect-pane='flow'] > .group {
+	padding: 0;
+	overflow: hidden;
+}
+
+[data-inspect-pane='flow'] .diagram {
+	border: 0;
+	border-radius: 0;
+}
+
+/* The diagram answers a click by opening the enlarged view; the pointer says so before the click. */
+.diagram.is-zoomable {
+	cursor: zoom-in;
+}
+
+.diagram.is-zoomable:focus-visible {
+	outline: 2px solid var(--st-accent);
+	outline-offset: -2px;
+}
+
+/* The enlarged diagram: a sheet over the whole settings document with its own toolbar. The clone
+   is sized from the viewBox and scrolls natively, so zooming never reflows the page underneath. */
+.zoom {
+	position: fixed;
+	inset: 0;
+	z-index: 50;
+	display: flex;
+	flex-direction: column;
+	background: rgba(0, 0, 0, 0.6);
+}
+
+.zoom-bar {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+	border-bottom: 1px solid var(--st-border);
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	color: var(--vscode-foreground);
+}
+
+.zoom-title {
+	flex: 1;
+	min-width: 0;
+	margin-right: 6px;
+	font-size: var(--st-small);
+	font-weight: 600;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.zoom-pct {
+	min-width: 42px;
+	text-align: center;
+	font-size: var(--st-small);
+	font-variant-numeric: tabular-nums;
+	color: var(--st-muted);
+}
+
+button.zoom-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 24px;
+	min-width: 24px;
+	padding: 0 7px;
+	border: 1px solid transparent;
+	border-radius: var(--st-radius-sm);
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	font-size: var(--st-text);
+	cursor: pointer;
+}
+
+button.zoom-button:hover {
+	background: var(--st-hover);
+}
+
+button.zoom-button:focus-visible {
+	outline: 1px solid var(--st-accent);
+	outline-offset: 1px;
+}
+
+/* The sheet is opaque: the mermaid theme is picked for light or dark, and a transparent sheet
+   would put a light diagram on a darkened page (or a dark one on a light page). */
+.zoom-body {
+	flex: 1;
+	overflow: auto;
+	padding: 20px;
+	background: var(--vscode-editor-background);
+}
+
+/* Auto margins centre the sheet while it fits and collapse to zero when it overflows, so a zoomed
+   diagram can still be scrolled to its left edge. */
+.zoom-stage {
+	margin: 0 auto;
+}
+
+.zoom-stage svg {
+	display: block;
+	width: 100%;
+	height: 100%;
+	max-width: none !important;
+}
+
 
 /* ------------------------------------------------------------------ prompts */
 
@@ -1040,11 +1249,32 @@ th {
 	border-bottom-color: var(--st-border);
 }
 
-tbody tr:hover td {
+/* Rows are appended to the table directly (no tbody), so a `tbody` selector would never match. */
+tr:hover td {
 	background: var(--st-hover);
 }
 
-td.mono {
+/* The hover note a row carries: fixed, so it can open beside the pointer anywhere over the row,
+   and pointer-transparent, so it never steals the hover from the row underneath. */
+.row-tip {
+	position: fixed;
+	z-index: 30;
+	max-width: 340px;
+	padding: 6px 9px;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius-sm);
+	background: var(--vscode-editorHoverWidget-background, var(--st-surface-2));
+	color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+	font-size: var(--st-small);
+	line-height: 1.45;
+	white-space: pre-wrap;
+	pointer-events: none;
+	box-shadow: 0 4px 14px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
+}
+
+/* Mono text wherever a value is read as a value: table cells, the paths in the plugin config card,
+   and the file names inline in hints. */
+.mono {
 	font-family: var(--st-mono);
 }
 
@@ -1196,18 +1426,6 @@ td.mono {
 	cursor: pointer;
 }
 
-/* The service and provider columns are paired line by line: keep a long name from wrapping one
-   without the other and pushing the pairs out of step. */
-#pg-deps .pg-service,
-#pg-deps .pg-provider {
-	white-space: nowrap;
-}
-
-/* A service nobody provides: the missing end of the pair a waiting row is looking at. */
-.pg-missing {
-	color: var(--vscode-editorWarning-foreground, #c8a13a);
-}
-
 #pg-detail {
 	max-height: 240px;
 }
@@ -1215,6 +1433,54 @@ td.mono {
 /* A row that is not loaded says why in a tooltip; the cell itself carries the warning colour. */
 td.plugin-error {
 	color: var(--vscode-editorWarning-foreground, #c8a13a);
+}
+
+/* The config files the plugin list is read from, with the button that re-reads them: one small card
+   inside the pane, so the button sits with what it acts on and the paths read as one block. */
+.plugin-config {
+	margin: 10px 0 12px;
+	padding: 8px 12px 9px;
+	border: 1px solid var(--st-border-soft);
+	border-radius: var(--st-radius);
+	background: var(--st-surface-2);
+}
+
+.plugin-config-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding-bottom: 8px;
+	border-bottom: 1px solid var(--st-border-soft);
+}
+
+.plugin-config-title {
+	flex: 1;
+	min-width: 0;
+	font-size: var(--st-label);
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--st-muted);
+}
+
+/* Label and path on one line, the labels in one column: a long path wraps inside its own row
+   instead of pushing the next label out of line. */
+.plugin-config-rows {
+	display: grid;
+	grid-template-columns: max-content minmax(0, 1fr);
+	gap: 3px 14px;
+	margin: 8px 0 0;
+	font-size: var(--st-small);
+	line-height: 1.5;
+}
+
+.plugin-config-rows dt {
+	color: var(--st-muted);
+}
+
+.plugin-config-rows dd {
+	margin: 0;
+	overflow-wrap: anywhere;
 }
 
 #plugins td:last-child {

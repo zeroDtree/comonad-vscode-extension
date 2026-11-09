@@ -61,9 +61,13 @@ export function reactions(ctx: Context): void {
 	const watcher = vscode.workspace.createFileSystemWatcher('**/.comonad/**');
 	const refresh = (uri?: vscode.Uri) => {
 		// A `cordis.yml` is the plugin list itself, so a change to it is applied as such rather than
-		// as content: everything else in `.comonad` is a file of the library to read again.
+		// as content: everything else in `.comonad` is a file of the library to read again. Settings
+		// are the host's own: its watcher has already dropped the cache and said so.
 		if (uri?.path.endsWith('/cordis.yml')) {
 			applyList(uri.fsPath);
+			return;
+		}
+		if (uri?.path.endsWith('/settings.json')) {
 			return;
 		}
 		if (uri) {
@@ -85,15 +89,19 @@ export function reactions(ctx: Context): void {
 	home.onDidDelete(reload);
 	ctx.effect(() => () => home.dispose());
 
-	ctx.effect(() => {
-		const subscription = vscode.workspace.onDidChangeConfiguration((event) => {
-			// Settings are not files: a `comonad.*` write changes nothing on disk to read again. The
-			// one setting that names a resource of its own is the server list.
-			if (event.affectsConfiguration('comonad.mcpServers')) {
-				void ctx.mcp.reload().catch((error) => ctx.log.message(`reactions: mcp reload failed: ${error}`));
-			}
-		});
-		return () => subscription.dispose();
+	// The server list names resources of its own: reload it when a hand edit changed it, not on
+	// every settings save. A save this panel made reloads explicitly after its awaited write.
+	let mcpSeen = JSON.stringify(ctx.host.config().mcpServers ?? {});
+	ctx.on('settings/changed', () => {
+		mcpSeen = JSON.stringify(ctx.host.config().mcpServers ?? {});
+	});
+	ctx.on('settings/file-changed', () => {
+		const next = JSON.stringify(ctx.host.config().mcpServers ?? {});
+		if (next === mcpSeen) {
+			return;
+		}
+		mcpSeen = next;
+		void ctx.mcp.reload().catch((error) => ctx.log.message(`reactions: mcp reload failed: ${error}`));
 	});
 	ctx.effect(() => {
 		const subscription = vscode.workspace.onDidChangeWorkspaceFolders(() => {

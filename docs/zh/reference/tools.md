@@ -43,7 +43,7 @@
 
 ## MCP
 
-MCP 服务器在 `comonad.mcpServers` 中配置。每个服务器可设置 `capability`、`writeTools`、`exclude` 和
+MCP 服务器在[设置文件](/zh/reference/settings)的 `mcpServers` 设置中配置。每个服务器可设置 `capability`、`writeTools`、`exclude` 和
 逐工具 `overrides`。工具以 `server__tool` 出现，并经过与内置工具相同的策略门控。见[扩展](/zh/guide/extend#mcp)。
 
 ## 下一步
