@@ -2327,13 +2327,18 @@ suite('Comonad domain', () => {
 		assert.match(panel, /ctx\.tools\.layout/, 'and every tool in the user’s order');
 		assert.match(panel, /parameters: tool\.parameters/, 'with each tool’s definition, schema included');
 
+		// The list is the pane's only column: a row's detail is a sheet, not a second column.
+		assert.ok(!/id="pr-title"/.test(panel) && !/id="pr-view"/.test(panel), 'no side-by-side preview column');
+
 		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
 		assert.match(guest, /function showInspect/, 'the guest still switches the Inspect sub-tabs');
 		assert.match(guest, /function renderPrompts/, 'renders the prompt layout');
 		assert.match(guest, /case 'prompts':/, 'and handles the reply');
 		assert.ok(guest.includes("'Comonad'") && guest.includes("'Tools'"), 'the list has the two groups');
 		assert.ok(!guest.includes('SillyTavern'), 'the SillyTavern collection is not in this tab');
-		assert.match(guest, /pr-prefix/, 'a Comonad row opens its editable static prefix');
+		assert.match(guest, /function openPromptDialog/, 'a row opens its own sheet');
+		assert.match(guest, /pr-prefix/, 'where a Comonad row edits its static prefix');
+		assert.ok(!/function renderPromptPreview/.test(guest), 'the old side-column preview is gone');
 		assert.match(guest, /promptDrag/, 'rows can be dragged into a new order');
 		assert.match(guest, /savePrompts/, 'and the layout is saved as a whole');
 		// Mermaid measures its container, so the flow may only be drawn while it is on screen.
@@ -2344,6 +2349,7 @@ suite('Comonad domain', () => {
 		assert.match(css, /#pr-wrap\s*\{/, 'the tab has its own layout');
 		assert.match(css, /\.pr-row\s*\{/, 'with a row per prompt');
 		assert.match(css, /\.pr-item\s*\{/, 'and a card that can be dragged');
+		assert.match(css, /\.pr-dialog\s*\{/, 'the row sheet has its own overlay');
 	});
 
 	test('the agent tab carries the command timeout override', () => {

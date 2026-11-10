@@ -174,6 +174,8 @@
 		if (!document.querySelector('.tab[data-tab="' + name + '"]')) {
 			name = 'agent';
 		}
+		// A row's sheet belongs to the Prompts tab; leaving the tab puts it away.
+		closePromptDialog();
 		activeTab = name;
 		store.set({ tab: name, inspect: activeInspect });
 		for (const tab of document.querySelectorAll('.tab')) {
@@ -1327,14 +1329,12 @@
 	let promptDirty = false;
 	/** The row being dragged: { group, index }, or null. */
 	let promptDrag = null;
+	/** The open per-row sheet, or null. One at a time; the row it was opened from gets the focus back. */
+	let promptDialog = null;
+	let promptDialogOpener = null;
+	let promptDialogSave = null;
 
 	const promptKey = (group, row) => group + ':' + (group === 'comonad' ? row.id : row.name);
-	const firstPromptKey = () =>
-		promptLayout && promptLayout.comonad.length
-			? promptKey('comonad', promptLayout.comonad[0])
-			: promptLayout && promptLayout.tools.length
-				? promptKey('tools', promptLayout.tools[0])
-				: '';
 
 	function acceptPrompts(data, saved) {
 		if (!data) {
@@ -1344,6 +1344,8 @@
 		// A push can land while the user is editing. Only a save response (or a clean form) replaces
 		// the local copy; a dirty one keeps its edits and merely refreshes the banner.
 		if (!promptLayout || !promptDirty || saved) {
+			// The open sheet points at a row of the copy being replaced, so it cannot stay up.
+			closePromptDialog();
 			promptLayout = {
 				comonad: (data.comonad || []).map((row) => ({ ...row })),
 				tools: (data.tools || []).map((row) => ({ ...row })),
@@ -1355,10 +1357,7 @@
 
 	function promptMarkDirty() {
 		promptDirty = true;
-		const save = $('pr-save');
-		if (save) {
-			save.disabled = false;
-		}
+		updatePromptSave();
 	}
 
 	function movePromptRow(group, from, to) {
@@ -1372,7 +1371,7 @@
 		renderPrompts();
 	}
 
-	function promptRowElement(group, row, index, picked) {
+	function promptRowElement(group, row, index) {
 		const readOnlyOrder = group === 'comonad' && row.readOnlyOrder === true;
 		const item = document.createElement('div');
 		item.className = 'pr-item' + (row.enabled === false ? ' is-off' : '');
@@ -1409,7 +1408,7 @@
 			});
 		}
 		const line = document.createElement('div');
-		line.className = 'pr-row' + (picked ? ' is-on' : '');
+		line.className = 'pr-row';
 
 		const toggle = document.createElement('label');
 		toggle.className = 'switch';
@@ -1429,10 +1428,13 @@
 		name.type = 'button';
 		name.className = 'pr-name';
 		name.textContent = row.name;
-		name.title = group === 'comonad' ? 'Edit the static prefix' : 'Read this tool definition';
-		name.addEventListener('click', () => {
-			store.set({ prompt: promptKey(group, row) });
-			renderPrompts();
+		name.title = group === 'comonad' ? 'View or edit the static prefix' : 'View this tool definition';
+		// The whole card opens the row's sheet; the switch and the move buttons keep their own jobs.
+		line.addEventListener('click', (event) => {
+			if (event.target.closest('.switch, .pr-controls')) {
+				return;
+			}
+			openPromptDialog(group, row, name);
 		});
 
 		const note = document.createElement('span');
@@ -1462,27 +1464,82 @@
 		return item;
 	}
 
-	function renderPromptPreview(picked) {
-		const editor = $('pr-editor');
-		const view = $('pr-view');
-		editor.innerHTML = '';
-		view.hidden = false;
-		const comonad = promptLayout.comonad.find((row) => promptKey('comonad', row) === picked);
-		if (comonad) {
-			$('pr-title').textContent = 'Comonad — ' + comonad.name;
-			$('pr-meta').textContent =
-				(comonad.enabled === false ? 'off' : 'on') +
+	/** Puts the row's sheet away and hands the focus back to the row it was opened from. */
+	function closePromptDialog() {
+		if (!promptDialog) {
+			return;
+		}
+		promptDialog.remove();
+		promptDialog = null;
+		promptDialogSave = null;
+		const opener = promptDialogOpener;
+		promptDialogOpener = null;
+		if (opener && opener.isConnected) {
+			opener.focus();
+		}
+	}
+
+	/** One row's sheet over the tab: a Comonad block edits its static prefix and shows the text the
+	 *  next turn would carry; a tool shows its registered definition read-only. Edits land in the
+	 *  layout copy, so Save writes them like any other change on the page. */
+	function openPromptDialog(group, row, opener) {
+		closePromptDialog();
+		promptDialogOpener = opener || null;
+
+		const overlay = document.createElement('div');
+		overlay.className = 'pr-dialog';
+		overlay.setAttribute('role', 'dialog');
+		overlay.setAttribute('aria-modal', 'true');
+		overlay.addEventListener('click', (event) => {
+			// The backdrop dismisses; a click inside the card stays.
+			if (event.target === overlay) {
+				closePromptDialog();
+			}
+		});
+		overlay.addEventListener('keydown', (event) => {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				closePromptDialog();
+			}
+		});
+
+		const card = document.createElement('div');
+		card.className = 'pr-dialog-card';
+		const head = document.createElement('div');
+		head.className = 'pr-dialog-head';
+		const title = document.createElement('span');
+		title.className = 'pr-dialog-title';
+		const closeIcon = document.createElement('button');
+		closeIcon.type = 'button';
+		closeIcon.className = 'icon';
+		closeIcon.textContent = '×';
+		closeIcon.title = 'Close';
+		closeIcon.setAttribute('aria-label', 'Close');
+		closeIcon.addEventListener('click', () => closePromptDialog());
+		head.append(title, closeIcon);
+
+		const meta = document.createElement('p');
+		meta.className = 'hint';
+		const body = document.createElement('div');
+		body.className = 'pr-dialog-body';
+
+		let focusTarget = closeIcon;
+		if (group === 'comonad') {
+			title.textContent = 'Comonad — ' + row.name;
+			overlay.setAttribute('aria-label', title.textContent);
+			meta.textContent =
+				(row.enabled === false ? 'off' : 'on') +
 				' · ' +
-				comonad.tokens +
+				row.tokens +
 				' tokens' +
-				(comonad.readOnlyOrder ? ' · order and switch come from the active ST preset' : '');
+				(row.readOnlyOrder ? ' · order and switch come from the active ST preset' : '');
 			const label = document.createElement('label');
 			label.textContent = 'Static prefix';
 			label.htmlFor = 'pr-prefix';
 			const hint = document.createElement('p');
 			hint.className = 'hint';
 			hint.textContent =
-				comonad.id === 'comonad-tools'
+				row.id === 'comonad-tools'
 					? 'This guidance is sent when at least one tool is available. A turn with no tools uses the built-in no-tools sentence; the dynamic lines below are always appended.'
 					: 'Only this static opening is editable. The generated content below it is rebuilt every turn and is shown read-only.';
 			const area = document.createElement('textarea');
@@ -1490,84 +1547,105 @@
 			area.className = 'control';
 			area.rows = 4;
 			area.spellcheck = false;
-			area.value = comonad.prefix;
+			area.value = row.prefix;
 			area.addEventListener('input', () => {
-				comonad.prefix = area.value;
+				row.prefix = area.value;
 				promptMarkDirty();
 			});
+			const generated = document.createElement('label');
+			generated.textContent = 'Generated this turn';
+			const view = document.createElement('pre');
+			view.className = 'pr-view';
+			view.textContent = row.text || '(not sent this turn)';
+			body.append(meta, label, hint, area, generated, view);
+			focusTarget = area;
+		} else {
+			title.textContent = 'Tool — ' + row.name;
+			overlay.setAttribute('aria-label', title.textContent);
+			meta.textContent =
+				(row.enabled === false ? 'off' : 'on') +
+				' · ' +
+				(row.visible ? 'offered' : row.reason || 'not offered') +
+				' · ' +
+				row.capability +
+				' · ' +
+				row.tokens +
+				' tokens';
+			const view = document.createElement('pre');
+			view.className = 'pr-view';
+			view.textContent = (row.description || '') + '\n\n' + JSON.stringify(row.parameters || {}, null, 2);
+			body.append(meta, view);
+			focusTarget = closeIcon;
+		}
+
+		const foot = document.createElement('div');
+		foot.className = 'pr-dialog-foot';
+		if (group === 'comonad') {
 			const reset = document.createElement('button');
 			reset.type = 'button';
 			reset.className = 'secondary';
 			reset.textContent = 'Reset prefix';
 			reset.addEventListener('click', () => {
-				comonad.prefix = comonad.defaultPrefix;
+				row.prefix = row.defaultPrefix;
+				body.querySelector('textarea').value = row.defaultPrefix;
 				promptMarkDirty();
-				renderPrompts();
 			});
-			editor.append(label, hint, area, reset);
-			view.textContent = comonad.text || '(not sent this turn)';
-			return;
+			foot.append(reset);
 		}
-		const tool = promptLayout.tools.find((row) => promptKey('tools', row) === picked);
-		if (tool) {
-			$('pr-title').textContent = 'Tool — ' + tool.name;
-			$('pr-meta').textContent =
-				(tool.enabled === false ? 'off' : 'on') +
-				' · ' +
-				(tool.visible ? 'offered' : tool.reason || 'not offered') +
-				' · ' +
-				tool.capability +
-				' · ' +
-				tool.tokens +
-				' tokens';
-			view.textContent = (tool.description || '') + '\n\n' + JSON.stringify(tool.parameters || {}, null, 2);
-			return;
-		}
-		$('pr-title').textContent = 'Preview';
-		$('pr-meta').textContent = '';
-		view.textContent = 'Pick a prompt on the left.';
+		const close = document.createElement('button');
+		close.type = 'button';
+		close.className = 'secondary';
+		close.textContent = 'Close';
+		close.addEventListener('click', () => closePromptDialog());
+		const save = document.createElement('button');
+		save.type = 'button';
+		save.className = 'primary';
+		save.textContent = 'Save';
+		save.disabled = !promptDirty;
+		save.title = 'Write this layout to settings';
+		save.addEventListener('click', () => {
+			savePrompts();
+			closePromptDialog();
+		});
+		promptDialogSave = save;
+		foot.append(close, save);
+
+		card.append(head, body, foot);
+		overlay.append(card);
+		promptDialog = overlay;
+		document.body.append(overlay);
+		focusTarget.focus();
 	}
 
 	function renderPrompts() {
 		const list = $('pr-list');
-		const view = $('pr-view');
-		if (!list || !view) {
+		if (!list) {
 			return;
 		}
 		list.innerHTML = '';
 		if (!promptLayout) {
 			list.innerHTML = '<p class="hint">Reading the prompts…</p>';
-			$('pr-editor').innerHTML = '';
-			$('pr-title').textContent = 'Preview';
-			$('pr-meta').textContent = '';
-			view.textContent = '';
 			return;
 		}
 		const groups = [
 			['Comonad', promptLayout.comonad, 'comonad'],
 			['Tools', promptLayout.tools, 'tools'],
 		];
-		const keys = [];
-		for (const [, rows, group] of groups) {
-			for (const row of rows) {
-				keys.push(promptKey(group, row));
-			}
-		}
-		const picked = (vscode.getState() || {}).prompt || '';
-		const shown = keys.includes(picked) ? picked : firstPromptKey();
-		for (const [label, rows, group] of groups) {
-			if (!rows.length) {
+		let rows = 0;
+		for (const [label, entries, group] of groups) {
+			if (!entries.length) {
 				continue;
 			}
 			const heading = document.createElement('h3');
 			heading.textContent = label;
-			heading.append(Object.assign(document.createElement('span'), { className: 'pr-count', textContent: String(rows.length) }));
+			heading.append(Object.assign(document.createElement('span'), { className: 'pr-count', textContent: String(entries.length) }));
 			list.append(heading);
-			rows.forEach((row, index) => {
-				list.append(promptRowElement(group, row, index, promptKey(group, row) === shown));
+			entries.forEach((row, index) => {
+				list.append(promptRowElement(group, row, index));
+				rows += 1;
 			});
 		}
-		if (!keys.length) {
+		if (!rows) {
 			list.innerHTML = '<p class="hint">Nothing to show yet.</p>';
 		}
 
@@ -1603,7 +1681,6 @@
 				? 'The next turn would run as ' + promptsData.chat.mode + ' · ' + promptsData.chat.approval +
 					' · response: ' + promptsData.chat.approvalResponse + ' · ' + promptsData.chat.sandbox + '.'
 				: 'No active chat: tools are reported as not offered.';
-		renderPromptPreview(shown);
 		updatePromptSave();
 	}
 
@@ -1611,6 +1688,9 @@
 		const save = $('pr-save');
 		if (save) {
 			save.disabled = !promptDirty;
+		}
+		if (promptDialogSave) {
+			promptDialogSave.disabled = !promptDirty;
 		}
 	}
 

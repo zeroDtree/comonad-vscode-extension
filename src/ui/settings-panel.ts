@@ -1196,15 +1196,9 @@ ${paneSections}
       <div id="pr-wrap">
         <div class="field">
           <label>Comonad blocks and tool definitions</label>
-          <p class="hint">Comonad's blocks carry the static prefix you can edit here; the dynamic content below it is generated every turn. Tools keep the definitions their plugins register — this page only orders and switches them. When ST takes over, the block order and switches mirror the active preset.</p>
+          <p class="hint">Comonad's blocks carry the static prefix you can edit; the dynamic content below it is generated every turn. Tools keep the definitions their plugins register — this page only orders and switches them. When ST takes over, the block order and switches mirror the active preset. Pick a row to view or edit it.</p>
           <p class="hint" id="pr-chat"></p>
           <div id="pr-list"></div>
-        </div>
-        <div class="field">
-          <label id="pr-title">Preview</label>
-          <p class="hint" id="pr-meta"></p>
-          <div id="pr-editor"></div>
-          <pre id="pr-view" class="pr-view"></pre>
         </div>
       </div>
       <div class="row">

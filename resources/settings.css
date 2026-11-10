@@ -1050,12 +1050,10 @@ button.zoom-button:focus-visible {
 
 /* ------------------------------------------------------------------ prompts */
 
-/* The Prompts tab: a list of every prompt beside the one that is picked. */
+/* The Prompts tab: the list is the page's only column. A row's detail opens in its own sheet
+   (below) rather than in a second column that squeezes the list. */
 #pr-wrap {
-	display: grid;
-	grid-template-columns: minmax(260px, min(42%, 460px)) 1fr;
-	gap: 16px;
-	align-items: start;
+	display: block;
 }
 
 #pr-list {
@@ -1111,10 +1109,6 @@ button.zoom-button:focus-visible {
 	background: var(--st-surface-2);
 }
 
-.pr-row.is-on {
-	background: var(--vscode-list-activeSelectionBackground, var(--st-surface-2));
-}
-
 .pr-row .pr-name {
 	flex: 1 1 auto;
 	min-width: 0;
@@ -1152,6 +1146,88 @@ button.zoom-button:focus-visible {
 	word-break: break-word;
 }
 
+/* A row's sheet: the card holds the prefix editor and the generated text (or a tool definition)
+   over the tab, so the list keeps the full width whether or not a row is open. */
+.pr-dialog {
+	position: fixed;
+	inset: 0;
+	z-index: 50;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	background: rgba(0, 0, 0, 0.55);
+}
+
+.pr-dialog-card {
+	display: flex;
+	flex-direction: column;
+	width: min(780px, 100%);
+	max-height: 100%;
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius);
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	color: var(--vscode-foreground);
+	box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+
+.pr-dialog-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 12px;
+	border-bottom: 1px solid var(--st-border-soft);
+}
+
+.pr-dialog-title {
+	flex: 1;
+	min-width: 0;
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pr-dialog-body {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
+	padding: 12px;
+}
+
+.pr-dialog-body label {
+	display: block;
+	margin: 10px 0 2px;
+	font-size: var(--st-label);
+	color: var(--st-muted);
+}
+
+.pr-dialog-body .hint {
+	margin: 0 0 10px;
+}
+
+.pr-dialog-body textarea {
+	width: 100%;
+	box-sizing: border-box;
+	margin: 4px 0 8px;
+	font-family: var(--st-mono);
+	font-size: var(--st-small);
+}
+
+/* The sheet scrolls as a whole, so the preview grows to its content instead of scrolling twice. */
+.pr-dialog .pr-view {
+	min-height: 200px;
+	max-height: none;
+}
+
+.pr-dialog-foot {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding: 10px 12px;
+	border-top: 1px solid var(--st-border-soft);
+}
+
 /* The Prompts tab's rows are editable cards, not the old read-only buttons: a switch, the name,
    a note and the move buttons share the row, and the whole card is the drag target. */
 #pr-list .pr-item {
@@ -1172,10 +1248,6 @@ button.zoom-button:focus-visible {
 	box-shadow: inset 0 2px 0 var(--st-accent);
 }
 
-#pr-list .pr-row {
-	cursor: default;
-}
-
 #pr-list .pr-item[draggable='true'] .pr-row {
 	cursor: grab;
 }
@@ -1188,19 +1260,6 @@ button.zoom-button:focus-visible {
 	display: flex;
 	flex: 0 0 auto;
 	gap: 2px;
-}
-
-#pr-editor label,
-#pr-editor .hint {
-	display: block;
-}
-
-#pr-editor textarea {
-	width: 100%;
-	box-sizing: border-box;
-	margin: 4px 0 6px;
-	font-family: var(--st-mono);
-	font-size: var(--st-small);
 }
 
 #prompts-note {
@@ -1511,8 +1570,7 @@ th.num {
 }
 
 @media (max-width: 720px) {
-	#graph-wrap,
-	#pr-wrap {
+	#graph-wrap {
 		grid-template-columns: 1fr;
 	}
 }
