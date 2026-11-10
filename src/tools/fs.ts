@@ -266,11 +266,15 @@ export const fsTools = toolset([
 		async execute(args, ctx) {
 			const { path, old, new: replacement } = args as { path: string; old: string; new: string };
 			const target = await writable(ctx, path);
-			const text = await readFile(target, 'utf8');
-			if (!text.includes(old)) {
-				throw new Error(`the old text was not found in ${path}`);
-			}
-			const write = () => writeFile(target, text.replace(old, replacement));
+			// The read is inside the tracked-write callback, so the per-path lock covers the whole
+			// read-check-write: a parallel subagent cannot change the file between them.
+			const write = async (): Promise<void> => {
+				const text = await readFile(target, 'utf8');
+				if (!text.includes(old)) {
+					throw new Error(`the old text was not found in ${path}`);
+				}
+				await writeFile(target, text.replace(old, replacement));
+			};
 			if (ctx.edit) {
 				await ctx.edit(target, write);
 			} else {

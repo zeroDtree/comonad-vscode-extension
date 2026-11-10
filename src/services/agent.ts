@@ -35,7 +35,6 @@ import { isContextOverflow, isImageUnsupported, isTransportFailure, type Complet
 import {
 	ALL_CAPABILITIES,
 	APPROVAL_LABELS,
-	asCapabilities,
 	callTarget,
 	capabilitiesOf,
 	evaluatePolicy,
@@ -70,6 +69,7 @@ import {
 } from '../lib/blocks';
 import { applyPromptLayout } from '../lib/prompt-layout';
 import type {
+	AgentSpawnOutcome,
 	AgentSpawnRequest,
 	AttachmentPart,
 	ImageAttachment,
@@ -86,7 +86,10 @@ import type { GenerationTrigger } from '../lib/generations';
 import type { ToolOutcome } from './tools';
 import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
-import { agentIndex, agentLines, allowedToolsFor, skillLines } from './catalog';
+import { allowedToolsFor, BUILTIN_ROLE_BY_ID, SUBAGENT_EXCLUDED_TOOLS, type AgentRole } from '../lib/agents';
+import { buildSubagentSystemPrompt } from '../lib/agent-prompts';
+import { KeyedMutex } from '../lib/locks';
+import { skillLines } from './catalog';
 import type { JournalApi } from '../lib/journal';
 import { DEFAULT_CONTEXT_WINDOW, subagentGrant, subagentStepBudget } from './settings';
 import {
@@ -170,6 +173,8 @@ interface RunState {
 	rootSessionId: string;
 	/** The subagent's name, for the audit trail; absent on the main agent. */
 	agentName?: string;
+	/** The orchestration task this child is running, when known. */
+	taskId?: string;
 	/** Workspace-relative files this run wrote through the tracked file tools. */
 	writes: Set<string>;
 	policy: SessionPolicy;
@@ -224,8 +229,6 @@ interface RunState {
 	foldable: boolean;
 }
 
-const MAX_SUBAGENT_DEPTH = 2;
-
 /** What a continue says as the user when the preset has no `continue_nudge_prompt` of its own. */
 /**
  * The generation types that write nothing into the chat and run no tools: an impersonation streams into the
@@ -256,6 +259,15 @@ function subagentTitle(name: string, description?: string): string {
 	return label ? `Subagent: ${name} — ${clip(label, 60)}` : `Subagent: ${name}`;
 }
 
+/** A call id safe to use as a link key; a delegation without one simply has no card link. */
+function callIdOf(request: AgentSpawnRequest): string | undefined {
+	const callId = request.callId?.trim();
+	if (!callId || callId.length > 200 || callId === '__proto__' || callId === 'prototype' || callId === 'constructor') {
+		return undefined;
+	}
+	return callId;
+}
+
 const MAX_SUBAGENTS = 4;
 
 declare module 'cordis' {
@@ -270,11 +282,9 @@ declare module 'cordis' {
  * `ctx.agent.runTurn()` and watch `agent/*` events.
  */
 export class Agent extends Service {
-	static inject = ['host', 'settings', 'graphs', 'sessions', 'attachments', 'references', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'decisions', 'log'];
+	static inject = ['host', 'settings', 'graphs', 'sessions', 'attachments', 'references', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'decisions', 'orchestrator', 'log'];
 
 	private readonly turns = new Map<string, Turn>();
-	/** Background subagents outlive their turn; they are aborted only when the agent unloads. */
-	private readonly backgroundSubagents = new Set<AbortController>();
 	/** Session → the model that refused images there. A different model gets to try them again. */
 	private readonly imagesOff = new Map<string, string>();
 	/** `${sessionId}\0${root}` already merged from the journal in this process. */
@@ -282,7 +292,6 @@ export class Agent extends Service {
 	private readonly todoLists = new Map<string, TodoItem[]>();
 	private readonly pending = new Map<string, string[]>();
 	private readonly greeted = new Set<string>();
-	private readonly depths = new Map<string, number>();
 	private readonly budgetWarned = new Set<string>();
 	/** Sessions already warned that the world-info budget was spent. */
 	private readonly overflowWarned = new Set<string>();
@@ -295,10 +304,14 @@ export class Agent extends Service {
 	/** Sessions already told that their stored model profile is gone. */
 	private readonly warned = new Set<string>();
 	private activeSubagents = 0;
-	/** Live subagent sessions, so a nested spawn edits the same object the child's run saves. */
+	/** Children waiting for a subagent slot; the queue makes a large delegate batch wait, not fail. */
+	private readonly subagentWaiters: { start: () => void; abort: () => void; signal: AbortSignal }[] = [];
+	/** Live subagent sessions, so policy tightening edits the same object the child's run saves. */
 	private readonly subagentSessions = new Map<string, Session>();
-	/** The write-capable subagent currently running, if any: file writes are serialised. */
-	private writingSubagent: string | null = null;
+	/** One write runs at a time per absolute path; different files run concurrently. */
+	private readonly writeLocks = new KeyedMutex();
+	/** The turn's restore mark is pushed once, even when parallel children write at the same time. */
+	private readonly markLocks = new KeyedMutex();
 
 	constructor(ctx: Context) {
 		super(ctx, 'agent');
@@ -319,9 +332,6 @@ export class Agent extends Service {
 		ctx.effect(() => () => {
 			for (const turn of this.turns.values()) {
 				turn.controller.abort();
-			}
-			for (const controller of this.backgroundSubagents) {
-				controller.abort();
 			}
 		});
 	}
@@ -478,6 +488,8 @@ export class Agent extends Service {
 					policy.capabilities = [...MODE_CAPS[input.policy.workMode]];
 				}
 				session.policy = policy;
+				// A node left running by a crashed or stopped turn cannot be awaited any more.
+				this.ctx.orchestrator.recover(session);
 			}
 			if (session.modelContext && !this.ctx.sessions.verifyModelContext(session)) {
 				this.notice(ref, 'The stored summary no longer matches the chat; it was dropped from the model context.');
@@ -1785,7 +1797,10 @@ export class Agent extends Service {
 			const serial: number[] = [];
 			state.toolCalls.forEach((call, index) => {
 				const tool = this.ctx.tools.get(call.name);
-				const readOnly = (tool?.capability === 'ro' || tool?.capability === 'shell_ro') && call.name !== 'ask_user';
+				const readOnly =
+					(tool?.capability === 'ro' || tool?.capability === 'shell_ro') &&
+					call.name !== 'ask_user' &&
+					tool?.serial !== true;
 				(readOnly ? parallel : serial).push(index);
 			});
 			for (let start = 0; start < parallel.length; start += 6) {
@@ -2129,10 +2144,30 @@ export class Agent extends Service {
 			sessionId: state.sessionId,
 			rootSessionId: state.rootSessionId,
 			batch: state.batch,
+			...(state.taskId ? { taskId: state.taskId } : {}),
+			...(state.agentName ? { agentName: state.agentName } : {}),
 			authorization,
 			workspace: state.policy.workingDirectory,
 			policy: state.policy,
 			signal,
+			// The task graph belongs to the root turn; a child has no accessor and cannot mutate it.
+			...(state.filter
+				? {}
+				: {
+						taskGraph: {
+							sessionId: state.sessionId,
+							turn: state.turn,
+							get: () => this.turnSession(state.sessionId)?.taskGraph,
+							set: (graph) => {
+								const live = this.turnSession(state.sessionId);
+								if (!live) {
+									throw new Error('no live session for this task graph');
+								}
+								live.taskGraph = graph;
+								this.ctx.sessions.save(live);
+							},
+						},
+					}),
 			traceStep:
 				traceIndex === undefined
 					? undefined
@@ -2170,8 +2205,10 @@ export class Agent extends Service {
 								this.ctx.decisions.terminal(trace, 'dispatch_started');
 							}
 						},
-			// One scratch tree per chat, shared by its subagents so the main agent can read their reports.
-			scratchDirectory: state.policy.workingDirectory.trim() ? scratchDirectory(state.policy.workingDirectory, state.rootSessionId) : undefined,
+			// One scratch root per chat; each child gets its own subtree so parallel tests do not collide.
+			scratchDirectory: state.policy.workingDirectory.trim()
+				? scratchDirectory(state.policy.workingDirectory, state.rootSessionId, state.sessionId)
+				: undefined,
 			resolveReference: (path, options) => this.ctx.references.resolvePath(path, scopeOf(state.policy), signal, options),
 			log: (text) => this.notice(state.ref, text),
 			ask: (question, options, multi) => this.ctx.host.ask(question, options, multi),
@@ -2198,6 +2235,11 @@ export class Agent extends Service {
 	 * Nothing is recorded when there is no workspace, when checkpoints are off, or when the write fails.
 	 */
 	private async journalEdit(state: RunState, path: string, write: () => Promise<void>): Promise<void> {
+		// Parallel subagents may write different files at once; the same absolute path is one at a time.
+		return this.writeLocks.run(resolve(path), () => this.journalEditLocked(state, path, write));
+	}
+
+	private async journalEditLocked(state: RunState, path: string, write: () => Promise<void>): Promise<void> {
 		const workspace = state.policy.workingDirectory;
 		const inside = Boolean(workspace) && isInside(workspace, path);
 		const rel = inside ? relative(resolve(workspace), resolve(path)).split(sep).join('/') : '';
@@ -2217,9 +2259,16 @@ export class Agent extends Service {
 		let before: string | null;
 		try {
 			// The turn's restore point is taken before its first write: restoring to it undoes the whole
-			// turn. `length` is this turn's prompt index, which is what an edited prompt cuts at.
-			if (!session.marks.some((mark) => mark.turn === session.turnIndex)) {
+			// turn. `length` is this turn's prompt index, which is what an edited prompt cuts at. The
+			// keyed mutex makes the check-and-push atomic across parallel child writes.
+			await this.markLocks.run(`${session.id}:${session.turnIndex}`, async () => {
+				if (session.marks.some((mark) => mark.turn === session.turnIndex)) {
+					return;
+				}
 				const entries = await journal.entries(workspace, session.id);
+				if (session.marks.some((mark) => mark.turn === session.turnIndex)) {
+					return;
+				}
 				const prompt = session.transcript.findLastIndex((message) => message.role === 'user');
 				session.marks.push({
 					turn: session.turnIndex,
@@ -2228,7 +2277,7 @@ export class Agent extends Service {
 					at: Date.now(),
 				});
 				this.ctx.sessions.save(session);
-			}
+			});
 			before = await journal.store(workspace, state.rootSessionId, rel);
 		} catch (error) {
 			// A shadow repository that cannot be reached (git missing, storage gone) must not keep the
@@ -2360,42 +2409,47 @@ export class Agent extends Service {
 		session.createdDirs = (session.createdDirs ?? []).filter(gone);
 	}
 
-	private async spawnAgent(parent: RunState, request: AgentSpawnRequest): Promise<string> {
-		const depth = this.depths.get(parent.sessionId) ?? 0;
-		if (depth >= MAX_SUBAGENT_DEPTH) {
-			return 'Error: subagent depth limit reached';
+	private async spawnAgent(parent: RunState, request: AgentSpawnRequest): Promise<AgentSpawnOutcome> {
+		const failed = (error: string): AgentSpawnOutcome => ({ ok: false, report: '', writes: [], error });
+		// A child has a filter; only the root Orchestrator may delegate.
+		if (parent.filter) {
+			return failed('subagents cannot delegate');
 		}
-		if (this.activeSubagents >= MAX_SUBAGENTS) {
-			return 'Error: too many subagents are running; try again later';
+		const role = request.pinned
+			? (request.agent ? BUILTIN_ROLE_BY_ID.get(request.agent.trim().toLowerCase()) : undefined)
+			: this.ctx.catalog.agent(request.agent);
+		if (!role) {
+			return failed(`unknown agent ${request.agent ?? '(none)'}`);
 		}
-		const definition = this.ctx.catalog.agent(request.agent);
-		if (request.agent && !definition) {
-			return `Error: unknown agent ${request.agent}`;
-		}
-		// The unnamed spawn is the `explore` agent, by name: `agents[0]` is whatever sorts first once
-		// a user has agents of their own, and that would silently make one of them the default.
-		const agent = definition ?? this.ctx.catalog.agent('explore');
 		// A delegation can only narrow: validate every field here rather than trusting the model's JSON.
 		if (
 			request.capabilities !== undefined &&
 			(!Array.isArray(request.capabilities) ||
-				request.capabilities.some((capability) => typeof capability !== 'string' || !(ALL_CAPABILITIES as readonly string[]).includes(capability)))
+				request.capabilities.some(
+					(capability) => typeof capability !== 'string' || !(ALL_CAPABILITIES as readonly string[]).includes(capability),
+				))
 		) {
-			return 'Error: invalid capabilities for a subagent delegation';
+			return failed('invalid capabilities for a subagent delegation');
+		}
+		if (request.capabilities?.some((capability) => !role.capabilities.includes(capability))) {
+			return failed(`${role.id} cannot use ${request.capabilities.filter((capability) => !role.capabilities.includes(capability)).join(', ')}`);
 		}
 		if (request.network !== undefined && typeof request.network !== 'boolean') {
-			return 'Error: the subagent network constraint must be a boolean';
+			return failed('the subagent network constraint must be a boolean');
+		}
+		if (request.network === true && !role.network) {
+			return failed(`${role.id} does not allow network`);
 		}
 		if (request.sandboxMode !== undefined && !Object.hasOwn(SANDBOX_LABELS, request.sandboxMode)) {
-			return 'Error: invalid sandbox mode for a subagent delegation';
+			return failed('invalid sandbox mode for a subagent delegation');
 		}
 		if (request.approval !== undefined && !Object.hasOwn(APPROVAL_LABELS, request.approval)) {
-			return 'Error: invalid approval policy for a subagent delegation';
+			return failed('invalid approval policy for a subagent delegation');
 		}
-		const capabilities = request.capabilities === undefined ? undefined : asCapabilities(request.capabilities);
+		const capabilities = request.capabilities === undefined ? [...role.capabilities] : [...new Set(request.capabilities)];
 		const constraints: DelegationConstraints = {
-			...(capabilities ? { capabilities } : {}),
-			...(typeof request.network === 'boolean' ? { network: request.network } : {}),
+			capabilities,
+			network: request.network ?? role.network,
 			...(request.sandboxMode ? { sandboxMode: request.sandboxMode } : {}),
 			...(request.approval ? { approval: request.approval } : {}),
 		};
@@ -2405,51 +2459,56 @@ export class Agent extends Service {
 			...parent.policy,
 			rules: parent.policy.rules ?? this.ctx.settings.rules(),
 		};
-		const candidate = buildSubagentPolicy(parentPolicy, constraints, undefined, agent?.model || parent.policy.model);
-		const grant = subagentGrant(this.ctx.settings.get(), agent?.name ?? 'explore', agent?.builtin === true);
-		// The settings grant is the authorization; the definition's tools are the selection. Both, plus
-		// the parent's own allow list (for a nested spawn), and the hard subagent cap.
+		const candidate = buildSubagentPolicy(parentPolicy, constraints, undefined, role.model || parent.policy.model);
+		const grant = subagentGrant(this.ctx.settings.get(), role);
+		// The settings grant is the authorization; the role's tools are the selection. The orchestrator
+		// tools and leaf-forbidden tools are excluded even from a custom role's list.
 		const listed = this.ctx.tools
 			.visible(candidate)
 			.filter((tool) => SUBAGENT_CAPABILITIES.includes(tool.capability))
+			.filter((tool) => !SUBAGENT_EXCLUDED_TOOLS.includes(tool.name))
 			.filter((tool) => !parent.filter?.allow || parent.filter.allow.includes(tool.name))
 			.filter((tool) => tool.capability !== 'rw' || (grant.files && tool.trackedWrite === true))
 			.filter((tool) => tool.capability !== 'shell_test' || grant.test)
-			.map((tool) => tool.name)
-			.filter((name) => name !== 'agent' || depth + 1 < MAX_SUBAGENT_DEPTH);
-		// No explicit tools list means read-only: a definition opts into writing by naming the tool.
-		const allow = agent?.tools?.length
-			? allowedToolsFor(agent, listed)
+			.map((tool) => tool.name);
+		// No explicit tools list means read-only: a custom role opts into writing by naming the tool.
+		const allow = role.tools?.length
+			? allowedToolsFor(role, listed)
 			: listed.filter((name) => {
 					const capability = this.ctx.tools.get(name)?.capability;
 					return capability === undefined || !SUBAGENT_WRITE_CAPABILITIES.includes(capability);
 				});
 		const policy: SessionPolicy = { ...candidate, tools: allow };
 		const revision = policyRevision(policySnapshot(policy, policy.rules ?? this.ctx.settings.rules()));
-		const writeCapable = allow.some((name) => SUBAGENT_WRITE_CAPABILITIES.includes(this.ctx.tools.get(name)?.capability ?? 'ro'));
-		// A background run has no live turn to journal against and nobody to review its diff.
-		if (request.background && writeCapable) {
-			return 'Error: a write-capable subagent must run in the foreground; background subagents are read-only';
-		}
-		// Two writers would race on the same files and on the same journal mark.
-		if (writeCapable && this.writingSubagent) {
-			return `Error: another write-capable subagent is already running (${this.writingSubagent}); wait for it to finish`;
-		}
-		if (writeCapable) {
-			this.writingSubagent = request.description ?? agent?.name ?? 'subagent';
-		}
-		const releaseWriter = (): void => {
-			if (writeCapable) {
-				this.writingSubagent = null;
-			}
-		};
 		const subId = `sub-${randomUUID()}`;
-		// The parent's `agent` card links to the child conversation. The map lives on the session that
-		// owns the call, so a nested spawn links the subagent's card, not the root's.
+		let release: (() => void) | undefined;
+		try {
+			release = await this.acquireSubagentSlot(request.signal);
+			return await this.runSubagent(parent, request, role, policy, revision, subId, allow, callIdOf(request));
+		} catch (error) {
+			return failed(describe(error));
+		} finally {
+			release?.();
+		}
+	}
+
+	/** Creates the child conversation, runs its graph and returns the structured outcome. */
+	private async runSubagent(
+		parent: RunState,
+		request: AgentSpawnRequest,
+		role: AgentRole,
+		policy: SessionPolicy,
+		revision: string,
+		subId: string,
+		allow: string[],
+		callId: string | undefined,
+	): Promise<AgentSpawnOutcome> {
+		const config = this.ctx.settings.get();
+		// The parent's card links to the child conversation. The map lives on the session that owns
+		// the call, so a nested card could link its own child rather than the root's.
 		const owner =
 			this.turnSession(parent.sessionId) ?? this.subagentSessions.get(parent.sessionId) ?? this.ctx.sessions.get(parent.sessionId);
-		const callId = request.callId?.trim();
-		if (owner && callId && callId.length <= 200 && callId !== '__proto__' && callId !== 'prototype' && callId !== 'constructor') {
+		if (owner && callId) {
 			const links = Object.entries({ ...(owner.subagents ?? {}), [callId]: subId });
 			// Keep the newest links: an old card losing its link is better than an unbounded session file.
 			owner.subagents = Object.fromEntries(links.slice(-256));
@@ -2459,141 +2518,164 @@ export class Agent extends Service {
 				this.ctx.log.message(`subagent link: ${describe(error)}`);
 			}
 		}
-		const run = async (): Promise<string> => {
-			this.activeSubagents += 1;
-			// The depth is the *child's*: a spawn from inside this run reads it off `subId`, and two
-			// siblings finishing at different times each retire only their own entry.
-			this.depths.set(subId, depth + 1);
-			let finishChild: (() => void) | undefined;
+		const instructions = config.instructions
+			? instructionBody(await loadInstructions(policy.workingDirectory, this.ctx.host.home(), this.ctx.host.trusted()))
+			: '';
+		const memory = config.memory ? await readMemory(memoryDir(this.ctx.host.storage.root, policy.workingDirectory)) : '';
+		const skills = config.skills && allow.includes('skill') ? skillLines(this.ctx.catalog.skills) : '';
+		const system = buildSubagentSystemPrompt({
+			role,
+			contract: request.contract ?? 'worker',
+			instructions,
+			memory,
+			skills,
+			network: policy.network,
+			sandbox: policy.sandboxMode,
+			capabilities: [...capabilitiesOf(policy)],
+		});
+		const subTranscript: Message[] = [{ role: 'user', content: request.prompt, at: Date.now() }];
+		// The child's conversation is a real session from this moment on: the card can open it while
+		// it works, and it outlives the parent turn as a transcript.
+		const child = this.ctx.sessions.createChild(policy, subId, {
+			title: subagentTitle(role.id, request.description),
+			parentId: parent.sessionId,
+			subagent: role.id,
+			transcript: subTranscript,
+			policyRevision: revision,
+		});
+		this.subagentSessions.set(subId, child);
+		let latest = subTranscript;
+		const remember = (next: Message[]): void => {
+			latest = next;
+			child.transcript = next;
+			child.turnIndex = next.some((message) => message.role === 'user') ? 1 : 0;
 			try {
-				const system = [
-					`You are the ${agent?.name ?? 'explore'} subagent of Comonad.`,
-					agent?.prompt ?? 'Complete the delegated task and return a concise report.',
-					'Project files may be changed only with the file tools offered to you; never use a shell command to write a project file. run_shell_test can write only its scratch directory. If a tool you need is not offered, report that instead of working around it.',
-					agentIndex(this.ctx.catalog.agents),
-				].join('\n\n');
-				const parentSession = request.fork ? this.ctx.sessions.get(parent.sessionId) : undefined;
-				const base = request.fork && parentSession ? parentSession.transcript : [];
-				const inherited = request.fork ? parent.messages.filter((message) => message.role !== 'system') : [];
-				const subTranscript: Message[] = [...base, { role: 'user', content: request.prompt, at: Date.now() }];
-				// The child's conversation is a real session from this moment on: the card can open it
-				// while it works, and it outlives the parent turn as a transcript.
-				const child = this.ctx.sessions.createChild(policy, subId, {
-					title: subagentTitle(agent?.name ?? 'explore', request.description),
-					parentId: parent.sessionId,
-					subagent: agent?.name ?? 'explore',
-					transcript: subTranscript,
-					policyRevision: revision,
-				});
-				this.subagentSessions.set(subId, child);
-				let latest = subTranscript;
-				const remember = (next: Message[]): void => {
-					latest = next;
-					child.transcript = next;
-					child.turnIndex = next.some((message) => message.role === 'user') ? 1 : 0;
-					try {
-						this.ctx.sessions.save(child);
-					} catch (error) {
-						this.ctx.log.message(`subagent session: ${describe(error)}`);
-					}
-					this.ctx.emit('subagent/changed', subId);
-				};
-				// Settles the child conversation even when an event listener throws before the graph starts.
-				finishChild = () => {
-					child.transcript = latest;
-					child.subagentDone = true;
-					try {
-						this.ctx.sessions.save(child);
-					} catch (error) {
-						this.ctx.log.message(`subagent session: ${describe(error)}`);
-					}
-					this.ctx.emit('subagent/changed', subId);
-					this.subagentSessions.delete(subId);
-				};
-				this.ctx.emit('agent/subagent-start', parent.ref, {
-					callId,
-					id: subId,
-					name: agent?.name ?? 'explore',
-					description: request.description,
-				});
-				// A nested spawn's card lives in its parent subagent's view: repaint that view now.
-				if (parent.filter) {
-					this.ctx.emit('subagent/changed', parent.sessionId);
-				}
-				const state: RunState = {
-					ref: { sessionId: subId },
-					sessionId: subId,
-					rootSessionId: parent.rootSessionId,
-					agentName: agent?.name ?? 'explore',
-					writes: new Set(),
-					policy,
-					transcript: subTranscript,
-					messages: [{ role: 'system', content: system }, ...inherited, { role: 'user', content: request.prompt }],
-					contextForm: this.ctx.settings.get().contextForm,
-					trailer: [],
-					toolCalls: [],
-					turn: child.turnIndex,
-					gateReason: '',
-					batch: 0,
-					filter: { allow },
-					// A subagent is an ordinary generation of its own; nothing about it is swiped or quieted.
-					trigger: 'normal',
-					prior: [...base],
-					// A subagent's request is its own, with no chat record behind it to fold, so only
-					// elision may shrink it; the isolation is what keeps its oversize off the parent.
-					foldable: false,
-				};
-				const abort = new AbortController();
-				// A background run outlives the turn that started it: it is aborted when the agent
-				// unloads, not when the parent turn ends (which endTurn's cleanup abort would do). A
-				// foreground run is the turn's own work and stops with it.
-				const unlink = request.background ? () => undefined : linkAbort(request.signal, abort);
-				if (request.background) {
-					this.backgroundSubagents.add(abort);
-				}
-				try {
-					abort.signal.throwIfAborted();
-					const outcome = await runGraph(this.graph(), state, {
-						// The parent turn's budget is the default only when the setting says to inherit:
-						// a subagent otherwise spends its own configured budget.
-						maxSteps: subagentStepBudget(this.ctx.settings.get(), parent.policy.maxSteps ?? 0, agent?.maxTurns),
-						signal: abort.signal,
-						choose: (soft: SoftRequest) => this.ctx.llm.choose(policy.model, soft, abort.signal),
-						onStep: (current) => remember(current.transcript),
-					});
-					const report = outcome.status === 'aborted' ? '(stopped)' : (lastAssistant(outcome.state.transcript)?.content ?? '(no report)');
-					return state.writes.size ? `${report}\n\nFiles changed:\n${[...state.writes].map((path) => `- ${path}`).join('\n')}` : report;
-				} finally {
-					unlink();
-					this.backgroundSubagents.delete(abort);
-				}
-			} finally {
-				try {
-					finishChild?.();
-				} catch (error) {
-					this.ctx.log.message(`subagent session: ${describe(error)}`);
-				}
-				this.activeSubagents -= 1;
-				this.depths.delete(subId);
+				this.ctx.sessions.save(child);
+			} catch (error) {
+				this.ctx.log.message(`subagent session: ${describe(error)}`);
 			}
+			this.ctx.emit('subagent/changed', subId);
 		};
-		if (request.background) {
-			void run()
-				.then((text) => {
-					this.pushContext(parent.sessionId, `Subagent "${request.description ?? agent?.name ?? 'task'}" finished:\n${clip(text, 4_000)}`);
-					this.ctx.host.notify(`Subagent ${request.description ?? agent?.name ?? ''} finished`);
-				})
-				.catch((error) => this.ctx.log.message(`subagent failed: ${describe(error)}`))
-				.finally(releaseWriter);
-			return `Started in the background: ${request.description ?? request.prompt.slice(0, 60)}`;
-		}
+		let finishChild: (() => void) | undefined;
+		// Settles the child conversation even when an event listener throws before the graph starts.
+		finishChild = () => {
+			child.transcript = latest;
+			child.subagentDone = true;
+			try {
+				this.ctx.sessions.save(child);
+			} catch (error) {
+				this.ctx.log.message(`subagent session: ${describe(error)}`);
+			}
+			this.ctx.emit('subagent/changed', subId);
+			this.subagentSessions.delete(subId);
+		};
+		const state: RunState = {
+			ref: { sessionId: subId },
+			sessionId: subId,
+			rootSessionId: parent.rootSessionId,
+			agentName: role.id,
+			...(request.taskId ? { taskId: request.taskId } : {}),
+			writes: new Set(),
+			policy,
+			transcript: subTranscript,
+			messages: [{ role: 'system', content: system }, { role: 'user', content: request.prompt }],
+			contextForm: config.contextForm,
+			trailer: [],
+			toolCalls: [],
+			turn: child.turnIndex,
+			gateReason: '',
+			batch: 0,
+			filter: { allow },
+			// A subagent is an ordinary generation of its own; nothing about it is swiped or quieted.
+			trigger: 'normal',
+			prior: [],
+			// A subagent's request is its own, with no chat record behind it to fold, so only elision
+			// may shrink it; the isolation is what keeps its oversize off the parent.
+			foldable: false,
+		};
+		const abort = new AbortController();
+		const unlink = linkAbort(request.signal, abort);
 		try {
-			return await run();
+			request.onStart?.(subId);
+			this.ctx.emit('agent/subagent-start', parent.ref, {
+				callId,
+				id: subId,
+				name: role.id,
+				description: request.description,
+			});
+			abort.signal.throwIfAborted();
+			const base = subagentStepBudget(config, parent.policy.maxSteps ?? 0, role.maxTurns);
+			const maxSteps =
+				request.maxTurns === undefined ? base : base > 0 ? Math.min(base, request.maxTurns) : request.maxTurns;
+			const outcome = await runGraph(this.graph(), state, {
+				maxSteps,
+				signal: abort.signal,
+				choose: (soft: SoftRequest) => this.ctx.llm.choose(policy.model, soft, abort.signal),
+				onStep: (current) => remember(current.transcript),
+			});
+			const stopped = outcome.status === 'aborted';
+			return {
+				ok: !stopped,
+				report: stopped ? '(stopped)' : (lastAssistant(outcome.state.transcript)?.content ?? ''),
+				writes: [...state.writes],
+				sessionId: subId,
+				...(stopped ? { stopped: true } : {}),
+			};
 		} catch (error) {
-			return `Error: ${describe(error)}`;
+			return { ok: false, report: '', writes: [...state.writes], sessionId: subId, error: describe(error) };
 		} finally {
-			releaseWriter();
+			unlink();
+			try {
+				finishChild();
+			} catch (error) {
+				this.ctx.log.message(`subagent session: ${describe(error)}`);
+			}
 		}
+	}
+
+	/** Waits for a subagent slot; the queue is the concurrency cap without a hard failure. */
+	private async acquireSubagentSlot(signal: AbortSignal): Promise<() => void> {
+		if (signal.aborted) {
+			throw signal.reason ?? new Error('stopped');
+		}
+		if (this.activeSubagents < MAX_SUBAGENTS) {
+			this.activeSubagents += 1;
+			return () => this.releaseSubagentSlot();
+		}
+		return new Promise<() => void>((resolve, reject) => {
+			const waiter = {
+				signal,
+				start: () => {
+					signal.removeEventListener('abort', onAbort);
+					this.activeSubagents += 1;
+					resolve(() => this.releaseSubagentSlot());
+				},
+				abort: () => {
+					signal.removeEventListener('abort', onAbort);
+					const index = this.subagentWaiters.indexOf(waiter);
+					if (index !== -1) {
+						this.subagentWaiters.splice(index, 1);
+					}
+					reject(signal.reason ?? new Error('stopped'));
+				},
+			};
+			const onAbort = (): void => waiter.abort();
+			signal.addEventListener('abort', onAbort, { once: true });
+			this.subagentWaiters.push(waiter);
+		});
+	}
+
+	private releaseSubagentSlot(): void {
+		this.activeSubagents = Math.max(0, this.activeSubagents - 1);
+		const next = this.subagentWaiters.shift();
+		if (!next) {
+			return;
+		}
+		if (next.signal.aborted) {
+			next.abort();
+			return;
+		}
+		next.start();
 	}
 
 	/**
@@ -2762,8 +2844,8 @@ export class Agent extends Service {
 		if (config.skills && has('skill')) {
 			push(COMONAD_BLOCK.skills, skillLines(this.ctx.catalog.skills));
 		}
-		if (has('agent')) {
-			push(COMONAD_BLOCK.agents, agentLines(this.ctx.catalog.agents));
+		if (has('delegate') && !session.parentId && !session.subagent) {
+			push(COMONAD_BLOCK.orchestrator, this.ctx.orchestrator.prompt(session));
 		}
 		// The books a chat can look up, without the plugin's own heading: the prefix above is the
 		// block's editable opening, and this is only the list it adds below.
@@ -2803,8 +2885,11 @@ export const agentPlugin = Agent;
  * ship `.comonad` (or the session folder) as a symlink: the scratch must not become a writable hole
  * outside the workspace. A path that escapes, or cannot be created, disables the test shell instead.
  */
-export function scratchDirectory(workspace: string, rootSessionId: string): string | undefined {
-	const dir = join(workspace, '.comonad', 'scratch', rootSessionId);
+export function scratchDirectory(workspace: string, rootSessionId: string, sessionId?: string): string | undefined {
+	const leaf = sessionId && sessionId !== rootSessionId ? sessionId.replace(/[^A-Za-z0-9._-]/g, '_') : '';
+	const dir = leaf
+		? join(workspace, '.comonad', 'scratch', rootSessionId, leaf)
+		: join(workspace, '.comonad', 'scratch', rootSessionId);
 	try {
 		mkdirSync(dir, { recursive: true });
 		const root = realpathSync(workspace);

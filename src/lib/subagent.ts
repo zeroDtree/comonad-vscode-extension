@@ -6,13 +6,12 @@ import type { Approval, Capability, SessionPolicy } from './types';
 /**
  * The subagent policy algebra. A child inherits a parent's effective policy, then only narrows it:
  * capabilities intersect, network is an AND, the sandbox takes the stricter of the two, ancestor
- * rules accumulate their restrictions, and the child's tool approval policy is its own (with a
- * fixed `never` response). Spawn and Fork use exactly this construction; only their context differs.
+ * rules accumulate their restrictions, and the child inherits the parent's tool approval policy
+ * (with a fixed `never` response). Every delegated role uses exactly this construction.
  */
 
 export const SUBAGENT_CAPABILITIES: readonly Capability[] = ['ro', 'ro_plan', 'shell_ro', 'rw', 'shell_test'];
 export const SUBAGENT_WRITE_CAPABILITIES: readonly Capability[] = ['rw', 'shell_test'];
-export const DEFAULT_SUBAGENT_APPROVAL: Approval = 'whitelist_accept';
 
 const CAPABILITY_ORDER: readonly Capability[] = ['ro', 'ro_plan', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'];
 
@@ -134,7 +133,7 @@ export function buildSubagentPolicy(
 		capabilities,
 		rules: cloneRules(parent.rules ?? emptyRules()),
 		tools: tools === undefined ? undefined : [...tools],
-		approval: constraints.approval ?? DEFAULT_SUBAGENT_APPROVAL,
+		approval: constraints.approval ?? parent.approval,
 		// A delegated agent has nobody to ask: every confirmation is a denial.
 		approvalResponse: 'never',
 		network: parent.network && constraints.network !== false,

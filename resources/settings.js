@@ -463,12 +463,23 @@
 			const source = document.createElement('span');
 			source.className = 'subagent-src';
 			source.textContent = agent.builtin ? 'built-in' : 'custom';
+			// The role's own ceiling: the task filter can narrow it further, never widen it.
+			const mode = document.createElement('span');
+			mode.className = 'subagent-src';
+			mode.textContent = [
+				agent.workMode || 'ro',
+				agent.risk === 'write' ? 'write' : 'read',
+				agent.network ? 'network' : '',
+				agent.maxTurns ? agent.maxTurns + ' turns' : '',
+			]
+				.filter(Boolean)
+				.join(' · ');
 			// The effective capability, spelled out — not a bare ✓ the reader has to interpret.
 			const caps = document.createElement('span');
 			caps.className = 'subagent-caps';
 			const cap = agent.files && agent.test ? 'Write + Test' : agent.files ? 'Write' : agent.test ? 'Test' : 'Read-only';
 			caps.textContent = cap;
-			head.append(name, source, caps);
+			head.append(name, source, mode, caps);
 			card.append(head);
 
 			const description = document.createElement('p');

@@ -135,22 +135,23 @@ export const vscodeTools = toolset([
 				sandboxMode: ctx.policy.sandboxMode,
 				denyReadPaths: ctx.policy.denyReadPaths,
 			});
-			const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
-			// Unsaved text is the user's, not the agent's: refuse rather than save it to disk.
-			if (document.isDirty) {
-				throw new Error(`${path} has unsaved changes in the editor — save it first, then retry`);
-			}
-			const edit = new vscode.WorkspaceEdit();
-			for (const change of edits) {
-				const range = new vscode.Range(change.startLine - 1, change.startColumn - 1, change.endLine - 1, change.endColumn - 1);
-				if (change.old !== undefined && document.getText(range) !== change.old) {
-					throw new Error(`expected text does not match ${path} at line ${change.startLine}`);
+			// The editor writes this file, so the journal reads the disk around it. Opening, checking
+			// and applying happen inside the tracked-write callback: the per-path lock makes the
+			// expected-text checks and the edit one atomic step against parallel subagents.
+			const write = async (): Promise<void> => {
+				const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+				// Unsaved text is the user's, not the agent's: refuse rather than save it to disk.
+				if (document.isDirty) {
+					throw new Error(`${path} has unsaved changes in the editor — save it first, then retry`);
 				}
-				edit.replace(document.uri, range, change.text);
-			}
-			// The editor writes this file, so the journal reads the disk around it: the unsaved text is
-			// what the user would lose on a revert, which is why the review refuses a dirty document.
-			const write = async () => {
+				const edit = new vscode.WorkspaceEdit();
+				for (const change of edits) {
+					const range = new vscode.Range(change.startLine - 1, change.startColumn - 1, change.endLine - 1, change.endColumn - 1);
+					if (change.old !== undefined && document.getText(range) !== change.old) {
+						throw new Error(`expected text does not match ${path} at line ${change.startLine}`);
+					}
+					edit.replace(document.uri, range, change.text);
+				}
 				const applied = await vscode.workspace.applyEdit(edit);
 				if (!applied) {
 					throw new Error('the editor rejected the edits');

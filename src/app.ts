@@ -16,7 +16,9 @@ import { graphPlugin } from './services/graph';
 import { hooksPlugin } from './services/hooks';
 import { llmPlugin } from './services/llm';
 import { logPlugin } from './services/log';
+import { mailboxPlugin } from './services/mailbox';
 import { mcpPlugin } from './services/mcp';
+import { orchestratorPlugin } from './services/orchestrator';
 import { panesPlugin } from './services/panes';
 import { pluginHost, type PluginRow } from './services/plugins';
 import { sessionsPlugin } from './services/sessions';
@@ -28,7 +30,9 @@ import { toolsPlugin } from './services/tools';
 import { usagePlugin } from './services/usage';
 import { fsTools } from './tools/fs';
 import { mathTools } from './tools/math';
-import { agentTools, askTools, memoryTools, skillTools } from './tools/misc';
+import { messageTools } from './tools/message';
+import { askTools, memoryTools, skillTools } from './tools/misc';
+import { orchestrateTools } from './tools/orchestrate';
 import { planTools } from './tools/plan';
 import { shellTools } from './tools/shell';
 import { todoTools } from './tools/todo';
@@ -88,6 +92,8 @@ export const PLUGINS: Record<string, Plugin> = {
 	approval: approvalPlugin,
 	commands: commandsPlugin,
 	graph: graphPlugin,
+	mailbox: mailboxPlugin,
+	orchestrator: orchestratorPlugin,
 	agent: agentPlugin,
 	'provider-openai': openaiPlugin,
 	'tools-fs': fsTools,
@@ -98,7 +104,8 @@ export const PLUGINS: Record<string, Plugin> = {
 	'tools-vscode': vscodeTools,
 	'tools-math': mathTools,
 	'tools-ask': askTools,
-	'tools-agent': agentTools,
+	'tools-orchestrate': orchestrateTools,
+	'tools-message': messageTools,
 	'tools-skill': skillTools,
 	'tools-memory': memoryTools,
 	'ui-slash': slashCommands,
@@ -151,6 +158,10 @@ export const ROWS: PluginRow[] = [
 	{ id: 'commands', group: 'kernel' },
 	// The graph engine: the agent's loop is compiled by this plugin from the editable Mermaid source.
 	{ id: 'graph', group: 'kernel' },
+	// The Orchestrator: the persistent task graph and the shared coordination mailbox. Mounted before
+	// the agent because the agent reads the graph when it builds a turn and closes over the service.
+	{ id: 'mailbox', group: 'kernel' },
+	{ id: 'orchestrator', group: 'kernel' },
 	{ id: 'agent', group: 'kernel' },
 
 	// The model adapter: every profile is an OpenAI-compatible endpoint (DeepSeek by default).
@@ -165,7 +176,8 @@ export const ROWS: PluginRow[] = [
 	{ id: 'tools-vscode', group: 'tools' },
 	{ id: 'tools-math', group: 'tools' },
 	{ id: 'tools-ask', group: 'tools' },
-	{ id: 'tools-agent', group: 'tools' },
+	{ id: 'tools-orchestrate', group: 'tools' },
+	{ id: 'tools-message', group: 'tools' },
 	{ id: 'tools-skill', group: 'tools' },
 	{ id: 'tools-memory', group: 'tools' },
 

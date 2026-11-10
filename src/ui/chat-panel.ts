@@ -241,6 +241,7 @@ export function chatPanel(ctx: Context): void {
 				.slice(0, 60)
 				.map((item) => ({ id: item.id, title: item.title, active: item.id === session?.id, updatedAt: item.updatedAt })),
 			todos: session ? ctx.agent.todos(session.id).map((todo) => ({ status: todo.status, text: todo.text })) : [],
+			taskBoard: session ? ctx.orchestrator.board(session) : undefined,
 		};
 	};
 
@@ -288,7 +289,7 @@ export function chatPanel(ctx: Context): void {
 		// A thought's length in tokens, counted with the model's tokenizer when one is warmed: the
 		// fold's summary reads it beside the duration, live and after a reload alike.
 		tokens: step.kind === 'thought' ? countRaw(step.text ?? '') : undefined,
-		// The conversation an `agent` call spawned, so its card can open the child view.
+		// The conversation a delegation spawned, so its card can open the child view.
 		subagentId:
 			step.kind === 'tool' && step.id && session?.subagents && Object.hasOwn(session.subagents, step.id)
 				? session.subagents[step.id]
@@ -592,6 +593,12 @@ export function chatPanel(ctx: Context): void {
 	ctx.on('agent/subagent-start', (ref, info) => {
 		if (ref.surface === SURFACE) {
 			post({ type: 'subagent-start', ...info });
+		}
+	});
+	// The task board belongs to the root chat; a child's events never repaint the parent's overview.
+	ctx.on('orchestrator/changed', (id, board) => {
+		if (ctx.sessions.active()?.id === id) {
+			post({ type: 'task-board', board: board ?? null });
 		}
 	});
 	// A watched subagent gained a step, finished or failed: repaint the open overlay only.
@@ -1647,7 +1654,7 @@ export function chatPanel(ctx: Context): void {
 	// The title-bar icons are commands; the chat list itself lives in the webview.
 	registerCommand(ctx, 'comonad.toggleHistory', () => post({ type: 'toggleHistory' }));
 }
-chatPanel.inject = ['sessions', 'agent', 'attachments', 'references', 'settings', 'llm', 'usage', 'commands', 'log', 'host'];
+chatPanel.inject = ['sessions', 'agent', 'orchestrator', 'attachments', 'references', 'settings', 'llm', 'usage', 'commands', 'log', 'host'];
 
 function splitChoices(labels: Record<string, string>): { id: string; label: string; description: string }[] {
 	return Object.entries(labels).map(([id, label]) => {
@@ -1707,6 +1714,7 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 	<!-- Floats at the bottom of the transcript, above every footer row, whenever the reader has
 	     scrolled away from the newest message. -->
 	<button id="jump-latest" type="button" hidden data-tip="Jump to the newest message">↓ Latest</button>
+	<div id="tasks" hidden></div>
 	<div id="todos" hidden></div>
 	<div id="changes-panel" hidden>
 		<div id="changes-head">

@@ -1320,6 +1320,40 @@ footer {
 	background: var(--vscode-sideBar-background, transparent);
 }
 
+#tasks {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 10px;
+	margin-bottom: 7px;
+	font-size: 12px;
+}
+
+.task-head {
+	font-weight: 600;
+	opacity: 0.8;
+}
+
+.task {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	opacity: 0.85;
+}
+
+.task.accepted {
+	opacity: 0.5;
+}
+
+.task.rejected {
+	color: var(--vscode-errorForeground);
+}
+
+.task.running,
+.task.verifying {
+	color: var(--vscode-textLink-foreground);
+}
+
 #todos {
 	display: flex;
 	flex-wrap: wrap;

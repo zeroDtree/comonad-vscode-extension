@@ -31,7 +31,10 @@ silently: the review asks, or refuses until you save.
 
 A subagent's file-tool writes are journaled under the **parent chat**, not under a session of their
 own. They appear in the same pending list, the same diff and the same restore points as the main
-agent's writes.
+agent's writes. Parallel write tasks are allowed: each tracked write passes through one per-path
+lock, so two children writing different files proceed together while writes to the same file are
+serialised. A child's test shell gets its own scratch subtree, so parallel builds do not share a
+journal or a build directory.
 
 ## Restoring a turn
 

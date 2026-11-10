@@ -165,33 +165,40 @@ Hooks 在生命周期点运行：`SessionStart`、`UserPromptSubmit`、`PreToolU
 | MCP | `mcpServers`（设置） | stdio 或 streamable HTTP；逐服务器能力与覆盖 |
 | 记忆 | agent 自己的 `MEMORY.md` | 进入提示，用 `memory` 工具编辑 |
 
-### 子 Agent
+### 子 Agent 角色
 
-子 Agent 是 `.comonad/agents/` 或 `~/.comonad/agents/` 下的 Markdown 文件：
+十四个内置角色在代码里。自定义角色是 `.comonad/agents/` 或 `~/.comonad/agents/` 下的 Markdown 文件：
 
 ```markdown
 ---
 name: writer
-description: 实现一个聚焦的改动。
-tools: [read_file, grep_files, write_file, edit_text, run_shell_test]
+description: 写一篇聚焦的技术说明。
+mode: sw
+network: false
+capabilities: [ro, rw, shell_ro, shell_test]
+files: true
+test: true
+tools: [read_file, grep_files, write_file, edit_text, run_shell_test, message]
 maxTurns: 20
 ---
-实现改动。所有项目写入都走文件工具；run_shell_test 只写 scratch 目录。
+写这篇说明。所有项目写入都走文件工具；run_shell_test 只写 scratch 目录。
 ```
 
-frontmatter **选择**工具；写能力还需要 `subagents` 设置中的**授权**（Settings → Subagents）：
+角色 id 是小写 slug（`name` 或文件名）。`mode`（或 `workMode`）是能力上限；`capabilities` 是默认有效能力，
+必须留在子代理硬上限内（`ro`、`ro_plan`、`shell_ro`、`rw`、`shell_test`）。`network: true` 只是请求网络，
+父开关仍须开启。`risk` 由有效能力推导，不能在文件里覆盖。自定义角色出现在编排块中，任务的 `role` 可以
+引用它。
 
-```json
-{ "subagents": { "writer": { "files": true, "test": true } } }
-```
+frontmatter **选择**工具；写能力还需要 `subagents` 设置中的授权（Settings → Subagents）：`files` 启用
+可跟踪文件工具（`write_file`、`edit_text`、`edit_ranges`），`test` 启用 `run_shell_test`。只读工具不需要
+授权。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级处于 Plan 模式时可用；计划写入
+（`write_plan`）、`run_shell`/`start_shell` 和编排工具永远不会授予子级。没有 `tools` 列表的定义视为
+只读。复用内置 id 的自定义角色不继承内置默认授权。见[安全](/zh/guide/safety#编排器与子-agent)与
+[编排](/zh/guide/orchestration)。
 
-只读工具不需要授权。`files` 只启用可跟踪的文件工具（`write_file`、`edit_text`、`edit_ranges`）；
-`test` 启用 `run_shell_test`。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级处于
-Plan 模式时可用；计划写入（`write_plan`）以及 `run_shell`、`start_shell` 永远不会授予子 Agent。没有
-`tools` 列表的定义视为只读。父模式也必须允许该能力。见[安全](/zh/guide/safety#子-agent)。
-
-`maxTurns`（默认 20）按每回合两图步、最少四步来收紧子 Agent 的图步预算；它只能收紧
-`subagentStepsMode`/`subagentSteps`，不能放宽。见[设置](/zh/reference/settings#子-agent)。
+`maxTurns` 按每回合两图步、最少四步来收紧子代理的图步预算；它只能收紧
+`subagentStepsMode`/`subagentSteps`，任务的 `budget` 可以进一步收紧。见
+[设置](/zh/reference/settings#子-agent)。
 
 ### MCP
 

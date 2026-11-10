@@ -26,6 +26,8 @@ import { llmPlugin } from '../services/llm';
 import { hooksPlugin } from '../services/hooks';
 import { approvalPlugin } from '../services/approval';
 import { graphPlugin } from '../services/graph';
+import { mailboxPlugin } from '../services/mailbox';
+import { orchestratorPlugin } from '../services/orchestrator';
 import { agentPlugin } from '../services/agent';
 
 /**
@@ -177,6 +179,8 @@ export async function createTestKernel(
 		'log',
 		'commands',
 		'graphs',
+		'mailbox',
+		'orchestrator',
 		'agent',
 		// `vectors` arrives with the tavern that mounts it, so it waits with it and is skipped with it.
 	].filter((name) => !skipped.has(name) && (name !== 'vectors' || !skipped.has('tavern')));
@@ -209,6 +213,8 @@ export async function createTestKernel(
 		child.plugin(hooksPlugin);
 		child.plugin(approvalPlugin);
 		child.plugin(graphPlugin);
+		child.plugin(mailboxPlugin);
+		child.plugin(orchestratorPlugin);
 		child.plugin(agentPlugin);
 		child.plugin(waitForServices);
 	});

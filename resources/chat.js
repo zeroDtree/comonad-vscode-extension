@@ -1145,6 +1145,10 @@
 		web_search: 'Search the web',
 		ask_user: 'Ask you',
 		agent: 'Run agent',
+		delegate: 'Delegate tasks',
+		task_plan: 'Plan tasks',
+		task_status: 'Task status',
+		message: 'Coordination note',
 		skill: 'Run skill',
 		memory: 'Use memory',
 		todo_write: 'Update todos',
@@ -1407,7 +1411,7 @@
 		return head.join(', ');
 	}
 
-	const SUMMARY_KEYS = ['path', 'file_path', 'file', 'pattern', 'query', 'url', 'question', 'description', 'prompt', 'name', 'id', 'todos'];
+	const SUMMARY_KEYS = ['path', 'file_path', 'file', 'pattern', 'query', 'url', 'question', 'description', 'prompt', 'name', 'id', 'todos', 'tasks'];
 
 	/** The one argument worth showing beside a non-shell tool's title. */
 	function argSummary(step, parsed) {
@@ -1629,7 +1633,7 @@
 		const title = shell ? oneLine(shellDescriptionOf(step), 120) || humanToolName(step.name) : humanToolName(step.name);
 		const summary = shell ? shellUtilities(command) || oneLine(command, 100) : argSummary(step, parsed);
 		const openSubagent =
-			step.name === 'agent' && step.subagentId
+			(step.name === 'agent' || step.name === 'delegate') && step.subagentId
 				? '<button type="button" class="tool-open-subagent" data-subagent="' + esc(step.subagentId) + '" data-tip="Open the subagent session">Open session</button>'
 				: '';
 		const mode = toolCardMode();
@@ -2994,6 +2998,12 @@
 		}
 	});
 
+	// The task board's Open buttons use the same rich-click handling as a transcript card.
+	const tasksEl = $('tasks');
+	if (tasksEl) {
+		tasksEl.addEventListener('click', handleRichClick);
+	}
+
 	const subagentMessagesEl = $('subagent-messages');
 	if (subagentMessagesEl) {
 		subagentMessagesEl.addEventListener('click', handleRichClick);
@@ -3255,6 +3265,7 @@
 		refreshTip();
 		const detail = [state.detail, state.suspended ? '⏸ waiting for approval — send /resume' : ''].filter(Boolean).join('  ·  ');
 		$('status').textContent = detail;
+		renderTasks();
 		renderTodos();
 		if (state.runningSessionId) {
 			runningSession = state.runningSessionId;
@@ -3345,6 +3356,61 @@
 			'\n\nClick to pick the books this chat scans';
 	}
 
+	function renderTasks() {
+		const board = state && state.taskBoard;
+		const list = board && Array.isArray(board.nodes) ? board.nodes : [];
+		const node = $('tasks');
+		if (!list.length) {
+			node.hidden = true;
+			node.innerHTML = '';
+			return;
+		}
+		const counts = board.counts || {};
+		const glyph = (status) =>
+			status === 'accepted' ? '✔' : status === 'rejected' ? '✕' : status === 'running' ? '◐' : status === 'verifying' ? '◑' : '○';
+		const notes = Array.isArray(board.messages) ? board.messages.length : 0;
+		node.hidden = false;
+		node.innerHTML =
+			'<span class="task-head">Tasks ' +
+			(counts.accepted || 0) +
+			'/' +
+			list.length +
+			(notes ? ' · ' + notes + ' note' + (notes === 1 ? '' : 's') : '') +
+			'</span>' +
+			list
+				.slice(0, 8)
+				.map((task) => {
+					const tip = [
+						task.title,
+						task.role + ' · ' + task.status,
+						task.writes && task.writes.length ? 'writes: ' + task.writes.join(', ') : '',
+						task.rejection ? task.rejection.code + ': ' + task.rejection.reason : '',
+					]
+						.filter(Boolean)
+						.join('\n');
+					const open = task.subagentSessionId
+						? '<button type="button" class="tool-open-subagent" data-subagent="' +
+							esc(task.subagentSessionId) +
+							'" data-tip="Open the task session">Open</button>'
+						: '';
+					return (
+						'<span class="task ' +
+						esc(task.status) +
+						'" data-tip="' +
+						esc(tip) +
+						'">' +
+						glyph(task.status) +
+						' ' +
+						esc(task.id) +
+						' · ' +
+						esc(task.role) +
+						open +
+						'</span>'
+					);
+				})
+				.join('');
+	}
+
 	function renderTodos() {
 		const list = (state && state.todos) || [];
 		const node = $('todos');
@@ -3389,6 +3455,12 @@
 				break;
 			case 'changes':
 				renderChanges(message.files || [], message.reviewed || []);
+				break;
+			case 'task-board':
+				if (state) {
+					state.taskBoard = message.board || null;
+					renderTasks();
+				}
 				break;
 			case 'turns':
 				if (message.prepend) {

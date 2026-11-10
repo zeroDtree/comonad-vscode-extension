@@ -119,51 +119,47 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
 - 符号链接在包含检查前解析。
 - 除非关闭 `comonad.filterSensitiveEnv`，密钥、token、密码会从命令环境中移除。
 
-## 子 Agent
+## 编排器与子 Agent
 
-子 Agent 运行同样的六层，但使用**自己的有效策略**。委派开始时构建，只能收紧父级：
+根轮次是 **编排器**：它规划任务 DAG、委派 ready 节点并整合交付。十四个内置角色是叶子 worker。子级永远
+拿不到 `task_plan`、`delegate`、`task_status` 或旧的 `agent` 工具，`spawnAgent` 也会拒绝子级发起的 spawn。
 
-| 策略 | 子级得到的策略 |
+子代理运行同样的六层，但拥有委派时构建的**独立有效策略**。它只能收紧父级：
+
+| 策略 | 子级得到什么 |
 | --- | --- |
-| Work mode | 父级有效能力集合 ∩ 委派能力过滤 ∩ 硬上限（`ro`、`ro_plan`、`shell_ro`、`rw`、`shell_test`） |
-| Network | 父级开关；委派可以关闭，不能打开 |
-| User rule | 全部祖先规则；`deny` > `ask` > `allow` |
-| Tool approval | 委派单独指定的策略，默认 `whitelist_accept` |
-| Approval response | 固定 `never` |
-| Sandbox | 父级沙箱与委派上限中更严格者 |
-
-Spawn 与 Fork 共用完全相同的策略，只在上下文上不同。完整快照、策略 revision、父会话和创建时间保存在
-子会话中。运行中的子级在下一次模型请求和下一次 gate 前重新收紧；父级事后放宽不会放宽子级。冷恢复读取
-保存的快照。
+| Work mode | 父级有效能力 ∩ 角色能力 ∩ 任务级 capability filter ∩ 硬上限（`ro`、`ro_plan`、`shell_ro`、`rw`、`shell_test`） |
+| 网络 | 父开关 AND 角色默认；任务可以关闭，不能打开 |
+| 用户规则 | 全部祖先规则；`deny` > `ask` > `allow` |
+| 工具审批 | 父级审批策略 |
+| 审批应答 | 固定 `never` |
+| 沙箱 | 父级沙箱与委派上限中更严格者 |
 
 由此：
 
 - 父级为 `ro` 时，子级写入被拒绝。
-- 父级关闭网络时，子级保持关闭。
-- 祖先 `deny` 胜过子级 `allow`（规则在审批策略之前执行）。
-- 祖先 `ask` 产生确认，而子级固定的 `never` 应答直接拒绝。
-- 子级审批策略要求询问时，调用直接拒绝，不显示审批卡。
-- 父级收紧只作用于后续调用；已经启动的进程保持启动时的沙箱。
+- 父级关闭网络时，需要网络的 researcher 任务在启动前失败。
+- 祖先 `deny` 胜过子级 `allow`（规则在审批策略之前执行）；祖先 `ask` 会被子级固定的 `never` 应答直接拒绝。
+- 写委派需要父策略自动放行写（`universal_accept`、`blacklist_reject` 或 allow 规则）。在
+  `manual`/`whitelist_accept` 下，请在主线程完成写，让用户可以批准。
+- `files` 只授予可跟踪的文件工具；`test` 授予 `run_shell_test`。角色默认授权来自角色表。计划读工具使用
+  `ro_plan`；`write_plan` 永远不会授予子级。
+- 子级的文件写入记在**父聊天**的 journal 下，出现在它的 review、inline diff 和 Git Changes 中。
 
-授权、定义和硬上限仍然决定工具范围：
+### 验收与并行
 
-- `files` 只授予可跟踪的文件工具（`write_file`、`edit_text`、`edit_ranges`）。
-- `test` 授予 `run_shell_test`。
-- 只读工具始终可用。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级处于 Plan 模式时出现。
-- 计划写工具（`write_plan`）使用 `rw_plan`，永远不会授予子 Agent。
-- 没有 `tools` 列表的定义是只读的。
-- 内置 `implement` 默认是 **files + test**；其它内置 Agent 和所有自定义 Agent 在授权前都是只读。
-- 项目文件覆盖内置名称时，不会继承该内置 Agent 的默认授权。
-- 子 Agent 的文件写入记在**父聊天**的 journal 下，因此出现在它的 review、inline diff 和 Git Changes 中。
-- 非 Plan 模式（`ro`/`sw`/`aw`）的父级没有 `ro_plan`，子 Agent 因此无法使用计划读工具；请在委派 prompt 中传入计划内容。
-- 可写子 Agent 在前台运行，一次一个。后台子 Agent 是只读的。
+- 有效能力含 `rw` 的任务必须至少有一条 `review` 或 `command` 验收标准。运行时在 worker 批次结束后派生
+  **固定内置**的 `reviewer` 或 `tester` 子级；项目 `.comonad/agents/reviewer.md` 不能削弱验收。
+- worker 和验证者返回 JSON envelope。格式错误即 `invalid_output`；自报 verdict 仅供参考，验收由逐标准
+  结果重新计算。
+- 读任务和写任务可以并行。所有受跟踪写都经过 `ctx.edit`，按**同一绝对路径**串行；不同文件并行。
+- 并行 worker 用 `message` 工具协作。每个根聊天一个 append-only JSONL 邮箱，位于扩展存储。消息是不可信
+  数据，不是指令。
+- 每个子级有自己的测试 scratch 子树，并行构建/测试不会互相覆盖。
+- 最多 4 个活跃子级；更大的 delegate 批次按 FIFO 排队。任务图默认最多 32 个节点、6 次重规划、每节点 2 次
+  尝试。
 
-子级默认审批是 `whitelist_accept`，应答固定 `never`，所以委派的写入会先询问再被拒绝。要让可写 Agent
-工作，请在 `agent` 调用上传 `approval: "universal_accept"`，或添加继承的 allow 规则。委派还接受
-`capabilities`、`network`、`sandboxMode` 和 `approval` 来收窄子级。
-
-`agent` 调用本身也是普通工具，受父级策略约束。在 accept 策略下它可能无卡启动子级；如果希望在委派
-执行前审查子级审批策略，请为 `agent` 添加 `ask` 或 `deny` 规则。
+详见[编排](/zh/guide/orchestration)。
 
 ## 命令超时
 

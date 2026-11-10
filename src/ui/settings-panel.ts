@@ -370,12 +370,17 @@ export function settingsPanel(ctx: Context): void {
 			subagents: {
 				grants: config.subagents,
 				agents: ctx.catalog.agents.map((agent) => {
-					const grant = subagentGrant(config, agent.name, agent.builtin === true);
+					const grant = subagentGrant(config, agent);
 					const listed = agent.tools ?? [];
 					return {
-						name: agent.name,
+						name: agent.id,
+						title: agent.title,
 						description: agent.description,
 						builtin: agent.builtin === true,
+						workMode: agent.workMode,
+						network: agent.network,
+						risk: agent.risk,
+						maxTurns: agent.maxTurns ?? 0,
 						tools: listed,
 						canFiles: listed.some((name) => {
 							const tool = ctx.tools.get(name);

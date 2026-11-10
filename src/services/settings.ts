@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
+import { BUILTIN_ROLES, READ_ONLY_GRANT, type AgentRole, type SubagentGrant } from '../lib/agents';
 import type { EffortTop } from '../lib/effort';
 import { asApproval, asApprovalResponse, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
@@ -139,27 +140,18 @@ export interface PermissionsConfig {
 	deny: string[];
 }
 
-/** What a subagent may be granted. Read-only tools are always available; these add the write paths. */
-export interface SubagentGrant {
-	/** The tracked file-write tools (`write_file`, `edit_text`, `edit_ranges`). */
-	files: boolean;
-	/** The scratch-only test shell (`run_shell_test`). */
-	test: boolean;
-}
+export type { SubagentGrant } from '../lib/agents';
+export { READ_ONLY_GRANT } from '../lib/agents';
 
 export type SubagentGrants = Record<string, SubagentGrant>;
 
-export const READ_ONLY_GRANT: Readonly<SubagentGrant> = { files: false, test: false };
-
 /**
- * The shipped subagent grants. Only the built-in implementer may write by default; every other
- * built-in and every custom agent stays read-only until the user grants it in Settings → Subagents.
- * The lookup is gated on `AgentDefinition.builtin`, so a project file that shadows a built-in name
- * does not inherit the default.
+ * The shipped subagent grants, derived from the role table so a role's default and its Settings
+ * checkbox can never disagree. A project file that shadows a built-in name loses the default.
  */
-export const DEFAULT_SUBAGENT_GRANTS: Readonly<Record<string, SubagentGrant>> = {
-	implement: { files: true, test: true },
-};
+export const DEFAULT_SUBAGENT_GRANTS: Readonly<Record<string, SubagentGrant>> = Object.fromEntries(
+	BUILTIN_ROLES.filter((role) => role.grant.files || role.grant.test).map((role) => [role.id, { ...role.grant }]),
+);
 
 const SUBAGENT_NAME = /^[a-z0-9][a-z0-9._-]*$/;
 const MAX_SUBAGENT_GRANTS = 64;
@@ -188,15 +180,15 @@ export function sanitizeSubagentGrants(value: unknown): SubagentGrants {
 }
 
 /**
- * The effective grant of one agent: an explicit entry wins outright, then the built-in default for a
- * genuine built-in, then read-only. A custom agent that reuses a built-in name gets nothing.
+ * The effective grant of one role: an explicit entry wins outright, then the built-in role's own
+ * default, then read-only. A custom role that reuses a built-in id gets nothing.
  */
-export function subagentGrant(config: Pick<Config, 'subagents'>, name: string, builtin: boolean): SubagentGrant {
-	const key = name.trim().toLowerCase();
-	if (Object.hasOwn(config.subagents, key)) {
+export function subagentGrant(config: Pick<Config, 'subagents'>, role: AgentRole | undefined): SubagentGrant {
+	const key = role?.id.trim().toLowerCase() ?? '';
+	if (key && Object.hasOwn(config.subagents, key)) {
 		return { ...config.subagents[key]! };
 	}
-	const shipped = builtin ? DEFAULT_SUBAGENT_GRANTS[key] : undefined;
+	const shipped = role?.builtin ? role.grant : undefined;
 	return shipped ? { ...shipped } : { ...READ_ONLY_GRANT };
 }
 

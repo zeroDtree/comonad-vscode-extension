@@ -8,6 +8,7 @@ import { asReasoningEffort } from '../lib/effort';
 import { asApproval, asApprovalResponse, asCapabilities, asRuleSet, asWorkMode } from '../lib/policy';
 import { asSandboxMode, DEFAULT_SANDBOX_MODE, isInside } from '../lib/sandbox';
 import { modelContextDigest, type ContextForm } from '../lib/prompt';
+import { sanitizeTaskGraph, type TaskGraph } from '../lib/task-graph';
 import { turnsOf } from '../lib/turns';
 import type { AttachmentPart, Message, ModelContext, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
 
@@ -119,8 +120,10 @@ export interface Session {
 	policyRevision?: string;
 	/** The subagent run has finished. */
 	subagentDone?: boolean;
-	/** Tool call id → subagent session id: what lets an `agent` card open the child conversation. */
+	/** Tool call id → subagent session id: what lets a `delegate` card open the child conversation. */
 	subagents?: Record<string, string>;
+	/** The Orchestrator's persistent task DAG; root chats only. */
+	taskGraph?: TaskGraph;
 	usage: SessionUsage;
 	/**
 	 * The prompt size the provider reported for the last request, in tokens. It is the only exact
@@ -403,6 +406,8 @@ export class SessionStore {
 			created: [],
 			createdDirs: [],
 			createdRoot: undefined,
+			// A fork is a new chat: accepted tasks belong to the conversation it copied, not to it.
+			taskGraph: undefined,
 			usage: emptyUsage(),
 		};
 		this.save(session);
@@ -494,6 +499,7 @@ export class SessionStore {
 			subagent: typeof session.subagent === 'string' ? session.subagent : undefined,
 			subagentDone: session.subagentDone === true,
 			subagents: sanitizeSubagentLinks(session.subagents),
+			taskGraph: delegated ? undefined : sanitizeTaskGraph(session.taskGraph),
 			usage: session.usage ?? emptyUsage(),
 			instructions: session.instructions ?? [],
 		};

@@ -112,6 +112,8 @@ export class Checkpoints extends Service implements JournalApi {
 	private readonly empties = new Map<string, string>();
 	/** A fresh name for each temporary review index, so two diffs at once cannot share one. */
 	private reviewIndex = 0;
+	/** One initialization per shadow repository: parallel first writes must not race `git init`. */
+	private readonly opening = new Map<string, Promise<Repo>>();
 
 	private queued<T>(work: () => Promise<T>): Promise<T> {
 		const next = this.lock.then(work, work);
@@ -656,9 +658,21 @@ export class Checkpoints extends Service implements JournalApi {
 		await writeFile(target, bytes);
 	}
 
-	private async open(workspace: string, sessionId: string): Promise<Repo> {
+	private open(workspace: string, sessionId: string): Promise<Repo> {
 		const work = resolve(workspace);
 		const dir = repoDir(this.root, work, sessionId);
+		const pending = this.opening.get(dir);
+		if (pending) {
+			return pending;
+		}
+		const opening = this.openRepo(dir, work).finally(() => {
+			this.opening.delete(dir);
+		});
+		this.opening.set(dir, opening);
+		return opening;
+	}
+
+	private async openRepo(dir: string, work: string): Promise<Repo> {
 		const repo = { dir, work };
 		if (await exists(join(dir, 'HEAD'))) {
 			return repo;

@@ -56,8 +56,9 @@ The full guide is at **<https://zeroDtree.github.io/comonad-vscode-extension/>**
 | [Safety](https://zeroDtree.github.io/comonad-vscode-extension/guide/safety.html) | Modes, approval policies, rules, sandboxing, secrets |
 | [Context](https://zeroDtree.github.io/comonad-vscode-extension/guide/context.html) | Window budget and compaction |
 | [Checkpoints and review](https://zeroDtree.github.io/comonad-vscode-extension/guide/checkpoints.html) | Journal, Keep/Undo, restore points |
+| [Orchestration](https://zeroDtree.github.io/comonad-vscode-extension/guide/orchestration.html) | Orchestrator, 14 roles, task DAG, acceptance, parallel writes |
 | [Content layer](https://zeroDtree.github.io/comonad-vscode-extension/guide/content.html) | Characters, world books, personas, presets |
-| [Extending](https://zeroDtree.github.io/comonad-vscode-extension/guide/extend.html) | Plugins, hooks, skills, subagents, MCP |
+| [Extending](https://zeroDtree.github.io/comonad-vscode-extension/guide/extend.html) | Plugins, hooks, skills, subagent roles, MCP |
 | [Reference](https://zeroDtree.github.io/comonad-vscode-extension/reference/commands.html) | Commands, tools and settings |
 
 ## Development

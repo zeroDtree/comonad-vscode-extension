@@ -15,7 +15,7 @@ export const COMONAD_BLOCK = {
 	memory: 'comonad-memory',
 	todos: 'comonad-todos',
 	skills: 'comonad-skills',
-	agents: 'comonad-agents',
+	orchestrator: 'comonad-orchestrator',
 	lore: 'comonad-lore',
 	context: 'comonad-context',
 } as const;
@@ -30,7 +30,7 @@ export const COMONAD_BLOCKS: readonly { id: ComonadBlockId; name: string }[] = [
 	{ id: COMONAD_BLOCK.memory, name: 'Memory' },
 	{ id: COMONAD_BLOCK.todos, name: 'Todos' },
 	{ id: COMONAD_BLOCK.skills, name: 'Skills' },
-	{ id: COMONAD_BLOCK.agents, name: 'Sub-agents' },
+	{ id: COMONAD_BLOCK.orchestrator, name: 'Orchestration' },
 	{ id: COMONAD_BLOCK.lore, name: 'Lore index' },
 	{ id: COMONAD_BLOCK.context, name: 'Context' },
 ];
@@ -48,7 +48,7 @@ export const DEFAULT_BLOCK_PREFIX: Record<ComonadBlockId, string> = {
 	[COMONAD_BLOCK.memory]: 'Memory from earlier sessions:',
 	[COMONAD_BLOCK.todos]: 'Current todo list:',
 	[COMONAD_BLOCK.skills]: 'Skills (load one with the skill tool before following it):',
-	[COMONAD_BLOCK.agents]: 'Subagents (delegate with the agent tool):',
+	[COMONAD_BLOCK.orchestrator]: 'You are the Orchestrator: answer directly when the work is trivial; otherwise plan, delegate, verify, and deliver.',
 	[COMONAD_BLOCK.lore]: 'World books (look one up with the lore_lookup tool when the user mentions something here):',
 	[COMONAD_BLOCK.context]: 'Context:',
 };
@@ -91,4 +91,4 @@ export function isComonadBlockId(value: string): value is ComonadBlockId {
  * The blocks that advertise a tool. They are left out whenever the request carries no tools, so the
  * model is never told to call something it cannot reach.
  */
-export const TOOL_DEPENDENT_BLOCKS: readonly ComonadBlockId[] = [COMONAD_BLOCK.skills, COMONAD_BLOCK.agents, COMONAD_BLOCK.lore];
+export const TOOL_DEPENDENT_BLOCKS: readonly ComonadBlockId[] = [COMONAD_BLOCK.skills, COMONAD_BLOCK.orchestrator, COMONAD_BLOCK.lore];

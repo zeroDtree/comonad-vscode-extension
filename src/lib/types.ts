@@ -4,6 +4,7 @@
 import type { ToolAuthorization } from './authorization';
 import type { PolicyStep, RuleSet } from './policy';
 import type { SandboxMode, SandboxOptions } from './sandbox';
+import type { TaskGraphAccess } from './task-graph';
 
 export type { SandboxMode } from './sandbox';
 
@@ -234,23 +235,41 @@ export interface AgentSpawnRequest {
 	prompt: string;
 	description?: string;
 	agent?: string;
-	background?: boolean;
-	/** Share the parent conversation context instead of starting fresh. */
-	fork?: boolean;
-	/** Further narrow the parent's capability set; never widens it. */
+	/** Resolve the role from the code-owned built-in table, not the editable catalog (acceptance). */
+	pinned?: boolean;
+	/** The task graph node this child is running; identifies the sender in the mailbox. */
+	taskId?: string;
+	/** Worker or verifier output contract in the child system prompt. */
+	contract?: 'worker' | 'verifier';
+	/** Further narrow the role's capability set; never widens it. */
 	capabilities?: Capability[];
 	/** `false` turns network off; `true` or absent inherits, and never turns it on. */
 	network?: boolean;
 	/** A sandbox ceiling; the child gets the stricter of this and the parent's sandbox. */
 	sandboxMode?: SandboxMode;
-	/** The child's own tool approval policy; defaults to whitelist_accept. */
+	/** The child's own tool approval policy; absent inherits the parent's. */
 	approval?: Approval;
+	/** A per-task step ceiling; the role and settings still cap it. */
+	maxTurns?: number;
 	/** The parent's tool call, so its card can link to the child session. */
 	callId?: string;
+	/** Called as soon as the child session exists, before the graph starts. */
+	onStart?: (sessionId: string) => void;
 	signal: AbortSignal;
 }
 
-export type AgentSpawnFunction = (request: AgentSpawnRequest) => Promise<string>;
+export interface AgentSpawnOutcome {
+	ok: boolean;
+	/** The child's final assistant text, unmodified (the structured envelope lives here). */
+	report: string;
+	/** Workspace-relative files the child wrote through tracked tools. */
+	writes: string[];
+	sessionId?: string;
+	stopped?: boolean;
+	error?: string;
+}
+
+export type AgentSpawnFunction = (request: AgentSpawnRequest) => Promise<AgentSpawnOutcome>;
 
 export interface ToolContext {
 	sessionId: string;
@@ -258,6 +277,10 @@ export interface ToolContext {
 	rootSessionId?: string;
 	/** The tool call being dispatched, when known; a spawned subagent links its session to it. */
 	callId?: string;
+	/** The orchestration task this child is running, when known. */
+	taskId?: string;
+	/** The subagent role, for the message tool's sender identity. */
+	agentName?: string;
 	/** The turn's tool batch, which the authorization is bound to. */
 	batch: number;
 	/** The gate-issued, single-use grant for this call; the executor refuses a call without one. */
@@ -271,6 +294,8 @@ export interface ToolContext {
 	todos(items?: TodoItem[]): TodoItem[];
 	tasks: TaskApi;
 	spawnAgent: AgentSpawnFunction;
+	/** The root Orchestrator's live task-graph accessor; absent in a child session. */
+	taskGraph?: TaskGraphAccess;
 	/** The session's private scratch directory: the only place a test shell may write. */
 	scratchDirectory?: string;
 	/** Resolve a path through the same guards and format resolvers `@` uses. */
@@ -310,6 +335,8 @@ export interface ToolSpec {
 	capability: Capability;
 	needsNetwork: boolean;
 	needsWorkspace: boolean;
+	/** Never run in the read-only parallel batch: it mutates shared state (the task graph). */
+	serial?: boolean;
 	/**
 	 * Runs outside the OS sandbox (a VS Code task, a plugin's own process). Such a tool can only
 	 * run under `danger-full-access`, because no other sandbox mode could be enforced for it.

@@ -173,37 +173,45 @@ in trusted workspaces, and exit code 2 blocks.
 | MCP | `mcpServers` (settings) | stdio or streamable HTTP; per-server capability and overrides |
 | Memory | Agent-owned `MEMORY.md` | Loaded into the prompt, edited with the `memory` tool |
 
-### Subagents
+### Subagent roles
 
-A subagent is a Markdown file under `.comonad/agents/` or `~/.comonad/agents/`:
+The fourteen built-in roles live in code. A custom role is a Markdown file under `.comonad/agents/`
+or `~/.comonad/agents/`:
 
 ```markdown
 ---
 name: writer
-description: Implement a focused change.
-tools: [read_file, grep_files, write_file, edit_text, run_shell_test]
+description: Write a focused technical note.
+mode: sw
+network: false
+capabilities: [ro, rw, shell_ro, shell_test]
+files: true
+test: true
+tools: [read_file, grep_files, write_file, edit_text, run_shell_test, message]
 maxTurns: 20
 ---
-Implement the change. Use the file tools for every project write; run_shell_test writes only its
-scratch directory.
+Write the note. Use the file tools for every project write; run_shell_test writes only the scratch
+directory.
 ```
 
-The frontmatter **selects** tools. Writes also need a **grant** in the `subagents` setting (Settings →
-Subagents):
+The role id is a lowercase slug (`name` or the file name). `mode` (or `workMode`) is the capability
+ceiling; `capabilities` is the default effective set and must stay inside the subagent hard cap
+(`ro`, `ro_plan`, `shell_ro`, `rw`, `shell_test`). `network: true` only requests network; the parent
+switch still has to be on. `risk` is derived from the effective capabilities and cannot be set in the
+file. A custom role appears in the Orchestration block and can be named by a task's `role`.
 
-```json
-{ "subagents": { "writer": { "files": true, "test": true } } }
-```
+The frontmatter **selects** tools. Writes also need a grant in the `subagents` setting (Settings →
+Subagents); `files` enables tracked file tools (`write_file`, `edit_text`, `edit_ranges`) and `test`
+enables `run_shell_test`. Read-only tools need no grant. Plan readers (`list_plans`, `read_plan`) use
+`ro_plan` and are available only when the parent is in Plan mode; plan writes (`write_plan`),
+`run_shell`/`start_shell` and the orchestrator tools are never granted to a child. A definition
+without a `tools` list is read-only. A custom role that reuses a built-in id does not inherit the
+built-in default grant. See [Safety](/guide/safety#orchestrator-and-subagents) and
+[Orchestration](/guide/orchestration).
 
-Read-only tools need no grant. `files` enables only tracked file tools (`write_file`, `edit_text`,
-`edit_ranges`); `test` enables `run_shell_test`. The plan readers (`list_plans`, `read_plan`) use
-`ro_plan` and are available only when the parent is in Plan mode; plan writes (`write_plan`) and
-`run_shell`/`start_shell` are never granted to a subagent. A definition without a `tools` list is
-read-only. The parent mode must allow the capability too. See [Safety](/guide/safety#subagents).
-
-`maxTurns` (default 20) bounds the child's graph budget at two steps per turn, with a minimum of
-four steps. It can tighten `subagentStepsMode`/`subagentSteps` but never loosen them; see
-[Settings](/reference/settings#subagents).
+`maxTurns` bounds the child's graph budget at two steps per turn, with a minimum of four steps. It
+can tighten `subagentStepsMode`/`subagentSteps` but never loosen them, and a task's `budget` can
+tighten it further; see [Settings](/reference/settings#orchestrator-and-subagents).
 
 ### MCP
 

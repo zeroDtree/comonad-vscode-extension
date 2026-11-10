@@ -3,28 +3,19 @@ import type { Dirent } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Service, type Context } from 'cordis';
-import { COMONAD_BLOCK, DEFAULT_BLOCK_PREFIX } from '../lib/blocks';
+import { BUILTIN_ROLES, roleRisk, type AgentRole } from '../lib/agents';
 import { booleanField, numberField, parseFrontmatter, stringField, stringListField } from '../lib/frontmatter';
+import { asWorkMode, MODE_CAPS } from '../lib/policy';
+import { SUBAGENT_CAPABILITIES } from '../lib/subagent';
+import type { Capability } from '../lib/types';
 
-/** Skills, subagent definitions and custom slash commands discovered from disk. */
+/** Skills, subagent roles and custom slash commands discovered from disk. */
 
 export interface Skill {
 	name: string;
 	description: string;
 	path: string;
 	body: string;
-}
-
-export interface AgentDefinition {
-	name: string;
-	description: string;
-	prompt: string;
-	tools?: string[];
-	disallowed?: string[];
-	model?: string;
-	maxTurns?: number;
-	background?: boolean;
-	builtin?: boolean;
 }
 
 export interface CustomCommand {
@@ -37,75 +28,6 @@ export interface CustomCommand {
 	path: string;
 }
 
-export const BUILTIN_AGENTS: AgentDefinition[] = [
-	{
-		name: 'explore',
-		description: 'Fast read-only search of the codebase. Use for locating code and answering questions about the workspace.',
-		prompt: 'You explore the workspace and report what you find. Read files, search, and summarize. Never modify anything. Return a concise report with file paths and line references.',
-		tools: ['list_dir', 'read_file', 'grep_files', 'find_files', 'find_symbols'],
-		builtin: true,
-	},
-	{
-		name: 'plan',
-		description: 'Read-only researcher that produces an implementation plan.',
-		prompt:
-			'You research the workspace and produce a step-by-step implementation plan. Inspect the relevant files first, and read existing plans for this chat with list_plans and read_plan when they are offered. The plan must list concrete files to change and the verification steps. You cannot write plan files: return the plan in your final report so the main agent can record it with write_plan. Never modify anything.',
-		tools: [
-			'list_dir',
-			'read_file',
-			'grep_files',
-			'find_files',
-			'find_symbols',
-			'get_diagnostics',
-			'git_diff',
-			'list_plans',
-			'read_plan',
-		],
-		builtin: true,
-	},
-	{
-		name: 'review',
-		description: 'Read-only code reviewer. Use to review pending changes or a file for bugs and risks.',
-		prompt: 'You review code without modifying it. Inspect the pending workspace diff and the relevant files. Report findings ordered by severity with file:line references and concrete fixes. Focus on correctness, security, and maintainability.',
-		tools: [
-			'list_dir',
-			'read_file',
-			'grep_files',
-			'find_files',
-			'find_symbols',
-			'get_diagnostics',
-			'git_diff',
-			'run_shell_readonly',
-			'list_plans',
-			'read_plan',
-		],
-		builtin: true,
-	},
-	{
-		name: 'implement',
-		description: 'Implement a focused change and verify it with tests. Writes through the tracked file tools only.',
-		prompt:
-			'You implement the delegated change. If the task names a plan and read_plan is offered, read it; otherwise use the plan content in the prompt. Every project change goes through write_file, edit_text or edit_ranges: never use a shell command to write project files. Run tests, builds and linters with run_shell_test; that shell keeps the workspace read-only and can write only to the scratch directory ($COMONAD_SCRATCH). Report the files you changed and the test results.',
-		tools: [
-			'list_dir',
-			'read_file',
-			'grep_files',
-			'find_files',
-			'find_symbols',
-			'get_diagnostics',
-			'git_diff',
-			'write_file',
-			'edit_text',
-			'edit_ranges',
-			'run_shell_readonly',
-			'run_shell_test',
-			'list_plans',
-			'read_plan',
-		],
-		builtin: true,
-	},
-];
-
 declare module 'cordis' {
 	interface Context {
 		catalog: Catalog;
@@ -116,7 +38,7 @@ export class Catalog extends Service {
 	static inject = ['host', 'log'];
 
 	skills: Skill[] = [];
-	agents: AgentDefinition[] = BUILTIN_AGENTS;
+	agents: AgentRole[] = [...BUILTIN_ROLES];
 	commands: CustomCommand[] = [];
 
 	/** The first read, in flight from the moment the service exists: see `Tavern.ready`. */
@@ -159,12 +81,12 @@ export class Catalog extends Service {
 		return this.skills.find((skill) => skill.name.toLowerCase() === wanted);
 	}
 
-	agent(name: string | undefined): AgentDefinition | undefined {
+	agent(name: string | undefined): AgentRole | undefined {
 		if (!name) {
 			return undefined;
 		}
 		const wanted = name.trim().toLowerCase();
-		return this.agents.find((agent) => agent.name.toLowerCase() === wanted);
+		return this.agents.find((agent) => agent.id.toLowerCase() === wanted);
 	}
 
 	command(name: string): CustomCommand | undefined {
@@ -181,32 +103,6 @@ export function skillLines(skills: Skill[]): string {
 		return '';
 	}
 	return skills.map((skill) => `- ${skill.name}: ${skill.description || 'no description'}`).join('\n');
-}
-
-/** The subagent list itself, without the heading a prompt block adds above it. */
-export function agentLines(agents: AgentDefinition[]): string {
-	if (agents.length === 0) {
-		return '';
-	}
-	return agents.map((agent) => `- ${agent.name}: ${agent.description || 'no description'}`).join('\n');
-}
-
-export function agentIndex(agents: AgentDefinition[], heading = DEFAULT_BLOCK_PREFIX[COMONAD_BLOCK.agents]): string {
-	const body = agentLines(agents);
-	const head = heading.trim();
-	return head && body ? `${head}\n${body}` : head || body;
-}
-
-export function allowedToolsFor(agent: AgentDefinition, available: string[]): string[] {
-	if (agent.tools?.length) {
-		const wanted = new Set(agent.tools);
-		return available.filter((name) => wanted.has(name));
-	}
-	if (agent.disallowed?.length) {
-		const blocked = new Set(agent.disallowed);
-		return available.filter((name) => !blocked.has(name));
-	}
-	return available;
 }
 
 async function loadSkills(roots: { project?: string; user?: string }): Promise<Skill[]> {
@@ -247,8 +143,8 @@ async function loadSkills(roots: { project?: string; user?: string }): Promise<S
 	return skills.sort((left, right) => left.name.localeCompare(right.name));
 }
 
-async function loadAgents(roots: { project?: string; user?: string }): Promise<AgentDefinition[]> {
-	const custom: AgentDefinition[] = [];
+async function loadAgents(roots: { project?: string; user?: string }): Promise<AgentRole[]> {
+	const custom: AgentRole[] = [];
 	for (const root of [roots.project, roots.user]) {
 		if (!root) {
 			continue;
@@ -270,25 +166,47 @@ async function loadAgents(roots: { project?: string; user?: string }): Promise<A
 					continue;
 				}
 				const { data, body } = parseFrontmatter(await readFile(file, 'utf8'));
-				const name = stringField(data, 'name') ?? entry.name.replace(/\.md$/, '');
+				const raw = stringField(data, 'name') ?? entry.name.replace(/\.md$/, '');
+				const id = raw.trim().toLowerCase();
+				if (!/^[a-z0-9][a-z0-9._-]*$/.test(id) || id.length > 64) {
+					continue;
+				}
+				const workMode = asWorkMode(stringField(data, 'mode') ?? stringField(data, 'workMode'), 'ro');
+				const declared = stringListField(data, 'capabilities');
+				const capabilities: Capability[] = declared?.length
+					? declared.filter((capability): capability is Capability =>
+							(SUBAGENT_CAPABILITIES as readonly string[]).includes(capability) &&
+							MODE_CAPS[workMode].has(capability as Capability),
+						)
+					: [...MODE_CAPS[workMode]].filter((capability) => SUBAGENT_CAPABILITIES.includes(capability));
+				const grant = {
+					files: booleanField(data, 'files') === true,
+					test: booleanField(data, 'test') === true,
+				};
 				custom.push({
-					name,
+					id,
+					title: stringField(data, 'title') ?? id,
 					description: stringField(data, 'description') ?? '',
 					prompt: body,
+					workMode,
+					capabilities,
+					network: booleanField(data, 'network') === true,
 					tools: stringListField(data, 'tools'),
 					disallowed: stringListField(data, 'disallowedTools') ?? stringListField(data, 'disallowed'),
+					grant,
+					risk: roleRisk(capabilities),
 					model: stringField(data, 'model'),
 					maxTurns: numberField(data, 'maxTurns'),
-					background: booleanField(data, 'background'),
+					builtin: false,
 				});
 			} catch {
 				continue;
 			}
 		}
 	}
-	const overridden = new Set(custom.map((agent) => agent.name));
-	return [...BUILTIN_AGENTS.filter((agent) => !overridden.has(agent.name)), ...custom].sort((left, right) =>
-		left.name.localeCompare(right.name),
+	const overridden = new Set(custom.map((agent) => agent.id));
+	return [...BUILTIN_ROLES.filter((agent) => !overridden.has(agent.id)), ...custom].sort((left, right) =>
+		left.id.localeCompare(right.id),
 	);
 }
 

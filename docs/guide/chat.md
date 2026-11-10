@@ -77,9 +77,13 @@ its shape.
 - **Step timers** climb live and settle on the duration the extension measured.
 - **Turn footer** shows *Worked for 12s · 3 tools*, or *Working…* / *Stopped*, plus copy, fork and
   regenerate actions.
-- **A subagent call opens its conversation.** An `agent` card carries **Open session** as soon as the
-  child exists. It opens a read-only overlay with the subagent's prompt, steps and tool results, and
-  follows the run as it works; **← Back** returns to the parent chat unchanged.
+- **The task board** sits above the composer while a plan has nodes: accepted/total, one chip per
+  node with its role and status, the recent coordination-note count, and **Open** for every child
+  session. It updates from the `orchestrator/changed` event while the turn runs.
+- **A delegation opens its conversation.** A `delegate` card carries **Open session** for a
+  single-task batch; a multi-task batch links every child from the task board. The read-only overlay
+  shows the child's prompt, steps and tool results and follows the run as it works; **← Back**
+  returns to the parent chat unchanged.
 - **Display** (Settings → UI) switches the whole transcript: **Rendered** folds thoughts and draws tool cards,
   **Token** shows assistant text plus a call count, **Raw** shows the full record as plain text.
 

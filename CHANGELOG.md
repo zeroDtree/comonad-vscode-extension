@@ -12,6 +12,18 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 ### Highlights
 
+- **The root turn is an Orchestrator.** It records a persistent task DAG with `task_plan`, runs ready
+  nodes with `delegate`, and reads `task_status`; a shared `message` mailbox lets parallel children
+  coordinate through one JSONL file. The old `agent` tool and the four generic built-ins
+  (`explore`/`plan`/`review`/`implement`) are replaced by fourteen leaf roles: `general-purpose`,
+  `researcher`, `math-researcher`, `explorer`, `planner`, `coder`, `tester`, `reviewer`, `debugger`,
+  `security-auditor`, `data-analyst`, `scientist`, `technical-writer` and `architect`. There is no
+  compatibility alias.
+- **Acceptance is independent.** A write task must have a `review` or `command` criterion; the runtime
+  derives a pinned built-in reviewer/tester after the worker batch and recomputes acceptance from the
+  structured JSON envelope. The model cannot mark a task accepted. Read and write tasks run in
+  parallel; tracked writes are serialised per absolute path, and each child gets its own test scratch
+  subtree.
 - **Graphs are plugins.** The graph engine now owns named Mermaid graphs and a node/route registry.
   The source lives in `comonad.graph`; empty uses the shipped `agent` loop.
 - **The tool loop is a gate, not a route.** The shipped graph is now `llm → calls → gate →

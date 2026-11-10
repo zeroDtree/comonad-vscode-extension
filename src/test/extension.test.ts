@@ -80,7 +80,7 @@ import { Checkpoints, checkpointsPlugin } from '../services/checkpoints';
 import { parseDiffs } from '../lib/diff';
 import { fsTools } from '../tools/fs';
 import { vscodeTools } from '../tools/vscode';
-import { agentTools } from '../tools/misc';
+import { BUILTIN_ROLE_BY_ID, type AgentRole } from '../lib/agents';
 import { planTools } from '../tools/plan';
 import { hostStorage, type Host } from '../services/host';
 import { Context, Service, type Plugin } from 'cordis';
@@ -896,19 +896,32 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(sanitizeSubagentGrants(null), {});
 		assert.deepStrictEqual(sanitizeSubagentGrants([]), {});
 
+		const builtin = (id: string): AgentRole => BUILTIN_ROLE_BY_ID.get(id)!;
+		const custom = (id: string): AgentRole => ({
+			id,
+			title: id,
+			description: '',
+			prompt: '',
+			workMode: 'ro',
+			capabilities: ['ro'],
+			network: false,
+			grant: { files: false, test: false },
+			risk: 'read',
+			builtin: false,
+		});
 		const config = { subagents: sanitizeSubagentGrants({}) };
-		// The built-in implementer writes and tests out of the box; every other agent is read-only.
-		assert.deepStrictEqual(subagentGrant(config, 'implement', true), DEFAULT_SUBAGENT_GRANTS.implement);
-		assert.deepStrictEqual(subagentGrant(config, 'explore', true), { files: false, test: false });
-		assert.deepStrictEqual(subagentGrant(config, 'my-writer', false), { files: false, test: false });
-		// A project file that shadows a built-in name does not inherit its default.
-		assert.deepStrictEqual(subagentGrant(config, 'implement', false), { files: false, test: false });
+		// The built-in coder writes and tests out of the box; every other role is read-only by default.
+		assert.deepStrictEqual(subagentGrant(config, builtin('coder')), DEFAULT_SUBAGENT_GRANTS.coder);
+		assert.deepStrictEqual(subagentGrant(config, builtin('explorer')), { files: false, test: false });
+		assert.deepStrictEqual(subagentGrant(config, custom('my-writer')), { files: false, test: false });
+		// A project file that shadows a built-in id does not inherit its default.
+		assert.deepStrictEqual(subagentGrant(config, { ...custom('coder'), id: 'coder' }), { files: false, test: false });
 
 		// An explicit entry overrides the default outright, including turning it off.
-		const off = { subagents: sanitizeSubagentGrants({ implement: {} }) };
-		assert.deepStrictEqual(subagentGrant(off, 'implement', true), { files: false, test: false });
-		const custom = { subagents: sanitizeSubagentGrants({ 'my-writer': { files: true } }) };
-		assert.deepStrictEqual(subagentGrant(custom, 'my-writer', false), { files: true, test: false });
+		const off = { subagents: sanitizeSubagentGrants({ coder: {} }) };
+		assert.deepStrictEqual(subagentGrant(off, builtin('coder')), { files: false, test: false });
+		const granted = { subagents: sanitizeSubagentGrants({ 'my-writer': { files: true } }) };
+		assert.deepStrictEqual(subagentGrant(granted, custom('my-writer')), { files: true, test: false });
 	});
 
 	test('the turn policy carries the configured step budget', async () => {
@@ -3236,6 +3249,17 @@ suite('Cordis kernel', () => {
 		assert.match(script, /plugin-error/, 'and a row that did not load says so');
 	});
 
+	test('the Subagents tab shows each role’s ceiling and grant defaults', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		const script = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
+		assert.match(panel, /workMode: agent\.workMode/, 'the host sends the role mode');
+		assert.match(panel, /risk: agent\.risk/, 'and its read/write risk');
+		assert.match(panel, /network: agent\.network/, 'and its network default');
+		assert.match(panel, /subagentGrant\(config, agent\)/, 'the grant comes from the role, not a duplicate table');
+		assert.match(script, /agent\.workMode/, 'the pane renders the mode');
+		assert.match(script, /agent\.risk/, 'and the risk');
+	});
+
 	test('the Inspect tab holds the dependency table, and no diagram of it', () => {
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
 		const script = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
@@ -4134,6 +4158,34 @@ suite('Cordis kernel', () => {
 		}
 		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
 		assert.ok(css.includes('.thought-tokens') && css.includes('#chats-scope') && css.includes('#jump-latest'));
+	});
+
+	test('the webview carries the orchestrator task board and delegation seams', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		for (const needle of [
+			'function renderTasks(',
+			"case 'task-board'",
+			"delegate: 'Delegate tasks'",
+			"task_plan: 'Plan tasks'",
+			"task_status: 'Task status'",
+			"message: 'Coordination note'",
+			"step.name === 'delegate'",
+			'data-subagent',
+			'tasksEl.addEventListener',
+		]) {
+			assert.ok(js.includes(needle), needle);
+		}
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		for (const needle of [
+			'id="tasks"',
+			"ctx.on('orchestrator/changed'",
+			'taskBoard: session ? ctx.orchestrator.board(session) : undefined',
+		]) {
+			assert.ok(panel.includes(needle), needle);
+		}
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.ok(css.includes('#tasks') && css.includes('.task.rejected'));
 	});
 
 	test('chat only runs a turn without offering the model any tool', async () => {
@@ -6436,12 +6488,12 @@ suite('Tavern content', () => {
 			const preview = kernel.ctx.tavern.previewPrompts(preset, [
 				{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' },
 				{ id: COMONAD_BLOCK.skills, name: 'Skills', text: 'skills' },
-				{ id: COMONAD_BLOCK.agents, name: 'Sub-agents', text: 'agents' },
+				{ id: COMONAD_BLOCK.orchestrator, name: 'Orchestration', text: 'orchestrate' },
 				{ id: COMONAD_BLOCK.lore, name: 'Lore index', text: 'lore' },
 			]);
 			assert.strictEqual(preview[COMONAD_BLOCK.identity], 'identity');
 			assert.strictEqual(preview[COMONAD_BLOCK.skills], undefined);
-			assert.strictEqual(preview[COMONAD_BLOCK.agents], undefined);
+			assert.strictEqual(preview[COMONAD_BLOCK.orchestrator], undefined);
 			assert.strictEqual(preview[COMONAD_BLOCK.lore], undefined);
 		} finally {
 			await kernel.dispose();
@@ -6705,7 +6757,7 @@ suite('Tavern content', () => {
 					stop: () => false,
 					list: () => [],
 				},
-				spawnAgent: async () => '',
+				spawnAgent: async () => ({ ok: true, report: '', writes: [] }),
 			};
 			const text = (value: string | { content: string }): string => (typeof value === 'string' ? value : value.content);
 			const hit = text(await tool.execute({ query: 'salt' }, context));
@@ -8509,656 +8561,6 @@ suite('Per-file checkpoints', () => {
 		}
 	});
 
-	test('a subagent cannot write: its write tools are not offered, and a forced write is refused', async () => {
-		const kernel = await createTestKernel({ config: { checkpoints: true } });
-		try {
-			const workspace = kernel.host.workspace();
-			writeFileSync(join(workspace, 'guarded.txt'), 'original\n');
-			let subagentOffered: string[] = [];
-			let subagentResult = '';
-			let subagentRuns = 0;
-			kernel.ctx.llm.use({
-				name: 'delegator',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					// The subagent is told it is a subagent; it tries to write anyway, and reports what came back.
-					if (system.includes('subagent of Comonad')) {
-						subagentRuns += 1;
-						subagentOffered = (request.tools ?? []).map((tool) => tool.name);
-						const last = [...request.messages].reverse().find((message) => message.role === 'tool');
-						if (!last) {
-							const toolCall: ToolCall = { id: 'forced', name: 'write_file', arguments: JSON.stringify({ path: 'guarded.txt', content: 'hacked\n' }) };
-							return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
-						}
-						subagentResult = last.content;
-						return { message: { role: 'assistant', content: 'report' }, toolCalls: [], usage: { input: 1, output: 1 } };
-					}
-					// The parent delegates once, then reports.
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						const toolCall: ToolCall = { id: 'delegate', name: 'agent', arguments: JSON.stringify({ prompt: 'try to write', description: 'write' }) };
-						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
-					}
-					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			await kernel.ctx.plugin(fsTools);
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			// Without this the next assertions could pass vacuously: the subagent must actually have run.
-			assert.ok(subagentRuns > 0, `the subagent ran (${subagentRuns} times)`);
-			assert.ok(subagentOffered.length > 0, 'the subagent was offered at least one tool');
-			assert.ok(!subagentOffered.includes('write_file'), `write_file is not offered to a subagent: ${subagentOffered.join(', ')}`);
-			assert.ok(!subagentOffered.includes('edit_text'), 'edit_text is not offered either');
-			assert.ok(/not available to this subagent/.test(subagentResult), `a forced write is refused: ${subagentResult}`);
-			assert.strictEqual(readFileSync(join(workspace, 'guarded.txt'), 'utf8'), 'original\n', 'the file was not written');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a granted subagent writes through the tracked file tools into the parent journal', async () => {
-		const kernel = await createTestKernel({ config: { checkpoints: true, mode: 'sw', approval: 'universal_accept' } });
-		try {
-			const workspace = kernel.host.workspace();
-			let subagentSaw = '';
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'implementer',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						const last = request.messages[request.messages.length - 1];
-						if (last?.role !== 'tool') {
-							return reply('', [{ id: 'w1', name: 'write_file', arguments: JSON.stringify({ path: 'made.txt', content: 'made\n' }) }]);
-						}
-						subagentSaw = last.content;
-						return reply('wrote it');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						return reply('', [
-							{
-								id: 'delegate',
-								name: 'agent',
-								arguments: JSON.stringify({
-									agent: 'implement',
-									prompt: 'write made.txt',
-									description: 'write',
-									approval: 'universal_accept',
-								}),
-							},
-						]);
-					}
-					return reply('done');
-				},
-			});
-			const starts: Array<{ callId?: string; id: string; name: string }> = [];
-			const changes: string[] = [];
-			kernel.ctx.on('agent/subagent-start', (_ref, info) => starts.push(info));
-			kernel.ctx.on('subagent/changed', (id) => changes.push(id));
-			await kernel.ctx.plugin(fsTools);
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			assert.strictEqual(readFileSync(join(workspace, 'made.txt'), 'utf8'), 'made\n', 'the subagent wrote the file');
-			assert.match(subagentSaw, /wrote made\.txt/, 'the write tool ran in the subagent');
-			const root = kernel.ctx.sessions.active();
-			assert.ok(root, 'the parent chat exists');
-			const pending = await kernel.ctx.checkpoints.pending(workspace, root.id);
-			assert.ok(pending.files.some((file) => file.path === 'made.txt'), 'the parent journal records the subagent write');
-			const parent = kernel.ctx.sessions.require(root.id);
-			const toolResult = parent.transcript.find((message) => message.role === 'tool');
-			assert.match(toolResult?.content ?? '', /Files changed/);
-			assert.match(toolResult?.content ?? '', /made\.txt/);
-
-			// The parent's `agent` card links to a real, hidden child conversation.
-			const childId = parent.subagents?.delegate;
-			assert.ok(childId, 'the parent records the tool-call → child-session link');
-			const child = kernel.ctx.sessions.require(childId);
-			assert.strictEqual(child.parentId, parent.id, 'the child knows its parent');
-			assert.strictEqual(child.subagent, 'implement', 'and the agent that owns it');
-			assert.strictEqual(child.subagentDone, true, 'the finished run is marked done');
-			assert.ok(child.transcript.some((message) => message.role === 'user' && message.content.includes('write made.txt')), 'the child keeps the prompt');
-			assert.ok(
-				child.transcript.some((message) => message.role === 'assistant' && message.toolCalls?.some((call) => call.name === 'write_file')),
-				'the child keeps the model step',
-			);
-			assert.ok(child.transcript.some((message) => message.role === 'tool' && /wrote made\.txt/.test(message.content)), 'and the tool result');
-			assert.ok(!kernel.ctx.sessions.list().some((session) => session.id === childId), 'the child stays out of the ordinary history');
-			assert.strictEqual(starts.length, 1, 'one subagent start was announced');
-			assert.strictEqual(starts[0]?.callId, 'delegate');
-			assert.strictEqual(starts[0]?.id, childId);
-			assert.strictEqual(starts[0]?.name, 'implement');
-			assert.ok(changes.includes(childId), 'the child conversation announced its steps');
-
-			kernel.ctx.sessions.remove(parent.id);
-			assert.strictEqual(kernel.ctx.sessions.get(childId), undefined, 'removing the parent removes its child');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a subagent without a grant is read-only even when its definition lists write tools', async () => {
-		const kernel = await createTestKernel({ config: { checkpoints: true, mode: 'sw', approval: 'universal_accept' } });
-		try {
-			const workspace = kernel.host.workspace();
-			const agents = join(workspace, '.comonad', 'agents');
-			mkdirSync(agents, { recursive: true });
-			writeFileSync(join(agents, 'writer.md'), '---\nname: writer\ndescription: writes\ntools: [read_file, write_file]\n---\nWrite the file.\n');
-			await kernel.ctx.catalog.reload();
-			let offered: string[] = [];
-			let refused = '';
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'ungranted',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						offered = (request.tools ?? []).map((tool) => tool.name);
-						const last = request.messages[request.messages.length - 1];
-						if (last?.role !== 'tool') {
-							return reply('', [{ id: 'forced', name: 'write_file', arguments: JSON.stringify({ path: 'forced.txt', content: 'no\n' }) }]);
-						}
-						refused = last.content;
-						return reply('stopped');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						return reply('', [
-							{
-								id: 'delegate',
-								name: 'agent',
-								arguments: JSON.stringify({
-									agent: 'writer',
-									prompt: 'try to write',
-									description: 'write',
-									approval: 'universal_accept',
-								}),
-							},
-						]);
-					}
-					return reply('done');
-				},
-			});
-			await kernel.ctx.plugin(fsTools);
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			assert.ok(offered.includes('read_file'), `read tools are offered: ${offered.join(', ')}`);
-			assert.ok(!offered.includes('write_file'), `write_file is not offered without a grant: ${offered.join(', ')}`);
-			assert.match(refused, /not available to this subagent/);
-			assert.ok(!existsSync(join(workspace, 'forced.txt')), 'the forced write did not land');
-
-			// The same definition, granted in settings, now receives the tracked write tool.
-			kernel.host.values.subagents = { writer: { files: true } };
-			offered = [];
-			refused = '';
-			await kernel.ctx.agent.runTurn({ text: 'delegate again', surface: 'test' });
-			assert.ok(offered.includes('write_file'), `the grant makes the write tool available: ${offered.join(', ')}`);
-			assert.strictEqual(readFileSync(join(workspace, 'forced.txt'), 'utf8'), 'no\n', 'and the write lands');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a subagent never receives the full shell, and a write-capable one cannot run in the background', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept', subagents: { runner: { files: true, test: true } } } });
-		try {
-			const workspace = kernel.host.workspace();
-			const agents = join(workspace, '.comonad', 'agents');
-			mkdirSync(agents, { recursive: true });
-			writeFileSync(
-				join(agents, 'runner.md'),
-				'---\nname: runner\ndescription: runs\ntools: [read_file, write_file, run_shell_test, run_shell, start_shell]\n---\nDo the task.\n',
-			);
-			await kernel.ctx.catalog.reload();
-			let offered: string[] = [];
-			let backgroundRuns = 0;
-			let foreground = false;
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'runner',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						offered = (request.tools ?? []).map((tool) => tool.name);
-						if (!foreground) {
-							backgroundRuns += 1;
-						}
-						return reply('done');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						const args = foreground
-							? { agent: 'runner', prompt: 'run it', description: 'fg' }
-							: { agent: 'runner', prompt: 'write it', description: 'bg', background: true };
-						return reply('', [{ id: 'delegate', name: 'agent', arguments: JSON.stringify(args) }]);
-					}
-					return reply('done');
-				},
-			});
-			await kernel.ctx.plugin(fsTools);
-			await kernel.ctx.plugin(shellTools);
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			assert.strictEqual(backgroundRuns, 0, 'the background write-capable subagent never started');
-			const parent = kernel.ctx.sessions.active();
-			assert.ok(parent);
-			const tool = parent.transcript.find((message) => message.role === 'tool');
-			assert.match(tool?.content ?? '', /must run in the foreground/);
-
-			// Foreground now: the grant and the definition are honoured, but the full shell is not.
-			foreground = true;
-			await kernel.ctx.agent.runTurn({ text: 'delegate again', surface: 'test' });
-			assert.ok(offered.includes('write_file'), `the granted tracked write is offered: ${offered.join(', ')}`);
-			assert.ok(offered.includes('run_shell_test'), `the granted test shell is offered: ${offered.join(', ')}`);
-			assert.ok(!offered.includes('run_shell'), `the full shell is never offered: ${offered.join(', ')}`);
-			assert.ok(!offered.includes('start_shell'), 'and neither is its background form');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a granted writing subagent denies its own ask by default', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'sw', approval: 'universal_accept', checkpoints: false } });
-		try {
-			const workspace = kernel.host.workspace();
-			let saw = '';
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'default-child-approval',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						const last = request.messages[request.messages.length - 1];
-						if (last?.role !== 'tool') {
-							return reply('', [{ id: 'w1', name: 'write_file', arguments: JSON.stringify({ path: 'denied.txt', content: 'no\n' }) }]);
-						}
-						saw = last.content;
-						return reply('done');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						return reply('', [
-							{ id: 'delegate', name: 'agent', arguments: JSON.stringify({ agent: 'implement', prompt: 'write it', description: 'write' }) },
-						]);
-					}
-					return reply('done');
-				},
-			});
-			await kernel.ctx.plugin(fsTools);
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			assert.ok(!existsSync(join(workspace, 'denied.txt')), 'the default child approval does not let a write run');
-			assert.match(saw, /Rejected:/);
-			assert.match(saw, /subagent approval response policy denies/);
-			const parent = kernel.ctx.sessions.active();
-			assert.ok(parent);
-			const childId = parent.subagents?.delegate;
-			assert.ok(childId);
-			const child = kernel.ctx.sessions.require(childId);
-			assert.strictEqual(child.policy.approval, 'whitelist_accept');
-			assert.strictEqual(child.policy.approvalResponse, 'never');
-			assert.ok(child.policy.capabilities?.includes('rw'), 'the grant still gives the capability');
-			assert.ok(child.policy.tools?.includes('write_file'), 'and the model is offered the tool');
-			assert.ok(child.policy.rules, 'the child policy carries the rule snapshot');
-			assert.ok(child.policyRevision, 'the child session records its policy revision');
-
-			const event = kernel.ctx.decisions.recent(20).find((entry) => entry.subagent === 'implement' && entry.tool_name === 'write_file');
-			assert.ok(event);
-			assert.strictEqual(event.event, 'denied');
-			const view = kernel.ctx.decisions.reconstruct(event.call_id);
-			assert.ok(view);
-			assert.strictEqual(view.nodes[0]?.policy_revision, child.policyRevision);
-			assert.strictEqual(view.nodes.at(-1)?.layer, 'response');
-			assert.strictEqual(view.nodes.at(-1)?.matched_rule, 'never');
-			assert.ok(view.policy?.capabilities.includes('rw'));
-			assert.ok(view.policy?.tools?.includes('write_file'));
-			assert.strictEqual(view.policy?.approvalResponse, 'never');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a child inherits the parent capabilities, network and sandbox and narrows them', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'ro', approval: 'universal_accept', network: true, sandboxMode: 'workspace-write' } });
-		try {
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'narrow-child',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						return reply('done');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						return reply('', [
-							{
-								id: 'delegate',
-								name: 'agent',
-								arguments: JSON.stringify({
-									agent: 'implement',
-									prompt: 'inspect',
-									description: 'inspect',
-									network: false,
-									sandboxMode: 'read-only',
-								}),
-							},
-						]);
-					}
-					return reply('done');
-				},
-			});
-			await kernel.ctx.plugin(fsTools);
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			const parent = kernel.ctx.sessions.active();
-			assert.ok(parent);
-			const childId = parent.subagents?.delegate;
-			assert.ok(childId);
-			const child = kernel.ctx.sessions.require(childId);
-			assert.deepStrictEqual(child.policy.capabilities, ['ro', 'shell_ro'], 'the parent ro mode wins over the wider delegation');
-			assert.strictEqual(child.policy.network, false, 'the delegation closed network');
-			assert.strictEqual(child.policy.sandboxMode, 'read-only', 'the sandbox met the delegation ceiling');
-			assert.ok(!child.policy.tools?.includes('write_file'), 'a read-only parent never delegates a write tool');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('an ancestor ask rule denies a child even with universal_accept', async () => {
-		const kernel = await createTestKernel({
-			config: { mode: 'aw', approval: 'universal_accept', permissions: { allow: [], ask: ['probe_ask'], deny: [] } },
-		});
-		try {
-			const workspace = kernel.host.workspace();
-			const agents = join(workspace, '.comonad', 'agents');
-			mkdirSync(agents, { recursive: true });
-			writeFileSync(join(agents, 'asker.md'), '---\nname: asker\ndescription: asks\n---\nAsk.\n');
-			await kernel.ctx.catalog.reload();
-			let result = '';
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.tools.register({
-				name: 'probe_ask',
-				description: '',
-				parameters: objectSchema({}),
-				capability: 'ro',
-				needsNetwork: false,
-				needsWorkspace: false,
-				execute: async () => 'ran',
-			});
-			kernel.ctx.llm.use({
-				name: 'ancestor-ask',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						const last = request.messages[request.messages.length - 1];
-						if (last?.role !== 'tool') {
-							return reply('', [{ id: 'ask', name: 'probe_ask', arguments: '{}' }]);
-						}
-						result = last.content;
-						return reply('done');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						return reply('', [
-							{
-								id: 'delegate',
-								name: 'agent',
-								arguments: JSON.stringify({ agent: 'asker', prompt: 'ask', description: 'ask', approval: 'universal_accept' }),
-							},
-						]);
-					}
-					return reply('done');
-				},
-			});
-			let approvals = 0;
-			kernel.ctx.on('approval/request', (request, next) => {
-				approvals += 1;
-				return next();
-			});
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			assert.strictEqual(approvals, 0, 'the child never reaches an approval surface');
-			assert.match(result, /Rejected:/);
-			assert.match(result, /subagent approval response policy denies/);
-			const parent = kernel.ctx.sessions.active();
-			assert.ok(parent);
-			const childId = parent.subagents?.delegate;
-			assert.ok(childId);
-			const child = kernel.ctx.sessions.require(childId);
-			assert.ok(child.policy.rules?.ask.some((rule) => rule.tool === 'probe_ask'), 'the ancestor rule is in the snapshot');
-			assert.strictEqual(child.policy.approval, 'universal_accept');
-			assert.strictEqual(child.policy.approvalResponse, 'never');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a running child is tightened by a parent settings change and never widened again', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept', network: true, sandboxMode: 'workspace-write' } });
-		try {
-			const workspace = kernel.host.workspace();
-			const agents = join(workspace, '.comonad', 'agents');
-			mkdirSync(agents, { recursive: true });
-			writeFileSync(join(agents, 'probe.md'), '---\nname: probe\ndescription: probes\ntools: [probe_policy]\n---\nProbe the policy.\n');
-			await kernel.ctx.catalog.reload();
-			const seen: Array<{ network: boolean; sandboxMode: string }> = [];
-			kernel.ctx.tools.register({
-				name: 'probe_policy',
-				description: '',
-				parameters: objectSchema({}),
-				capability: 'ro',
-				needsNetwork: false,
-				needsWorkspace: false,
-				execute: async (_args, ctx) => {
-					seen.push({ network: ctx.policy.network, sandboxMode: ctx.policy.sandboxMode });
-					return JSON.stringify(seen.at(-1));
-				},
-			});
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'tightening',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						const tools = request.messages.filter((message) => message.role === 'tool').length;
-						if (tools === 0) {
-							return reply('', [{ id: 'p1', name: 'probe_policy', arguments: '{}' }]);
-						}
-						if (tools === 1) {
-							kernel.host.values.network = false;
-							kernel.host.values.sandboxMode = 'read-only';
-							return reply('', [{ id: 'p2', name: 'probe_policy', arguments: '{}' }]);
-						}
-						if (tools === 2) {
-							kernel.host.values.network = true;
-							kernel.host.values.sandboxMode = 'workspace-write';
-							return reply('', [{ id: 'p3', name: 'probe_policy', arguments: '{}' }]);
-						}
-						return reply('done');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						return reply('', [
-							{
-								id: 'delegate',
-								name: 'agent',
-								arguments: JSON.stringify({ agent: 'probe', prompt: 'probe', description: 'probe', approval: 'universal_accept' }),
-							},
-						]);
-					}
-					return reply('done');
-				},
-			});
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			assert.deepStrictEqual(seen, [
-				{ network: true, sandboxMode: 'workspace-write' },
-				{ network: false, sandboxMode: 'read-only' },
-				{ network: false, sandboxMode: 'read-only' },
-			]);
-			const parent = kernel.ctx.sessions.active();
-			assert.ok(parent);
-			const child = kernel.ctx.sessions.require(parent.subagents?.delegate ?? '');
-			assert.strictEqual(child.policy.network, false);
-			assert.strictEqual(child.policy.sandboxMode, 'read-only');
-			assert.strictEqual(child.policyRevision !== undefined, true);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a cold-resumed child reads its snapshot, not the current settings', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept', network: true, sandboxMode: 'workspace-write' } });
-		try {
-			const parent = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'parent');
-			kernel.ctx.sessions.save(parent);
-			const childPolicy: SessionPolicy = {
-				...kernel.ctx.agent.policyFor(),
-				capabilities: ['ro'],
-				rules: parseRules({}),
-				tools: ['probe_policy'],
-				approval: 'universal_accept',
-				approvalResponse: 'never',
-				network: false,
-				sandboxMode: 'read-only',
-			};
-			kernel.ctx.sessions.createChild(childPolicy, 'child', {
-				title: 'cold child',
-				parentId: parent.id,
-				subagent: 'probe',
-				transcript: [{ role: 'user', content: 'seed' }],
-				policyRevision: 'snapshot',
-			});
-			// The parent and settings are now looser than the child snapshot.
-			kernel.host.values.mode = 'aw';
-			kernel.host.values.network = true;
-			kernel.host.values.sandboxMode = 'workspace-write';
-			let seen: { network: boolean; sandboxMode: string; capabilities?: string[] } | undefined;
-			kernel.ctx.tools.register({
-				name: 'probe_policy',
-				description: '',
-				parameters: objectSchema({}),
-				capability: 'ro',
-				needsNetwork: false,
-				needsWorkspace: false,
-				execute: async (_args, ctx) => {
-					seen = { network: ctx.policy.network, sandboxMode: ctx.policy.sandboxMode, capabilities: ctx.policy.capabilities };
-					return 'ok';
-				},
-			});
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'cold',
-				async chat(request) {
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role !== 'tool') {
-						return reply('', [{ id: 'p', name: 'probe_policy', arguments: '{}' }]);
-					}
-					return reply('done');
-				},
-			});
-			await kernel.ctx.agent.runTurn({ sessionId: 'child', text: 'cold', surface: 'test' });
-			assert.ok(seen);
-			assert.strictEqual(seen.network, false, 'the snapshot network stays off');
-			assert.strictEqual(seen.sandboxMode, 'read-only', 'the snapshot sandbox stays tight');
-			assert.deepStrictEqual(seen.capabilities, ['ro'], 'and the snapshot capability set is authoritative');
-			const child = kernel.ctx.sessions.require('child');
-			assert.ok(child.policyRevision && child.policyRevision !== 'snapshot', 'the revision is recomputed for the effective snapshot');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('spawn and fork build the same child policy', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept', network: true, sandboxMode: 'workspace-write' } });
-		try {
-			let turn = 0;
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'spawn-fork',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						return reply('done');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						turn += 1;
-						return reply('', [
-							{
-								id: turn === 1 ? 'spawn' : 'fork',
-								name: 'agent',
-								arguments: JSON.stringify({ agent: 'explore', prompt: 'inspect', fork: turn === 2, approval: 'universal_accept' }),
-							},
-						]);
-					}
-					return reply('done');
-				},
-			});
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'spawn', surface: 'test' });
-			const parent = kernel.ctx.sessions.active();
-			assert.ok(parent);
-			const spawn = kernel.ctx.sessions.require(parent.subagents?.spawn ?? '');
-			await kernel.ctx.agent.runTurn({ text: 'fork', surface: 'test' });
-			const after = kernel.ctx.sessions.active();
-			assert.ok(after);
-			const fork = kernel.ctx.sessions.require(after.subagents?.fork ?? '');
-			assert.notStrictEqual(spawn.id, fork.id);
-			assert.deepStrictEqual(fork.policy, spawn.policy, 'only the context differs between Spawn and Fork');
-			assert.strictEqual(fork.policyRevision, spawn.policyRevision);
-			assert.ok(fork.transcript.some((message) => message.role === 'user' && message.content === 'spawn'), 'Fork carries the parent history');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
 	test('the journal is a row like any other: with it off, a write is just a write', async () => {
 		const kernel = await createTestKernel({ config: { checkpoints: true }, skip: ['checkpoints'] });
 		try {
@@ -9542,170 +8944,6 @@ suite('Plan tools', () => {
 		}
 	});
 
-	test('a subagent resolves the plan folder of the chat that spawned it', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const workspace = kernel.host.workspace();
-			mkdirSync(join(workspace, '.comonad', 'plans', 'root-chat'), { recursive: true });
-			writeFileSync(join(workspace, '.comonad', 'plans', 'root-chat', 'plan.md'), 'root plan\n');
-			await kernel.ctx.plugin(planTools);
-			const ctx = { ...directToolContext(kernel), sessionId: 'sub-child', rootSessionId: 'root-chat' };
-			assert.strictEqual(await kernel.ctx.tools.get('read_plan')!.execute({ name: 'plan.md' }, ctx), 'root plan\n');
-			assert.match(String(await kernel.ctx.tools.get('list_plans')!.execute({}, ctx)), /plan\.md/);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a plan-mode child reads the parent plan but never writes one', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'pl', approval: 'universal_accept' } });
-		try {
-			const workspace = kernel.host.workspace();
-			const parent = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'root-chat');
-			mkdirSync(join(workspace, '.comonad', 'plans', parent.id), { recursive: true });
-			writeFileSync(join(workspace, '.comonad', 'plans', parent.id, 'plan.md'), 'the canonical plan\n');
-			const agents = join(workspace, '.comonad', 'agents');
-			mkdirSync(agents, { recursive: true });
-			writeFileSync(
-				join(agents, 'reader.md'),
-				'---\nname: reader\ndescription: reads plans\ntools: [read_file, list_plans, read_plan, write_plan]\n---\nRead the plan.\n',
-			);
-			await kernel.ctx.catalog.reload();
-
-			let offered: string[] = [];
-			let read = '';
-			let refused = '';
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'plan-reader',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						offered = (request.tools ?? []).map((tool) => tool.name);
-						const last = request.messages[request.messages.length - 1];
-						if (last?.role === 'user') {
-							return reply('', [{ id: 'r1', name: 'read_plan', arguments: JSON.stringify({ name: 'plan.md' }) }]);
-						}
-						if (last?.role === 'tool' && last.toolCallId === 'r1') {
-							read = last.content;
-							return reply('', [{ id: 'w1', name: 'write_plan', arguments: JSON.stringify({ name: 'x.md', content: 'x' }) }]);
-						}
-						if (last?.role === 'tool' && last.toolCallId === 'w1') {
-							refused = last.content;
-							return reply('done');
-						}
-						return reply('done');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						return reply('', [
-							{
-								id: 'delegate',
-								name: 'agent',
-								arguments: JSON.stringify({ agent: 'reader', prompt: 'read plan.md', description: 'read', approval: 'universal_accept' }),
-							},
-						]);
-					}
-					return reply('done');
-				},
-			});
-			await kernel.ctx.plugin(planTools);
-			await kernel.ctx.plugin(fsTools);
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			assert.match(read, /the canonical plan/, 'the child read the root plan');
-			assert.match(refused, /not available to this subagent/, 'the forced plan write was refused');
-			assert.ok(offered.includes('list_plans'), `list_plans is offered: ${offered.join(', ')}`);
-			assert.ok(offered.includes('read_plan'), `read_plan is offered: ${offered.join(', ')}`);
-			assert.ok(!offered.includes('write_plan'), 'write_plan is never offered');
-			const childId = parent.subagents?.delegate;
-			assert.ok(childId, 'the parent records the child link');
-			const child = kernel.ctx.sessions.require(childId);
-			assert.ok(child.policy.capabilities?.includes('ro_plan'), 'the child holds ro_plan');
-			assert.ok(!child.policy.capabilities?.includes('rw_plan'), 'the child never holds rw_plan');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('an execution-mode child has no plan readers', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'sw', approval: 'universal_accept' } });
-		try {
-			const workspace = kernel.host.workspace();
-			const parent = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'exec-chat');
-			const agents = join(workspace, '.comonad', 'agents');
-			mkdirSync(agents, { recursive: true });
-			writeFileSync(
-				join(agents, 'reader.md'),
-				'---\nname: reader\ndescription: reads plans\ntools: [read_file, list_plans, read_plan]\n---\nRead the plan.\n',
-			);
-			await kernel.ctx.catalog.reload();
-
-			let offered: string[] = [];
-			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
-				message: { role: 'assistant' as const, content, toolCalls },
-				toolCalls,
-				usage: { input: 1, output: 1 },
-			});
-			kernel.ctx.llm.use({
-				name: 'exec-child',
-				async chat(request) {
-					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
-					if (system.includes('subagent of Comonad')) {
-						offered = (request.tools ?? []).map((tool) => tool.name);
-						return reply('done');
-					}
-					const last = request.messages[request.messages.length - 1];
-					if (last?.role === 'user') {
-						return reply('', [
-							{ id: 'delegate', name: 'agent', arguments: JSON.stringify({ agent: 'reader', prompt: 'read plan.md', description: 'read' }) },
-						]);
-					}
-					return reply('done');
-				},
-			});
-			await kernel.ctx.plugin(planTools);
-			await kernel.ctx.plugin(fsTools);
-			await kernel.ctx.plugin(agentTools);
-			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
-
-			assert.ok(offered.includes('read_file'), `read_file is offered: ${offered.join(', ')}`);
-			assert.ok(!offered.includes('list_plans'), 'list_plans is not offered without ro_plan');
-			assert.ok(!offered.includes('read_plan'), 'read_plan is not offered without ro_plan');
-			const childId = parent.subagents?.delegate;
-			assert.ok(childId);
-			const child = kernel.ctx.sessions.require(childId);
-			assert.ok(!child.policy.capabilities?.includes('ro_plan'), 'an execution-mode parent grants no ro_plan');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('built-in plan, review and implement agents read plans but never write them', async () => {
-		const kernel = await createTestKernel();
-		try {
-			for (const name of ['plan', 'review', 'implement']) {
-				const agent = kernel.ctx.catalog.agent(name);
-				assert.ok(agent?.tools?.includes('list_plans'), `${name} lists plans`);
-				assert.ok(agent?.tools?.includes('read_plan'), `${name} reads plans`);
-				assert.ok(!agent?.tools?.includes('write_plan'), `${name} never writes plans`);
-			}
-			const explore = kernel.ctx.catalog.agent('explore');
-			assert.ok(!explore?.tools?.includes('list_plans'));
-			assert.ok(!explore?.tools?.includes('read_plan'));
-			assert.ok(!explore?.tools?.includes('write_plan'));
-		} finally {
-			await kernel.dispose();
-		}
-	});
-});
-
-suite('Prompt editing', () => {
 	test('a turn names the user message that opened it', () => {
 		const transcript: Message[] = [
 			{ role: 'assistant', content: 'hello', greeting: true },
@@ -10559,7 +9797,7 @@ function directToolContext(kernel: Awaited<ReturnType<typeof createTestKernel>>,
 			stop: () => false,
 			list: () => [],
 		},
-		spawnAgent: async () => '',
+		spawnAgent: async () => ({ ok: true, report: '', writes: [] }),
 	};
 }
 

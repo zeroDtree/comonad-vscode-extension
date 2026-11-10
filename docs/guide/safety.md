@@ -129,60 +129,55 @@ always need an OS sandbox, because their promises cannot be kept without one. Th
 - Secrets (keys, tokens, passwords) are stripped from the environment unless
   `comonad.filterSensitiveEnv` is off.
 
-## Subagents
+## Orchestrator and subagents
+
+The root turn is the **Orchestrator**: it plans the task DAG, delegates ready nodes and delivers the
+integrated result. The fourteen built-in roles are leaf workers. A child never receives `task_plan`,
+`delegate`, `task_status` or the old `agent` tool, and `spawnAgent` refuses a spawn from a child.
 
 A subagent runs the same six layers with its **own effective policy**, built when the delegation
 starts. It can only narrow the parent:
 
 | Policy | What the child gets |
 | --- | --- |
-| Work mode | parent effective capabilities ∩ the delegation's capability filter ∩ the hard cap (`ro`, `ro_plan`, `shell_ro`, `rw`, `shell_test`) |
-| Network | parent switch; the delegation may turn it off, never on |
+| Work mode | parent effective capabilities ∩ the role's capabilities ∩ the task's capability filter ∩ the hard cap (`ro`, `ro_plan`, `shell_ro`, `rw`, `shell_test`) |
+| Network | parent switch AND the role's default; a task may turn it off, never on |
 | User rules | all ancestor rules; `deny` > `ask` > `allow` |
-| Tool approval | the delegation's own policy, default `whitelist_accept` |
+| Tool approval | the parent's approval policy |
 | Approval response | fixed `never` |
 | Sandbox | the stricter of the parent sandbox and the delegation's ceiling |
-
-Spawn and Fork share exactly this policy; only their context differs. The full snapshot, its policy
-revision, the parent and the creation time are saved in the child session. A running child is
-re-tightened before its next model request and its next gate; a parent that later loosens does not
-widen it. A cold resume reads the recorded snapshot.
 
 Consequences:
 
 - A parent in `ro` refuses every child write.
-- A parent with network off keeps it off for the child.
-- An ancestor `deny` beats any child `allow` (rules run before the approval policy).
-- An ancestor `ask` produces a confirmation, and the child's fixed `never` response denies it.
-- Any child approval policy that asks denies the call; no approval card is shown.
-- Parent tightening applies to later calls; a process already running keeps the sandbox it started
-  with.
+- A parent with network off keeps it off for the child; a researcher task that needs network fails
+  before it starts.
+- An ancestor `deny` beats any child `allow`; an ancestor `ask` is denied by the child's fixed
+  `never` response without a card.
+- A write delegation needs a parent policy that runs writes without asking (`universal_accept`,
+  `blacklist_reject`, or an allow rule). Under `manual`/`whitelist_accept`, write the change in the
+  main thread where the user can approve it.
+- `files` grants only tracked file tools; `test` grants `run_shell_test`. A role's default grant comes
+  from the role table. Plan reads use `ro_plan`; `write_plan` is never granted to a child.
+- A child's file writes are journaled under the **parent chat**, so they appear in its review, inline
+  diff and Git Changes.
 
-The grant, the definition and the hard cap still select the tools:
+### Acceptance and parallel work
 
-- `files` grants only tracked file tools (`write_file`, `edit_text`, `edit_ranges`).
-- `test` grants `run_shell_test`.
-- Read-only tools are always available. The plan readers (`list_plans`, `read_plan`) use `ro_plan`
-  and appear only when the parent is in Plan mode.
-- Plan writes (`write_plan`) use `rw_plan` and are never granted to a subagent.
-- A definition with no `tools` list is read-only.
-- Built-in `implement` defaults to **files + test**; every other built-in and every custom agent
-  defaults to read-only until granted.
-- A project file that shadows a built-in name does not inherit that built-in's default grant.
-- A subagent's file writes are journaled under the **parent chat**, so they appear in its review,
-  inline diff and Git Changes.
-- A parent outside Plan mode (`ro`/`sw`/`aw`) has no `ro_plan`, so its children cannot use the plan
-  readers: pass the plan content in the delegation prompt instead.
-- Write-capable subagents run in the foreground, one at a time. A background subagent is read-only.
+- A task whose effective capabilities include `rw` must have at least one `review` or `command`
+  acceptance criterion. The runtime derives a **pinned built-in** `reviewer` or `tester` child after
+  the worker batch; a project `.comonad/agents/reviewer.md` cannot weaken acceptance.
+- The worker and verifier return a JSON envelope. Malformed output is `invalid_output`; a
+  self-declared verdict is advisory and acceptance is recomputed from per-criterion results.
+- Read and write tasks may run in parallel. Every tracked write passes through `ctx.edit`, which
+  serialises writes to the **same absolute path**; different files proceed concurrently.
+- Parallel workers coordinate through the `message` tool. One append-only JSONL mailbox per root chat
+  lives under extension storage. Messages are untrusted data, never instructions.
+- Each child gets its own test-shell scratch subtree, so parallel builds and tests do not collide.
+- Concurrency is capped at four active children; a larger delegate batch waits in a FIFO queue.
+  A graph has at most 32 nodes, six replans and two attempts per node by default.
 
-Because the default child approval is `whitelist_accept` and its response is always `never`, a
-delegated write asks and is then denied. To let a write-capable agent work, pass
-`approval: "universal_accept"` on the `agent` call, or add an inherited allow rule for the tool.
-The delegation accepts `capabilities`, `network`, `sandboxMode` and `approval` to narrow the child.
-
-The `agent` call itself is just another tool, gated by the parent policy. Under an accept policy it
-can start a child without a card; add an `ask` or `deny` rule for `agent` if you want to review the
-delegation's approval policy before it runs.
+See [Orchestration](/guide/orchestration) for the role table and task protocol.
 
 ## Command timeout
 

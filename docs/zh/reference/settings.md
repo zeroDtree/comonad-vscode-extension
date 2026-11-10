@@ -53,7 +53,7 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 | `subagentSteps` | `40` | `custom` 下子 Agent 的步数预算；`0` 表示无限制。定义的 `maxTurns` 只能收紧它 |
 | `filterSensitiveEnv` | `true` | 从命令环境中移除 key、token 与密码 |
 | `permissions` | `{allow:[], ask:[], deny:[]}` | 用户规则；见[安全](/zh/guide/safety#_3-user-rule) |
-| `subagents` | `{}` | 子 Agent 的逐 Agent 授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。内置 `implement` 默认两者都有；其它 Agent 默认只读。 |
+| `subagents` | `{}` | 子角色的逐角色授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。默认值来自角色表：`coder`、`tester`、`data-analyst`、`scientist` 两者都有；`technical-writer` 只有 files；`math-researcher` 只有 test；其它内置角色默认只读。 |
 
 ## 图
 
@@ -65,31 +65,31 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 
 ## 子 Agent
 
-`subagents` 把 Agent 名称映射到它的授权：
+`subagents` 覆盖角色的默认授权；默认值来自角色表，授权与角色不会互相矛盾：
 
 ```json
 {
   "subagents": {
-    "implement": { "files": true, "test": true },
-    "review": { "test": true },
+    "coder": { "files": true, "test": true },
+    "tester": { "files": true, "test": true },
+    "technical-writer": { "files": true },
     "my-writer": { "files": true }
   }
 }
 ```
 
-只读工具始终可用。只有 `files` 和 `test` 两种授权；`run_shell`、`start_shell` 和计划写入永远不会授予
-子 Agent。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级处于 Plan 模式时可用。Agent
-定义还必须列出使用该能力的工具；没有 `tools` 列表的定义视为只读。父模式仍需允许该能力。内置
-`implement` 默认获得两种授权；其它内置和所有自定义 Agent 默认只读，需显式配置。
+只读工具始终可用。只有 `files` 和 `test` 两种授权；`run_shell`、`start_shell`、`run_task` 和计划写入永远
+不会授予子级。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级处于 Plan 模式时可用。没有
+`tools` 列表的自定义角色视为只读；复用内置 id 的自定义角色不继承内置默认授权。父模式仍需允许该能力。
 
-委派继承父级有效策略，只能收紧。子级的工具审批策略是独立的（默认 `whitelist_accept`），审批应答固定
-为 `never`：任何需要询问的调用都会被拒绝。因此可写 Agent 需要继承的 allow 规则，或在 `agent` 调用上
-传 `approval: "universal_accept"`。子会话保存完整有效策略、revision 和父会话。见
-[安全](/zh/guide/safety#子-agent)。
+委派继承父级有效策略并只能收紧，也继承父级的工具审批策略；审批应答固定为 `never`，任何需要询问的调用
+都会被拒绝。因此写任务需要父策略自动放行写（`universal_accept`、`blacklist_reject` 或 allow 规则）；
+否则请在主线程完成写。子会话保存完整有效策略、revision 和父会话。见
+[安全](/zh/guide/safety#编排器与子-agent)与[编排](/zh/guide/orchestration)。
 
-步数：`subagentStepsMode` 默认 `custom`，每个子 Agent 花费 `subagentSteps`（40）个图步；
-设为 `inherit` 时改用该回合的 `maxSteps`。定义里的 `maxTurns` 按回合计数，只会收紧预算（每回合两图步，
-最少四步），不会放宽。
+步数：`subagentStepsMode` 默认 `custom`，每个子代理花费 `subagentSteps`（40）个图步；`inherit` 改用该
+回合的 `maxSteps`。角色的 `maxTurns` 按回合计数，只会收紧预算（每回合两图步，最少四步），不会放宽。
+任务的 `budget` 可以进一步收紧。
 
 ## 检查点
 

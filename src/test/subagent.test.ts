@@ -94,9 +94,9 @@ suite('Subagent policy algebra', () => {
 		);
 	});
 
-	test('the default child approval is whitelist_accept and network never turns on', () => {
+	test('the child inherits the parent approval and network never turns on', () => {
 		const child = buildSubagentPolicy(policy({ network: false }), { network: true }, ['read_file']);
-		assert.strictEqual(child.approval, 'whitelist_accept');
+		assert.strictEqual(child.approval, 'universal_accept', 'the parent approval is inherited');
 		assert.strictEqual(child.approvalResponse, 'never');
 		assert.strictEqual(child.network, false, 'a delegation cannot turn network on for a child');
 	});

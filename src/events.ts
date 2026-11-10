@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { ApprovalDecision, ApprovalRequest, AttachmentPart, ImagePart, ToolCall, TurnRef } from './lib/types';
+import type { TaskBoard } from './lib/task-graph';
 import type { PostToolDecision, PreToolDecision, ToolExecution, ToolOutcome } from './services/tools';
 
 /**
@@ -23,6 +24,8 @@ declare module 'cordis' {
 		'agent/subagent-start'(ref: TurnRef, info: { callId?: string; id: string; name: string; description?: string }): void;
 		/** A subagent session gained a step, finished, or failed: an open child view repaints. */
 		'subagent/changed'(id: string): void;
+		/** The root chat's task graph changed; the board is ready to render. */
+		'orchestrator/changed'(sessionId: string, board?: TaskBoard): void;
 		/** Waterfall: surfaces answer for their own `surface` id and delegate the rest. */
 		'approval/request'(request: ApprovalRequest, next: () => ApprovalDecision | Promise<ApprovalDecision>): ApprovalDecision | Promise<ApprovalDecision>;
 		'sessions/changed'(id?: string): void;

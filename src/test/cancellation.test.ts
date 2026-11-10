@@ -49,7 +49,7 @@ function context(kernel: Awaited<ReturnType<typeof createTestKernel>>, signal: A
 		ask: async () => [],
 		todos: () => [],
 		tasks: kernel.ctx.tasks,
-		spawnAgent: async () => '',
+		spawnAgent: async () => ({ ok: true, report: '', writes: [] }),
 	};
 }
 

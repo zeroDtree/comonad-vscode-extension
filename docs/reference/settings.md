@@ -56,7 +56,7 @@ JSON files hold the same names.
 | `subagentSteps` | `40` | Subagent step budget under `custom`; `0` means no limit. A definition's `maxTurns` can only tighten it |
 | `filterSensitiveEnv` | `true` | Strip keys, tokens and passwords from command environments |
 | `permissions` | `{allow:[], ask:[], deny:[]}` | User rules; see [Safety](/guide/safety#_3-user-rules) |
-| `subagents` | `{}` | Per-agent subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Built-in `implement` defaults to both; every other agent is read-only until granted. |
+| `subagents` | `{}` | Per-role subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Defaults come from the role table: `coder`, `tester`, `data-analyst` and `scientist` get both; `technical-writer` gets files; `math-researcher` gets test; every other built-in is read-only. |
 
 ## Graph
 
@@ -67,37 +67,39 @@ JSON files hold the same names.
 Only the default graph runs a turn; named graphs remain available to plugins through
 `ctx.graphs.get(id)`. See [Graphs](/guide/graphs).
 
-## Subagents
+## Orchestrator and subagents
 
-`subagents` maps an agent name to its grants:
+`subagents` overrides the default grant of a role. The role table supplies the default, so a grant
+and the role can never disagree:
 
 ```json
 {
   "subagents": {
-    "implement": { "files": true, "test": true },
-    "review": { "test": true },
+    "coder": { "files": true, "test": true },
+    "tester": { "files": true, "test": true },
+    "technical-writer": { "files": true },
     "my-writer": { "files": true }
   }
 }
 ```
 
 Read-only tools are always available. `files` and `test` are the only grants; `run_shell`,
-`start_shell` and plan writes are never granted to a subagent. The plan readers (`list_plans`,
-`read_plan`) use `ro_plan` and are available only when the parent is in Plan mode. The agent
-definition must also list a tool using the capability; a definition without a `tools` list is
-read-only. The parent mode still has to allow the capability. Built-in `implement` defaults to both
-grants; every other built-in and every custom agent is read-only until configured.
+`start_shell`, `run_task` and plan writes are never granted to a child. The plan readers
+(`list_plans`, `read_plan`) use `ro_plan` and are available only when the parent is in Plan mode. A
+custom definition without a `tools` list is read-only; a custom role that reuses a built-in id does
+not inherit the built-in default. The parent mode still has to allow the capability.
 
-A delegation inherits the parent's effective policy and can only narrow it. Its tool approval policy
-is separate (default `whitelist_accept`) and its approval response is fixed `never`: any call it
-would ask about is denied. A write-capable agent therefore needs an inherited allow rule or
-`approval: "universal_accept"` on the `agent` call. The child session stores the full effective
-policy, its revision and its parent. See [Safety](/guide/safety#subagents).
+A delegation inherits the parent's effective policy and only narrows it. It inherits the parent's
+tool approval policy, and its approval response is fixed `never`: any call it would ask about is
+denied. A write task therefore needs the parent to run writes without asking (`universal_accept`,
+`blacklist_reject`, or an allow rule); otherwise write it in the main thread. The child session
+stores the full effective policy, its revision and its parent. See
+[Safety](/guide/safety#orchestrator-and-subagents) and [Orchestration](/guide/orchestration).
 
-Steps: `subagentStepsMode` defaults to `custom`, where each subagent spends
-`subagentSteps` (40) graph steps; `inherit` gives it the turn's `maxSteps` instead. A
-definition's `maxTurns` counts turns and can lower either budget (two steps per turn, four at the
-minimum), but never raise it.
+Steps: `subagentStepsMode` defaults to `custom`, where each subagent spends `subagentSteps` (40)
+graph steps; `inherit` gives it the turn's `maxSteps` instead. A role's `maxTurns` counts turns and
+can lower either budget (two steps per turn, four at the minimum), but never raise it. A task's
+`budget` can tighten the resulting step count further.
 
 ## Checkpoints
 

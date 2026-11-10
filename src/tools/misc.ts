@@ -2,7 +2,7 @@
 import type { Context } from 'cordis';
 import { abortable } from '../lib/cancel';
 import { appendMemory, memoryDir, readMemory } from '../lib/instructions';
-import { objectSchema, type Approval, type Capability, type SandboxMode } from '../lib/types';
+import { objectSchema } from '../lib/types';
 import { toolset } from '../services/tools';
 
 /** Interaction tools: user questions, subagents, skills and memory. */
@@ -27,74 +27,6 @@ export const askTools = toolset([
 			// The native quick pick cannot be dismissed here, but Stop must not wait for it.
 			const answers = await abortable(ctx.signal, ctx.ask(question, options, multi));
 			return answers.join(', ') || '(no answer)';
-		},
-	},
-]);
-
-export const agentTools = toolset([
-	{
-		name: 'agent',
-		description:
-			'Delegate a focused task to a subagent that runs in its own context window and reports back a summary. The child inherits the parent policy but only narrows it. Its approval response is always never, so any tool call that asks is denied: a write-capable agent needs an inherited allow rule or approval: "universal_accept" on the delegation. A subagent may list and read plans recorded for this chat when the parent is in Plan mode (ro_plan), but it can never write a plan: name the plan in the prompt and record accepted plans yourself with write_plan.',
-		capability: 'ro',
-		needsNetwork: false,
-		needsWorkspace: true,
-		parameters: objectSchema(
-			{
-				prompt: { type: 'string', description: 'The task for the subagent.' },
-				description: { type: 'string', description: 'Short label shown in the transcript.' },
-				agent: { type: 'string', description: 'Agent name: explore, plan, review, implement, or a custom agent.' },
-				background: { type: 'boolean' },
-				fork: { type: 'boolean', description: 'Give the subagent a copy of this conversation for extra context.' },
-				capabilities: {
-					type: 'array',
-					items: { type: 'string', enum: ['ro', 'ro_plan', 'rw', 'shell_ro', 'shell_test'] },
-					description:
-						'Further narrow the capabilities the child inherits. It can never add one. Plan reads use ro_plan; rw_plan and shell_rw are never granted to a subagent.',
-				},
-				network: {
-					type: 'boolean',
-					description: 'false turns network off for the child. true or absent inherits the parent; it never turns network on.',
-				},
-				sandboxMode: {
-					type: 'string',
-					enum: ['workspace-read', 'read-only', 'workspace-write', 'danger-full-access'],
-					description: 'A sandbox ceiling. The child gets the stricter of this and the parent sandbox.',
-				},
-				approval: {
-					type: 'string',
-					enum: ['manual', 'whitelist_accept', 'blacklist_reject', 'universal_accept', 'universal_reject'],
-					description:
-						'The child tool approval policy, independent of the parent. Defaults to whitelist_accept. Because the child approval response is always never, a policy that asks denies the call.',
-				},
-			},
-			['prompt'],
-		),
-		async execute(args, ctx) {
-			const { prompt, description, agent, background, fork, capabilities, network, sandboxMode, approval } = args as {
-				prompt: string;
-				description?: string;
-				agent?: string;
-				background?: boolean;
-				fork?: boolean;
-				capabilities?: Capability[];
-				network?: boolean;
-				sandboxMode?: SandboxMode;
-				approval?: Approval;
-			};
-			return ctx.spawnAgent({
-				prompt,
-				description,
-				agent,
-				background,
-				fork,
-				capabilities,
-				network,
-				sandboxMode,
-				approval,
-				callId: ctx.callId,
-				signal: ctx.signal,
-			});
 		},
 	},
 ]);
