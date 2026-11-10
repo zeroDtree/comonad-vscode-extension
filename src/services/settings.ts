@@ -141,7 +141,7 @@ export interface PermissionsConfig {
 
 /** What a subagent may be granted. Read-only tools are always available; these add the write paths. */
 export interface SubagentGrant {
-	/** The tracked file-write tools (`write_file`, `apply_patch`, `apply_edits`). */
+	/** The tracked file-write tools (`write_file`, `edit_text`, `edit_ranges`). */
 	files: boolean;
 	/** The scratch-only test shell (`run_shell_test`). */
 	test: boolean;

@@ -181,7 +181,7 @@ A subagent is a Markdown file under `.comonad/agents/` or `~/.comonad/agents/`:
 ---
 name: writer
 description: Implement a focused change.
-tools: [read_file, grep_files, write_file, apply_patch, run_shell_test]
+tools: [read_file, grep_files, write_file, edit_text, run_shell_test]
 maxTurns: 20
 ---
 Implement the change. Use the file tools for every project write; run_shell_test writes only its
@@ -195,8 +195,8 @@ Subagents):
 { "subagents": { "writer": { "files": true, "test": true } } }
 ```
 
-Read-only tools need no grant. `files` enables only tracked file tools (`write_file`, `apply_patch`,
-`apply_edits`); `test` enables `run_shell_test`. `run_shell`, `start_shell` and plan writes are never
+Read-only tools need no grant. `files` enables only tracked file tools (`write_file`, `edit_text`,
+`edit_ranges`); `test` enables `run_shell_test`. `run_shell`, `start_shell` and plan writes are never
 granted to a subagent. A definition without a `tools` list is read-only. The parent mode must allow
 the capability too. See [Safety](/guide/safety#subagents).
 

@@ -160,7 +160,7 @@ Consequences:
 
 The grant, the definition and the hard cap still select the tools:
 
-- `files` grants only tracked file tools (`write_file`, `apply_patch`, `apply_edits`).
+- `files` grants only tracked file tools (`write_file`, `edit_text`, `edit_ranges`).
 - `test` grants `run_shell_test`.
 - Read-only tools are always available.
 - A definition with no `tools` list is read-only.

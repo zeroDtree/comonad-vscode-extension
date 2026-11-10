@@ -147,7 +147,7 @@ Spawn 与 Fork 共用完全相同的策略，只在上下文上不同。完整�
 
 授权、定义和硬上限仍然决定工具范围：
 
-- `files` 只授予可跟踪的文件工具（`write_file`、`apply_patch`、`apply_edits`）。
+- `files` 只授予可跟踪的文件工具（`write_file`、`edit_text`、`edit_ranges`）。
 - `test` 授予 `run_shell_test`。
 - 只读工具始终可用。
 - 没有 `tools` 列表的定义是只读的。

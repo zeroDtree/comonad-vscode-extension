@@ -6,7 +6,7 @@ file costs nothing, and the review only looks at the files the journal names.
 
 ```mermaid
 flowchart LR
-  Write["write_file · apply_patch<br/>apply_edits"] --> Journal["Change journal<br/>before + after"]
+  Write["write_file · edit_text<br/>edit_ranges"] --> Journal["Change journal<br/>before + after"]
   Journal --> Pending["Pending list<br/>above the composer"]
   Pending --> Keep["Keep<br/>stage in shadow"]
   Pending --> Undo["Undo<br/>restore content"]

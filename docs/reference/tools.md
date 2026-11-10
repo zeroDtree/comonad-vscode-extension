@@ -7,13 +7,13 @@ Every tool declares a **capability**, whether it needs **network**, and whether 
 
 | Group | Tools |
 | --- | --- |
-| Files | `list_dir`, `read_file`, `grep_files`, `write_file`, `apply_patch` |
+| Files | `list_dir`, `read_file`, `grep_files`, `write_file`, `edit_text` |
 | Shell | `run_shell_readonly`, `run_shell_test`, `run_shell`, `start_shell`, `shell_output`, `stop_shell` |
 | Plans | `list_plans`, `read_plan`, `write_plan` |
 | Todos | `todo_write` |
 | Math | `calculate`, `describe_numbers`, `percentile`, `convert_units` |
 | Web | `fetch_url`, `web_search` |
-| VS Code | `find_files`, `find_symbols`, `get_diagnostics`, `apply_edits`, `git_diff`, `run_task` |
+| VS Code | `find_files`, `find_symbols`, `get_diagnostics`, `edit_ranges`, `git_diff`, `run_task` |
 | Agent | `ask_user`, `agent` (subagents), `skill`, `memory` |
 | MCP | `server__tool` for every tool the server exposes |
 

@@ -95,9 +95,9 @@ export const vscodeTools = toolset([
 		},
 	},
 	{
-		name: 'apply_edits',
+		name: 'edit_ranges',
 		description:
-			'Apply line/column text edits to one workspace file through the editor, so the user can undo them. Prefer this tool for precise, localized changes; use write_file for new files or full rewrites.',
+			'Edit line/column ranges in one workspace file through the editor, so the user can undo them. Prefer this tool for precise, localized changes; use write_file for new files or full rewrites.',
 		capability: 'rw',
 		trackedWrite: true,
 		needsNetwork: false,

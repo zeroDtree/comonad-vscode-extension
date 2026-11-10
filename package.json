@@ -973,7 +973,7 @@
               "files": {
                 "type": "boolean",
                 "default": false,
-                "description": "Grant the tracked file-write tools (write_file, apply_patch, apply_edits)."
+                "description": "Grant the tracked file-write tools (write_file, edit_text, edit_ranges)."
               },
               "test": {
                 "type": "boolean",

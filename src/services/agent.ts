@@ -2726,8 +2726,8 @@ export class Agent extends Service {
 			].join('\n'),
 		);
 		const toolBody: string[] = [];
-		if (has('apply_edits') || has('write_file')) {
-			toolBody.push('Prefer apply_edits for precise changes and write_file for new files or full rewrites.');
+		if (has('edit_ranges') || has('write_file')) {
+			toolBody.push('Prefer edit_ranges for precise changes and write_file for new files or full rewrites.');
 		}
 		if (!session.policy.workingDirectory) {
 			toolBody.push('This session has no working directory: file, shell and task tools are unavailable.');

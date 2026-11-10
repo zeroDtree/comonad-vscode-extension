@@ -63,7 +63,7 @@ export const BUILTIN_AGENTS: AgentDefinition[] = [
 		name: 'implement',
 		description: 'Implement a focused change and verify it with tests. Writes through the tracked file tools only.',
 		prompt:
-			'You implement the delegated change. Every project change goes through write_file, apply_patch or apply_edits: never use a shell command to write project files. Run tests, builds and linters with run_shell_test; that shell keeps the workspace read-only and can write only to the scratch directory ($COMONAD_SCRATCH). Report the files you changed and the test results.',
+			'You implement the delegated change. Every project change goes through write_file, edit_text or edit_ranges: never use a shell command to write project files. Run tests, builds and linters with run_shell_test; that shell keeps the workspace read-only and can write only to the scratch directory ($COMONAD_SCRATCH). Report the files you changed and the test results.',
 		tools: [
 			'list_dir',
 			'read_file',
@@ -73,8 +73,8 @@ export const BUILTIN_AGENTS: AgentDefinition[] = [
 			'get_diagnostics',
 			'git_diff',
 			'write_file',
-			'apply_patch',
-			'apply_edits',
+			'edit_text',
+			'edit_ranges',
 			'run_shell_readonly',
 			'run_shell_test',
 		],

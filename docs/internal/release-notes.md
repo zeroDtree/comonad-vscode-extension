@@ -98,8 +98,8 @@
   every control immediately (the other tabs keep their Save button), so a safety toggle can no longer
   display a value the agent is not using. macOS write confinement now emits the missing
   `(deny file-write*)` — it previously allowed writes anywhere — and a write-confined or read-only
-  bwrap shell gets an empty, read-only private `/tmp` instead of a writable one. `apply_edits`
-  refusals and a missing `apply_patch` match are reported as tool errors rather than successful
+  bwrap shell gets an empty, read-only private `/tmp` instead of a writable one. `edit_ranges`
+  refusals and a missing `edit_text` match are reported as tool errors rather than successful
   calls, sensitive-environment filtering no longer strips `SSH_AUTH_SOCK` or `GIT_AUTHOR_*`, and
   shell commands resolve the login shell's `PATH`, so `git`, `rg` and pytest are found on Remote-SSH
   hosts.
@@ -488,8 +488,8 @@
   the whole conversation. The transcript a panel is given is now read after the wait, and one that got
   shorter behind its back (the same fork, or a prompt edit) is handed over again.
 
-- **Checkpoints are per file, not per turn.** Every write the agent makes (`write_file`, `apply_patch`,
-  `apply_edits`, `write_plan`) is journaled with the file's content before and after it, through
+- **Checkpoints are per file, not per turn.** Every write the agent makes (`write_file`, `edit_text`,
+  `edit_ranges`, `write_plan`) is journaled with the file's content before and after it, through
   `ToolContext.edit`. A turn that writes nothing takes no snapshot. Nothing is ever pruned, so a
   session keeps its full history.
   - **Review** lists only the journaled files, from one `git diff` against a temporary index that holds

@@ -1183,7 +1183,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     <div id="subagent-rows"></div>
     <details class="help-fold">
       <summary>How permissions work</summary>
-      <p class="group-note">Read-only tools are always available. <b>Write files</b> grants the tracked write tools (<code>write_file</code>, <code>apply_patch</code>, <code>apply_edits</code>); <b>Run tests</b> grants <code>run_shell_test</code>, whose workspace is read-only and whose only writable place is the scratch directory. Full shell and plan writes are never granted to a subagent. The agent's own <code>tools</code> list still selects which tools it uses, and the parent mode must allow the capability too. Changes apply to the next spawn.</p>
+      <p class="group-note">Read-only tools are always available. <b>Write files</b> grants the tracked write tools (<code>write_file</code>, <code>edit_text</code>, <code>edit_ranges</code>); <b>Run tests</b> grants <code>run_shell_test</code>, whose workspace is read-only and whose only writable place is the scratch directory. Full shell and plan writes are never granted to a subagent. The agent's own <code>tools</code> list still selects which tools it uses, and the parent mode must allow the capability too. Changes apply to the next spawn.</p>
     </details>
   </section>
 

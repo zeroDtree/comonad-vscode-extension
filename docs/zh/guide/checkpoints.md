@@ -5,7 +5,7 @@ Comonad 在项目之外的影子存储里按文件记录 agent 的每次写入�
 
 ```mermaid
 flowchart LR
-  Write["write_file · apply_patch<br/>apply_edits"] --> Journal["变更日志<br/>改前 + 改后"]
+  Write["write_file · edit_text<br/>edit_ranges"] --> Journal["变更日志<br/>改前 + 改后"]
   Journal --> Pending["待处理列表<br/>输入框上方"]
   Pending --> Keep["Keep<br/>写入影子索引"]
   Pending --> Undo["Undo<br/>恢复内容"]

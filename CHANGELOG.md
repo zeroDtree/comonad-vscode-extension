@@ -19,6 +19,9 @@ Highlights are below; the full implementation notes are linked at the end. The u
   after the answer. The policy is a pure decision module and the only issuer of a single-use tool
   authorization; the executor refuses a call without one, so a custom graph cannot route around
   the rules. Stored graphs that name the old nodes fall back to the shipped loop.
+- **File tools are named for their edits.** `apply_patch` is now `edit_text` and `apply_edits` is
+  now `edit_ranges`; `write_file` keeps its name. Agent definitions and rules that name the old
+  tools must use the new names — there is no alias.
 - **Compaction no longer rewrites the chat.** The canonical transcript is kept in full; a summary
   card and model-context coverage live beside it. Original turns expand from the card, older turns
   page in on demand, and restore points no longer move. `/summarize --rebuild` can rewrite the

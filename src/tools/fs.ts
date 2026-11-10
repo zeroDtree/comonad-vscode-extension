@@ -256,7 +256,7 @@ export const fsTools = toolset([
 		},
 	},
 	{
-		name: 'apply_patch',
+		name: 'edit_text',
 		description: 'Replace the first occurrence of exact text in a workspace file. Use read_file first to copy the text precisely.',
 		capability: 'rw',
 		trackedWrite: true,

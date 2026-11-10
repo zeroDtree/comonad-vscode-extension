@@ -38,7 +38,7 @@ async function explainSelection(uri: unknown, range: unknown, mode: 'explain' | 
 	const prompt =
 		mode === 'explain'
 			? `Explain what the selected code in ${relative} (lines ${start}-${selection.end.line + 1}) does. Point out subtle behaviour and potential bugs.\n\n\`\`\`${document.languageId}\n${snippet}\n\`\`\``
-			: `Improve the selected code in ${relative} (lines ${start}-${selection.end.line + 1}). Fix bugs or simplify it, then apply the edit with apply_edits.\n\n\`\`\`${document.languageId}\n${snippet}\n\`\`\``;
+			: `Improve the selected code in ${relative} (lines ${start}-${selection.end.line + 1}). Fix bugs or simplify it, then apply the edit with edit_ranges.\n\n\`\`\`${document.languageId}\n${snippet}\n\`\`\``;
 	await openChat(prompt);
 }
 

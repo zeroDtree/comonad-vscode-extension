@@ -173,7 +173,7 @@ Hooks 在生命周期点运行：`SessionStart`、`UserPromptSubmit`、`PreToolU
 ---
 name: writer
 description: 实现一个聚焦的改动。
-tools: [read_file, grep_files, write_file, apply_patch, run_shell_test]
+tools: [read_file, grep_files, write_file, edit_text, run_shell_test]
 maxTurns: 20
 ---
 实现改动。所有项目写入都走文件工具；run_shell_test 只写 scratch 目录。
@@ -185,7 +185,7 @@ frontmatter **选择**工具；写能力还需要 `subagents` 设置中的**授�
 { "subagents": { "writer": { "files": true, "test": true } } }
 ```
 
-只读工具不需要授权。`files` 只启用可跟踪的文件工具（`write_file`、`apply_patch`、`apply_edits`）；
+只读工具不需要授权。`files` 只启用可跟踪的文件工具（`write_file`、`edit_text`、`edit_ranges`）；
 `test` 启用 `run_shell_test`。`run_shell`、`start_shell` 和计划写入永远不会授予子 Agent。没有 `tools`
 列表的定义视为只读。父模式也必须允许该能力。见[安全](/zh/guide/safety#子-agent)。
 

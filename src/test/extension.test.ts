@@ -919,11 +919,11 @@ suite('Comonad domain', () => {
 		}
 	});
 
-	test('a path escape from apply_edits is an error, not a success', async () => {
+	test('a path escape from edit_ranges is an error, not a success', async () => {
 		const kernel = await createTestKernel({ config: { sandboxMode: 'workspace-write' as const } });
 		try {
 			await kernel.ctx.plugin(vscodeTools);
-			const outcome = await kernel.ctx.tools.invoke(call('apply_edits', { path: '../escape.txt', edits: [] }), directToolContext(kernel, ['1']));
+			const outcome = await kernel.ctx.tools.invoke(call('edit_ranges', { path: '../escape.txt', edits: [] }), directToolContext(kernel, ['1']));
 			assert.strictEqual(outcome.isError, true);
 			assert.match(outcome.content, /cannot write outside the workspace/);
 		} finally {
@@ -931,13 +931,13 @@ suite('Comonad domain', () => {
 		}
 	});
 
-	test('apply_patch reports a missing old text as an error', async () => {
+	test('edit_text reports a missing old text as an error', async () => {
 		const kernel = await createTestKernel();
 		try {
 			await kernel.ctx.plugin(fsTools);
 			writeFileSync(join(kernel.host.workspace(), 'patch.txt'), 'content\n');
 			const outcome = await kernel.ctx.tools.invoke(
-				call('apply_patch', { path: 'patch.txt', old: 'missing', new: 'replacement' }),
+				call('edit_text', { path: 'patch.txt', old: 'missing', new: 'replacement' }),
 				directToolContext(kernel, ['1']),
 			);
 			assert.strictEqual(outcome.isError, true);
@@ -8549,7 +8549,7 @@ suite('Per-file checkpoints', () => {
 			assert.ok(subagentRuns > 0, `the subagent ran (${subagentRuns} times)`);
 			assert.ok(subagentOffered.length > 0, 'the subagent was offered at least one tool');
 			assert.ok(!subagentOffered.includes('write_file'), `write_file is not offered to a subagent: ${subagentOffered.join(', ')}`);
-			assert.ok(!subagentOffered.includes('apply_patch'), 'apply_patch is not offered either');
+			assert.ok(!subagentOffered.includes('edit_text'), 'edit_text is not offered either');
 			assert.ok(/not available to this subagent/.test(subagentResult), `a forced write is refused: ${subagentResult}`);
 			assert.strictEqual(readFileSync(join(workspace, 'guarded.txt'), 'utf8'), 'original\n', 'the file was not written');
 		} finally {
