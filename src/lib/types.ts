@@ -24,7 +24,7 @@ export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'max
 
 export type Preset = 'ask' | 'plan' | 'auto' | 'readonly' | 'full';
 
-export type Capability = 'ro' | 'rw' | 'rw_plan' | 'shell_ro' | 'shell_test' | 'shell_rw';
+export type Capability = 'ro' | 'ro_plan' | 'rw' | 'rw_plan' | 'shell_ro' | 'shell_test' | 'shell_rw';
 
 export interface ToolCall {
 	id: string;
@@ -254,6 +254,8 @@ export type AgentSpawnFunction = (request: AgentSpawnRequest) => Promise<string>
 
 export interface ToolContext {
 	sessionId: string;
+	/** The chat that owns this run's plan files and journal; a subagent's own session is `sub-…`. */
+	rootSessionId?: string;
 	/** The tool call being dispatched, when known; a spawned subagent links its session to it. */
 	callId?: string;
 	/** The turn's tool batch, which the authorization is bound to. */

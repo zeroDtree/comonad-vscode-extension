@@ -20,7 +20,7 @@ export const MODE_CAPS: Record<WorkMode, ReadonlySet<Capability>> = {
 	ro: new Set(['ro', 'shell_ro']),
 	sw: new Set(['ro', 'rw', 'shell_ro', 'shell_test']),
 	aw: new Set(['ro', 'rw', 'shell_ro', 'shell_test', 'shell_rw']),
-	pl: new Set(['ro', 'shell_ro', 'rw_plan']),
+	pl: new Set(['ro', 'shell_ro', 'ro_plan', 'rw_plan']),
 };
 
 export const MODE_LABELS: Record<WorkMode, string> = {
@@ -28,7 +28,7 @@ export const MODE_LABELS: Record<WorkMode, string> = {
 	ro: 'Read-Only — read files, read-only shell',
 	sw: 'Semi-Write — write files, run tests in a scratch shell',
 	aw: 'Full Access — write files, full shell',
-	pl: 'Plan — read files, read-only shell, writes plan files only',
+	pl: 'Plan — read files, read-only shell, reads and writes plan files',
 };
 
 /** Every capability that runs a command. Kept in one place so the gate, rules and the parser agree. */
@@ -107,7 +107,7 @@ export function presetPolicy(preset: string): PresetPolicy {
 	}
 }
 
-export const ALL_CAPABILITIES: readonly Capability[] = ['ro', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'];
+export const ALL_CAPABILITIES: readonly Capability[] = ['ro', 'ro_plan', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'];
 
 /** A capability list from a session or a delegation: known values only, de-duplicated. */
 export function asCapabilities(value: unknown): Capability[] | undefined {
@@ -133,10 +133,11 @@ export function capabilityAllowed(capability: Capability, policy: Pick<SessionPo
 }
 
 /**
- * The whitelist's built-in contents: read-only calls, plus the plan tools (which only `pl` mode
- * grants anyway). A user `allow` rule is a separate layer and runs its call directly.
+ * The whitelist's built-in contents: read-only calls, including the plan reader (`ro_plan`), plus
+ * the plan writer (`rw_plan`, which only `pl` mode grants anyway). A user `allow` rule is a separate
+ * layer and runs its call directly.
  */
-const DEFAULT_WHITELIST: ReadonlySet<Capability> = new Set(['ro', 'shell_ro', 'rw_plan']);
+const DEFAULT_WHITELIST: ReadonlySet<Capability> = new Set(['ro', 'shell_ro', 'ro_plan', 'rw_plan']);
 
 /**
  * The blacklist's built-in contents: everything that can write. A user `deny` rule is a separate

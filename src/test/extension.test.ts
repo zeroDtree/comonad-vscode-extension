@@ -81,6 +81,7 @@ import { parseDiffs } from '../lib/diff';
 import { fsTools } from '../tools/fs';
 import { vscodeTools } from '../tools/vscode';
 import { agentTools } from '../tools/misc';
+import { planTools } from '../tools/plan';
 import { hostStorage, type Host } from '../services/host';
 import { Context, Service, type Plugin } from 'cordis';
 import {
@@ -356,12 +357,12 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(caps('ro'), ['ro', 'shell_ro']);
 		assert.deepStrictEqual(caps('sw'), ['ro', 'rw', 'shell_ro', 'shell_test']);
 		assert.deepStrictEqual(caps('aw'), ['ro', 'rw', 'shell_ro', 'shell_rw', 'shell_test']);
-		assert.deepStrictEqual(caps('pl'), ['ro', 'rw_plan', 'shell_ro']);
+		assert.deepStrictEqual(caps('pl'), ['ro', 'ro_plan', 'rw_plan', 'shell_ro']);
 		assert.match(MODE_LABELS.chat, /Chat Only — no tools/);
 		assert.match(MODE_LABELS.ro, /Read-Only — read files, read-only shell/);
 		assert.match(MODE_LABELS.sw, /Semi-Write — write files, run tests in a scratch shell/);
 		assert.match(MODE_LABELS.aw, /Full Access — write files, full shell/);
-		assert.match(MODE_LABELS.pl, /Plan — read files, read-only shell, writes plan files only/);
+		assert.match(MODE_LABELS.pl, /Plan — read files, read-only shell, reads and writes plan files/);
 	});
 
 	test('deny rules win over accept policies', () => {
@@ -9460,6 +9461,246 @@ suite('Per-file checkpoints', () => {
 			assert.strictEqual(readFileSync(join(h.work, 'new.txt'), 'utf8'), 'first\nsecond\n', 'the file itself was never rewritten');
 		} finally {
 			h.dispose();
+		}
+	});
+});
+
+suite('Plan tools', () => {
+	test('the plan readers are ro_plan and the writer stays rw_plan', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(planTools);
+			assert.strictEqual(kernel.ctx.tools.get('list_plans')?.capability, 'ro_plan');
+			assert.strictEqual(kernel.ctx.tools.get('read_plan')?.capability, 'ro_plan');
+			assert.strictEqual(kernel.ctx.tools.get('write_plan')?.capability, 'rw_plan');
+			assert.strictEqual(kernel.ctx.tools.get('write_plan')?.trackedWrite, true);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('every plan tool is offered only in plan mode', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(planTools);
+			const names = (mode: WorkMode) => kernel.ctx.tools.visible(policy({ workMode: mode })).map((tool) => tool.name);
+			const planToolNames = ['list_plans', 'read_plan', 'write_plan'];
+			for (const name of planToolNames) {
+				assert.ok(names('pl').includes(name), `${name} is offered in plan mode`);
+			}
+			for (const mode of ['ro', 'sw', 'aw', 'chat'] as WorkMode[]) {
+				for (const name of planToolNames) {
+					assert.ok(!names(mode).includes(name), `${name} is not offered in ${mode}`);
+				}
+			}
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('plan readers survive a write-refusing sandbox while the writer is refused', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(planTools);
+			for (const sandboxMode of ['read-only', 'workspace-read'] as const) {
+				const names = kernel.ctx.tools.visible(policy({ workMode: 'pl', sandboxMode })).map((tool) => tool.name);
+				assert.ok(names.includes('list_plans'), `list_plans survives ${sandboxMode}`);
+				assert.ok(names.includes('read_plan'), `read_plan survives ${sandboxMode}`);
+				assert.ok(!names.includes('write_plan'), `write_plan is refused under ${sandboxMode}`);
+			}
+			const lookupPlan = (name: string) => kernel.ctx.tools.get(name);
+			const rejected = gateCalls(
+				[call('write_plan', { name: 'plan.md', content: 'x' })],
+				lookupPlan,
+				policy({ workMode: 'pl', sandboxMode: 'read-only' }),
+				{ allow: [], ask: [], deny: [] },
+				gateEnv(),
+			);
+			assert.strictEqual(rejected.decision, 'reject');
+			assert.match(rejected.reason, /refuses every write/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the blacklist runs plan reads and rejects the plan write', async () => {
+		const kernel = await createTestKernel();
+		try {
+			await kernel.ctx.plugin(planTools);
+			const lookupPlan = (name: string) => kernel.ctx.tools.get(name);
+			const empty = { allow: [], ask: [], deny: [] };
+			const decide = (name: string, args: Record<string, unknown>, approval: 'blacklist_reject' | 'whitelist_accept') =>
+				gateCalls([call(name, args)], lookupPlan, policy({ workMode: 'pl', approval }), empty, gateEnv()).decision;
+			assert.strictEqual(decide('list_plans', {}, 'blacklist_reject'), 'allow');
+			assert.strictEqual(decide('read_plan', { name: 'plan.md' }, 'blacklist_reject'), 'allow');
+			assert.strictEqual(decide('write_plan', { name: 'plan.md', content: 'x' }, 'blacklist_reject'), 'reject');
+			assert.strictEqual(decide('list_plans', {}, 'whitelist_accept'), 'allow');
+			assert.strictEqual(decide('read_plan', { name: 'plan.md' }, 'whitelist_accept'), 'allow');
+			assert.strictEqual(decide('write_plan', { name: 'plan.md', content: 'x' }, 'whitelist_accept'), 'allow');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a subagent resolves the plan folder of the chat that spawned it', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const workspace = kernel.host.workspace();
+			mkdirSync(join(workspace, '.comonad', 'plans', 'root-chat'), { recursive: true });
+			writeFileSync(join(workspace, '.comonad', 'plans', 'root-chat', 'plan.md'), 'root plan\n');
+			await kernel.ctx.plugin(planTools);
+			const ctx = { ...directToolContext(kernel), sessionId: 'sub-child', rootSessionId: 'root-chat' };
+			assert.strictEqual(await kernel.ctx.tools.get('read_plan')!.execute({ name: 'plan.md' }, ctx), 'root plan\n');
+			assert.match(String(await kernel.ctx.tools.get('list_plans')!.execute({}, ctx)), /plan\.md/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a plan-mode child reads the parent plan but never writes one', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'pl', approval: 'universal_accept' } });
+		try {
+			const workspace = kernel.host.workspace();
+			const parent = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'root-chat');
+			mkdirSync(join(workspace, '.comonad', 'plans', parent.id), { recursive: true });
+			writeFileSync(join(workspace, '.comonad', 'plans', parent.id, 'plan.md'), 'the canonical plan\n');
+			const agents = join(workspace, '.comonad', 'agents');
+			mkdirSync(agents, { recursive: true });
+			writeFileSync(
+				join(agents, 'reader.md'),
+				'---\nname: reader\ndescription: reads plans\ntools: [read_file, list_plans, read_plan, write_plan]\n---\nRead the plan.\n',
+			);
+			await kernel.ctx.catalog.reload();
+
+			let offered: string[] = [];
+			let read = '';
+			let refused = '';
+			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
+				message: { role: 'assistant' as const, content, toolCalls },
+				toolCalls,
+				usage: { input: 1, output: 1 },
+			});
+			kernel.ctx.llm.use({
+				name: 'plan-reader',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('subagent of Comonad')) {
+						offered = (request.tools ?? []).map((tool) => tool.name);
+						const last = request.messages[request.messages.length - 1];
+						if (last?.role === 'user') {
+							return reply('', [{ id: 'r1', name: 'read_plan', arguments: JSON.stringify({ name: 'plan.md' }) }]);
+						}
+						if (last?.role === 'tool' && last.toolCallId === 'r1') {
+							read = last.content;
+							return reply('', [{ id: 'w1', name: 'write_plan', arguments: JSON.stringify({ name: 'x.md', content: 'x' }) }]);
+						}
+						if (last?.role === 'tool' && last.toolCallId === 'w1') {
+							refused = last.content;
+							return reply('done');
+						}
+						return reply('done');
+					}
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						return reply('', [
+							{
+								id: 'delegate',
+								name: 'agent',
+								arguments: JSON.stringify({ agent: 'reader', prompt: 'read plan.md', description: 'read', approval: 'universal_accept' }),
+							},
+						]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(planTools);
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.plugin(agentTools);
+			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
+
+			assert.match(read, /the canonical plan/, 'the child read the root plan');
+			assert.match(refused, /not available to this subagent/, 'the forced plan write was refused');
+			assert.ok(offered.includes('list_plans'), `list_plans is offered: ${offered.join(', ')}`);
+			assert.ok(offered.includes('read_plan'), `read_plan is offered: ${offered.join(', ')}`);
+			assert.ok(!offered.includes('write_plan'), 'write_plan is never offered');
+			const childId = parent.subagents?.delegate;
+			assert.ok(childId, 'the parent records the child link');
+			const child = kernel.ctx.sessions.require(childId);
+			assert.ok(child.policy.capabilities?.includes('ro_plan'), 'the child holds ro_plan');
+			assert.ok(!child.policy.capabilities?.includes('rw_plan'), 'the child never holds rw_plan');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('an execution-mode child has no plan readers', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'sw', approval: 'universal_accept' } });
+		try {
+			const workspace = kernel.host.workspace();
+			const parent = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'exec-chat');
+			const agents = join(workspace, '.comonad', 'agents');
+			mkdirSync(agents, { recursive: true });
+			writeFileSync(
+				join(agents, 'reader.md'),
+				'---\nname: reader\ndescription: reads plans\ntools: [read_file, list_plans, read_plan]\n---\nRead the plan.\n',
+			);
+			await kernel.ctx.catalog.reload();
+
+			let offered: string[] = [];
+			const reply = (content: string, toolCalls: ToolCall[] = []) => ({
+				message: { role: 'assistant' as const, content, toolCalls },
+				toolCalls,
+				usage: { input: 1, output: 1 },
+			});
+			kernel.ctx.llm.use({
+				name: 'exec-child',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('subagent of Comonad')) {
+						offered = (request.tools ?? []).map((tool) => tool.name);
+						return reply('done');
+					}
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						return reply('', [
+							{ id: 'delegate', name: 'agent', arguments: JSON.stringify({ agent: 'reader', prompt: 'read plan.md', description: 'read' }) },
+						]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(planTools);
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.plugin(agentTools);
+			await kernel.ctx.agent.runTurn({ text: 'delegate it', surface: 'test' });
+
+			assert.ok(offered.includes('read_file'), `read_file is offered: ${offered.join(', ')}`);
+			assert.ok(!offered.includes('list_plans'), 'list_plans is not offered without ro_plan');
+			assert.ok(!offered.includes('read_plan'), 'read_plan is not offered without ro_plan');
+			const childId = parent.subagents?.delegate;
+			assert.ok(childId);
+			const child = kernel.ctx.sessions.require(childId);
+			assert.ok(!child.policy.capabilities?.includes('ro_plan'), 'an execution-mode parent grants no ro_plan');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('built-in plan, review and implement agents read plans but never write them', async () => {
+		const kernel = await createTestKernel();
+		try {
+			for (const name of ['plan', 'review', 'implement']) {
+				const agent = kernel.ctx.catalog.agent(name);
+				assert.ok(agent?.tools?.includes('list_plans'), `${name} lists plans`);
+				assert.ok(agent?.tools?.includes('read_plan'), `${name} reads plans`);
+				assert.ok(!agent?.tools?.includes('write_plan'), `${name} never writes plans`);
+			}
+			const explore = kernel.ctx.catalog.agent('explore');
+			assert.ok(!explore?.tools?.includes('list_plans'));
+			assert.ok(!explore?.tools?.includes('read_plan'));
+			assert.ok(!explore?.tools?.includes('write_plan'));
+		} finally {
+			await kernel.dispose();
 		}
 	});
 });

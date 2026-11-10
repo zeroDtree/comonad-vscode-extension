@@ -10,11 +10,11 @@ import type { Approval, Capability, SessionPolicy } from './types';
  * fixed `never` response). Spawn and Fork use exactly this construction; only their context differs.
  */
 
-export const SUBAGENT_CAPABILITIES: readonly Capability[] = ['ro', 'shell_ro', 'rw', 'shell_test'];
+export const SUBAGENT_CAPABILITIES: readonly Capability[] = ['ro', 'ro_plan', 'shell_ro', 'rw', 'shell_test'];
 export const SUBAGENT_WRITE_CAPABILITIES: readonly Capability[] = ['rw', 'shell_test'];
 export const DEFAULT_SUBAGENT_APPROVAL: Approval = 'whitelist_accept';
 
-const CAPABILITY_ORDER: readonly Capability[] = ['ro', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'];
+const CAPABILITY_ORDER: readonly Capability[] = ['ro', 'ro_plan', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'];
 
 export interface DelegationConstraints {
 	/** Further narrows the parent's capability set; it can never add one. */

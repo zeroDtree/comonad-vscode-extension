@@ -38,7 +38,7 @@ The mode decides which capabilities exist at all.
 | Read-Only (`ro`) | Read files, read-only shell |
 | Semi-Write (`sw`) | + write files, + test shell (workspace read-only, scratch writable) |
 | Full Access (`aw`) | + full shell |
-| Plan (`pl`) | Read files, read-only shell, writes plan files only |
+| Plan (`pl`) | Read files, read-only shell, reads and writes plan files |
 
 The mode is remembered per chat; new chats start from `comonad.mode`.
 
@@ -73,7 +73,7 @@ three lists matched. This means an allow rule runs even under `universal_reject`
 | Policy | Runs | Asks | Rejects |
 | --- | --- | --- | --- |
 | `manual` | – | every call | – |
-| `whitelist_accept` | `ro`, `shell_ro`, `rw_plan` | everything else | – |
+| `whitelist_accept` | `ro`, `shell_ro`, `ro_plan`, `rw_plan` | everything else | – |
 | `blacklist_reject` | everything else | dangerous commands | `rw`, `shell_test`, `shell_rw`, `rw_plan` |
 | `universal_accept` | everything | dangerous commands | – |
 | `universal_reject` | – | – | every call |
@@ -136,7 +136,7 @@ starts. It can only narrow the parent:
 
 | Policy | What the child gets |
 | --- | --- |
-| Work mode | parent effective capabilities ∩ the delegation's capability filter ∩ the hard cap (`ro`, `shell_ro`, `rw`, `shell_test`) |
+| Work mode | parent effective capabilities ∩ the delegation's capability filter ∩ the hard cap (`ro`, `ro_plan`, `shell_ro`, `rw`, `shell_test`) |
 | Network | parent switch; the delegation may turn it off, never on |
 | User rules | all ancestor rules; `deny` > `ask` > `allow` |
 | Tool approval | the delegation's own policy, default `whitelist_accept` |
@@ -162,13 +162,17 @@ The grant, the definition and the hard cap still select the tools:
 
 - `files` grants only tracked file tools (`write_file`, `edit_text`, `edit_ranges`).
 - `test` grants `run_shell_test`.
-- Read-only tools are always available.
+- Read-only tools are always available. The plan readers (`list_plans`, `read_plan`) use `ro_plan`
+  and appear only when the parent is in Plan mode.
+- Plan writes (`write_plan`) use `rw_plan` and are never granted to a subagent.
 - A definition with no `tools` list is read-only.
 - Built-in `implement` defaults to **files + test**; every other built-in and every custom agent
   defaults to read-only until granted.
 - A project file that shadows a built-in name does not inherit that built-in's default grant.
 - A subagent's file writes are journaled under the **parent chat**, so they appear in its review,
   inline diff and Git Changes.
+- A parent outside Plan mode (`ro`/`sw`/`aw`) has no `ro_plan`, so its children cannot use the plan
+  readers: pass the plan content in the delegation prompt instead.
 - Write-capable subagents run in the foreground, one at a time. A background subagent is read-only.
 
 Because the default child approval is `whitelist_accept` and its response is always `never`, a

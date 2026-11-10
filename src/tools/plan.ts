@@ -6,10 +6,13 @@ import { guardPath, PathEscapeError } from '../lib/sandbox';
 import { objectSchema, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
 
-/** Plan files live under `<workdir>/<planDirectory>/<session>/` inside the workspace. */
+/**
+ * Plan files live under `<workdir>/<planDirectory>/<root chat id>/` inside the workspace. A
+ * subagent's own session id is `sub-…`, so it resolves the folder of the chat that spawned it.
+ */
 
 function planDir(ctx: ToolContext): string {
-	return join(ctx.policy.planDirectory || '.comonad/plans', ctx.sessionId);
+	return join(ctx.policy.planDirectory || '.comonad/plans', ctx.rootSessionId ?? ctx.sessionId);
 }
 
 /** Resolves a plan path through the workspace guard, so a symlinked plan folder cannot escape. */
@@ -32,8 +35,8 @@ function planPath(ctx: ToolContext, name: string | null, access: 'read' | 'write
 export const planTools = toolset([
 	{
 		name: 'list_plans',
-		description: 'List plan files for this session.',
-		capability: 'rw_plan',
+		description: 'List the plan files recorded for this chat.',
+		capability: 'ro_plan',
 		needsNetwork: false,
 		needsWorkspace: true,
 		parameters: objectSchema({}),
@@ -52,8 +55,8 @@ export const planTools = toolset([
 	},
 	{
 		name: 'read_plan',
-		description: 'Read a plan file by name.',
-		capability: 'rw_plan',
+		description: 'Read a plan file recorded for this chat by name.',
+		capability: 'ro_plan',
 		needsNetwork: false,
 		needsWorkspace: true,
 		parameters: objectSchema({ name: { type: 'string' } }, ['name']),
@@ -64,7 +67,7 @@ export const planTools = toolset([
 	},
 	{
 		name: 'write_plan',
-		description: 'Write a plan file by name. Use it to record the implementation plan before editing code.',
+		description: 'Write a plan file recorded for this chat by name. Use it to record the implementation plan before editing code.',
 		capability: 'rw_plan',
 		trackedWrite: true,
 		needsNetwork: false,

@@ -2127,6 +2127,7 @@ export class Agent extends Service {
 	): ToolContext {
 		return {
 			sessionId: state.sessionId,
+			rootSessionId: state.rootSessionId,
 			batch: state.batch,
 			authorization,
 			workspace: state.policy.workingDirectory,
@@ -2728,6 +2729,9 @@ export class Agent extends Service {
 		const toolBody: string[] = [];
 		if (has('edit_ranges') || has('write_file')) {
 			toolBody.push('Prefer edit_ranges for precise changes and write_file for new files or full rewrites.');
+		}
+		if (has('write_plan')) {
+			toolBody.push('Record the accepted implementation plan with write_plan; list_plans and read_plan show the plans recorded for this chat.');
 		}
 		if (!session.policy.workingDirectory) {
 			toolBody.push('This session has no working directory: file, shell and task tools are unavailable.');

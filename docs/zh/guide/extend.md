@@ -186,8 +186,9 @@ frontmatter **选择**工具；写能力还需要 `subagents` 设置中的**授�
 ```
 
 只读工具不需要授权。`files` 只启用可跟踪的文件工具（`write_file`、`edit_text`、`edit_ranges`）；
-`test` 启用 `run_shell_test`。`run_shell`、`start_shell` 和计划写入永远不会授予子 Agent。没有 `tools`
-列表的定义视为只读。父模式也必须允许该能力。见[安全](/zh/guide/safety#子-agent)。
+`test` 启用 `run_shell_test`。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级处于
+Plan 模式时可用；计划写入（`write_plan`）以及 `run_shell`、`start_shell` 永远不会授予子 Agent。没有
+`tools` 列表的定义视为只读。父模式也必须允许该能力。见[安全](/zh/guide/safety#子-agent)。
 
 `maxTurns`（默认 20）按每回合两图步、最少四步来收紧子 Agent 的图步预算；它只能收紧
 `subagentStepsMode`/`subagentSteps`，不能放宽。见[设置](/zh/reference/settings#子-agent)。

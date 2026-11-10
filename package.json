@@ -690,7 +690,7 @@
             "universal_reject"
           ],
           "default": "manual",
-          "markdownDescription": "Tool approval policy, consulted only when no user rule matched. `manual` asks for every call; `whitelist_accept` runs the whitelisted capabilities (`ro`, `shell_ro`, `rw_plan`) and asks for the rest; `blacklist_reject` rejects the blacklisted capabilities (`rw`, `shell_test`, `shell_rw`, `rw_plan`) and asks for dangerous commands; `universal_accept` runs everything and asks for dangerous commands; `universal_reject` rejects every call."
+          "markdownDescription": "Tool approval policy, consulted only when no user rule matched. `manual` asks for every call; `whitelist_accept` runs the whitelisted capabilities (`ro`, `shell_ro`, `ro_plan`, `rw_plan`) and asks for the rest; `blacklist_reject` rejects the blacklisted capabilities (`rw`, `shell_test`, `shell_rw`, `rw_plan`) and asks for dangerous commands; `universal_accept` runs everything and asks for dangerous commands; `universal_reject` rejects every call."
         },
         "comonad.approvalResponse": {
           "type": "string",
@@ -983,7 +983,7 @@
             },
             "additionalProperties": false
           },
-          "markdownDescription": "Per-agent capability grants for subagents, keyed by agent name. `files` enables the tracked file-write tools; `test` enables the scratch-only test shell. Read-only tools are always available; full shell (`run_shell`, `start_shell`) and plan writes are never granted to a subagent. The agent's own `tools` list still selects which tools it uses, and the parent mode still has to allow the capability. Built-in `implement` defaults to both; every other agent defaults to read-only. Example: `{ \"implement\": { \"files\": true, \"test\": true } }`."
+          "markdownDescription": "Per-agent capability grants for subagents, keyed by agent name. `files` enables the tracked file-write tools; `test` enables the scratch-only test shell. Read-only tools are always available; the plan readers (`list_plans`, `read_plan`) use `ro_plan` and appear only when the parent mode is Plan. Full shell (`run_shell`, `start_shell`) and plan writes (`write_plan`) are never granted to a subagent. The agent's own `tools` list still selects which tools it uses, and the parent mode still has to allow the capability. Built-in `implement` defaults to both; every other agent defaults to read-only. Example: `{ \"implement\": { \"files\": true, \"test\": true } }`."
         },
         "comonad.instructions": {
           "type": "boolean",

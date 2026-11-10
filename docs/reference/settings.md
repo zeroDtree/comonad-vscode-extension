@@ -82,10 +82,11 @@ Only the default graph runs a turn; named graphs remain available to plugins thr
 ```
 
 Read-only tools are always available. `files` and `test` are the only grants; `run_shell`,
-`start_shell` and plan writes are never granted to a subagent. The agent definition must also list a
-tool using the capability; a definition without a `tools` list is read-only. The parent mode still
-has to allow the capability. Built-in `implement` defaults to both grants; every other built-in and
-every custom agent is read-only until configured.
+`start_shell` and plan writes are never granted to a subagent. The plan readers (`list_plans`,
+`read_plan`) use `ro_plan` and are available only when the parent is in Plan mode. The agent
+definition must also list a tool using the capability; a definition without a `tools` list is
+read-only. The parent mode still has to allow the capability. Built-in `implement` defaults to both
+grants; every other built-in and every custom agent is read-only until configured.
 
 A delegation inherits the parent's effective policy and can only narrow it. Its tool approval policy
 is separate (default `whitelist_accept`) and its approval response is fixed `never`: any call it

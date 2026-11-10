@@ -35,7 +35,7 @@ export const agentTools = toolset([
 	{
 		name: 'agent',
 		description:
-			'Delegate a focused task to a subagent that runs in its own context window and reports back a summary. The child inherits the parent policy but only narrows it. Its approval response is always never, so any tool call that asks is denied: a write-capable agent needs an inherited allow rule or approval: "universal_accept" on the delegation.',
+			'Delegate a focused task to a subagent that runs in its own context window and reports back a summary. The child inherits the parent policy but only narrows it. Its approval response is always never, so any tool call that asks is denied: a write-capable agent needs an inherited allow rule or approval: "universal_accept" on the delegation. A subagent may list and read plans recorded for this chat when the parent is in Plan mode (ro_plan), but it can never write a plan: name the plan in the prompt and record accepted plans yourself with write_plan.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -48,8 +48,9 @@ export const agentTools = toolset([
 				fork: { type: 'boolean', description: 'Give the subagent a copy of this conversation for extra context.' },
 				capabilities: {
 					type: 'array',
-					items: { type: 'string', enum: ['ro', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'] },
-					description: 'Further narrow the capabilities the child inherits. It can never add one.',
+					items: { type: 'string', enum: ['ro', 'ro_plan', 'rw', 'shell_ro', 'shell_test'] },
+					description:
+						'Further narrow the capabilities the child inherits. It can never add one. Plan reads use ro_plan; rw_plan and shell_rw are never granted to a subagent.',
 				},
 				network: {
 					type: 'boolean',

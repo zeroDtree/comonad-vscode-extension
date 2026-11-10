@@ -9,7 +9,7 @@
 | --- | --- |
 | 文件 | `list_dir`、`read_file`、`grep_files`、`write_file`、`edit_text` |
 | Shell | `run_shell_readonly`、`run_shell_test`、`run_shell`、`start_shell`、`shell_output`、`stop_shell` |
-| 计划 | `list_plans`、`read_plan`、`write_plan` |
+| 计划 | `list_plans`、`read_plan`（`ro_plan`，仅 Plan 模式）、`write_plan`（`rw_plan`，仅 Plan 模式） |
 | 待办 | `todo_write` |
 | 数学 | `calculate`、`describe_numbers`、`percentile`、`convert_units` |
 | Web | `fetch_url`、`web_search` |
@@ -25,7 +25,8 @@
 子 Agent 的提示词、步骤和工具结果，并随执行过程更新。调用可以用 `capabilities`、`network`、
 `sandboxMode` 和 `approval` 收窄子级；子级的审批应答固定为 `never`，因此任何需要询问的策略都会直接
 拒绝。子级默认审批是 `whitelist_accept`；委派可写 Agent 时请传 `approval: "universal_accept"`，或让
-父级 allow 规则被继承。Spawn 与 Fork 使用相同策略，只在上下文上不同。
+父级 allow 规则被继承。父级处于 Plan 模式时，子 Agent 可以 list/read 本聊天的计划（`ro_plan`），但
+永远不会获得 `write_plan`：接受后的计划由父级记录。Spawn 与 Fork 使用相同策略，只在上下文上不同。
 
 ## Shell 工具
 

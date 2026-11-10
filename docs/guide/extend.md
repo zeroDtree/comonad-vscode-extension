@@ -196,9 +196,10 @@ Subagents):
 ```
 
 Read-only tools need no grant. `files` enables only tracked file tools (`write_file`, `edit_text`,
-`edit_ranges`); `test` enables `run_shell_test`. `run_shell`, `start_shell` and plan writes are never
-granted to a subagent. A definition without a `tools` list is read-only. The parent mode must allow
-the capability too. See [Safety](/guide/safety#subagents).
+`edit_ranges`); `test` enables `run_shell_test`. The plan readers (`list_plans`, `read_plan`) use
+`ro_plan` and are available only when the parent is in Plan mode; plan writes (`write_plan`) and
+`run_shell`/`start_shell` are never granted to a subagent. A definition without a `tools` list is
+read-only. The parent mode must allow the capability too. See [Safety](/guide/safety#subagents).
 
 `maxTurns` (default 20) bounds the child's graph budget at two steps per turn, with a minimum of
 four steps. It can tighten `subagentStepsMode`/`subagentSteps` but never loosen them; see

@@ -9,7 +9,7 @@ Every tool declares a **capability**, whether it needs **network**, and whether 
 | --- | --- |
 | Files | `list_dir`, `read_file`, `grep_files`, `write_file`, `edit_text` |
 | Shell | `run_shell_readonly`, `run_shell_test`, `run_shell`, `start_shell`, `shell_output`, `stop_shell` |
-| Plans | `list_plans`, `read_plan`, `write_plan` |
+| Plans | `list_plans`, `read_plan` (`ro_plan`, Plan mode), `write_plan` (`rw_plan`, Plan mode) |
 | Todos | `todo_write` |
 | Math | `calculate`, `describe_numbers`, `percentile`, `convert_units` |
 | Web | `fetch_url`, `web_search` |
@@ -27,7 +27,9 @@ read-only overlay shows the subagent's prompt, steps and tool results and follow
 call can narrow the child with `capabilities`, `network`, `sandboxMode` and `approval`; the child's
 approval response is always `never`, so a policy that asks denies the call. The default child
 approval is `whitelist_accept`; pass `approval: "universal_accept"` (or inherit an allow rule) when
-delegating a write-capable agent. Spawn and Fork use the same policy; only their context differs.
+delegating a write-capable agent. A child may list and read this chat's plans when the parent is in
+Plan mode (`ro_plan`), but `write_plan` is never granted: record accepted plans in the parent.
+Spawn and Fork use the same policy; only their context differs.
 
 ## Shell tools
 

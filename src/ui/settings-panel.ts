@@ -1178,12 +1178,12 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       <p class="hint" id="subagent-budget-note"></p>
     </div>
     <h2 class="group-title">Agents</h2>
-    <p class="group-note">Every subagent can use read-only tools. The grants below add the ability to write files and run tests; full shell and plan writes are never granted. Changes apply to the next spawn.</p>
+    <p class="group-note">Every subagent can use read-only tools, including the plan readers when the parent is in Plan mode. The grants below add the ability to write files and run tests; full shell and plan writes are never granted. Changes apply to the next spawn.</p>
     <p class="group-note">A delegation inherits the parent policy and can only narrow it. Its approval response is always <code>never</code>, so a call it would ask about is denied; a write-capable agent needs an inherited allow rule or <code>approval: "universal_accept"</code> on the delegation.</p>
     <div id="subagent-rows"></div>
     <details class="help-fold">
       <summary>How permissions work</summary>
-      <p class="group-note">Read-only tools are always available. <b>Write files</b> grants the tracked write tools (<code>write_file</code>, <code>edit_text</code>, <code>edit_ranges</code>); <b>Run tests</b> grants <code>run_shell_test</code>, whose workspace is read-only and whose only writable place is the scratch directory. Full shell and plan writes are never granted to a subagent. The agent's own <code>tools</code> list still selects which tools it uses, and the parent mode must allow the capability too. Changes apply to the next spawn.</p>
+      <p class="group-note">Read-only tools are always available; the plan readers (<code>list_plans</code>, <code>read_plan</code>) use <code>ro_plan</code> and appear only when the parent mode is Plan. <b>Write files</b> grants the tracked write tools (<code>write_file</code>, <code>edit_text</code>, <code>edit_ranges</code>); <b>Run tests</b> grants <code>run_shell_test</code>, whose workspace is read-only and whose only writable place is the scratch directory. Full shell and plan writes (<code>write_plan</code>) are never granted to a subagent. The agent's own <code>tools</code> list still selects which tools it uses, and the parent mode must allow the capability too. Changes apply to the next spawn.</p>
     </details>
   </section>
 

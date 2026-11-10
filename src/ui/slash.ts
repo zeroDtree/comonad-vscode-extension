@@ -63,7 +63,7 @@ export function slashCommands(ctx: Context): void {
 			}
 			return {
 				done: false,
-				text: `Research the workspace read-only, then write a step-by-step implementation plan for:\n\n${args}`,
+				text: `Research the workspace read-only, check existing plans with list_plans, then record a step-by-step implementation plan with write_plan for:\n\n${args}`,
 				policy: { workMode: 'pl', approval: 'whitelist_accept', network: false },
 			};
 		},

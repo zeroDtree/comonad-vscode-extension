@@ -37,7 +37,7 @@ flowchart TB
 | Read-Only（`ro`） | 读文件、只读 shell |
 | Semi-Write（`sw`） | + 写文件，+ 测试 shell（工作区只读、仅 scratch 可写） |
 | Full Access（`aw`） | + 工作区内完整 shell |
-| Plan（`pl`） | 读文件、只读 shell，仅写计划文件 |
+| Plan（`pl`） | 读文件、只读 shell，读写计划文件 |
 
 模式按聊天记忆；新聊天从 `comonad.mode` 开始。
 
@@ -70,7 +70,7 @@ fetch_url(domain:example.com)
 | 策略 | 直接执行 | 先询问 | 拒绝 |
 | --- | --- | --- | --- |
 | `manual` | – | 全部调用 | – |
-| `whitelist_accept` | `ro`、`shell_ro`、`rw_plan` | 其余调用 | – |
+| `whitelist_accept` | `ro`、`shell_ro`、`ro_plan`、`rw_plan` | 其余调用 | – |
 | `blacklist_reject` | 其余调用 | 危险命令 | `rw`、`shell_test`、`shell_rw`、`rw_plan` |
 | `universal_accept` | 全部调用 | 危险命令 | – |
 | `universal_reject` | – | – | 全部调用 |
@@ -125,7 +125,7 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
 
 | 策略 | 子级得到的策略 |
 | --- | --- |
-| Work mode | 父级有效能力集合 ∩ 委派能力过滤 ∩ 硬上限（`ro`、`shell_ro`、`rw`、`shell_test`） |
+| Work mode | 父级有效能力集合 ∩ 委派能力过滤 ∩ 硬上限（`ro`、`ro_plan`、`shell_ro`、`rw`、`shell_test`） |
 | Network | 父级开关；委派可以关闭，不能打开 |
 | User rule | 全部祖先规则；`deny` > `ask` > `allow` |
 | Tool approval | 委派单独指定的策略，默认 `whitelist_accept` |
@@ -149,11 +149,13 @@ Spawn 与 Fork 共用完全相同的策略，只在上下文上不同。完整�
 
 - `files` 只授予可跟踪的文件工具（`write_file`、`edit_text`、`edit_ranges`）。
 - `test` 授予 `run_shell_test`。
-- 只读工具始终可用。
+- 只读工具始终可用。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级处于 Plan 模式时出现。
+- 计划写工具（`write_plan`）使用 `rw_plan`，永远不会授予子 Agent。
 - 没有 `tools` 列表的定义是只读的。
 - 内置 `implement` 默认是 **files + test**；其它内置 Agent 和所有自定义 Agent 在授权前都是只读。
 - 项目文件覆盖内置名称时，不会继承该内置 Agent 的默认授权。
 - 子 Agent 的文件写入记在**父聊天**的 journal 下，因此出现在它的 review、inline diff 和 Git Changes 中。
+- 非 Plan 模式（`ro`/`sw`/`aw`）的父级没有 `ro_plan`，子 Agent 因此无法使用计划读工具；请在委派 prompt 中传入计划内容。
 - 可写子 Agent 在前台运行，一次一个。后台子 Agent 是只读的。
 
 子级默认审批是 `whitelist_accept`，应答固定 `never`，所以委派的写入会先询问再被拒绝。要让可写 Agent
