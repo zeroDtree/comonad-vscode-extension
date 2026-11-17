@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Context } from 'cordis';
 import { effectiveCapabilities } from '../lib/agents';
+import type { BudgetInput } from '../lib/budget';
 import { buildVerifierPrompt, buildWorkerTaskPrompt } from '../lib/agent-prompts';
 import { parseAgentEnvelope } from '../lib/agent-output';
 import { capabilitiesOf } from '../lib/policy';
@@ -18,6 +19,18 @@ import { objectSchema, type ToolContext } from '../lib/types';
 /** The Orchestrator's task tools and the shared coordination mailbox. */
 
 const FAILED = (error: unknown): string => `Error: ${error instanceof Error ? error.message : String(error)}`;
+
+const budgetSchema = {
+	type: 'object',
+	properties: {
+		turns: { type: 'integer', minimum: 0, description: 'Model round trips. 0 = no limit.' },
+		tools: { type: 'integer', minimum: 0, description: 'Tool calls. 0 = no limit.' },
+		tokens: { type: 'integer', minimum: 0, description: 'Input + output tokens. 0 = no limit.' },
+		milliseconds: { type: 'integer', minimum: 0, description: 'Wall-clock milliseconds. 0 = no limit.' },
+	},
+	additionalProperties: false,
+	description: 'Per-task native budget; each dimension can only tighten the role/global default.',
+};
 
 const acceptanceSchema = {
 	type: 'object',
@@ -55,7 +68,8 @@ const nodeSchema = {
 		dependsOn: { type: 'array', items: { type: 'string' } },
 		acceptance: { type: 'array', minItems: 1, maxItems: 8, items: acceptanceSchema },
 		maxAttempts: { type: 'integer', minimum: 1, maximum: 3 },
-		budget: { type: 'integer', minimum: 1, maximum: 64, description: 'Maximum model steps for this task.' },
+		maxResumes: { type: 'integer', minimum: 0, maximum: 10, description: 'How many times a paused budget run may be resumed. Default 3.' },
+		budget: budgetSchema,
 	},
 	required: ['id', 'title', 'role', 'objective', 'acceptance'],
 	additionalProperties: false,
@@ -100,7 +114,7 @@ export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
 		name: 'delegate',
 		description:
-			'Run 1..8 ready tasks from the current plan in parallel. All selected tasks must be pending and ready; a batch may not contain dependencies within itself. Read and write tasks may run together; the runtime serialises writes to the same file and parallel workers can coordinate through the message tool. After the workers finish, the runtime derives fixed independent reviewer/tester children for review/command criteria. You cannot mark a task accepted; read the board and verdicts, then replan rejected work within its attempt budget.',
+			'Run 1..8 ready tasks from the current plan in parallel. All selected tasks must be pending and ready; a batch may not contain dependencies within itself. Read and write tasks may run together; the runtime serialises writes to the same file and parallel workers can coordinate through the message tool. A worker that exhausts a native budget is paused, not rejected: use resume to continue its session. After the workers finish, the runtime derives fixed independent reviewer/tester children for review/command criteria. You cannot mark a task accepted; read the board and verdicts, then replan rejected work within its attempt budget.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -175,7 +189,7 @@ export function orchestrateTools(ctx: Context): void {
 								contract: 'worker',
 								capabilities: effectiveCapabilities(run.role, node.capabilities),
 								network: node.network ?? run.role.network,
-								maxTurns: node.budget,
+								budget: node.budget,
 								description: node.title,
 								...(tasks.length === 1 && toolCtx.callId ? { callId: toolCtx.callId } : {}),
 								onStart: (sessionId) => ctx.orchestrator.attach(access, node.id, sessionId),
@@ -187,6 +201,20 @@ export function orchestrateTools(ctx: Context): void {
 					const pendingVerification: Array<{ node: TaskNode; report: string; writes: string[] }> = [];
 					for (const { run, outcome } of settled) {
 						const node = run.node;
+						if (outcome.paused) {
+							ctx.orchestrator.pause(
+								access,
+								node.id,
+								outcome.budget ?? {
+									limits: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
+									usage: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
+								},
+								outcome.report,
+								outcome.lastTool,
+								outcome.writes,
+							);
+							continue;
+						}
 						if (!outcome.ok) {
 							ctx.orchestrator.reject(access, node.id, {
 								code: outcome.stopped ? 'stopped' : 'worker_failed',
@@ -246,7 +274,7 @@ export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
 		name: 'task_status',
 		description:
-			'Read the current task board, ready nodes, rejection reasons, child/verifier session ids and recent coordination messages. Use it before delivering and after a rejection before replanning.',
+			'Read the current task board, ready nodes, rejection reasons, paused budgets, child/verifier session ids and recent coordination messages. Use it before delivering, after a rejection before replanning, and before resuming a paused task.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: false,
@@ -272,6 +300,173 @@ export function orchestrateTools(ctx: Context): void {
 			}));
 			const board = formatBoard(boardOf(graph, messages));
 			return ids.length ? `${board}\n\n${detailsOf(graph, ids)}` : `${board}\n\n${detailsOf(graph, graph.nodes.map((node) => node.id))}`;
+		},
+	});
+
+	ctx.tools.register({
+		name: 'resume',
+		description:
+			'Resume 1..8 paused tasks with a new segment budget. Resuming continues the same child session and transcript; it does not spend an attempt. The default segment budget is the task plan budget; pass a budget to set this segment. Each dimension is still capped by the role and global defaults. A resumed worker returns a new result and derived verifiers.',
+		capability: 'ro',
+		needsNetwork: false,
+		needsWorkspace: true,
+		serial: true,
+		parameters: objectSchema(
+			{
+				tasks: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string' }, description: 'Paused task ids from the current plan.' },
+				budget: budgetSchema,
+			},
+			['tasks'],
+		),
+		async execute(args, toolCtx) {
+			const access = toolCtx.taskGraph;
+			if (!access) {
+				return 'Error: resuming is only available to the Orchestrator';
+			}
+			const input = args as { tasks?: unknown; budget?: BudgetInput };
+			const tasks = Array.isArray(input.tasks)
+				? input.tasks.filter((id): id is string => typeof id === 'string' && id.trim() !== '').map((id) => id.trim())
+				: [];
+			if (!tasks.length) {
+				return 'Error: tasks must name at least one paused task id';
+			}
+			try {
+				return await ctx.orchestrator.run(access, async () => {
+					const graph = access.get();
+					if (!graph) {
+						return 'Error: no task plan exists; call task_plan first';
+					}
+					const roles = ctx.orchestrator.roles();
+					const parentCaps = new Set(capabilitiesOf(toolCtx.policy));
+					const priorWrites = new Map<string, string[]>();
+					for (const id of tasks) {
+						const node = graph.nodes.find((candidate) => candidate.id === id);
+						if (!node) {
+							return `Error: unknown task ${id}`;
+						}
+						if (node.status !== 'paused') {
+							return `Error: ${id} is ${node.status}, not paused`;
+						}
+						if (!node.subagentSessionId) {
+							return `Error: ${id} has no child session to resume`;
+						}
+						const role = roles.get(node.role);
+						if (!role) {
+							return `Error: ${id}: role ${node.role} is not available`;
+						}
+						const caps = effectiveCapabilities(role, node.capabilities);
+						if (caps.includes('rw') && !parentCaps.has('rw')) {
+							return `Error: ${id} writes, but this session has no rw capability`;
+						}
+						if ((node.network ?? role.network) && !toolCtx.policy.network) {
+							return `Error: ${id} needs network, but the session has network off`;
+						}
+						if (node.acceptance.some((criterion) => criterion.check === 'command') && !parentCaps.has('shell_test')) {
+							return `Error: ${id} needs command verification, but this session has no shell_test capability`;
+						}
+						priorWrites.set(id, [...(node.rejection?.writes ?? [])]);
+					}
+					const runs = ctx.orchestrator.resume(access, tasks);
+					const settled = await Promise.all(
+						runs.map(async (run) => {
+							const node = run.node;
+							const outcome = await toolCtx.spawnAgent({
+								prompt: buildWorkerTaskPrompt({
+									taskId: node.id,
+									title: node.title,
+									objective: node.objective,
+									inputs: node.inputs,
+									outputs: node.outputs,
+									acceptance: node.acceptance,
+								}),
+								agent: run.role.id,
+								taskId: node.id,
+								contract: 'worker',
+								capabilities: effectiveCapabilities(run.role, node.capabilities),
+								network: node.network ?? run.role.network,
+								budget: input.budget ?? node.budget,
+								resumeSessionId: node.subagentSessionId,
+								description: node.title,
+								...(tasks.length === 1 && toolCtx.callId ? { callId: toolCtx.callId } : {}),
+								onStart: (sessionId) => ctx.orchestrator.attach(access, node.id, sessionId),
+								signal: toolCtx.signal,
+							});
+							return { run, outcome, prior: priorWrites.get(node.id) ?? [] };
+						}),
+					);
+					const pendingVerification: Array<{ node: TaskNode; report: string; writes: string[] }> = [];
+					for (const { run, outcome, prior } of settled) {
+						const node = run.node;
+						if (outcome.paused) {
+							ctx.orchestrator.pause(
+								access,
+								node.id,
+								outcome.budget ?? {
+									limits: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
+									usage: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
+								},
+								outcome.report,
+								outcome.lastTool,
+								[...new Set([...prior, ...outcome.writes])],
+							);
+							continue;
+						}
+						if (!outcome.ok) {
+							ctx.orchestrator.reject(access, node.id, {
+								code: outcome.error?.startsWith('cannot resume')
+									? 'resume_unavailable'
+									: outcome.stopped
+										? 'stopped'
+										: 'worker_failed',
+								reason: outcome.error ?? outcome.report ?? 'the worker failed',
+								at: Date.now(),
+							});
+							continue;
+						}
+						const parsed = parseAgentEnvelope(outcome.report);
+						if (!parsed.ok) {
+							ctx.orchestrator.reject(access, node.id, { code: 'invalid_output', reason: parsed.reason, at: Date.now() });
+							continue;
+						}
+						const envelope = parsed.value;
+						const writes = [...new Set([...prior, ...outcome.writes])];
+						const result: TaskResult = {
+							status: envelope.status === 'blocked' || envelope.status === 'failed' ? envelope.status : 'ok',
+							summary: envelope.summary,
+							evidence: envelope.evidence,
+							criteria: envelope.acceptance ?? [],
+							writes,
+							...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
+							at: Date.now(),
+						};
+						ctx.orchestrator.recordWorker(access, node.id, result);
+						if (result.status !== 'ok') {
+							ctx.orchestrator.finish(access, node.id);
+							continue;
+						}
+						if (node.acceptance.every((criterion) => criterion.check === 'evidence')) {
+							ctx.orchestrator.finish(access, node.id);
+							continue;
+						}
+						pendingVerification.push({ node, report: outcome.report, writes });
+					}
+					const review = pendingVerification.filter((item) => item.node.acceptance.some((criterion) => criterion.check === 'review'));
+					await Promise.all(review.map((item) => runVerifier(ctx, toolCtx, access, item, 'reviewer')));
+					for (const item of pendingVerification.filter((entry) => entry.node.acceptance.some((criterion) => criterion.check === 'command'))) {
+						await runVerifier(ctx, toolCtx, access, item, 'tester');
+					}
+					for (const item of pendingVerification) {
+						const node = access.get()?.nodes.find((candidate) => candidate.id === item.node.id);
+						if (node?.status === 'verifying' || node?.status === 'running') {
+							ctx.orchestrator.finish(access, node.id);
+						}
+					}
+					const final = access.get();
+					return final ? `${formatBoard(boardOf(final))}\n\n${detailsOf(final, tasks)}` : 'The task graph disappeared.';
+				});
+			} catch (error) {
+				return FAILED(error);
+			}
 		},
 	});
 }
@@ -323,8 +518,10 @@ async function runVerifier(
 	});
 	if (!outcome.ok) {
 		ctx.orchestrator.reject(access, node.id, {
-			code: outcome.stopped ? 'stopped' : 'verification_unavailable',
+			code: outcome.paused ? 'budget_exhausted' : outcome.stopped ? 'stopped' : 'verification_unavailable',
 			reason: outcome.error ?? outcome.report ?? `the ${roleId} verifier failed`,
+			...(outcome.budget ? { budget: outcome.budget } : {}),
+			...(outcome.paused ? { partial: outcome.report } : {}),
 			at: Date.now(),
 		});
 		return;
@@ -364,6 +561,22 @@ function detailsOf(graph: { nodes: TaskNode[] }, ids: readonly string[]): string
 		}
 		if (node.result?.writes.length) {
 			lines.push(`  writes: ${node.result.writes.join(', ')}`);
+		}
+		if (node.rejection?.budget) {
+			const { limits, usage, stopped } = node.rejection.budget;
+			const limit = (value: number): string => (value > 0 ? String(value) : '∞');
+			lines.push(
+				`  budget: ${usage.turns}/${limit(limits.turns)} turns, ${usage.tools}/${limit(limits.tools)} tools, ${usage.tokens}/${limit(limits.tokens)} tokens, ${usage.milliseconds}/${limit(limits.milliseconds)} ms${stopped ? `; stopped by ${stopped}` : ''}`,
+			);
+		}
+		if (node.rejection?.partial) {
+			lines.push(`  partial: ${node.rejection.partial.slice(0, 1000)}`);
+		}
+		if (node.rejection?.writes?.length) {
+			lines.push(`  previous writes: ${node.rejection.writes.join(', ')}`);
+		}
+		if (node.resumes > 0) {
+			lines.push(`  resumes: ${node.resumes}/${node.maxResumes}`);
 		}
 		if (node.verification?.checks.length) {
 			lines.push(

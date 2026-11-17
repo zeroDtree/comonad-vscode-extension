@@ -4132,7 +4132,7 @@
 		}
 		const counts = board.counts || {};
 		const glyph = (status) =>
-			status === 'accepted' ? '✔' : status === 'rejected' ? '✕' : status === 'running' ? '◐' : status === 'verifying' ? '◑' : '○';
+			status === 'accepted' ? '✔' : status === 'rejected' ? '✕' : status === 'running' ? '◐' : status === 'verifying' ? '◑' : status === 'paused' ? '⏸' : '○';
 		const notes = Array.isArray(board.messages) ? board.messages.length : 0;
 		node.hidden = false;
 		node.innerHTML =

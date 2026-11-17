@@ -183,6 +183,10 @@ async function loadAgents(roots: { project?: string; user?: string }): Promise<A
 					files: booleanField(data, 'files') === true,
 					test: booleanField(data, 'test') === true,
 				};
+				const turns = numberField(data, 'maxTurns');
+				const tools = numberField(data, 'maxTools');
+				const tokens = numberField(data, 'maxTokens');
+				const milliseconds = numberField(data, 'maxMilliseconds');
 				custom.push({
 					id,
 					title: stringField(data, 'title') ?? id,
@@ -196,7 +200,12 @@ async function loadAgents(roots: { project?: string; user?: string }): Promise<A
 					grant,
 					risk: roleRisk(capabilities),
 					model: stringField(data, 'model'),
-					maxTurns: numberField(data, 'maxTurns'),
+					budget: {
+						...(turns !== undefined ? { turns } : {}),
+						...(tools !== undefined ? { tools } : {}),
+						...(tokens !== undefined ? { tokens } : {}),
+						...(milliseconds !== undefined ? { milliseconds } : {}),
+					},
 					builtin: false,
 				});
 			} catch {

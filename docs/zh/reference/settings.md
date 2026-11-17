@@ -54,9 +54,8 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 | `allowFullAccess` | `true` | 提供 unrestricted 预设 |
 | `commandTimeout` | `60` | shell 超时回退值（秒） |
 | `commandTimeoutOverride` | `false` | 始终使用该值，忽略模型选择的超时 |
-| `maxSteps` | `0`（无限制） | 每回合最大图步数 |
-| `subagentStepsMode` | `custom` | `inherit` 共享该回合的 `maxSteps`；`custom` 使用 `subagentSteps` |
-| `subagentSteps` | `40` | `custom` 下子 Agent 的步数预算；`0` 表示无限制，但定义的 `maxTurns` 仍会封顶。`maxTurns` 不会收紧 `inherit` 预算 |
+| `budget` | `{turns:0, tools:0, tokens:0, milliseconds:0}` | 主 Agent 的四维原生硬预算；`0` 表示无限制 |
+| `subagentBudget` | `{turns:24, tools:100, tokens:0, milliseconds:0}` | 子 Agent 默认预算；角色或任务只能收紧各维度 |
 | `filterSensitiveEnv` | `true` | 从命令环境中移除 key、token 与密码 |
 | `permissions` | `{allow:[], ask:[], deny:[]}` | 用户规则；见[安全](/zh/guide/safety#_3-user-rule) |
 | `subagents` | `{}` | 子角色的逐角色授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。默认值来自角色表：`coder`、`tester`、`data-analyst`、`scientist` 两者都有；`technical-writer` 只有 files；`math-researcher` 只有 test；其它内置角色默认只读。 |
@@ -93,10 +92,11 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 否则请在主线程完成写。子会话保存完整有效策略、revision 和父会话。见
 [安全](/zh/guide/safety#编排器与子-agent)与[编排](/zh/guide/orchestration)。
 
-步数：`subagentStepsMode` 默认 `custom`，每个子代理花费 `subagentSteps`（40）个图步；为 `0` 时回落到
-角色的 `maxTurns` 上限（若有）。`inherit` 原样使用该回合的 `maxSteps`（包括 `0` 即无限制），并忽略
-`maxTurns`。在 `custom` 下，角色的 `maxTurns` 按回合计数（每回合两图步，最少四步），只会收紧预算，不会
-放宽。两种模式下任务的 `budget` 都可以进一步收紧。
+预算：每次运行有四个独立原生上限——`turns`（模型往返次数）、`tools`（工具调用次数）、`tokens`
+（输入 + 输出 token）、`milliseconds`（墙钟毫秒）。`0` 表示无限制。子代理的有效预算按维度取
+`subagentBudget`、角色预算、任务 `budget` 中最小的非零值；任务只能收紧。任一维触顶后，运行停在消息
+边界，保留 partial transcript；子任务进入 `paused`。`resume` 用新的分段预算继续同一子会话，不消耗
+attempt。见[设置](/zh/reference/settings#编排器与子-agent)。
 
 ## 检查点
 

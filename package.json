@@ -754,28 +754,71 @@
           ],
           "description": "Workspace-relative paths or basenames that file and shell tools must not read or write."
         },
-        "comonad.maxSteps": {
-          "type": "number",
-          "default": 0,
-          "markdownDescription": "Maximum graph steps per turn. `0` means no limit."
+        "comonad.budget": {
+          "type": "object",
+          "default": {
+            "turns": 0,
+            "tools": 0,
+            "tokens": 0,
+            "milliseconds": 0
+          },
+          "properties": {
+            "turns": {
+              "type": "number",
+              "default": 0,
+              "markdownDescription": "Model round trips per run. `0` means no limit."
+            },
+            "tools": {
+              "type": "number",
+              "default": 0,
+              "markdownDescription": "Tool calls per run. `0` means no limit."
+            },
+            "tokens": {
+              "type": "number",
+              "default": 0,
+              "markdownDescription": "Provider-reported input + output tokens per run. `0` means no limit."
+            },
+            "milliseconds": {
+              "type": "number",
+              "default": 0,
+              "markdownDescription": "Wall-clock milliseconds per run. `0` means no limit."
+            }
+          },
+          "additionalProperties": false,
+          "markdownDescription": "Four independent native budgets for the main agent. Each stops the run at its limit and returns a partial transcript. Unlike `comonad.budgetUsd` (a warning), these are hard limits."
         },
-        "comonad.subagentStepsMode": {
-          "type": "string",
-          "enum": [
-            "inherit",
-            "custom"
-          ],
-          "enumDescriptions": [
-            "Subagents share the turn's Max steps.",
-            "Subagents spend the budget in comonad.subagentSteps."
-          ],
-          "default": "custom",
-          "markdownDescription": "Where a subagent's step budget comes from: the turn's `maxSteps` (`inherit`, used exactly) or `comonad.subagentSteps` (`custom`). A definition's `maxTurns` can only tighten a `custom` budget."
-        },
-        "comonad.subagentSteps": {
-          "type": "number",
-          "default": 40,
-          "markdownDescription": "Steps a subagent may take when `comonad.subagentStepsMode` is `custom`. `0` means no limit."
+        "comonad.subagentBudget": {
+          "type": "object",
+          "default": {
+            "turns": 24,
+            "tools": 100,
+            "tokens": 0,
+            "milliseconds": 0
+          },
+          "properties": {
+            "turns": {
+              "type": "number",
+              "default": 24,
+              "markdownDescription": "Model round trips per child run. `0` means no limit."
+            },
+            "tools": {
+              "type": "number",
+              "default": 100,
+              "markdownDescription": "Tool calls per child run. `0` means no limit."
+            },
+            "tokens": {
+              "type": "number",
+              "default": 0,
+              "markdownDescription": "Input + output tokens per child run. `0` means no limit."
+            },
+            "milliseconds": {
+              "type": "number",
+              "default": 0,
+              "markdownDescription": "Wall-clock milliseconds per child run. `0` means no limit."
+            }
+          },
+          "additionalProperties": false,
+          "markdownDescription": "Default native budget for a child agent. A role definition and a task plan can only tighten it; a paused child keeps its session and transcript and can be resumed."
         },
         "comonad.planDirectory": {
           "type": "string",

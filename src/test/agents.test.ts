@@ -83,10 +83,10 @@ suite('Agent roles', () => {
 		assert.deepStrictEqual(allowedToolsFor({}, available), available);
 	});
 
-	test('the role index is one line per role with its mode and network', () => {
+	test('the role index is one line per role with its mode, network and budget', () => {
 		const lines = agentLines(BUILTIN_ROLES);
 		assert.strictEqual(lines.split('\n').length, 14);
-		assert.match(lines, /- researcher \[ro, network\]:/);
-		assert.match(lines, /- coder \[sw\]:/);
+		assert.match(lines, /- researcher \[ro, network; 10 turns, 40 tools\]:/);
+		assert.match(lines, /- coder \[sw; 16 turns, 60 tools\]:/);
 	});
 });

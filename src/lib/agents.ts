@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { describeBudget, normalizeBudget, type BudgetInput } from './budget';
 import type { Capability, WorkMode } from './types';
 
 /**
@@ -37,13 +38,14 @@ export interface AgentRole {
 	grant: SubagentGrant;
 	/** `write` only when the effective capabilities include `rw`. */
 	risk: AgentRisk;
-	maxTurns?: number;
+	/** Per-role default budget; a task can only tighten it. */
+	budget?: BudgetInput;
 	model?: string;
 	builtin?: boolean;
 }
 
 /** Tools only the root orchestrator may call. They are never offered to a child. */
-export const ORCHESTRATOR_TOOLS = ['task_plan', 'delegate', 'task_status'] as const;
+export const ORCHESTRATOR_TOOLS = ['task_plan', 'delegate', 'task_status', 'resume'] as const;
 
 /**
  * Tools a child must never be offered, in addition to the capability cap. `write_plan` and
@@ -102,7 +104,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		capabilities: ['ro', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...LORE, ...MESSAGE, ...TODO],
-		maxTurns: 8,
+		budget: { turns: 8, tools: 30 },
 	}),
 	role({
 		id: 'researcher',
@@ -114,7 +116,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		capabilities: ['ro'],
 		network: true,
 		tools: [...READ, ...WEB, ...SKILL, ...LORE, ...MESSAGE, ...TODO],
-		maxTurns: 10,
+		budget: { turns: 10, tools: 40 },
 	}),
 	role({
 		id: 'math-researcher',
@@ -127,7 +129,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		network: false,
 		tools: [...READ, ...SHELL_READ, ...MATH, ...SHELL_TEST, ...SKILL, ...MESSAGE, ...TODO],
 		grant: test(),
-		maxTurns: 10,
+		budget: { turns: 10, tools: 40 },
 	}),
 	role({
 		id: 'explorer',
@@ -139,7 +141,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		capabilities: ['ro', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...MESSAGE],
-		maxTurns: 6,
+		budget: { turns: 6, tools: 25 },
 	}),
 	role({
 		id: 'planner',
@@ -151,7 +153,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		capabilities: ['ro', 'ro_plan', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...PLAN_READ, ...SKILL, ...MESSAGE],
-		maxTurns: 10,
+		budget: { turns: 10, tools: 40 },
 	}),
 	role({
 		id: 'coder',
@@ -164,7 +166,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SHELL_TEST, ...PLAN_READ, ...SKILL, ...MESSAGE, ...TODO],
 		grant: filesAndTest(),
-		maxTurns: 16,
+		budget: { turns: 16, tools: 60 },
 	}),
 	role({
 		id: 'tester',
@@ -177,7 +179,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SHELL_TEST, ...PLAN_READ, ...SKILL, ...MESSAGE, ...TODO],
 		grant: filesAndTest(),
-		maxTurns: 12,
+		budget: { turns: 12, tools: 50 },
 	}),
 	role({
 		id: 'reviewer',
@@ -189,7 +191,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		capabilities: ['ro', 'ro_plan', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...PLAN_READ, ...SKILL, ...MESSAGE],
-		maxTurns: 10,
+		budget: { turns: 10, tools: 40 },
 	}),
 	role({
 		id: 'debugger',
@@ -201,7 +203,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		capabilities: ['ro', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...MESSAGE, ...TODO],
-		maxTurns: 10,
+		budget: { turns: 10, tools: 40 },
 	}),
 	role({
 		id: 'security-auditor',
@@ -213,7 +215,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		capabilities: ['ro', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...MESSAGE],
-		maxTurns: 10,
+		budget: { turns: 10, tools: 40 },
 	}),
 	role({
 		id: 'data-analyst',
@@ -226,7 +228,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SHELL_TEST, ...MATH, ...SKILL, ...MESSAGE, ...TODO],
 		grant: filesAndTest(),
-		maxTurns: 14,
+		budget: { turns: 14, tools: 50 },
 	}),
 	role({
 		id: 'scientist',
@@ -239,7 +241,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SHELL_TEST, ...MATH, ...SKILL, ...MESSAGE, ...TODO],
 		grant: filesAndTest(),
-		maxTurns: 16,
+		budget: { turns: 16, tools: 60 },
 	}),
 	role({
 		id: 'technical-writer',
@@ -252,7 +254,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SKILL, ...LORE, ...MESSAGE, ...TODO],
 		grant: files(),
-		maxTurns: 10,
+		budget: { turns: 10, tools: 40 },
 	}),
 	role({
 		id: 'architect',
@@ -264,7 +266,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		capabilities: ['ro', 'ro_plan', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...PLAN_READ, ...SKILL, ...MESSAGE],
-		maxTurns: 10,
+		budget: { turns: 10, tools: 40 },
 	}),
 ];
 
@@ -302,7 +304,7 @@ export function agentLines(agents: readonly AgentRole[]): string {
 	return agents
 		.map(
 			(agent) =>
-				`- ${agent.id} [${agent.workMode}${agent.network ? ', network' : ''}]: ${agent.description || 'no description'}`,
+				`- ${agent.id} [${agent.workMode}${agent.network ? ', network' : ''}; ${describeBudget(normalizeBudget(agent.budget))}]: ${agent.description || 'no description'}`,
 		)
 		.join('\n');
 }

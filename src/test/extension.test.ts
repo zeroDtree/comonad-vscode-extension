@@ -108,8 +108,8 @@ import {
 	profileKeyEnvs,
 	sanitizeSubagentGrants,
 	subagentGrant,
-	subagentStepBudget,
 } from '../services/settings';
+import { mergeBudget, normalizeBudget, RunBudget, sealPartial } from '../lib/budget';
 import { toolset } from '../services/tools';
 import { askTools } from '../tools/misc';
 import { promptText, scratchDirectory } from '../services/agent';
@@ -448,7 +448,7 @@ suite('Comonad domain', () => {
 		await assert.rejects(() => runGraph(graph, {}, { maxSteps: 3 }), /exceeded maxSteps \(3\)/);
 	});
 
-	test('maxSteps 0 (the default) runs without a budget', async () => {
+	test('the internal graph safety cap leaves a short graph alone', async () => {
 		const config = parseGraphSource(`flowchart TD
   %% start: loop
   loop["loop"] -->|route: pick| loop
@@ -468,19 +468,226 @@ suite('Comonad domain', () => {
 		assert.strictEqual(outcome.state.value, 200);
 	});
 
-	test("a subagent's step budget is inherited exactly or its own, and maxTurns only tightens custom", () => {
-		const custom = { subagentStepsMode: 'custom' as const, subagentSteps: 40 };
-		const inherit = { subagentStepsMode: 'inherit' as const, subagentSteps: 40 };
-		assert.strictEqual(subagentStepBudget(custom, 0), 40, 'custom spends its own budget');
-		assert.strictEqual(subagentStepBudget(inherit, 12), 12, 'inherit shares the turn budget');
-		assert.strictEqual(subagentStepBudget(inherit, 0), 0, 'inheriting an unlimited turn is unlimited');
-		assert.strictEqual(subagentStepBudget(inherit, 0, 20), 0, 'maxTurns does not bound an inherited unlimited budget');
-		assert.strictEqual(subagentStepBudget(inherit, 12, 2), 12, 'maxTurns does not tighten an inherited finite budget');
-		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 0 }, 0), 0, 'custom 0 with no maxTurns means no limit');
-		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 0 }, 0, 10), 20, 'custom 0 falls back to maxTurns, two steps a turn');
-		assert.strictEqual(subagentStepBudget(custom, 0, 10), 20, 'maxTurns counts two steps a turn');
-		assert.strictEqual(subagentStepBudget(custom, 0, 1), 4, 'and never below four steps');
-		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 100 }, 0, 20), 40, 'maxTurns can only tighten a custom budget');
+	test('budgets are four independent dimensions with 0 as unlimited', () => {
+		assert.deepStrictEqual(normalizeBudget({ turns: 3, tools: -1, tokens: 1.9, milliseconds: 500 }), {
+			turns: 3,
+			tools: 0,
+			tokens: 1,
+			milliseconds: 500,
+		});
+		assert.deepStrictEqual(mergeBudget({ turns: 10, tools: 5 }, { turns: 4, tokens: 100 }, { tokens: 50 }), {
+			turns: 4,
+			tools: 5,
+			tokens: 50,
+			milliseconds: 0,
+		});
+		const budget = new RunBudget({ turns: 2, tools: 3, tokens: 10, milliseconds: 1000 }, {}, 1000);
+		assert.strictEqual(budget.check(1500), undefined);
+		budget.spendTurn(1500);
+		budget.spendTurn(1500);
+		assert.strictEqual(budget.check(1500), 'turns');
+		assert.strictEqual(budget.check(3000), 'turns', 'the first exhausted dimension wins even when time has passed');
+		assert.deepStrictEqual(budget.report(1500).usage, { turns: 2, tools: 0, tokens: 0, milliseconds: 500 });
+		const revived = RunBudget.from(JSON.parse(JSON.stringify(budget)));
+		assert.ok(revived instanceof RunBudget, 'a cursor JSON round-trip revives the tracker methods');
+		assert.strictEqual(revived.check(1500), 'turns');
+	});
+
+	test('a tool budget stops independently of turns and tokens', () => {
+		const budget = new RunBudget({ tools: 2 });
+		budget.spendTurn();
+		budget.spendTools(2);
+		assert.strictEqual(budget.check(), 'tools');
+	});
+
+	test('a native tool budget executes N calls and answers the rest', async () => {
+		const kernel = await createTestKernel({
+			config: { budget: { turns: 0, tools: 2, tokens: 0, milliseconds: 0 } },
+		});
+		try {
+			let requests = 0;
+			let executed = 0;
+			const call = (id: string): ToolCall => ({
+				id,
+				name: 'probe',
+				arguments: JSON.stringify({ value: id }),
+			});
+			kernel.ctx.llm.use({
+				name: 'tool-budget',
+				async chat() {
+					requests += 1;
+					if (requests === 1) {
+						return { message: { role: 'assistant', content: '' }, toolCalls: [call('a'), call('b'), call('c')], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.plugin(
+				toolset([
+					{
+						name: 'probe',
+						description: 'probe',
+						parameters: objectSchema({ value: { type: 'string' } }, ['value']),
+						capability: 'ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						async execute() {
+							executed += 1;
+							return 'ok';
+						},
+					},
+				]),
+			);
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			assert.strictEqual(executed, 2);
+			assert.strictEqual(requests, 1, 'the stop prevents the next model round');
+			assert.strictEqual(result.stopped, true);
+			assert.strictEqual(result.budget?.stopped, 'tools');
+			const session = kernel.ctx.sessions.require(result.sessionId);
+			const toolMessages = session.transcript.filter((message) => message.role === 'tool');
+			assert.strictEqual(toolMessages.length, 3, 'every call gets a result');
+			assert.match(toolMessages[2]?.content ?? '', /tool budget/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a native turn budget stops before the next model round', async () => {
+		const kernel = await createTestKernel({
+			config: { budget: { turns: 1, tools: 0, tokens: 0, milliseconds: 0 } },
+		});
+		try {
+			let requests = 0;
+			let executed = 0;
+			kernel.ctx.llm.use({
+				name: 'turn-budget',
+				async chat() {
+					requests += 1;
+					return {
+						message: { role: 'assistant', content: requests === 1 ? '' : 'done' },
+						toolCalls: requests === 1 ? [{ id: 'a', name: 'probe', arguments: JSON.stringify({ value: 'a' }) }] : [],
+						usage: { input: 1, output: 1 },
+					};
+				},
+			});
+			await kernel.ctx.plugin(
+				toolset([
+					{
+						name: 'probe',
+						description: 'probe',
+						parameters: objectSchema({ value: { type: 'string' } }, ['value']),
+						capability: 'ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						async execute() {
+							executed += 1;
+							return 'ok';
+						},
+					},
+				]),
+			);
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			assert.strictEqual(executed, 1, 'the first turn may still use its tools');
+			assert.strictEqual(requests, 1, 'the second model round is not sent');
+			assert.strictEqual(result.budget?.stopped, 'turns');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a native token budget stops before tool calls the response asked for', async () => {
+		const kernel = await createTestKernel({
+			config: { budget: { turns: 0, tools: 0, tokens: 100_000, milliseconds: 0 } },
+		});
+		try {
+			let requests = 0;
+			let executed = 0;
+			kernel.ctx.llm.use({
+				name: 'token-budget',
+				async chat() {
+					requests += 1;
+					return {
+						message: { role: 'assistant', content: '' },
+						toolCalls: [{ id: 'a', name: 'probe', arguments: JSON.stringify({ value: 'a' }) }],
+						usage: { input: 100_000, output: 1 },
+					};
+				},
+			});
+			await kernel.ctx.plugin(
+				toolset([
+					{
+						name: 'probe',
+						description: 'probe',
+						parameters: objectSchema({ value: { type: 'string' } }, ['value']),
+						capability: 'ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						async execute() {
+							executed += 1;
+							return 'ok';
+						},
+					},
+				]),
+			);
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			assert.strictEqual(requests, 1);
+			assert.strictEqual(executed, 0, 'no tool runs after the token budget is spent');
+			assert.strictEqual(result.budget?.stopped, 'tokens');
+			const session = kernel.ctx.sessions.require(result.sessionId);
+			assert.match(
+				session.transcript.filter((message) => message.role === 'tool').map((message) => message.content).join('\n'),
+				/token budget/,
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a native time budget aborts a slow model round and seals the transcript', async () => {
+		const kernel = await createTestKernel({
+			config: { budget: { turns: 0, tools: 0, tokens: 0, milliseconds: 5 } },
+		});
+		try {
+			kernel.ctx.llm.use({
+				name: 'time-budget',
+				async chat() {
+					await new Promise((resolve) => setTimeout(resolve, 40));
+					return {
+						message: { role: 'assistant', content: 'late' },
+						toolCalls: [],
+						usage: { input: 1, output: 1 },
+					};
+				},
+			});
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			assert.strictEqual(result.budget?.stopped, 'milliseconds');
+			assert.strictEqual(result.stopped, true);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('sealPartial answers every dangling tool call exactly once', () => {
+		const messages: Message[] = [
+			{
+				role: 'assistant',
+				content: '',
+				toolCalls: [
+					{ id: 'a', name: 'read_file', arguments: '{}' },
+					{ id: 'b', name: 'read_file', arguments: '{}' },
+				],
+			},
+			{ role: 'tool', toolCallId: 'a', content: 'ok' },
+		];
+		const transcript = messages.map((message) => ({ ...message }));
+		assert.strictEqual(sealPartial(messages, transcript, 'turns'), '');
+		assert.deepStrictEqual(
+			transcript.filter((message) => message.role === 'tool').map((message) => message.toolCallId),
+			['a', 'b'],
+		);
+		assert.match(transcript.find((message) => message.toolCallId === 'b')?.content ?? '', /turn budget/);
+		sealPartial(messages, transcript, 'turns');
+		assert.strictEqual(transcript.filter((message) => message.role === 'tool').length, 2);
 	});
 
 	test('question answers are sanitized against the offered options', () => {
@@ -858,6 +1065,7 @@ suite('Comonad domain', () => {
 			commandTimeoutOverride: false,
 			planDirectory: '',
 			denyReadPaths: ['.env'],
+			budget: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
 		};
 		assert.deepStrictEqual(normalizeAgentPatch({ sandboxMode: 'read-only' as const }, current), { sandboxMode: 'read-only' as const });
 		assert.deepStrictEqual(normalizeAgentPatch({ sandboxMode: 'nonsense' as const }, current), { sandboxMode: 'workspace-write' as const });
@@ -869,6 +1077,12 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'nonsense' }, current), { toolCard: 'collapsed' });
 		assert.deepStrictEqual(normalizeAgentPatch({ questionNotification: false }, current), { questionNotification: false });
 		assert.deepStrictEqual(normalizeAgentPatch({ questionNotification: true }, current), { questionNotification: true });
+		assert.deepStrictEqual(normalizeAgentPatch({ budget: { turns: 12 } }, current), {
+			budget: { turns: 12, tools: 0, tokens: 0, milliseconds: 0 },
+		});
+		assert.deepStrictEqual(normalizeAgentPatch({ subagentBudget: { tools: 20 } }, current), {
+			subagentBudget: { turns: 24, tools: 20, tokens: 0, milliseconds: 0 },
+		});
 		assert.deepStrictEqual(
 			normalizeAgentPatch(
 				{ workingDirectory: '  /next  ', commandTimeout: '45', denyReadPaths: 'a\n b ', mode: 'nonsense', network: true },
@@ -894,6 +1108,7 @@ suite('Comonad domain', () => {
 				'commandTimeoutOverride',
 				'planDirectory',
 				'denyReadPaths',
+				'budget',
 			],
 		);
 	});
@@ -944,10 +1159,10 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(subagentGrant(granted, custom('my-writer')), { files: true, test: false });
 	});
 
-	test('the turn policy carries the configured step budget', async () => {
+	test('the turn policy carries the configured four-dimensional budget', async () => {
 		const kernel = await createTestKernel();
 		try {
-			assert.strictEqual(kernel.ctx.agent.policyFor().maxSteps, 12);
+			assert.deepStrictEqual(kernel.ctx.agent.policyFor().budget, { turns: 12, tools: 0, tokens: 0, milliseconds: 0 });
 		} finally {
 			await kernel.dispose();
 		}
@@ -3771,7 +3986,22 @@ suite('Cordis kernel', () => {
 			assert.match(document, /data-tab="subagents"/, 'the subagents tab is a core tab');
 			assert.match(document, /<section data-pane="subagents" hidden>/, 'with its own section');
 			assert.match(document, /id="subagent-rows"/, 'holding the grant matrix');
+			for (const id of [
+				'budget-turns',
+				'budget-tools',
+				'budget-tokens',
+				'budget-milliseconds',
+				'subagent-budget-turns',
+				'subagent-budget-tools',
+				'subagent-budget-tokens',
+				'subagent-budget-milliseconds',
+			]) {
+				assert.match(document, new RegExp(`id="${id}"`), `the ${id} control is in the document`);
+			}
 			const hostScript = readFileSync(join(root, 'resources', 'settings.js'), 'utf8');
+			assert.match(hostScript, /function renderBudget\(/, 'the client draws all four dimensions');
+			assert.match(hostScript, /saveBudget\('budget'/, 'and saves the root budget as one object');
+			assert.match(hostScript, /saveBudget\('subagentBudget'/, 'and the child budget as one object');
 			assert.match(hostScript, /function renderSubagents\(/, 'the client draws the matrix');
 			assert.match(hostScript, /type: 'saveSubagents'/, 'and saves a grant');
 			assert.match(hostScript, /settingsScope/, 'the guest remembers the chosen scope');

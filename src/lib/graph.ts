@@ -98,8 +98,12 @@ export interface RunOptions<S = unknown> {
 	onStep?: (state: S, step: number) => void;
 }
 
-/** `0` is no budget: the graph runs until it ends or is aborted, which is the default. */
-export const DEFAULT_MAX_STEPS = 0;
+/**
+ * A safety net, not a user budget: a custom graph that never reaches `End` is stopped after this
+ * many node executions. The four native run budgets live in the agent nodes; callers can still pass
+ * `maxSteps: 0` to disable this internal cap for a trusted graph.
+ */
+export const DEFAULT_MAX_STEPS = 10_000;
 
 export class GraphError extends Error {
 	constructor(message: string) {

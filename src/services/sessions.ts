@@ -4,6 +4,7 @@ import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 
 import { join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
 import { asAttachments, attachmentIdOf } from '../lib/attachments';
+import { RunBudget } from '../lib/budget';
 import { asReasoningEffort } from '../lib/effort';
 import { asApproval, asApprovalResponse, asCapabilities, asRuleSet, asWorkMode } from '../lib/policy';
 import { asSandboxMode, DEFAULT_SANDBOX_MODE, isInside } from '../lib/sandbox';
@@ -588,6 +589,10 @@ function sanitizeCursor(cursor: Cursor | null): Cursor | null {
 	// turn would crash on `writes.add`. Revive it from its array.
 	if (state.writes !== undefined) {
 		next.writes = new Set(Array.isArray(state.writes) ? state.writes.filter((path): path is string => typeof path === 'string') : []);
+	}
+	// A budget is a class with methods; the cursor stores its plain JSON, so revive it.
+	if (state.budget !== undefined) {
+		next.budget = RunBudget.from(state.budget) ?? state.budget;
 	}
 	// A cursor written while workflows existed may carry their state; it is dead weight now.
 	delete next.workflow;

@@ -49,8 +49,10 @@ sandbox and trace layers. A task graph is a plan for agents, not a tool-executio
 Set `graph` in the User (`~/.comonad/settings.json`) or Workspace
 (`<workspace>/.comonad/settings.json`) settings file to a Mermaid source. An empty value uses the
 shipped loop; a source that fails to parse or compile is logged and the shipped loop runs instead.
-`maxSteps` caps the whole turn (`0` means no limit). Plugins register node implementations and routes
-on `ctx.graphs`, so a custom graph can use any implementation the loaded plugins provide.
+The four native limits in `comonad.budget` (turns, tools, tokens and wall-clock milliseconds) apply
+to the turn; the graph engine also keeps an internal node cap so a custom loop cannot spin forever.
+Plugins register node implementations and routes on `ctx.graphs`, so a custom graph can use any
+implementation the loaded plugins provide.
 
 ## Plugins
 

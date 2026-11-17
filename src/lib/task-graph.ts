@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { AgentRisk, AgentRole } from './agents';
 import { effectiveCapabilities, roleRisk } from './agents';
+import { normalizeBudget, type BudgetDimension, type BudgetInput, type BudgetReport, type BudgetUsage } from './budget';
 import type { Capability } from './types';
 
 /**
@@ -9,10 +10,10 @@ import type { Capability } from './types';
  * persistence, spawning and audit.
  */
 
-export type TaskStatus = 'pending' | 'running' | 'verifying' | 'accepted' | 'rejected';
+export type TaskStatus = 'pending' | 'running' | 'verifying' | 'accepted' | 'rejected' | 'paused';
 export type AcceptanceCheck = 'evidence' | 'review' | 'command';
 
-export const TASK_STATUSES: readonly TaskStatus[] = ['pending', 'running', 'verifying', 'accepted', 'rejected'];
+export const TASK_STATUSES: readonly TaskStatus[] = ['pending', 'running', 'verifying', 'accepted', 'rejected', 'paused'];
 export const ACCEPTANCE_CHECKS: readonly AcceptanceCheck[] = ['evidence', 'review', 'command'];
 
 export const MAX_TASKS = 32;
@@ -21,8 +22,9 @@ export const MAX_DEPENDENCIES = 16;
 export const MAX_WRITES = 64;
 export const MAX_ATTEMPTS = 3;
 export const MAX_REPLANS = 6;
-export const MIN_BUDGET = 1;
-export const MAX_BUDGET = 64;
+/** Per-dimension plan bounds; `0` is unlimited and is the common value. */
+export const MAX_BUDGET_VALUE = 1_000_000_000;
+export const DEFAULT_MAX_RESUMES = 3;
 
 const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
@@ -52,8 +54,9 @@ export interface TaskNodeInput {
 	dependsOn?: string[];
 	acceptance: AcceptanceCriterion[];
 	maxAttempts?: number;
-	/** Maximum model steps for this task; it can only tighten the subagent step budget. */
-	budget?: number;
+	/** Per-task native budget; each dimension can only tighten the role/global default. */
+	budget?: BudgetInput;
+	maxResumes?: number;
 }
 
 export interface TaskNode extends Omit<TaskNodeInput, 'dependsOn' | 'maxAttempts'> {
@@ -62,6 +65,9 @@ export interface TaskNode extends Omit<TaskNodeInput, 'dependsOn' | 'maxAttempts
 	status: TaskStatus;
 	attempts: number;
 	maxAttempts: number;
+	/** How many times a paused budget run was resumed; resuming is not a new attempt. */
+	resumes: number;
+	maxResumes: number;
 	createdAt: number;
 	startedAt?: number;
 	finishedAt?: number;
@@ -115,6 +121,8 @@ export interface TaskResult {
 	/** Authoritative tracked writes from `Agent.spawnAgent`, not the worker's claims. */
 	writes: string[];
 	sessionId?: string;
+	/** Present when a native budget stopped the worker; the result is partial. */
+	budget?: BudgetReport;
 	at: number;
 }
 
@@ -139,8 +147,16 @@ export interface TaskRejection {
 		| 'verification_unavailable'
 		| 'stopped'
 		| 'interrupted'
-		| 'limit';
+		| 'limit'
+		| 'budget_exhausted'
+		| 'resume_unavailable';
 	reason: string;
+	/** The partial budget result when a worker was cut off by a native limit. */
+	budget?: BudgetReport;
+	partial?: string;
+	resumable?: boolean;
+	/** Tracked writes from the paused segment, carried into the resume's verifier context. */
+	writes?: string[];
 	at: number;
 }
 
@@ -271,7 +287,8 @@ function normalizeInput(node: TaskNodeInput): TaskNodeInput {
 		dependsOn: unique(node.dependsOn ?? []),
 		acceptance: node.acceptance,
 		...(node.maxAttempts !== undefined ? { maxAttempts: node.maxAttempts } : {}),
-		...(node.budget !== undefined ? { budget: node.budget } : {}),
+		...(node.maxResumes !== undefined ? { maxResumes: node.maxResumes } : {}),
+		...(node.budget !== undefined ? { budget: normalizeBudget(node.budget) } : {}),
 	};
 }
 
@@ -378,8 +395,22 @@ export function checkTaskPlan(input: TaskPlanInput, roles: ReadonlyMap<string, A
 			errors.push(`${node.id}: maxAttempts must be 1..${MAX_ATTEMPTS}`);
 		}
 		const budget = node.budget;
-		if (budget !== undefined && (typeof budget !== 'number' || !Number.isInteger(budget) || budget < MIN_BUDGET || budget > MAX_BUDGET)) {
-			errors.push(`${node.id}: budget must be ${MIN_BUDGET}..${MAX_BUDGET}`);
+		if (budget !== undefined) {
+			if (!budget || typeof budget !== 'object' || Array.isArray(budget)) {
+				errors.push(`${node.id}: budget must be an object of turns/tools/tokens/milliseconds`);
+			} else {
+				for (const [dimension, value] of Object.entries(budget)) {
+					if (!['turns', 'tools', 'tokens', 'milliseconds'].includes(dimension)) {
+						errors.push(`${node.id}: unknown budget dimension ${dimension}`);
+					} else if (value !== undefined && (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_BUDGET_VALUE)) {
+						errors.push(`${node.id}: budget.${dimension} must be 0..${MAX_BUDGET_VALUE}`);
+					}
+				}
+			}
+		}
+		const maxResumes = node.maxResumes;
+		if (maxResumes !== undefined && (typeof maxResumes !== 'number' || !Number.isInteger(maxResumes) || maxResumes < 0 || maxResumes > 10)) {
+			errors.push(`${node.id}: maxResumes must be 0..10`);
 		}
 		const deps = node.dependsOn ?? [];
 		if (!Array.isArray(deps) || deps.length > MAX_DEPENDENCIES || deps.some((dep) => typeof dep !== 'string')) {
@@ -538,7 +569,8 @@ function definition(node: TaskNodeInput | TaskNode, risk: AgentRisk): string {
 		dependsOn: [...(node.dependsOn ?? [])].sort(),
 		acceptance,
 		maxAttempts: node.maxAttempts ?? 2,
-		budget: node.budget ?? 0,
+		maxResumes: node.maxResumes ?? DEFAULT_MAX_RESUMES,
+		budget: normalizeBudget(node.budget),
 		risk,
 	});
 }
@@ -553,6 +585,8 @@ function nodeOf(input: TaskNodeInput, role: AgentRole, now: number, previous?: T
 		status: 'pending',
 		attempts: previous?.attempts ?? 0,
 		maxAttempts: normalized.maxAttempts ?? 2,
+		resumes: previous?.resumes ?? 0,
+		maxResumes: normalized.maxResumes ?? previous?.maxResumes ?? DEFAULT_MAX_RESUMES,
 		createdAt: previous?.createdAt ?? now,
 	};
 	return reset;
@@ -595,7 +629,7 @@ export function reconcileTaskGraph(
 			nodes.push(before);
 			continue;
 		}
-		if (before.status === 'rejected') {
+		if (before.status === 'rejected' || before.status === 'paused') {
 			nodes.push(changed ? nodeOf(node, role, now, before) : before);
 			continue;
 		}
@@ -663,7 +697,7 @@ export function satisfiesAcceptance(node: TaskNode): { accepted: boolean; reason
 }
 
 export function taskCounts(graph: TaskGraph): Record<TaskStatus, number> {
-	const counts: Record<TaskStatus, number> = { pending: 0, running: 0, verifying: 0, accepted: 0, rejected: 0 };
+	const counts: Record<TaskStatus, number> = { pending: 0, running: 0, verifying: 0, accepted: 0, rejected: 0, paused: 0 };
 	for (const node of graph.nodes) {
 		counts[node.status] += 1;
 	}
@@ -694,7 +728,7 @@ export function boardOf(graph: TaskGraph, messages?: readonly TaskBoardMessage[]
 export function formatBoard(board: TaskBoard): string {
 	const counts = board.counts;
 	const total = TASK_STATUSES.reduce((sum, status) => sum + counts[status], 0);
-	const head = `${counts.accepted}/${total} accepted · ${counts.running} running · ${counts.verifying} verifying · ${counts.rejected} rejected · ${counts.pending} pending`;
+	const head = `${counts.accepted}/${total} accepted · ${counts.running} running · ${counts.verifying} verifying · ${counts.paused} paused · ${counts.rejected} rejected · ${counts.pending} pending`;
 	const lines = [`Goal: ${board.objective}`, head];
 	for (const node of board.nodes) {
 		const suffix = node.rejection ? ` — ${node.rejection.code}: ${node.rejection.reason}` : '';
@@ -766,11 +800,15 @@ export function sanitizeTaskGraph(value: unknown): TaskGraph | undefined {
 			...(typeof node.network === 'boolean' ? { network: node.network } : {}),
 			dependsOn: stringList(node.dependsOn, 64, MAX_DEPENDENCIES),
 			acceptance,
-			...(typeof node.budget === 'number' ? { budget: integer(node.budget, MIN_BUDGET, MAX_BUDGET, MIN_BUDGET) } : {}),
+			...(node.budget && typeof node.budget === 'object' && !Array.isArray(node.budget)
+				? { budget: normalizeBudget(node.budget as BudgetInput) }
+				: {}),
 			risk: risk as AgentRisk,
 			status: status as TaskStatus,
 			attempts: integer(node.attempts, 0, MAX_ATTEMPTS, 0),
 			maxAttempts: integer(node.maxAttempts, 1, MAX_ATTEMPTS, 2),
+			resumes: integer(node.resumes, 0, 10, 0),
+			maxResumes: integer(node.maxResumes, 0, 10, DEFAULT_MAX_RESUMES),
 			createdAt: integer(node.createdAt, 0, Number.MAX_SAFE_INTEGER, 0),
 			...(typeof node.startedAt === 'number' ? { startedAt: node.startedAt } : {}),
 			...(typeof node.finishedAt === 'number' ? { finishedAt: node.finishedAt } : {}),
@@ -866,6 +904,28 @@ function sanitizeCriteria(value: unknown): CriterionResult[] {
 	return out;
 }
 
+function sanitizeBudgetReport(value: unknown): BudgetReport | undefined {
+	if (!value || typeof value !== 'object') {
+		return undefined;
+	}
+	const raw = value as Record<string, unknown>;
+	const usageRaw = raw.usage && typeof raw.usage === 'object' ? (raw.usage as Record<string, unknown>) : {};
+	const usage: BudgetUsage = {
+		turns: integer(usageRaw.turns, 0, MAX_BUDGET_VALUE, 0),
+		tools: integer(usageRaw.tools, 0, MAX_BUDGET_VALUE, 0),
+		tokens: integer(usageRaw.tokens, 0, MAX_BUDGET_VALUE, 0),
+		milliseconds: integer(usageRaw.milliseconds, 0, MAX_BUDGET_VALUE, 0),
+	};
+	const stopped = raw.stopped;
+	return {
+		limits: normalizeBudget(raw.limits as BudgetInput),
+		usage,
+		...(typeof stopped === 'string' && ['turns', 'tools', 'tokens', 'milliseconds'].includes(stopped)
+			? { stopped: stopped as BudgetDimension }
+			: {}),
+	};
+}
+
 function sanitizeResult(value: unknown): TaskResult | undefined {
 	if (!value || typeof value !== 'object') {
 		return undefined;
@@ -875,6 +935,7 @@ function sanitizeResult(value: unknown): TaskResult | undefined {
 	if (status !== 'ok' && status !== 'blocked' && status !== 'failed') {
 		return undefined;
 	}
+	const budget = sanitizeBudgetReport(raw.budget);
 	return {
 		status,
 		summary: clean(raw.summary, 2000),
@@ -882,6 +943,7 @@ function sanitizeResult(value: unknown): TaskResult | undefined {
 		criteria: sanitizeCriteria(raw.criteria),
 		writes: stringList(raw.writes, 256, MAX_WRITES),
 		...(typeof raw.sessionId === 'string' ? { sessionId: clean(raw.sessionId, 200) } : {}),
+		...(budget ? { budget } : {}),
 		at: integer(raw.at, 0, Number.MAX_SAFE_INTEGER, 0),
 	};
 }
@@ -930,9 +992,20 @@ function sanitizeRejection(value: unknown): TaskRejection | undefined {
 		code !== 'verification_unavailable' &&
 		code !== 'stopped' &&
 		code !== 'interrupted' &&
-		code !== 'limit'
+		code !== 'limit' &&
+		code !== 'budget_exhausted' &&
+		code !== 'resume_unavailable'
 	) {
 		return undefined;
 	}
-	return { code, reason: clean(raw.reason, 2000), at: integer(raw.at, 0, Number.MAX_SAFE_INTEGER, 0) };
+	const budget = sanitizeBudgetReport(raw.budget);
+	return {
+		code,
+		reason: clean(raw.reason, 2000),
+		...(budget ? { budget } : {}),
+		...(typeof raw.partial === 'string' ? { partial: clean(raw.partial, 4000) } : {}),
+		...(typeof raw.resumable === 'boolean' ? { resumable: raw.resumable } : {}),
+		...(Array.isArray(raw.writes) ? { writes: stringList(raw.writes, 256, MAX_WRITES) } : {}),
+		at: integer(raw.at, 0, Number.MAX_SAFE_INTEGER, 0),
+	};
 }

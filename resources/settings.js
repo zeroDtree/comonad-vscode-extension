@@ -402,6 +402,30 @@
 	}
 
 	/** The live tabs (Agent, UI) save themselves, so they are redrawn on every state push. */
+	// Four independent native budgets. The inputs are not `data-key` controls: they are sent as one
+	// object so an unset dimension keeps its stored value.
+	const BUDGET_FIELDS = ['turns', 'tools', 'tokens', 'milliseconds'];
+
+	function renderBudget(prefix, budget) {
+		const value = budget || {};
+		for (const dimension of BUDGET_FIELDS) {
+			put($(prefix + 'budget-' + dimension), String(value[dimension] || 0));
+		}
+	}
+
+	function readBudget(prefix) {
+		const budget = {};
+		for (const dimension of BUDGET_FIELDS) {
+			const node = $(prefix + 'budget-' + dimension);
+			budget[dimension] = Math.max(0, Math.floor(Number(node && node.value) || 0));
+		}
+		return budget;
+	}
+
+	function saveBudget(key, prefix) {
+		post({ type: 'saveAgent', config: { [key]: readBudget(prefix) }, scope: activeScope });
+	}
+
 	function renderLiveForm() {
 		const config = state.config;
 		fillSelect($('mode'), state.labels.modes, config.mode);
@@ -424,7 +448,7 @@
 		checked('timeout-override', config.commandTimeoutOverride);
 		checked('question-notification', config.questionNotification);
 		put($('plans'), config.planDirectory);
-		put($('steps'), String(config.maxSteps));
+		renderBudget('', config.budget);
 		put($('deny'), (config.denyReadPaths || []).join('\n'));
 		const environment = state.environment || {};
 		const note = $('environment-note');
@@ -443,9 +467,7 @@
 	 *  capability needs. The tools live behind an expander so the list stays scannable. */
 	function renderSubagents() {
 		const config = state.config;
-		put($('subagent-steps-mode'), config.subagentStepsMode);
-		put($('subagent-steps'), String(config.subagentSteps));
-		syncSubagentSteps();
+		renderBudget('subagent-', config.subagentBudget);
 		const data = state.subagents;
 		const list = $('subagent-rows');
 		if (!data || !list) {
@@ -471,7 +493,9 @@
 				agent.workMode || 'ro',
 				agent.risk === 'write' ? 'write' : 'read',
 				agent.network ? 'network' : '',
-				agent.maxTurns && config.subagentStepsMode !== 'inherit' ? agent.maxTurns + ' turns' : '',
+				agent.budget && (agent.budget.turns || agent.budget.tools)
+					? `${agent.budget.turns || '∞'} turns / ${agent.budget.tools || '∞'} tools`
+					: '',
 			]
 				.filter(Boolean)
 				.join(' · ');
@@ -579,36 +603,14 @@
 		post({ type: 'saveSubagents', subagents: grants, scope: activeScope });
 	}
 
-	// The budget input only applies to `custom`: leaving it enabled under `inherit` would invite edits
-	// that never take effect. The effective line says what the current settings actually resolve to,
-	// so the reader never has to guess whether the greyed-out number is the one in force.
-	const syncSubagentSteps = () => {
-		const mode = $('subagent-steps-mode');
-		const steps = $('subagent-steps');
-		if (mode && steps) {
-			steps.disabled = mode.value === 'inherit';
-		}
-		const note = $('subagent-budget-note');
-		if (!note || !state || !state.config) {
-			return;
-		}
-		const config = state.config;
-		// The DOM value wins for the mode (a change event lands before the next state push), but the
-		// number comes from state so a just-pushed Max steps is reflected immediately.
-		const inherit = (mode ? mode.value : config.subagentStepsMode) === 'inherit';
-		if (inherit) {
-			const budget = Number(config.maxSteps) || 0;
-			note.textContent = budget
-				? `Effective: ${budget} steps — inherited from Agent → Max steps.`
-				: 'Effective: unlimited steps — inherited from Agent → Max steps (0 = no limit).';
-		} else {
-			const budget = Number(steps && steps.value) || 0;
-			note.textContent = budget
-				? `Effective: ${budget} steps per subagent (Custom).`
-				: 'Effective: unlimited steps per subagent (Custom, 0 = no limit).';
-		}
-	};
-	$('subagent-steps-mode').addEventListener('change', syncSubagentSteps);
+	// Each budget input saves the whole four-dimensional object, so a change to one field never
+	// resets the others. The host normalizes and writes the object under one key.
+	for (const dimension of BUDGET_FIELDS) {
+		const root = $('budget-' + dimension);
+		root && root.addEventListener('change', () => saveBudget('budget', ''));
+		const child = $('subagent-budget-' + dimension);
+		child && child.addEventListener('change', () => saveBudget('subagentBudget', 'subagent-'));
+	}
 
 	/** The tabs the Save button owns: a state push leaves them alone while the form is dirty. */
 	function renderDraftForm() {

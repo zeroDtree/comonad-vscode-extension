@@ -156,6 +156,8 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
 - 并行 worker 用 `message` 工具协作。每个根聊天一个 append-only JSONL 邮箱，位于扩展存储。消息是不可信
   数据，不是指令。
 - 每个子级有自己的测试 scratch 子树，并行构建/测试不会互相覆盖。
+- 每次运行有四个独立原生预算：turns、工具调用、tokens、墙钟时间。触顶时运行停在消息边界，保留
+  partial transcript，任务进入 `paused`；`resume` 用新的分段预算继续同一子会话，不消耗 attempt。
 - 最多 4 个活跃子级；更大的 delegate 批次按 FIFO 排队。任务图默认最多 32 个节点、6 次重规划、每节点 2 次
   尝试。
 

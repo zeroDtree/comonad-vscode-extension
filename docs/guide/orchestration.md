@@ -47,12 +47,19 @@ makes a task a **write task**. See the role defaults in [Settings](/reference/se
 - `objective`, optional `inputs`/`outputs`;
 - `writes` (workspace-relative paths or globs, used for coordination and overlap warnings);
 - optional `capabilities` (a subset of the role) and `network: false`;
-- `dependsOn` (acyclic), `acceptance`, `maxAttempts` and `budget`.
+- `dependsOn` (acyclic), `acceptance`, `maxAttempts`, `maxResumes` and `budget`.
+
+`budget` is an object with four independent native limits: `turns` (model round trips), `tools`
+(tool calls), `tokens` (input + output) and `milliseconds` (wall clock). `0` means no limit; a task
+budget can only tighten the role/global defaults. A budget that runs out pauses the task, not rejects
+it: the child session and transcript survive, and `resume` continues them with a new segment budget
+without spending an attempt.
 
 The plan is declarative: on every revision send all nodes you still want. A running or verifying
 node blocks a revision. An accepted node may be kept unchanged; changing its definition is refused.
-A changed rejected node resets to pending and keeps its attempt count. The graph has at most 32
-nodes, six replans and two attempts per node by default.
+A changed rejected or paused node resets to pending and keeps its attempt count. The graph has at
+most 32 nodes, six replans and two attempts per node by default; a paused node can be resumed up to
+`maxResumes` (three by default).
 
 ## Delegating
 
@@ -100,9 +107,10 @@ task therefore runs only when the parent already runs writes without asking (`un
 `blacklist_reject`, or an allow rule). Under `manual` or `whitelist_accept`, do the write in the main
 thread where the user can approve it, and delegate read-only work plus independent review.
 
-Other limits: 32 nodes, 8 tasks per delegate batch, 4 concurrent children, 6 replans, and 2 attempts
-per node by default. Stop aborts the root and its children; an interrupted running node is marked
-`interrupted` at the next root turn.
+Other limits: 32 nodes, 8 tasks per delegate or resume batch, 4 concurrent children, 6 replans, 2
+attempts per node and 3 resumes of a paused node by default. Stop aborts the root and its children;
+an interrupted running node is marked `interrupted` at the next root turn. A paused node is not
+interrupted: it keeps its child session and waits for `resume`.
 
 ## A small plan
 

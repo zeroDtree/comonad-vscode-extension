@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
 import { BUILTIN_ROLES, READ_ONLY_GRANT, type AgentRole, type SubagentGrant } from '../lib/agents';
+import { normalizeBudget, type BudgetLimits } from '../lib/budget';
 import type { EffortTop } from '../lib/effort';
 import { asApproval, asApprovalResponse, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
@@ -15,9 +16,9 @@ import type { Host, SettingsScope } from './host';
 export type ToolCardMode = 'collapsed' | 'preview' | 'open';
 export const TOOL_CARD_MODES: readonly ToolCardMode[] = ['collapsed', 'preview', 'open'];
 
-/** Where a subagent's step budget comes from: the turn's own `maxSteps`, or a budget of its own. */
-export type SubagentStepsMode = 'inherit' | 'custom';
-export const SUBAGENT_STEPS_MODES: readonly SubagentStepsMode[] = ['inherit', 'custom'];
+/** The root agent is unlimited unless the user sets a budget; a child gets a focused default. */
+export const DEFAULT_ROOT_BUDGET: BudgetLimits = { turns: 0, tools: 0, tokens: 0, milliseconds: 0 };
+export const DEFAULT_SUBAGENT_BUDGET: BudgetLimits = { turns: 24, tools: 100, tokens: 0, milliseconds: 0 };
 
 export interface Profile {
 	id: string;
@@ -221,11 +222,10 @@ export interface Config {
 	denyReadPaths: string[];
 	/** Workspace-relative folder for plan files; empty uses `.comonad/plans`. */
 	planDirectory: string;
-	maxSteps: number;
-	/** Whether a subagent shares the turn's `maxSteps` or spends `subagentSteps`. */
-	subagentStepsMode: SubagentStepsMode;
-	/** A subagent's own step budget when the mode is `custom`; `0` means no limit. */
-	subagentSteps: number;
+	/** Native run budget for the root agent; `0` fields mean unlimited. */
+	budget: BudgetLimits;
+	/** Default native budget for a child agent; a role or task can only tighten it. */
+	subagentBudget: BudgetLimits;
 	model: string;
 	profiles: Profile[];
 	mcpServers: Record<string, McpServerSettings>;
@@ -276,9 +276,8 @@ export const CONFIG_KEYS = [
 	'commandTimeoutOverride',
 	'denyReadPaths',
 	'planDirectory',
-	'maxSteps',
-	'subagentStepsMode',
-	'subagentSteps',
+	'budget',
+	'subagentBudget',
 	'model',
 	'profiles',
 	'mcpServers',
@@ -321,6 +320,7 @@ export const AGENT_KEYS = [
 	'commandTimeoutOverride',
 	'planDirectory',
 	'denyReadPaths',
+	'budget',
 ] as const satisfies readonly (keyof Config)[];
 
 /** A textarea (one entry per line) or an array, trimmed and without blanks. */
@@ -342,9 +342,13 @@ export type AgentConfig = Pick<Config, (typeof AGENT_KEYS)[number]>;
 
 export function normalizeAgentPatch(
 	patch: Record<string, unknown>,
-	current: AgentConfig & Partial<Pick<Config, 'maxSteps' | 'subagentStepsMode' | 'subagentSteps'>>,
+	current: AgentConfig & Partial<Pick<Config, 'budget' | 'subagentBudget'>>,
 ): Partial<Config> {
 	const next: Partial<Config> = {};
+	const budgetOf = (value: unknown, fallback: BudgetLimits): BudgetLimits =>
+		value && typeof value === 'object' && !Array.isArray(value)
+			? normalizeBudget({ ...fallback, ...(value as Record<keyof BudgetLimits, number>) })
+			: fallback;
 	const has = (key: keyof Config): boolean => Object.hasOwn(patch, key);
 	const form = (key: 'displayForm' | 'contextForm'): ContextForm => {
 		const value = patch[key];
@@ -401,44 +405,13 @@ export function normalizeAgentPatch(
 	if (has('denyReadPaths')) {
 		next.denyReadPaths = asList(patch.denyReadPaths);
 	}
-	if (has('maxSteps')) {
-		const value = Number(patch.maxSteps);
-		next.maxSteps = Number.isFinite(value) ? Math.max(0, Math.round(value)) : (current.maxSteps ?? 0);
+	if (has('budget')) {
+		next.budget = budgetOf(patch.budget, current.budget ?? DEFAULT_ROOT_BUDGET);
 	}
-	if (has('subagentSteps')) {
-		const value = Number(patch.subagentSteps);
-		next.subagentSteps = Number.isFinite(value) ? Math.max(0, Math.round(value)) : (current.subagentSteps ?? 40);
-	}
-	if (has('subagentStepsMode')) {
-		next.subagentStepsMode =
-			typeof patch.subagentStepsMode === 'string' && (SUBAGENT_STEPS_MODES as readonly string[]).includes(patch.subagentStepsMode)
-				? (patch.subagentStepsMode as SubagentStepsMode)
-				: (current.subagentStepsMode ?? 'custom');
+	if (has('subagentBudget')) {
+		next.subagentBudget = budgetOf(patch.subagentBudget, current.subagentBudget ?? DEFAULT_SUBAGENT_BUDGET);
 	}
 	return next;
-}
-
-/**
- * The step budget for one subagent run. `inherit` returns the turn's `maxSteps` unchanged, so `0`
- * stays unlimited and a role's `maxTurns` never clamps it. `custom` spends `subagentSteps`; a
- * definition's `maxTurns` counts turns rather than graph steps (two steps per turn, four at the
- * minimum) and can only tighten that budget. A `custom` budget of `0` is unlimited unless a role
- * sets `maxTurns`, which then becomes its cap.
- */
-export function subagentStepBudget(
-	config: Pick<Config, 'subagentStepsMode' | 'subagentSteps'>,
-	inherited: number,
-	maxTurns?: number,
-): number {
-	if (config.subagentStepsMode === 'inherit') {
-		return inherited;
-	}
-	const own = config.subagentSteps;
-	const definition = maxTurns === undefined ? 0 : Math.max(4, maxTurns * 2);
-	if (own <= 0) {
-		return definition;
-	}
-	return definition <= 0 ? own : Math.min(own, definition);
 }
 
 declare module 'cordis' {
@@ -482,6 +455,12 @@ export class Settings extends Service {
 		};
 		const lines = (key: keyof Config, fallback: string[]): string[] =>
 			Array.isArray(raw[key]) ? (raw[key] as unknown[]).map(String) : fallback;
+		const budget = (key: 'budget' | 'subagentBudget', fallback: BudgetLimits): BudgetLimits => {
+			const found = raw[key];
+			return found && typeof found === 'object' && !Array.isArray(found)
+				? normalizeBudget({ ...fallback, ...(found as Record<keyof BudgetLimits, number>) })
+				: fallback;
+		};
 		const permissions = value('permissions', undefined as unknown as PermissionsConfig);
 		const profiles = value('profiles', undefined as unknown as Profile[]);
 		return {
@@ -495,11 +474,8 @@ export class Settings extends Service {
 			commandTimeoutOverride: flag('commandTimeoutOverride', false),
 			denyReadPaths: lines('denyReadPaths', ['.env', '**/.env']),
 			planDirectory: typeof raw.planDirectory === 'string' ? raw.planDirectory : '',
-			maxSteps: count('maxSteps', 0, 0),
-			// Kept apart so a hand-edited file can carry one without the other; `custom` with the
-			// shipped 40 matches the old budget every subagent got (`maxTurns` 20 × 2 steps).
-			subagentStepsMode: oneOf('subagentStepsMode', SUBAGENT_STEPS_MODES, 'custom'),
-			subagentSteps: count('subagentSteps', 40, 0),
+			budget: budget('budget', DEFAULT_ROOT_BUDGET),
+			subagentBudget: budget('subagentBudget', DEFAULT_SUBAGENT_BUDGET),
 			model: typeof raw.model === 'string' ? raw.model : 'auto',
 			// An empty list means "nothing configured", which would leave the chat without a model, so
 			// the built-in DeepSeek profiles stand in for it.

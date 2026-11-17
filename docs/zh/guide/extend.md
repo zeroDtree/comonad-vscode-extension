@@ -180,6 +180,9 @@ files: true
 test: true
 tools: [read_file, grep_files, write_file, edit_text, run_shell_test, message]
 maxTurns: 20
+maxTools: 60
+maxTokens: 0
+maxMilliseconds: 0
 ---
 写这篇说明。所有项目写入都走文件工具；run_shell_test 只写 scratch 目录。
 ```
@@ -196,9 +199,11 @@ frontmatter **选择**工具；写能力还需要 `subagents` 设置中的授权
 只读。复用内置 id 的自定义角色不继承内置默认授权。见[安全](/zh/guide/safety#编排器与子-agent)与
 [编排](/zh/guide/orchestration)。
 
-在 `subagentStepsMode: custom` 下，`maxTurns` 按每回合两图步、最少四步来收紧子代理的图步预算；它只能
-收紧 `subagentSteps`，不会放宽。继承的预算原样使用该回合的 `maxSteps`，`maxTurns` 不会收紧它。两种模式下
-任务的 `budget` 都可以进一步收紧。见[设置](/zh/reference/settings#子-agent)。
+自定义角色可以设置扁平的 `maxTurns`、`maxTools`、`maxTokens`、`maxMilliseconds` 字段。它们是四个
+独立原生上限：turns 是模型往返次数，tools 是工具调用次数，tokens 是输入 + 输出，milliseconds 是墙钟
+毫秒；`0` 表示无限制。每个字段只能收紧 `comonad.subagentBudget`，不会放宽；任务的 `budget` 可以进一步
+收紧。被上限暂停的子代理保留会话与 transcript，可以用新的分段预算 `resume`。
+见[设置](/zh/reference/settings#子-agent)。
 
 ### MCP
 

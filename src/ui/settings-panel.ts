@@ -23,7 +23,7 @@ import { ensureSettingsFile, settingsDisplayPath, type SettingsScope } from '../
 import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
-import { asList, normalizeAgentPatch, profileKeyEnvs, sanitizeSubagentGrants, SUBAGENT_STEPS_MODES, subagentGrant, type Profile, type SubagentStepsMode, type ToolCardMode } from '../services/settings';
+import { asList, normalizeAgentPatch, profileKeyEnvs, sanitizeSubagentGrants, subagentGrant, type Profile, type ToolCardMode } from '../services/settings';
 import { unavailableInSandbox } from '../services/tools';
 import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
@@ -239,21 +239,6 @@ export function settingsPanel(ctx: Context): void {
 	const apply = async (patch: Record<string, unknown>, scope: SettingsScope): Promise<void> => {
 		const current = ctx.settings.get();
 		const next: Record<string, unknown> = { ...normalizeAgentPatch(patch, current) };
-		if (Object.hasOwn(patch, 'maxSteps')) {
-			const steps = Number(patch.maxSteps);
-			next.maxSteps = Number.isFinite(steps) ? Math.max(0, steps) : current.maxSteps;
-		}
-		if (Object.hasOwn(patch, 'subagentStepsMode')) {
-			const mode = patch.subagentStepsMode;
-			next.subagentStepsMode =
-				typeof mode === 'string' && (SUBAGENT_STEPS_MODES as readonly string[]).includes(mode)
-					? (mode as SubagentStepsMode)
-					: current.subagentStepsMode;
-		}
-		if (Object.hasOwn(patch, 'subagentSteps')) {
-			const steps = Number(patch.subagentSteps);
-			next.subagentSteps = Number.isFinite(steps) ? Math.max(0, steps) : current.subagentSteps;
-		}
 		if (Object.hasOwn(patch, 'allow') || Object.hasOwn(patch, 'ask') || Object.hasOwn(patch, 'deny')) {
 			next.permissions = {
 				allow: ruleList(patch.allow ?? current.permissions.allow, 'allow'),
@@ -358,9 +343,8 @@ export function settingsPanel(ctx: Context): void {
 				commandTimeoutOverride: config.commandTimeoutOverride,
 				planDirectory: config.planDirectory,
 				denyReadPaths: config.denyReadPaths,
-				maxSteps: config.maxSteps,
-				subagentStepsMode: config.subagentStepsMode,
-				subagentSteps: config.subagentSteps,
+				budget: config.budget,
+				subagentBudget: config.subagentBudget,
 				displayForm: config.displayForm,
 				toolCard: config.toolCard,
 				contextForm: config.contextForm,
@@ -381,7 +365,7 @@ export function settingsPanel(ctx: Context): void {
 						workMode: agent.workMode,
 						network: agent.network,
 						risk: agent.risk,
-						maxTurns: agent.maxTurns ?? 0,
+						budget: agent.budget ?? {},
 						tools: listed,
 						canFiles: listed.some((name) => {
 							const tool = ctx.tools.get(name);
@@ -1069,10 +1053,25 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <p class="hint">What the model actually receives: rendered text, token counts or raw form. Applies to the active chat and is the default for new chats.</p>
         <select id="context" class="control" data-key="contextForm"></select>
       </div>
+    </div>
+    <h2 class="group-title">Run budgets</h2>
+    <div class="group">
+      <p class="hint">Four independent hard limits for the main agent. Each one stops the run at its limit and keeps a partial transcript; 0 means no limit. Tokens are input + output; time is wall clock in milliseconds.</p>
       <div class="field">
-        <label for="steps">Max steps</label>
-        <p class="hint">Maximum graph steps per turn. 0 means no limit.</p>
-        <input id="steps" class="control" type="number" min="0" data-key="maxSteps" />
+        <label for="budget-turns">Turns</label>
+        <input id="budget-turns" class="control" type="number" min="0" step="1" />
+      </div>
+      <div class="field">
+        <label for="budget-tools">Tool calls</label>
+        <input id="budget-tools" class="control" type="number" min="0" step="1" />
+      </div>
+      <div class="field">
+        <label for="budget-tokens">Tokens</label>
+        <input id="budget-tokens" class="control" type="number" min="0" step="1" />
+      </div>
+      <div class="field">
+        <label for="budget-milliseconds">Time (ms)</label>
+        <input id="budget-milliseconds" class="control" type="number" min="0" step="1" />
       </div>
     </div>
   </section>
@@ -1174,22 +1173,25 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
 
   <section data-pane="subagents" hidden>
     <h1 class="page-title">Subagents</h1>
-    <h2 class="group-title">Step budget</h2>
+    <h2 class="group-title">Default budget</h2>
     <div class="group">
+      <p class="hint">Default four-dimensional budget for a child agent. A role definition and a task plan can only tighten it. 0 means no limit.</p>
       <div class="field">
-        <label for="subagent-steps-mode">Subagent steps</label>
-        <p class="hint">Where a subagent's step budget comes from. A definition's <code>maxTurns</code> can tighten a Custom budget; an inherited budget is used exactly.</p>
-        <select id="subagent-steps-mode" class="control" data-key="subagentStepsMode">
-          <option value="inherit">Inherit — same as Max steps</option>
-          <option value="custom">Custom — the budget below</option>
-        </select>
+        <label for="subagent-budget-turns">Turns</label>
+        <input id="subagent-budget-turns" class="control" type="number" min="0" step="1" />
       </div>
       <div class="field">
-        <label for="subagent-steps">Subagent step budget</label>
-        <p class="hint">Steps a subagent may take when Subagent steps is Custom. 0 means no limit.</p>
-        <input id="subagent-steps" class="control" type="number" min="0" data-key="subagentSteps" />
+        <label for="subagent-budget-tools">Tool calls</label>
+        <input id="subagent-budget-tools" class="control" type="number" min="0" step="1" />
       </div>
-      <p class="hint" id="subagent-budget-note"></p>
+      <div class="field">
+        <label for="subagent-budget-tokens">Tokens</label>
+        <input id="subagent-budget-tokens" class="control" type="number" min="0" step="1" />
+      </div>
+      <div class="field">
+        <label for="subagent-budget-milliseconds">Time (ms)</label>
+        <input id="subagent-budget-milliseconds" class="control" type="number" min="0" step="1" />
+      </div>
     </div>
     <h2 class="group-title">Agents</h2>
     <p class="group-note">Every subagent can use read-only tools, including the plan readers when the parent is in Plan mode. The grants below add the ability to write files and run tests; full shell and plan writes are never granted. Changes apply to the next spawn.</p>

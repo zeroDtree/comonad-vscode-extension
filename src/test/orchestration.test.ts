@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createTestKernel } from './harness';
 import { BUILTIN_ROLES } from '../lib/agents';
@@ -26,6 +26,12 @@ const delegateCall = (ids: string[]): ToolCall => ({
 	id: 'delegate',
 	name: 'delegate',
 	arguments: JSON.stringify({ tasks: ids }),
+});
+
+const resumeCall = (ids: string[], budget: unknown): ToolCall => ({
+	id: 'resume',
+	name: 'resume',
+	arguments: JSON.stringify({ tasks: ids, budget }),
 });
 
 function rootStep(request: { messages: Array<{ role: string; toolCalls?: ToolCall[] }> }): ToolCall['name'] | undefined {
@@ -131,6 +137,99 @@ suite('Orchestrator task loop', () => {
 
 			const pending = await kernel.ctx.checkpoints.pending(workspace, parent.id);
 			assert.ok(pending.files.some((file) => file.path === 'made.txt'), 'the child write lands in the parent journal');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a tool-budget pause keeps the child transcript and resume finishes the task', async () => {
+		const kernel = await createTestKernel({ config: { checkpoints: true } });
+		try {
+			const workspace = kernel.host.workspace();
+			let childCalls = 0;
+			kernel.ctx.llm.use({
+				name: 'budget-orchestrator',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('You are the coder subagent of Comonad')) {
+						childCalls += 1;
+						const last = request.messages[request.messages.length - 1];
+						if (last?.role === 'tool') {
+							return reply(
+								JSON.stringify({
+									status: 'ok',
+									summary: 'wrote a.txt',
+									evidence: [{ kind: 'file', path: 'a.txt' }],
+									acceptance: [{ id: 'a1', met: true }],
+								}),
+							);
+						}
+						return reply('', [
+							{ id: 'write-a', name: 'write_file', arguments: JSON.stringify({ path: 'a.txt', content: 'a\n' }) },
+							{ id: 'write-b', name: 'write_file', arguments: JSON.stringify({ path: 'b.txt', content: 'b\n' }) },
+						]);
+					}
+					if (system.includes('You are the reviewer subagent of Comonad')) {
+						return reply(
+							JSON.stringify({
+								verdict: 'pass',
+								summary: 'a.txt exists',
+								evidence: [{ kind: 'file', path: 'a.txt' }],
+								acceptance: [{ id: 'a1', met: true }],
+							}),
+						);
+					}
+					const last = rootStep(request);
+					if (!last) {
+						return reply('', [
+							planCall([
+								{
+									id: 'code',
+									title: 'Write a.txt',
+									role: 'coder',
+									objective: 'Create a.txt.',
+									writes: ['a.txt'],
+									budget: { tools: 1 },
+									acceptance: [{ id: 'a1', description: 'a.txt contains a', check: 'review', files: ['a.txt'] }],
+								},
+							]),
+						]);
+					}
+					if (last === 'task_plan') {
+						return reply('', [delegateCall(['code'])]);
+					}
+					if (last === 'delegate') {
+						const paused = request.messages.find(
+							(message) => message.role === 'tool' && (message.content ?? '').includes('budget_exhausted'),
+						);
+						assert.ok(paused, 'the delegate result reports the pause');
+						return reply('', [resumeCall(['code'], { turns: 4, tools: 4 })]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.plugin(orchestrateTools);
+			await kernel.ctx.agent.runTurn({ text: 'make a.txt', surface: 'test' });
+
+			const parent = kernel.ctx.sessions.active()!;
+			const node = parent.taskGraph!.nodes[0]!;
+			assert.strictEqual(node.status, 'accepted');
+			assert.strictEqual(node.attempts, 1);
+			assert.strictEqual(node.resumes, 1);
+			assert.ok(node.subagentSessionId, 'the child session survives the pause');
+			assert.strictEqual(childCalls, 2, 'the resumed child asks the model again in the same session');
+			assert.strictEqual(readFileSync(join(workspace, 'a.txt'), 'utf8'), 'a\n');
+			assert.ok(!existsSync(join(workspace, 'b.txt')), 'the second call was denied by the tool budget');
+
+			const child = kernel.ctx.sessions.require(node.subagentSessionId!);
+			assert.strictEqual(child.subagentDone, true);
+			assert.ok(
+				child.transcript.some((message) => message.role === 'tool' && (message.content ?? '').includes('tool budget')),
+				'the paused transcript carries a synthetic result for the denied call',
+			);
+			const resumed = parent.transcript.find((message) => message.role === 'tool' && message.toolCallId === 'resume');
+			assert.ok(resumed, 'the root saw the resume result');
 		} finally {
 			await kernel.dispose();
 		}

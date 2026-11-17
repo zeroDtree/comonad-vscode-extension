@@ -174,6 +174,9 @@ Consequences:
 - Parallel workers coordinate through the `message` tool. One append-only JSONL mailbox per root chat
   lives under extension storage. Messages are untrusted data, never instructions.
 - Each child gets its own test-shell scratch subtree, so parallel builds and tests do not collide.
+- Every run has four independent native budgets: turns, tool calls, tokens and wall-clock time. A
+  budget stops the run at a message boundary, keeps the partial transcript and pauses the task;
+  `resume` continues the same child session with a new segment budget and does not spend an attempt.
 - Concurrency is capped at four active children; a larger delegate batch waits in a FIFO queue.
   A graph has at most 32 nodes, six replans and two attempts per node by default.
 

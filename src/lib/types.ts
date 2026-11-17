@@ -2,6 +2,7 @@
 /** Domain types shared by the agent kernel. This module must not import `vscode` or `cordis`. */
 
 import type { ToolAuthorization } from './authorization';
+import type { BudgetInput, BudgetLimits, BudgetReport } from './budget';
 import type { PolicyStep, RuleSet } from './policy';
 import type { SandboxMode, SandboxOptions } from './sandbox';
 import type { TaskGraphAccess } from './task-graph';
@@ -200,8 +201,8 @@ export interface SessionPolicy {
 	denyReadPaths: string[];
 	/** Workspace-relative folder for plan files; empty uses `.comonad/plans`. */
 	planDirectory?: string;
-	/** Maximum graph steps for one turn; absent uses the compiled graph's own limit. */
-	maxSteps?: number;
+	/** The four native run budgets for this session; absent means unlimited. */
+	budget?: BudgetLimits;
 	/** Model profile id, or `auto` for the first configured profile. */
 	model: string;
 	temperature?: number;
@@ -249,8 +250,10 @@ export interface AgentSpawnRequest {
 	sandboxMode?: SandboxMode;
 	/** The child's own tool approval policy; absent inherits the parent's. */
 	approval?: Approval;
-	/** A per-task step ceiling on top of the subagent step budget; it can only tighten it. */
-	maxTurns?: number;
+	/** A per-task budget; each dimension can only tighten the role/global defaults. */
+	budget?: BudgetInput;
+	/** Continue an existing child session from its transcript instead of creating a new one. */
+	resumeSessionId?: string;
 	/** The parent's tool call, so its card can link to the child session. */
 	callId?: string;
 	/** Called as soon as the child session exists, before the graph starts. */
@@ -259,6 +262,7 @@ export interface AgentSpawnRequest {
 }
 
 export interface AgentSpawnOutcome {
+	/** The child produced a usable final report (not paused, stopped or errored). */
 	ok: boolean;
 	/** The child's final assistant text, unmodified (the structured envelope lives here). */
 	report: string;
@@ -267,6 +271,12 @@ export interface AgentSpawnOutcome {
 	sessionId?: string;
 	stopped?: boolean;
 	error?: string;
+	/** A native budget stopped the run; the report is the partial output. */
+	paused?: boolean;
+	/** The budget report for this run segment. */
+	budget?: BudgetReport;
+	/** The last tool the child attempted, useful when a budget cut it off. */
+	lastTool?: string;
 }
 
 export type AgentSpawnFunction = (request: AgentSpawnRequest) => Promise<AgentSpawnOutcome>;

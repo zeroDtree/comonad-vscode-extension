@@ -57,9 +57,8 @@ JSON files hold the same names.
 | `allowFullAccess` | `true` | Offer the unrestricted preset |
 | `commandTimeout` | `60` | Fallback shell timeout in seconds |
 | `commandTimeoutOverride` | `false` | Always use that value and ignore the model's timeout |
-| `maxSteps` | `0` (no limit) | Maximum graph steps per turn |
-| `subagentStepsMode` | `custom` | `inherit` shares the turn's `maxSteps`; `custom` spends `subagentSteps` |
-| `subagentSteps` | `40` | Subagent step budget under `custom`; `0` means no limit, though a definition's `maxTurns` still caps it. `maxTurns` does not tighten an `inherit` budget |
+| `budget` | `{turns:0, tools:0, tokens:0, milliseconds:0}` | Four independent hard budgets for the main agent; `0` means no limit |
+| `subagentBudget` | `{turns:24, tools:100, tokens:0, milliseconds:0}` | Default child budget; a role or task can only tighten each dimension |
 | `filterSensitiveEnv` | `true` | Strip keys, tokens and passwords from command environments |
 | `permissions` | `{allow:[], ask:[], deny:[]}` | User rules; see [Safety](/guide/safety#_3-user-rules) |
 | `subagents` | `{}` | Per-role subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Defaults come from the role table: `coder`, `tester`, `data-analyst` and `scientist` get both; `technical-writer` gets files; `math-researcher` gets test; every other built-in is read-only. |
@@ -102,12 +101,13 @@ denied. A write task therefore needs the parent to run writes without asking (`u
 stores the full effective policy, its revision and its parent. See
 [Safety](/guide/safety#orchestrator-and-subagents) and [Orchestration](/guide/orchestration).
 
-Steps: `subagentStepsMode` defaults to `custom`, where each subagent spends `subagentSteps` (40)
-graph steps; when that is `0` it falls back to the role's `maxTurns` cap, if any. `inherit` gives
-the child exactly the turn's `maxSteps`, including `0` (no limit), and ignores `maxTurns`. Under
-`custom`, a role's `maxTurns` counts turns and can lower the budget (two steps per turn, four at the
-minimum), but never raise it. A task's `budget` can tighten the resulting step count further in
-either mode.
+Budgets: every run has four independent native limits — `turns` (model round trips), `tools`
+(tool calls), `tokens` (provider input + output) and `milliseconds` (wall clock). `0` means no
+limit. The effective child budget takes the tightest non-zero value per dimension across
+`subagentBudget`, the role's own budget and the task's `budget`; a task can only tighten. A run
+that reaches a limit stops at a message boundary, keeps a partial transcript and, for a child,
+pauses the task. `resume` continues the same child session with a new segment budget; it does not
+count as a new attempt.
 
 ## Checkpoints
 

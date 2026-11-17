@@ -189,6 +189,9 @@ files: true
 test: true
 tools: [read_file, grep_files, write_file, edit_text, run_shell_test, message]
 maxTurns: 20
+maxTools: 60
+maxTokens: 0
+maxMilliseconds: 0
 ---
 Write the note. Use the file tools for every project write; run_shell_test writes only the scratch
 directory.
@@ -209,10 +212,12 @@ without a `tools` list is read-only. A custom role that reuses a built-in id doe
 built-in default grant. See [Safety](/guide/safety#orchestrator-and-subagents) and
 [Orchestration](/guide/orchestration).
 
-Under `subagentStepsMode: custom`, `maxTurns` bounds the child's graph budget at two steps per turn,
-with a minimum of four steps; it can tighten `subagentSteps` but never loosen it. An inherited budget
-uses the turn's `maxSteps` exactly, and `maxTurns` does not clamp it. A task's `budget` can tighten
-either result; see [Settings](/reference/settings#orchestrator-and-subagents).
+A custom role can set flat `maxTurns`, `maxTools`, `maxTokens` and `maxMilliseconds` fields. They
+are four independent native limits: turns are model round trips, tools are tool calls, tokens are
+input + output, and milliseconds are wall clock. `0` means no limit. Each field can tighten
+`comonad.subagentBudget` but never loosen it; a task's `budget` can tighten the result further. A
+child paused by a limit keeps its session and transcript and can be resumed with a new segment
+budget. See [Settings](/reference/settings#orchestrator-and-subagents).
 
 ### MCP
 

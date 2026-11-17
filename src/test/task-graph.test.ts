@@ -108,7 +108,10 @@ suite('Task graph validation', () => {
 
 	test('bounds, bad paths and attempt/budget ranges are refused', () => {
 		assert.ok(checkTaskPlan(plan(node({ maxAttempts: 0 })), roles).errors.some((error) => /maxAttempts/.test(error)));
-		assert.ok(checkTaskPlan(plan(node({ budget: 0 })), roles).errors.some((error) => /budget/.test(error)));
+		assert.ok(checkTaskPlan(plan(node({ budget: { turns: -1 } })), roles).errors.some((error) => /budget\.turns/.test(error)));
+		assert.ok(checkTaskPlan(plan(node({ budget: { nonsense: 1 } as never })), roles).errors.some((error) => /unknown budget dimension/.test(error)));
+		assert.ok(checkTaskPlan(plan(node({ maxResumes: 11 })), roles).errors.some((error) => /maxResumes/.test(error)));
+		assert.deepStrictEqual(checkTaskPlan(plan(node({ budget: { turns: 8, tools: 20 } })), roles).errors, []);
 		assert.ok(checkTaskPlan(plan(node({ writes: ['../escape'] })), roles).errors.some((error) => /workspace-relative/.test(error)));
 		assert.ok(checkTaskPlan(plan(node({ acceptance: [] })), roles).errors.some((error) => /acceptance criteria/.test(error)));
 	});

@@ -91,7 +91,17 @@ import { buildSubagentSystemPrompt } from '../lib/agent-prompts';
 import { KeyedMutex } from '../lib/locks';
 import { skillLines } from './catalog';
 import type { JournalApi } from '../lib/journal';
-import { DEFAULT_CONTEXT_WINDOW, subagentGrant, subagentStepBudget } from './settings';
+import { DEFAULT_CONTEXT_WINDOW, subagentGrant } from './settings';
+import {
+	budgetLabel,
+	mergeBudget,
+	RunBudget,
+	sealPartial,
+	type BudgetDimension,
+	type BudgetInput,
+	type BudgetLimits,
+	type BudgetReport,
+} from '../lib/budget';
 import {
 	canRewrite,
 	createdDirsInWorkspace,
@@ -155,6 +165,8 @@ export interface TurnResult {
 	text: string;
 	/** The turn ended because the user stopped it, not because the model or a hook finished. */
 	stopped?: boolean;
+	/** A native budget stopped this turn; `text` is the partial output. */
+	budget?: BudgetReport;
 }
 
 /** One running turn: the signal every part of it shares, from prompt building to the last tool. */
@@ -177,6 +189,12 @@ interface RunState {
 	taskId?: string;
 	/** Workspace-relative files this run wrote through the tracked file tools. */
 	writes: Set<string>;
+	/** The four native budgets for this run segment; absent means unlimited. */
+	budget?: RunBudget;
+	/** The first exhausted dimension. The run stops at the next message boundary. */
+	stop?: BudgetDimension;
+	/** The last tool call this run attempted, for partial reports. */
+	lastTool?: string;
 	policy: SessionPolicy;
 	/** The model this turn already had to send without images (a reset, not a capability verdict). */
 	imagesOff?: string;
@@ -360,7 +378,7 @@ export class Agent extends Service {
 			commandTimeoutOverride: config.commandTimeoutOverride,
 			denyReadPaths: [...config.denyReadPaths],
 			planDirectory: config.planDirectory,
-			maxSteps: config.maxSteps,
+			budget: { ...config.budget },
 			model: config.model,
 		};
 	}
@@ -717,6 +735,7 @@ export class Agent extends Service {
 				rootSessionId: session.parentId ?? session.id,
 				agentName: session.subagent,
 				writes: new Set(),
+				budget: new RunBudget(session.policy.budget ?? {}),
 				policy: session.policy,
 				transcript: seeded,
 				messages,
@@ -898,6 +917,7 @@ export class Agent extends Service {
 		instructions?: string,
 		signal?: AbortSignal,
 		rebuild = false,
+		onUsage?: (usage: { input: number; output: number }) => void,
 	): Promise<ModelContext | null> {
 		const previous = session.modelContext;
 		const from = rebuild ? 0 : previous?.covers ?? 0;
@@ -922,6 +942,7 @@ export class Agent extends Service {
 			rebuild ? undefined : previous?.summary,
 			instructions,
 			signal,
+			onUsage,
 		);
 		if (!text) {
 			return null;
@@ -963,7 +984,9 @@ export class Agent extends Service {
 		}
 		this.notice(state.ref, 'Summarizing the conversation — this turn outgrew the model’s window.');
 		try {
-			const context = await this.compactContext(session, state.transcript, budget.input, undefined, signal);
+			const context = await this.compactContext(session, state.transcript, budget.input, undefined, signal, false, (usage) =>
+				state.budget?.spendTokens(usage.input + usage.output),
+			);
 			if (!context) {
 				return { messages: elided.messages };
 			}
@@ -1066,6 +1089,13 @@ export class Agent extends Service {
 				completion = await attempt(messages);
 			}
 		}
+		// The run budget counts real spend; without a provider usage event, estimate rather than
+		// treating an unreported request as free.
+		state.budget?.spendTokens(
+			completion.usage
+				? completion.usage.input + completion.usage.output
+				: estimateMessages(messages) + estimateTokens(completion.message.content),
+		);
 		if (completion.usage && session) {
 			session.usage.inputTokens += completion.usage.input;
 			session.usage.outputTokens += completion.usage.output;
@@ -1102,7 +1132,9 @@ export class Agent extends Service {
 			return estimateMessages(body) < estimateMessages(state.messages) ? [...system, ...body] : null;
 		}
 		try {
-			const context = await this.compactContext(session, state.transcript, 0, undefined, signal);
+			const context = await this.compactContext(session, state.transcript, 0, undefined, signal, false, (usage) =>
+				state.budget?.spendTokens(usage.input + usage.output),
+			);
 			if (!context) {
 				return null;
 			}
@@ -1137,6 +1169,7 @@ export class Agent extends Service {
 		previous?: string,
 		instructions?: string,
 		signal?: AbortSignal,
+		onUsage?: (usage: { input: number; output: number }) => void,
 	): Promise<string> {
 		const lines = older.map((message) => {
 			const notes = attachmentNotes(message.attachments);
@@ -1170,7 +1203,7 @@ export class Agent extends Service {
 			]
 				.filter(Boolean)
 				.join('\n\n'),
-			{ signal },
+			{ signal, onUsage },
 		);
 		return text.length <= SUMMARY_TEXT_LIMIT
 			? text
@@ -1276,6 +1309,10 @@ export class Agent extends Service {
 			if (outcome.status === 'aborted') {
 				return this.aborted(session, state);
 			}
+			const budget = this.budgetStopped(session, state, false);
+			if (budget) {
+				return budget;
+			}
 			// A Stop that lands as the graph finishes wins over the Stop hook.
 			signal.throwIfAborted();
 			const stop = await this.fireStop(session, state, signal);
@@ -1317,64 +1354,86 @@ export class Agent extends Service {
 		turn: Turn,
 		resume?: ResumeCursor,
 	): Promise<{ status: 'done' | 'aborted'; state: RunState; step: number }> {
-		const signal = turn.signal;
+		// The budget deadline interrupts a running model or tool, not only the next node. Link the
+		// turn's stop signal through a local controller so a budget timeout is distinguishable from
+		// the user's Stop.
+		const controller = new AbortController();
+		const unlink = linkAbort(turn.signal, controller);
+		const signal = controller.signal;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = state.budget?.deadline();
+		if (deadline !== undefined) {
+			timer = setTimeout(() => {
+				state.budget?.stop('milliseconds');
+				controller.abort(new Error('time budget exhausted'));
+			}, Math.min(2_147_483_647, Math.max(0, deadline - Date.now())));
+		}
 		let cursor = resume;
-		for (;;) {
-			const graph = this.graph();
-			const outcome = await runGraph(graph, state, {
-				maxSteps: state.policy.maxSteps,
-				resume: cursor,
-				signal,
-				choose: (request: SoftRequest) => this.ctx.llm.choose(state.policy.model, request, signal),
-				// The chat's stored transcript follows the turn as it runs. A panel that reloads or
-				// resyncs mid-turn can then redraw the steps it missed, and a turn suspended on an
-				// approval leaves a complete record behind instead of only the prompt.
-				onStep: (current) => this.persistTranscript(session, current),
-			});
-			state = outcome.state;
-			if (outcome.status === 'aborted') {
-				return { status: 'aborted', state, step: outcome.step };
+		try {
+			for (;;) {
+				const graph = this.graph();
+				const outcome = await runGraph(graph, state, {
+					resume: cursor,
+					signal,
+					choose: (request: SoftRequest) =>
+						this.ctx.llm.choose(state.policy.model, request, signal, (usage) =>
+							state.budget?.spendTokens(usage.input + usage.output),
+						),
+					// The chat's stored transcript follows the turn as it runs. A panel that reloads or
+					// resyncs mid-turn can then redraw the steps it missed, and a turn suspended on an
+					// approval leaves a complete record behind instead of only the prompt.
+					onStep: (current) => this.persistTranscript(session, current),
+				});
+				state = outcome.state;
+				if (outcome.status === 'aborted') {
+					return { status: 'aborted', state, step: outcome.step };
+				}
+				if (outcome.status === 'done') {
+					return { status: 'done', state, step: outcome.step };
+				}
+				const calls = Array.isArray(outcome.payload) ? (outcome.payload as ToolCall[]) : [];
+				// The suspension is where a turn can sit for a long time: write down everything it has
+				// done first, so the chat shows the work while the approval question is open.
+				this.persistTranscript(session, state);
+				session.cursor = { node: outcome.node, payload: outcome.payload, step: outcome.step, state };
+				this.ctx.sessions.save(session);
+				const answer = calls.length
+					? await this.ctx.approval.request({
+							calls,
+							reason: state.gateReason,
+							surface: state.ref.surface,
+							sessionId: session.id,
+							signal,
+							response: state.policy.approvalResponse,
+						})
+					: 'deny';
+				if (signal.aborted) {
+					return { status: 'aborted', state, step: outcome.step };
+				}
+				const approvalReason =
+					answer === 'deny'
+						? state.policy.approvalResponse === 'never'
+							? 'the approval response policy denies without asking'
+							: 'the approval surface denied the call'
+						: 'the approval surface allowed the call';
+				if (answer === 'always' && calls[0]) {
+					const rule = suggestAllowRule(calls[0], this.ctx.tools.get(calls[0].name));
+					await this.ctx.settings.addAllowRule(rule).catch(() => undefined);
+					this.notice(state.ref, `Added allow rule: ${rule}`);
+				}
+				session.cursor = null;
+				cursor = {
+					node: outcome.node,
+					value: { allowed: answer !== 'deny', reason: approvalReason },
+					payload: outcome.payload,
+					step: outcome.step,
+				};
 			}
-			if (outcome.status === 'done') {
-				return { status: 'done', state, step: outcome.step };
+		} finally {
+			if (timer) {
+				clearTimeout(timer);
 			}
-			const calls = Array.isArray(outcome.payload) ? (outcome.payload as ToolCall[]) : [];
-			// The suspension is where a turn can sit for a long time: write down everything it has
-			// done first, so the chat shows the work while the approval question is open.
-			this.persistTranscript(session, state);
-			session.cursor = { node: outcome.node, payload: outcome.payload, step: outcome.step, state };
-			this.ctx.sessions.save(session);
-			const answer = calls.length
-				? await this.ctx.approval.request({
-						calls,
-						reason: state.gateReason,
-						surface: state.ref.surface,
-						sessionId: session.id,
-						signal,
-						response: state.policy.approvalResponse,
-					})
-				: 'deny';
-			if (signal.aborted) {
-				return { status: 'aborted', state, step: outcome.step };
-			}
-			const approvalReason =
-				answer === 'deny'
-					? state.policy.approvalResponse === 'never'
-						? 'the approval response policy denies without asking'
-						: 'the approval surface denied the call'
-					: 'the approval surface allowed the call';
-			if (answer === 'always' && calls[0]) {
-				const rule = suggestAllowRule(calls[0], this.ctx.tools.get(calls[0].name));
-				await this.ctx.settings.addAllowRule(rule).catch(() => undefined);
-				this.notice(state.ref, `Added allow rule: ${rule}`);
-			}
-			session.cursor = null;
-			cursor = {
-				node: outcome.node,
-				value: { allowed: answer !== 'deny', reason: approvalReason },
-				payload: outcome.payload,
-				step: outcome.step,
-			};
+			unlink();
 		}
 	}
 
@@ -1390,11 +1449,33 @@ export class Agent extends Service {
 
 	/** The clean end of a stopped turn: no Stop hook, no stale reply, a wire-valid transcript. */
 	private aborted(session: Session, state: RunState): TurnResult {
+		const budget = this.budgetStopped(session, state, true);
+		if (budget) {
+			return budget;
+		}
 		this.settleCancelledCalls(state);
 		session.cursor = null;
 		this.finish(session, state, { aborted: true });
 		const reply = lastAssistant(state.transcript.slice(state.prior.length))?.content.trim() ?? '';
 		return { sessionId: session.id, text: reply, stopped: true };
+	}
+
+	/** End a turn whose native budget ran out, leaving a sealed, resumable transcript. */
+	private budgetStopped(session: Session, state: RunState, aborted: boolean): TurnResult | undefined {
+		const dimension = state.budget?.stopReason ?? state.stop;
+		if (!dimension) {
+			return undefined;
+		}
+		state.budget?.stop(dimension);
+		sealPartial(state.messages, state.transcript, dimension);
+		state.toolCalls = [];
+		state.traces = undefined;
+		session.cursor = null;
+		this.persistTranscript(session, state);
+		this.finish(session, state, aborted ? { aborted: true } : undefined);
+		this.notice(state.ref, `Budget exhausted (${budgetLabel(dimension)}); send another message to continue.`);
+		const reply = lastAssistant(state.transcript.slice(state.prior.length))?.content.trim() ?? '';
+		return { sessionId: session.id, text: reply, stopped: true, budget: state.budget?.report() };
 	}
 
 	/** Give every unanswered tool call a result, so the next request is still a valid conversation. */
@@ -1527,16 +1608,24 @@ export class Agent extends Service {
 		const routes = new Map<string, RouteFn<RunState>>();
 
 		nodes.set('llm.complete', async (state, runtime) => {
+			// A budget stop is a clean message boundary: no more model calls and no more tools.
+			if (state.stop) {
+				return { ...state, toolCalls: [], traces: undefined };
+			}
 			// A parent tightening lands before the next request, so the model never sees a tool the
 			// child no longer holds.
 			this.refreshSubagentPolicy(state);
+			const exhausted = state.budget?.check();
+			if (exhausted) {
+				return { ...state, stop: exhausted, toolCalls: [], traces: undefined };
+			}
 			// A subagent is shown only the read-only tools on its list; the model never learns of a write tool.
 			// A silent generation (an impersonation or a quiet turn) writes nothing down and is offered no
 			// tools at all: a tool it called would run for real, and its reply is thrown away afterwards.
 			// A preset whose Tools entry is off offers none either, for the whole turn.
 			const offered = this.ctx.tools.visible(state.policy).filter((tool) => this.subagentToolAllowed(state, tool));
 			const visible = SILENT_TRIGGERS.has(state.trigger) || state.toolsEnabled === false ? [] : offered;
-			const live = this.turnSession(state.sessionId);
+			const live = this.turnSession(state.sessionId) ?? this.subagentSessions.get(state.sessionId);
 			const session = live ?? this.ctx.sessions.get(state.sessionId);
 			// A long turn grows by its own tool results, so the request is checked here as well as at the
 			// turn's start: eliding old output costs nothing, and folding the turns before this one is
@@ -1545,6 +1634,17 @@ export class Agent extends Service {
 			if (fitted.messages !== state.messages || fitted.transcript !== undefined) {
 				state = { ...state, messages: fitted.messages, transcript: fitted.transcript ?? state.transcript };
 			}
+			// Token budgets are spend, not context: if the next request's input alone cannot fit in
+			// what is left, stop before paying for it. Output remains best-effort (one response).
+			const tokenLimit = state.budget?.limits.tokens ?? 0;
+			if (state.budget && tokenLimit > 0) {
+				const estimate = estimateMessages(fitted.messages);
+				if (state.budget.usage.tokens + estimate >= tokenLimit) {
+					state.budget.stop('tokens');
+					return { ...state, stop: 'tokens', toolCalls: [], traces: undefined };
+				}
+			}
+			state.budget?.spendTurn();
 			// The window of this model round trip is what the UI shows as "thinking for Ns".
 			const startedAt = Date.now();
 			const sent = await this.request(state, visible, runtime.signal, session, Boolean(live));
@@ -1552,7 +1652,11 @@ export class Agent extends Service {
 				state = { ...state, messages: sent.messages };
 			}
 			const completion = sent.completion;
-			const message = completion.message;
+			const raw = completion.message;
+			// The transcript's assistant message must carry the calls: a later resume or a budget seal
+			// reads them from there. Some test/plugin adapters return them only on the completion.
+			const message =
+				completion.toolCalls.length && !raw.toolCalls?.length ? { ...raw, toolCalls: completion.toolCalls } : raw;
 			if (message.content || message.toolCalls?.length) {
 				this.ctx.audit.write(state.sessionId, {
 					kind: 'assistant',
@@ -1561,16 +1665,21 @@ export class Agent extends Service {
 					...(state.agentName ? { subagent: state.agentName, root: state.rootSessionId } : {}),
 				});
 			}
+			// A turn budget stops the next model round, not the tools this round asked for; token and
+			// time spend, however, can end the current round before any tool runs.
+			const stop = state.budget?.check(Date.now(), ['milliseconds', 'tokens']);
+			const toolCalls = stop ? [] : completion.toolCalls;
 			if (message.content || message.toolCalls?.length || message.reasoning) {
 				return {
 					...state,
+					...(stop ? { stop } : {}),
 					messages: [...state.messages, message],
 					transcript: [...state.transcript, { ...message, at: Date.now(), startedAt }],
-					toolCalls: completion.toolCalls,
+					toolCalls,
 					traces: undefined,
 				};
 			}
-			return { ...state, toolCalls: completion.toolCalls, traces: undefined };
+			return { ...state, ...(stop ? { stop } : {}), toolCalls, traces: undefined };
 		});
 
 		nodes.set('agent.calls', async (state) => ({
@@ -1657,9 +1766,23 @@ export class Agent extends Service {
 				at: Date.now(),
 			});
 			const runCall = async (call: ToolCall, index: number): Promise<void> => {
+				state.lastTool = call.name;
 				if (runtime.signal.aborted) {
-					this.denyTrace(state, index, 'stopped before dispatch');
-					results[index] = stopped(call);
+					const dimension = state.budget?.stopReason;
+					this.denyTrace(state, index, dimension ? `${budgetLabel(dimension)} budget exhausted` : 'stopped before dispatch');
+					results[index] = dimension
+						? { role: 'tool', toolCallId: call.id, content: `Error: ${budgetLabel(dimension)} budget exhausted before this tool call ran; resume to continue.`, at: Date.now() }
+						: stopped(call);
+					return;
+				}
+				// The tool budget counts every call that reaches dispatch, and a turn/token/time stop
+				// ends the batch here. Every call still gets a result: the transcript must stay valid.
+				const exhausted = state.budget?.check(Date.now(), ['milliseconds', 'tokens', 'tools']);
+				if (exhausted) {
+					const reason = `the ${budgetLabel(exhausted)} budget was exhausted before this tool call ran; resume to continue`;
+					this.denyTrace(state, index, reason);
+					results[index] = { role: 'tool', toolCallId: call.id, content: `Error: ${reason}.`, at: Date.now() };
+					state.stop = exhausted;
 					return;
 				}
 				// A preset can switch tools off for the whole turn. The router rejects such a call first;
@@ -1682,6 +1805,9 @@ export class Agent extends Service {
 					results[index] = { role: 'tool', toolCallId: call.id, content: `Error: tool ${call.name} is not available to this subagent`, at: Date.now() };
 					return;
 				}
+				// Count only calls that can actually dispatch; a switched-off or unavailable tool is a
+				// denial, not a spent tool call.
+				state.budget?.spendTools(1);
 				let args = call.arguments;
 				let pre;
 				try {
@@ -1940,7 +2066,8 @@ export class Agent extends Service {
 		});
 
 		routes.set('agent.after-llm', (state) => {
-			if (state.toolCalls.length === 0) {
+			// A budget stop ends the run before the next batch, even if the model emitted calls.
+			if (state.stop || state.toolCalls.length === 0) {
 				return 'end';
 			}
 			// The call is revalidated against a parent that may have tightened during the request.
@@ -2496,7 +2623,7 @@ export class Agent extends Service {
 				});
 		const policy: SessionPolicy = { ...candidate, tools: allow };
 		const revision = policyRevision(policySnapshot(policy, policy.rules ?? this.ctx.settings.rules()));
-		const subId = `sub-${randomUUID()}`;
+		const subId = request.resumeSessionId ?? `sub-${randomUUID()}`;
 		let release: (() => void) | undefined;
 		try {
 			release = await this.acquireSubagentSlot(request.signal);
@@ -2539,6 +2666,7 @@ export class Agent extends Service {
 			: '';
 		const memory = config.memory ? await readMemory(memoryDir(this.ctx.host.storage.root, policy.workingDirectory)) : '';
 		const skills = config.skills && allow.includes('skill') ? skillLines(this.ctx.catalog.skills) : '';
+		const budgetLimits = mergeBudget(config.subagentBudget, role.budget, request.budget);
 		const system = buildSubagentSystemPrompt({
 			role,
 			contract: request.contract ?? 'worker',
@@ -2548,17 +2676,37 @@ export class Agent extends Service {
 			network: policy.network,
 			sandbox: policy.sandboxMode,
 			capabilities: [...capabilitiesOf(policy)],
+			budget: budgetLimits,
 		});
-		const subTranscript: Message[] = [{ role: 'user', content: request.prompt, at: Date.now() }];
+		// Resume is a continuation, not a retry: reuse the child session, its transcript and its
+		// workspace writes, and start the graph at the normal entry (the next model turn).
+		const previous = request.resumeSessionId ? this.ctx.sessions.get(subId) : undefined;
+		if (request.resumeSessionId) {
+			if (!previous) {
+				return { ok: false, report: '', writes: [], sessionId: subId, error: `cannot resume ${subId}: the child session is gone` };
+			}
+			if (previous.parentId !== parent.sessionId || previous.subagent !== role.id) {
+				return { ok: false, report: '', writes: [], sessionId: subId, error: `cannot resume ${subId}: it is not this role's child` };
+			}
+		}
+		const subTranscript: Message[] = previous
+			? [...previous.transcript]
+			: [{ role: 'user', content: request.prompt, at: Date.now() }];
 		// The child's conversation is a real session from this moment on: the card can open it while
 		// it works, and it outlives the parent turn as a transcript.
-		const child = this.ctx.sessions.createChild(policy, subId, {
+		const child = previous ?? this.ctx.sessions.createChild(policy, subId, {
 			title: subagentTitle(role.id, request.description),
 			parentId: parent.sessionId,
 			subagent: role.id,
 			transcript: subTranscript,
 			policyRevision: revision,
 		});
+		if (previous) {
+			child.subagentDone = false;
+			child.transcript = subTranscript;
+			child.policy = policy;
+			child.policyRevision = revision;
+		}
 		this.subagentSessions.set(subId, child);
 		let latest = subTranscript;
 		const remember = (next: Message[]): void => {
@@ -2592,9 +2740,10 @@ export class Agent extends Service {
 			agentName: role.id,
 			...(request.taskId ? { taskId: request.taskId } : {}),
 			writes: new Set(),
+			budget: new RunBudget(budgetLimits),
 			policy,
 			transcript: subTranscript,
-			messages: [{ role: 'system', content: system }, { role: 'user', content: request.prompt }],
+			messages: [{ role: 'system', content: system }, ...subTranscript],
 			contextForm: config.contextForm,
 			trailer: [],
 			toolCalls: [],
@@ -2611,6 +2760,15 @@ export class Agent extends Service {
 		};
 		const abort = new AbortController();
 		const unlink = linkAbort(request.signal, abort);
+		const budget = state.budget ?? new RunBudget();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = budget.deadline();
+		if (deadline !== undefined) {
+			timer = setTimeout(() => {
+				budget.stop('milliseconds');
+				abort.abort(new Error('time budget exhausted'));
+			}, Math.min(2_147_483_647, Math.max(0, deadline - Date.now())));
+		}
 		try {
 			request.onStart?.(subId);
 			this.ctx.emit('agent/subagent-start', parent.ref, {
@@ -2620,26 +2778,64 @@ export class Agent extends Service {
 				description: request.description,
 			});
 			abort.signal.throwIfAborted();
-			const base = subagentStepBudget(config, parent.policy.maxSteps ?? 0, role.maxTurns);
-			const maxSteps =
-				request.maxTurns === undefined ? base : base > 0 ? Math.min(base, request.maxTurns) : request.maxTurns;
 			const outcome = await runGraph(this.graph(), state, {
-				maxSteps,
 				signal: abort.signal,
-				choose: (soft: SoftRequest) => this.ctx.llm.choose(policy.model, soft, abort.signal),
+				choose: (soft: SoftRequest) =>
+					this.ctx.llm.choose(policy.model, soft, abort.signal, (usage) =>
+						state.budget?.spendTokens(usage.input + usage.output),
+					),
 				onStep: (current) => remember(current.transcript),
 			});
+			const latestState = outcome.state;
+			const dimension = budget.stopReason ?? latestState.stop ?? budget.check();
+			const lastTool = latestState.lastTool ?? state.lastTool;
+			if (dimension) {
+				budget.stop(dimension);
+				const partial = sealPartial(latestState.messages, latestState.transcript, dimension);
+				latest = latestState.transcript;
+				child.transcript = latest;
+				return {
+					ok: false,
+					paused: true,
+					report: partial,
+					writes: [...latestState.writes],
+					sessionId: subId,
+					budget: budget.report(),
+					...(lastTool ? { lastTool } : {}),
+				};
+			}
 			const stopped = outcome.status === 'aborted';
 			return {
 				ok: !stopped,
-				report: stopped ? '(stopped)' : (lastAssistant(outcome.state.transcript)?.content ?? ''),
-				writes: [...state.writes],
+				report: stopped ? '(stopped)' : (lastAssistant(latestState.transcript)?.content ?? ''),
+				writes: [...latestState.writes],
 				sessionId: subId,
+				budget: budget.report(),
 				...(stopped ? { stopped: true } : {}),
+				...(lastTool ? { lastTool } : {}),
 			};
 		} catch (error) {
+			const dimension = budget.stopReason ?? budget.check();
+			if (dimension) {
+				budget.stop(dimension);
+				const partial = sealPartial(state.messages, state.transcript, dimension);
+				latest = state.transcript;
+				child.transcript = latest;
+				return {
+					ok: false,
+					paused: true,
+					report: partial,
+					writes: [...state.writes],
+					sessionId: subId,
+					budget: budget.report(),
+					...(state.lastTool ? { lastTool: state.lastTool } : {}),
+				};
+			}
 			return { ok: false, report: '', writes: [...state.writes], sessionId: subId, error: describe(error) };
 		} finally {
+			if (timer) {
+				clearTimeout(timer);
+			}
 			unlink();
 			try {
 				finishChild();

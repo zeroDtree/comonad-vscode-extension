@@ -45,11 +45,15 @@ scratch；有效能力含 `rw` 才算**写任务**。默认授权见[设置](/zh
 - `objective`，可选 `inputs` / `outputs`；
 - `writes`（工作区相对路径或 glob，用于协作与重叠警告）；
 - 可选 `capabilities`（角色能力的子集）与 `network: false`；
-- `dependsOn`（无环）、`acceptance`、`maxAttempts`、`budget`。
+- `dependsOn`（无环）、`acceptance`、`maxAttempts`、`maxResumes`、`budget`。
+
+`budget` 是四维对象：`turns`（模型往返）、`tools`（工具调用）、`tokens`（输入 + 输出）、
+`milliseconds`（墙钟）。`0` 表示无限制；任务预算只能收紧角色/全局默认。触顶时任务进入 `paused`
+而不是 `rejected`：子会话与 transcript 保留，`resume` 用新的分段预算继续，不消耗 attempt。
 
 计划是声明式的：每次修订都重发仍需要的全部节点。`running` / `verifying` 节点会阻止修订；`accepted`
-节点保持不变，改定义会被拒绝；`rejected` 节点改定义后回到 `pending` 并保留尝试次数。图默认最多 32 个
-节点、6 次重规划、每节点 2 次尝试。
+节点保持不变，改定义会被拒绝；`rejected` / `paused` 节点改定义后回到 `pending` 并保留尝试次数。图默认
+最多 32 个节点、6 次重规划、每节点 2 次尝试；`paused` 节点默认最多 resume 3 次。
 
 ## 委派
 
@@ -91,8 +95,9 @@ review 验收可并行，command 验收串行。验证者最终消息也是 JSON
 （`universal_accept`、`blacklist_reject` 或 allow 规则）。在 `manual` / `whitelist_accept` 下，请在主
 线程完成写（用户可批准），把只读工作与独立审查交给子代理。
 
-其他上限：32 节点、每批 8 个任务、4 个并发子代理、6 次重规划、每节点默认 2 次尝试。停止会中止根轮次与
-子代理；被中断的 `running` 节点会在下一次根轮次开始时标为 `interrupted`。
+其他上限：32 节点、每批 8 个任务（delegate 或 resume）、4 个并发子代理、6 次重规划、每节点默认 2 次
+尝试、`paused` 节点默认最多 resume 3 次。停止会中止根轮次与子代理；被中断的 `running` 节点会在下一次
+根轮次开始时标为 `interrupted`；`paused` 节点不会被中断，保留子会话等待 `resume`。
 
 ## 一个小计划
 

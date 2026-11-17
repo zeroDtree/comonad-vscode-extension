@@ -226,7 +226,7 @@ export class Llm extends Service {
 		policyModel: string,
 		system: string,
 		user: string,
-		options: { signal?: AbortSignal; timeoutMs?: number } = {},
+		options: { signal?: AbortSignal; timeoutMs?: number; onUsage?: (usage: CompletionUsage) => void } = {},
 	): Promise<string> {
 		const timeout = AbortSignal.timeout(options.timeoutMs ?? 180_000);
 		const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
@@ -245,6 +245,9 @@ export class Llm extends Service {
 		if (signal.aborted) {
 			throw signal.reason ?? new DOMException('The request was stopped.', 'AbortError');
 		}
+		if (result.usage) {
+			options.onUsage?.(result.usage);
+		}
 		return result.message.content.trim();
 	}
 
@@ -252,6 +255,7 @@ export class Llm extends Service {
 		policyModel: string,
 		request: { instruct: string; choices: { id: string; description: string }[] },
 		signal: AbortSignal,
+		onUsage?: (usage: CompletionUsage) => void,
 	): Promise<string> {
 		const ids = request.choices.map((choice) => choice.id);
 		const system = [
@@ -261,7 +265,7 @@ export class Llm extends Service {
 		].join('\n');
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			try {
-				const text = await this.complete(policyModel, system, 'Choose the next node.', { signal });
+				const text = await this.complete(policyModel, system, 'Choose the next node.', { signal, onUsage });
 				const match = text.match(/\{[\s\S]*?\}/);
 				if (match) {
 					const parsed = JSON.parse(match[0]) as { id?: string };

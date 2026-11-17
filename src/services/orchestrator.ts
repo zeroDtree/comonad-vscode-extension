@@ -2,6 +2,7 @@
 import { Service, type Context } from 'cordis';
 import { BUILTIN_ROLE_BY_ID, effectiveCapabilities, roleRisk, type AgentRole } from '../lib/agents';
 import { buildOrchestratorBody } from '../lib/agent-prompts';
+import type { BudgetReport } from '../lib/budget';
 import { KeyedMutex } from '../lib/locks';
 import { labelOf } from '../lib/mailbox';
 import {
@@ -162,6 +163,103 @@ export class Orchestrator extends Service {
 				node: node.id,
 				role: role.id,
 				attempt: node.attempts,
+			});
+		}
+		this.emit(access, graph);
+		return runs;
+	}
+
+	/**
+	 * Parks a worker whose native budget ran out. This is not a rejection: the same child session
+	 * and transcript can be resumed with a fresh segment budget.
+	 */
+	pause(access: TaskGraphAccess, id: string, report: BudgetReport, partial: string, lastTool?: string, writes: string[] = []): TaskNode {
+		const graph = this.require(access);
+		const node = this.nodeOf(graph, id);
+		const now = Date.now();
+		node.status = 'paused';
+		node.finishedAt = now;
+		node.rejection = {
+			code: 'budget_exhausted',
+			reason: `${report.stopped ?? 'budget'} budget exhausted${lastTool ? ` after ${lastTool}` : ''}; resume to continue`,
+			budget: report,
+			partial,
+			resumable: true,
+			...(writes.length ? { writes } : {}),
+			at: now,
+		};
+		graph.updatedAt = now;
+		access.set(graph);
+		this.audit(access.sessionId, {
+			kind: 'task-end',
+			node: id,
+			status: node.status,
+			attempts: node.attempts,
+			resumes: node.resumes,
+			rejection: node.rejection,
+		});
+		this.emit(access, graph);
+		return node;
+	}
+
+	/** Continues paused workers with a new segment budget; resuming is not a new attempt. */
+	resume(access: TaskGraphAccess, ids: string[]): Array<{ node: TaskNode; role: AgentRole }> {
+		const graph = this.require(access);
+		if (ids.length < 1 || ids.length > 8) {
+			throw new Error('a resume batch needs 1..8 task ids');
+		}
+		if (new Set(ids).size !== ids.length) {
+			throw new Error('a resume batch contains a duplicate task id');
+		}
+		const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+		const roles = this.roles();
+		const runs: Array<{ node: TaskNode; role: AgentRole }> = [];
+		for (const id of ids) {
+			const node = byId.get(id);
+			if (!node) {
+				throw new Error(`unknown task ${id}`);
+			}
+			if (node.status !== 'paused') {
+				throw new Error(`${id} is ${node.status}, not paused`);
+			}
+			if (node.resumes >= node.maxResumes) {
+				throw new Error(`${id} has spent its ${node.maxResumes} resumes; replan with a new definition`);
+			}
+			if (!node.subagentSessionId) {
+				throw new Error(`${id} has no child session to resume`);
+			}
+			const role = roles.get(node.role);
+			if (!role) {
+				throw new Error(`${id}: role ${node.role} is no longer available`);
+			}
+			if (node.capabilities?.some((capability) => !role.capabilities.includes(capability))) {
+				throw new Error(`${id}: the role no longer allows its declared capabilities`);
+			}
+			if (roleRisk(effectiveCapabilities(role, node.capabilities)) !== node.risk) {
+				throw new Error(`${id}: the role's risk changed since the plan was made; replan`);
+			}
+			runs.push({ node, role });
+		}
+		const now = Date.now();
+		for (const { node } of runs) {
+			node.status = 'running';
+			node.resumes += 1;
+			node.startedAt = now;
+			node.finishedAt = undefined;
+			node.result = undefined;
+			node.verification = undefined;
+			node.rejection = undefined;
+			node.verificationSessionIds = [];
+		}
+		graph.updatedAt = now;
+		access.set(graph);
+		for (const { node, role } of runs) {
+			this.audit(access.sessionId, {
+				kind: 'task-start',
+				node: node.id,
+				role: role.id,
+				attempt: node.attempts,
+				resume: node.resumes,
 			});
 		}
 		this.emit(access, graph);

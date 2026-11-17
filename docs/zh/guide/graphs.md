@@ -40,8 +40,9 @@ flowchart LR
 
 在 User（`~/.comonad/settings.json`）或 Workspace（`<workspace>/.comonad/settings.json`）设置文件中
 设置 `graph` 为 Mermaid 源文件。空值使用内置循环；无法解析或编译的源文件会被记录，并回退到内置循环。
-`maxSteps` 限制整个回合的步数（`0` 表示无限制）。插件通过 `ctx.graphs` 注册 node 实现和 route，
-因此自定义图可以使用已加载插件提供的任何实现。
+`comonad.budget` 中的四个原生上限（turns、tools、tokens、墙钟毫秒）限制整个回合；图引擎另有一个
+内部节点安全阀，防止自定义循环无限运行。插件通过 `ctx.graphs` 注册 node 实现和 route，因此自定义图
+可以使用已加载插件提供的任何实现。
 
 ## 插件
 
