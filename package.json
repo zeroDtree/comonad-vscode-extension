@@ -22,7 +22,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:comonad.review"
   ],
   "main": "./dist/extension.js",
   "extensionKind": [
@@ -227,7 +228,7 @@
       },
       {
         "command": "comonad.review",
-        "title": "Comonad: Review Pending Changes",
+        "title": "Comonad: Review Changes",
         "category": "Comonad",
         "enablement": "comonad.checkpoints"
       },
@@ -769,7 +770,7 @@
             "Subagents spend the budget in comonad.subagentSteps."
           ],
           "default": "custom",
-          "markdownDescription": "Where a subagent's step budget comes from: the turn's `maxSteps` (`inherit`) or `comonad.subagentSteps` (`custom`). A definition's `maxTurns` can only tighten it."
+          "markdownDescription": "Where a subagent's step budget comes from: the turn's `maxSteps` (`inherit`, used exactly) or `comonad.subagentSteps` (`custom`). A definition's `maxTurns` can only tighten a `custom` budget."
         },
         "comonad.subagentSteps": {
           "type": "number",
@@ -1065,6 +1066,11 @@
           "default": false,
           "description": "Open the Comonad chat in its own floating window when it is opened as an editor tab."
         },
+        "comonad.questionNotification": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a VS Code notification with an Open Chat action when a question is waiting and the chat panel is closed. The question waits either way; its card is shown when the panel reopens."
+        },
         "comonad.contextForm": {
           "type": "string",
           "enum": [
@@ -1353,11 +1359,12 @@
     "watch:esbuild": "node esbuild.js --watch",
     "build:plugins": "node esbuild.js --plugin",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "watch:webview-tsc": "tsc --noEmit --watch --project src/webview/tsconfig.json",
     "package": "npm run check-types && npm run lint && node esbuild.js --production && node esbuild.js --plugin --production",
     "compile-tests": "node esbuild.js --tests",
     "watch-tests": "node esbuild.js --tests --watch",
     "pretest": "npm run compile && npm run compile-tests",
-    "check-types": "tsc --noEmit",
+    "check-types": "tsc --noEmit && tsc --noEmit --project src/webview/tsconfig.json",
     "lint": "eslint src packages",
     "test": "vscode-test"
   },

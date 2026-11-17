@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import type { ApprovalDecision, ApprovalRequest, AttachmentPart, ImagePart, ToolCall, TurnRef } from './lib/types';
+import type { ApprovalDecision, ApprovalRequest, AttachmentPart, ImagePart, QuestionRequest, ToolCall, TurnRef } from './lib/types';
 import type { TaskBoard } from './lib/task-graph';
 import type { PostToolDecision, PreToolDecision, ToolExecution, ToolOutcome } from './services/tools';
 
@@ -28,6 +28,8 @@ declare module 'cordis' {
 		'orchestrator/changed'(sessionId: string, board?: TaskBoard): void;
 		/** Waterfall: surfaces answer for their own `surface` id and delegate the rest. */
 		'approval/request'(request: ApprovalRequest, next: () => ApprovalDecision | Promise<ApprovalDecision>): ApprovalDecision | Promise<ApprovalDecision>;
+		/** Waterfall: a surface renders the question itself; the native host is the default. */
+		'question/request'(request: QuestionRequest, next: () => string[] | Promise<string[]>): string[] | Promise<string[]>;
 		'sessions/changed'(id?: string): void;
 		'settings/changed'(): void;
 		/** A settings file changed on disk outside this process; the cache has already been dropped. */

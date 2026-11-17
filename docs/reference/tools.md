@@ -18,6 +18,12 @@ Every tool declares a **capability**, whether it needs **network**, and whether 
 | Agent | `ask_user`, `skill`, `memory` |
 | MCP | `server__tool` for every tool the server exposes |
 
+`ask_user` renders an inline question card in the Comonad panel. The `@comonad` participant and
+turns with no panel surface use VS Code's quick pick or input box instead. A panel-surface question
+with no attached panel stays pending — the turn waits — and its card is replayed when the panel
+reopens; a VS Code notification with an **Open Chat** action points to it unless
+`questionNotification` is off.
+
 `read_file` also reads PNG, JPEG, WebP and GIF images (up to 4 MiB each) and hands them to the model
 as image content. With the **PDF documents** plugin it reads PDFs as page-marked text; pass `pages`
 (such as `"1-5"`) to choose a range. Without the plugin it returns an installation hint rather than

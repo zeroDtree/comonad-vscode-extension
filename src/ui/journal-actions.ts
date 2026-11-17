@@ -7,12 +7,25 @@ import { ChangedOutsideError, DirtyEditorError } from '../lib/journal';
 
 /**
  * The review actions the journal's surfaces share: what is pending, the unsaved-editor check, the
- * outside-changes question, undo with its refusals, and restoring to a turn's restore point. `review`,
- * the inline diff and the chat panel's prompt edit all use the same journal, so they ask the same
- * questions in the same words.
+ * outside-changes question, undo with its refusals, and restoring to a turn's restore point. The
+ * Review tab, the inline diff and the chat panel's prompt edit all use the same journal, so they ask
+ * the same questions in the same words.
  */
 
 export const SHELL_NOTE = 'Changes made by shell commands are not tracked here — review them with git.';
+
+/** The active chat and the folder its journal is about. */
+export interface JournalScope {
+	sessionId: string;
+	workspace: string;
+}
+
+/** The active chat and the folder its journal is about, or `undefined` when there is neither. */
+export function journalScope(ctx: Context): JournalScope | undefined {
+	const session = ctx.sessions.active();
+	const workspace = session?.policy.workingDirectory;
+	return session && workspace ? { sessionId: session.id, workspace } : undefined;
+}
 
 /** The editor's unsaved documents, by workspace-relative path. */
 export function unsavedPaths(workspace: string): (path: string) => boolean {
@@ -25,14 +38,15 @@ export function unsavedPaths(workspace: string): (path: string) => boolean {
 }
 
 /** What the active chat has pending, with the workspace it belongs to. */
-export async function journalPending(ctx: Context): Promise<{ sessionId: string; workspace: string; files: JournalFile[] } | undefined> {
-	const session = ctx.sessions.active();
-	if (!session?.policy.workingDirectory) {
+export async function journalPending(
+	ctx: Context,
+): Promise<{ sessionId: string; workspace: string; available: boolean; files: JournalFile[] } | undefined> {
+	const scope = journalScope(ctx);
+	if (!scope) {
 		return undefined;
 	}
-	const workspace = session.policy.workingDirectory;
-	const result = await ctx.checkpoints.pending(workspace, session.id, unsavedPaths(workspace));
-	return { sessionId: session.id, workspace, files: result.files };
+	const result = await ctx.checkpoints.pending(scope.workspace, scope.sessionId, unsavedPaths(scope.workspace));
+	return { ...scope, available: result.available, files: result.files };
 }
 
 /**
@@ -94,10 +108,19 @@ export async function restoreTo(
 }
 
 /** Undo with the checks the journal makes: refuse unsaved text, then ask about outside changes. */
-export async function undoPaths(ctx: Context, workspace: string, sessionId: string, paths: string[], isDirty: (path: string) => boolean): Promise<void> {
+export async function undoPaths(
+	ctx: Context,
+	workspace: string,
+	sessionId: string,
+	paths: string[],
+	isDirty: (path: string) => boolean,
+	options: { quiet?: boolean } = {},
+): Promise<void> {
 	try {
 		await ctx.checkpoints.undo(workspace, sessionId, paths, { isDirty });
-		void vscode.window.showInformationMessage(`Comonad: restored ${paths.length} file(s).`);
+		if (!options.quiet) {
+			void vscode.window.showInformationMessage(`Comonad: restored ${paths.length} file(s).`);
+		}
 	} catch (error) {
 		if (!(error instanceof ChangedOutsideError)) {
 			throw error;
@@ -112,6 +135,8 @@ export async function undoPaths(ctx: Context, workspace: string, sessionId: stri
 		const chosen = overwrite === 'all' ? error.paths : overwrite;
 		const wanted = paths.filter((path) => chosen.includes(path) || !error.paths.includes(path));
 		await ctx.checkpoints.undo(workspace, sessionId, wanted, { isDirty, overwrite });
-		void vscode.window.showInformationMessage(`Comonad: restored ${wanted.length} file(s).`);
+		if (!options.quiet) {
+			void vscode.window.showInformationMessage(`Comonad: restored ${wanted.length} file(s).`);
+		}
 	}
 }

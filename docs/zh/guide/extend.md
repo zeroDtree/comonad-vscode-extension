@@ -196,9 +196,9 @@ frontmatter **选择**工具；写能力还需要 `subagents` 设置中的授权
 只读。复用内置 id 的自定义角色不继承内置默认授权。见[安全](/zh/guide/safety#编排器与子-agent)与
 [编排](/zh/guide/orchestration)。
 
-`maxTurns` 按每回合两图步、最少四步来收紧子代理的图步预算；它只能收紧
-`subagentStepsMode`/`subagentSteps`，任务的 `budget` 可以进一步收紧。见
-[设置](/zh/reference/settings#子-agent)。
+在 `subagentStepsMode: custom` 下，`maxTurns` 按每回合两图步、最少四步来收紧子代理的图步预算；它只能
+收紧 `subagentSteps`，不会放宽。继承的预算原样使用该回合的 `maxSteps`，`maxTurns` 不会收紧它。两种模式下
+任务的 `budget` 都可以进一步收紧。见[设置](/zh/reference/settings#子-agent)。
 
 ### MCP
 

@@ -209,9 +209,10 @@ without a `tools` list is read-only. A custom role that reuses a built-in id doe
 built-in default grant. See [Safety](/guide/safety#orchestrator-and-subagents) and
 [Orchestration](/guide/orchestration).
 
-`maxTurns` bounds the child's graph budget at two steps per turn, with a minimum of four steps. It
-can tighten `subagentStepsMode`/`subagentSteps` but never loosen them, and a task's `budget` can
-tighten it further; see [Settings](/reference/settings#orchestrator-and-subagents).
+Under `subagentStepsMode: custom`, `maxTurns` bounds the child's graph budget at two steps per turn,
+with a minimum of four steps; it can tighten `subagentSteps` but never loosen it. An inherited budget
+uses the turn's `maxSteps` exactly, and `maxTurns` does not clamp it. A task's `budget` can tighten
+either result; see [Settings](/reference/settings#orchestrator-and-subagents).
 
 ### MCP
 

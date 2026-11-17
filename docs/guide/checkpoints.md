@@ -10,7 +10,7 @@ flowchart LR
   Journal --> Pending["Pending list<br/>above the composer"]
   Pending --> Keep["Keep<br/>stage in shadow"]
   Pending --> Undo["Undo<br/>restore content"]
-  Pending --> Review["Review<br/>inline diff"]
+  Pending --> Review["Review tab<br/>listing + inline diff"]
   Prompt["Edit prompt · Regenerate"] --> Restore["Restore files too"]
   Restore --> Journal
 ```
@@ -24,10 +24,17 @@ change switches it back to the pending files.
 
 - **Keep** accepts a file or hunk.
 - **Undo** restores the content from before the agent wrote it.
-- **Review** opens the diff editor for file-level or hunk-level decisions.
+- **Review** opens the **Review Changes** tab: a file list with `+N −M` counts, the selected file's
+  inline diff with three lines of context, and **Keep** / **Undo** on every block. The top bar acts
+  on every file; the file header acts on the selected one. Click a line number to open the real file
+  beside the review at that line.
 
-A file you edited since the agent last wrote it, or one open with unsaved text, is never overwritten
-silently: the review asks, or refuses until you save.
+The Review tab is derived from the journal, not from a second copy of the changes: closing and
+reopening it shows the same pending state, and a block kept in the editor's inline review disappears
+from the tab immediately. It reviews saved content. A file with unsaved text disables its block and
+file actions until you save; a file changed outside the agent disables block actions, and **Undo
+File** asks before restoring it. **Keep All** refuses while any pending file is unsaved, and **Keep**
+accepts the file as it is on disk, including an outside edit.
 
 A subagent's file-tool writes are journaled under the **parent chat**, not under a session of their
 own. They appear in the same pending list, the same diff and the same restore points as the main
@@ -58,7 +65,7 @@ without the result that answers it.
 
 | Command | Purpose |
 | --- | --- |
-| **Comonad: Review Pending Changes** | Open a diff, keep/undo a file or hunk, or keep/undo everything |
+| **Comonad: Review Changes** | Open the Review tab: keep/undo a block, a file, or everything |
 | `Cmd+Alt+D` / `Ctrl+Alt+D` | The same review |
 | `/review [focus]` | Ask the agent to review pending changes read-only |
 

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { missingAncestor } from '../lib/created';
+import { planFileName, planFolder } from '../lib/plans';
 import { guardPath, PathEscapeError } from '../lib/sandbox';
 import { objectSchema, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
@@ -12,15 +13,15 @@ import { toolset } from '../services/tools';
  */
 
 function planDir(ctx: ToolContext): string {
-	return join(ctx.policy.planDirectory || '.comonad/plans', ctx.rootSessionId ?? ctx.sessionId);
+	return planFolder(ctx.policy.planDirectory, ctx.rootSessionId ?? ctx.sessionId);
 }
 
 /** Resolves a plan path through the workspace guard, so a symlinked plan folder cannot escape. */
 function planPath(ctx: ToolContext, name: string | null, access: 'read' | 'write'): Promise<string> {
 	const parts = [planDir(ctx)];
 	if (name !== null) {
-		const clean = basename(name.trim());
-		if (!clean || clean === '.' || clean === '..') {
+		const clean = planFileName(name);
+		if (!clean) {
 			throw new PathEscapeError(`invalid plan name: ${name}`);
 		}
 		parts.push(clean);

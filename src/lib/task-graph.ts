@@ -52,7 +52,7 @@ export interface TaskNodeInput {
 	dependsOn?: string[];
 	acceptance: AcceptanceCriterion[];
 	maxAttempts?: number;
-	/** Maximum model steps for this task, clamped by the role and the settings budget. */
+	/** Maximum model steps for this task; it can only tighten the subagent step budget. */
 	budget?: number;
 }
 

@@ -20,7 +20,7 @@ import {
 	type RevertReport,
 } from '../lib/journal';
 import { inlineDiff } from '../ui/inline-diff';
-import { review } from '../ui/review';
+import { reviewPanel } from '../ui/review-panel';
 
 /**
  * Per-file edit journal. Comonad never snapshots the workspace: every write the agent makes goes
@@ -687,14 +687,15 @@ export class Checkpoints extends Service implements JournalApi {
 }
 
 /**
- * The row as the tree mounts it: the journal, and the review surface that goes with it. The review is
- * a plugin of its own so its handlers *inject* the journal — the commands read `ctx.checkpoints`, and
- * `review.inject` is what declares it — and the whole row is one toggle: off, and writes are simply
- * writes again.
+ * The row as the tree mounts it: the journal, and the review surfaces that go with it. Each surface
+ * is a plugin of its own so its handlers *inject* the journal — the commands read `ctx.checkpoints`,
+ * and each surface's `.inject` declares it — and the whole row is one toggle: off, and writes are
+ * simply writes again.
  */
 export async function checkpointsPlugin(ctx: Context): Promise<void> {
 	await ctx.plugin(Checkpoints);
-	ctx.plugin(review);
+	// The journal's own surface: the Review tab, with the listing and the block-by-block diff.
+	ctx.plugin(reviewPanel);
 	// The same journal, reviewed in the editor: decorations and a Keep/Undo at every block.
 	ctx.plugin(inlineDiff);
 	// The commands this row answers are declared in Comonad's manifest with an `enablement` of

@@ -237,6 +237,8 @@ export interface Config {
 	memory: boolean;
 	checkpoints: boolean;
 	chatWindow: boolean;
+	/** Show a VS Code notification when a question waits and no chat webview is attached. */
+	questionNotification: boolean;
 	contextForm: ContextForm;
 	displayForm: ContextForm;
 	/** How a tool call is drawn when it first appears: preview, header only, or open. */
@@ -287,6 +289,7 @@ export const CONFIG_KEYS = [
 	'memory',
 	'checkpoints',
 	'chatWindow',
+	'questionNotification',
 	'contextForm',
 	'displayForm',
 	'toolCard',
@@ -310,6 +313,7 @@ export const AGENT_KEYS = [
 	'displayForm',
 	'toolCard',
 	'contextForm',
+	'questionNotification',
 	'network',
 	'sandboxMode',
 	'workingDirectory',
@@ -376,6 +380,9 @@ export function normalizeAgentPatch(
 				? (value as ToolCardMode)
 				: current.toolCard;
 	}
+	if (has('questionNotification')) {
+		next.questionNotification = Boolean(patch.questionNotification);
+	}
 	if (has('network')) {
 		next.network = Boolean(patch.network);
 	}
@@ -412,17 +419,21 @@ export function normalizeAgentPatch(
 }
 
 /**
- * The step budget for one subagent run. `inherit` shares the turn's `maxSteps`; `custom` spends
- * `subagentSteps`. A definition's `maxTurns` counts turns rather than graph steps, so it keeps its
- * old two-steps-per-turn reading — and it can only tighten the chosen budget, never loosen it.
- * `0` means no limit, on either side of the comparison.
+ * The step budget for one subagent run. `inherit` returns the turn's `maxSteps` unchanged, so `0`
+ * stays unlimited and a role's `maxTurns` never clamps it. `custom` spends `subagentSteps`; a
+ * definition's `maxTurns` counts turns rather than graph steps (two steps per turn, four at the
+ * minimum) and can only tighten that budget. A `custom` budget of `0` is unlimited unless a role
+ * sets `maxTurns`, which then becomes its cap.
  */
 export function subagentStepBudget(
 	config: Pick<Config, 'subagentStepsMode' | 'subagentSteps'>,
 	inherited: number,
 	maxTurns?: number,
 ): number {
-	const own = config.subagentStepsMode === 'inherit' ? inherited : config.subagentSteps;
+	if (config.subagentStepsMode === 'inherit') {
+		return inherited;
+	}
+	const own = config.subagentSteps;
 	const definition = maxTurns === undefined ? 0 : Math.max(4, maxTurns * 2);
 	if (own <= 0) {
 		return definition;
@@ -508,6 +519,7 @@ export class Settings extends Service {
 			memory: flag('memory', true),
 			checkpoints: flag('checkpoints', true),
 			chatWindow: flag('chatWindow', false),
+			questionNotification: flag('questionNotification', true),
 			contextForm: oneOf('contextForm', CONTEXT_FORMS, 'rendered'),
 			displayForm: oneOf('displayForm', CONTEXT_FORMS, 'rendered'),
 			toolCard: oneOf('toolCard', TOOL_CARD_MODES, 'collapsed'),

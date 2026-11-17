@@ -1,0 +1,551 @@
+:root {
+	color-scheme: light dark;
+	--rv-border: var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	--rv-surface: var(--vscode-sideBar-background, rgba(128, 128, 128, 0.06));
+	--rv-add-bg: var(--vscode-diffEditor-insertedLineBackground, rgba(46, 160, 67, 0.18));
+	--rv-del-bg: var(--vscode-diffEditor-removedLineBackground, rgba(248, 81, 73, 0.16));
+	--rv-add-fg: var(--vscode-charts-green, #3fb950);
+	--rv-del-fg: var(--vscode-charts-red, #f85149);
+	--rv-selected: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.26));
+	--rv-hover: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.14));
+	--rv-muted: var(--vscode-descriptionForeground, rgba(204, 204, 204, 0.72));
+	--rv-warn: var(--vscode-editorWarning-foreground, #d7a12a);
+	--rv-mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, monospace);
+	--rv-code-size: var(--vscode-editor-font-size, 12px);
+}
+
+* {
+	box-sizing: border-box;
+}
+
+[hidden] {
+	display: none !important;
+}
+
+html,
+body {
+	height: 100%;
+	margin: 0;
+}
+
+body {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size, 13px);
+	color: var(--vscode-foreground);
+	background: var(--vscode-editor-background);
+}
+
+button {
+	font-family: inherit;
+	font-size: 12px;
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+	border: none;
+	border-radius: 3px;
+	padding: 3px 10px;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+button:hover:not(:disabled) {
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+
+button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+button:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, #007fd4);
+	outline-offset: 1px;
+}
+
+button.rv-primary {
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+}
+
+button.rv-primary:hover:not(:disabled) {
+	background: var(--vscode-button-hoverBackground);
+}
+
+button.rv-ghost {
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.14));
+	border: 1px solid transparent;
+}
+
+button.rv-ghost:hover:not(:disabled) {
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.24));
+}
+
+button.rv-ghost.is-active {
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.24));
+	border-color: var(--vscode-focusBorder, var(--rv-border));
+}
+
+#rv-top {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px 12px;
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--rv-border);
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	flex: none;
+}
+
+#rv-summary {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	font-size: 12px;
+	min-width: 0;
+}
+
+.rv-count {
+	font-weight: 600;
+}
+
+#rv-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 6px;
+	margin-left: auto;
+}
+
+#rv-body {
+	display: flex;
+	flex: 1;
+	min-height: 0;
+}
+
+#rv-files {
+	display: flex;
+	flex-direction: column;
+	width: 260px;
+	min-width: 180px;
+	flex: none;
+	border-right: 1px solid var(--rv-border);
+	background: var(--rv-surface);
+	min-height: 0;
+}
+
+#rv-files-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+	border-bottom: 1px solid var(--rv-border);
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--rv-muted);
+	flex: none;
+}
+
+#rv-files-count {
+	font-weight: 400;
+	opacity: 0.8;
+}
+
+.rv-files-empty {
+	padding: 12px 10px;
+	color: var(--rv-muted);
+	font-size: 11px;
+	line-height: 1.45;
+}
+
+body.rv-sidebar-hidden #rv-files {
+	display: none;
+}
+
+#rv-file-list {
+	flex: 1;
+	overflow-y: auto;
+	padding: 4px;
+}
+
+.rv-file {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	width: 100%;
+	padding: 4px 7px;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--vscode-foreground);
+	font-size: 12px;
+	text-align: left;
+}
+
+.rv-file:hover:not(:disabled) {
+	background: var(--rv-hover);
+}
+
+.rv-file.is-active {
+	background: var(--rv-selected);
+}
+
+.rv-kind {
+	flex: none;
+	width: 12px;
+	text-align: center;
+	font-size: 10px;
+	font-weight: 700;
+	opacity: 0.85;
+}
+
+.rv-kind.created {
+	color: var(--rv-add-fg);
+}
+
+.rv-kind.deleted {
+	color: var(--rv-del-fg);
+}
+
+.rv-path {
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rv-flag {
+	flex: none;
+	font-size: 10px;
+	font-weight: 700;
+	color: var(--rv-warn);
+}
+
+.rv-stats {
+	flex: none;
+	display: inline-flex;
+	gap: 5px;
+	font-size: 11px;
+}
+
+.rv-stat-add {
+	color: var(--rv-add-fg);
+}
+
+.rv-stat-del {
+	color: var(--rv-del-fg);
+}
+
+.rv-muted {
+	color: var(--rv-muted);
+}
+
+#rv-note {
+	flex: none;
+	padding: 8px 10px;
+	border-top: 1px solid var(--rv-border);
+	font-size: 11px;
+	line-height: 1.45;
+	color: var(--rv-muted);
+}
+
+#rv-main {
+	flex: 1;
+	min-width: 0;
+	overflow: auto;
+	position: relative;
+	scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(128, 128, 128, 0.4)) transparent;
+	scrollbar-gutter: stable;
+}
+
+#rv-file-head {
+	position: sticky;
+	top: 0;
+	z-index: 3;
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 5px 10px;
+	border-bottom: 1px solid var(--rv-border);
+	background: var(--vscode-editor-background);
+	font-size: 12px;
+}
+
+#rv-file-head button {
+	font-size: 11px;
+	padding: 2px 8px;
+}
+
+#rv-prev,
+#rv-next {
+	padding: 2px 7px;
+	font-size: 13px;
+	background: transparent;
+}
+
+.rv-link {
+	background: transparent !important;
+	border: none;
+	padding: 2px 4px;
+	color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+	font-family: var(--rv-mono);
+	font-size: 12px;
+	max-width: 48%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.rv-link:hover:not(:disabled) {
+	text-decoration: underline;
+	background: transparent;
+}
+
+#rv-badges {
+	display: inline-flex;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+.rv-badge {
+	font-size: 10px;
+	padding: 0 5px;
+	border: 1px solid var(--rv-border);
+	border-radius: 999px;
+	color: var(--rv-muted);
+	line-height: 16px;
+}
+
+.rv-badge.created {
+	color: var(--rv-add-fg);
+	border-color: var(--rv-add-fg);
+}
+
+.rv-badge.deleted {
+	color: var(--rv-del-fg);
+	border-color: var(--rv-del-fg);
+}
+
+.rv-badge.outside,
+.rv-badge.dirty {
+	color: var(--rv-warn);
+	border-color: var(--rv-warn);
+}
+
+.rv-spacer {
+	flex: 1;
+}
+
+#rv-empty {
+	padding: 28px 24px;
+	max-width: 70ch;
+}
+
+.rv-empty-title {
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.rv-empty-body {
+	margin-top: 6px;
+	line-height: 1.5;
+}
+
+.rv-empty-inline,
+.rv-more {
+	padding: 18px 16px;
+	color: var(--rv-muted);
+	font-size: 12px;
+}
+
+.rv-more {
+	padding: 10px 16px;
+	border-top: 1px solid var(--rv-border);
+}
+
+#rv-hunks {
+	padding-bottom: 24px;
+}
+
+.rv-context,
+.rv-hunk {
+	font-family: var(--rv-mono);
+	font-size: var(--rv-code-size);
+	line-height: 1.55;
+}
+
+.rv-row {
+	display: grid;
+	/* The guest sets --rv-gutter to the widest line number plus padding; a fixed 3.5ch ran
+	   3-digit numbers into each other. */
+	grid-template-columns: var(--rv-gutter, calc(3ch + 16px)) var(--rv-gutter, calc(3ch + 16px)) 1.6ch minmax(0, 1fr);
+	align-items: start;
+	width: max-content;
+	min-width: 100%;
+	white-space: pre;
+	tab-size: 4;
+}
+
+body.rv-wrap .rv-row {
+	width: auto;
+	min-width: 100%;
+	white-space: normal;
+}
+
+body.rv-wrap .rv-code {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.rv-row.rv-add {
+	background: var(--rv-add-bg);
+	/* The theme's line fill can be strong in dark themes; keep 70% so the text, and especially
+	   thin Markdown marks like `*`, stay readable. The opaque first declaration is the fallback
+	   for a browser without color-mix. */
+	background: color-mix(in srgb, var(--rv-add-bg) 70%, transparent);
+}
+
+.rv-row.rv-del {
+	background: var(--rv-del-bg);
+	background: color-mix(in srgb, var(--rv-del-bg) 70%, transparent);
+}
+
+.rv-ln {
+	color: var(--vscode-editorLineNumber-foreground, var(--rv-muted));
+	text-align: right;
+	padding: 0 5px;
+	font-family: var(--rv-mono);
+	font-size: inherit;
+	line-height: inherit;
+	background: transparent !important;
+	border: none;
+	border-radius: 0;
+	user-select: none;
+	font-variant-numeric: tabular-nums;
+}
+
+.rv-ln-old {
+	border-right: 1px solid var(--rv-border);
+}
+
+button.rv-ln {
+	cursor: pointer;
+}
+
+button.rv-ln:hover:not(:disabled) {
+	color: var(--vscode-editorLineNumber-activeForeground, var(--vscode-foreground));
+	text-decoration: underline;
+}
+
+.rv-ln-new {
+	padding-left: 7px;
+}
+
+.rv-mark {
+	text-align: center;
+	user-select: none;
+	opacity: 0.75;
+}
+
+.rv-add .rv-mark {
+	color: var(--rv-add-fg);
+}
+
+.rv-del .rv-mark {
+	color: var(--rv-del-fg);
+}
+
+.rv-code {
+	color: var(--vscode-editor-foreground, var(--vscode-foreground));
+	user-select: text;
+	padding-right: 16px;
+}
+
+.rv-hunk-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 2px 10px 2px 8px;
+	border-top: 1px solid var(--rv-border);
+	border-bottom: 1px solid var(--rv-border);
+	background: var(--vscode-editorWidget-background, var(--rv-surface));
+	font-family: var(--vscode-font-family);
+	font-size: 11px;
+}
+
+.rv-hunk-range {
+	color: var(--rv-muted);
+	font-family: var(--rv-mono);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rv-hunk-actions {
+	display: flex;
+	gap: 5px;
+	margin-left: auto;
+	flex: none;
+}
+
+.rv-hunk-actions button {
+	padding: 1px 8px;
+	font-size: 11px;
+}
+
+.rv-gap {
+	padding: 2px 10px;
+	font-family: var(--vscode-font-family);
+	font-size: 11px;
+	color: var(--rv-muted);
+	background: var(--rv-surface);
+	border-top: 1px solid var(--rv-border);
+	border-bottom: 1px solid var(--rv-border);
+	user-select: none;
+}
+
+#rv-notice {
+	position: fixed;
+	right: 12px;
+	bottom: 12px;
+	z-index: 10;
+	max-width: 60ch;
+	padding: 8px 12px;
+	border-radius: 6px;
+	border: 1px solid var(--vscode-notifications-border, var(--rv-border));
+	background: var(--vscode-notifications-background, var(--vscode-editorWidget-background));
+	color: var(--vscode-notifications-foreground, var(--vscode-foreground));
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
+	font-size: 12px;
+	line-height: 1.45;
+}
+
+#rv-notice.rv-notice-error {
+	border-color: var(--vscode-inputValidation-errorBorder, var(--rv-del-fg));
+	color: var(--vscode-errorForeground, var(--rv-del-fg));
+}
+
+#rv-notice.rv-notice-warn {
+	border-color: var(--vscode-inputValidation-warningBorder, var(--rv-warn));
+	color: var(--rv-warn);
+}
+
+@media (max-width: 700px) {
+	#rv-body {
+		flex-direction: column;
+	}
+
+	#rv-files {
+		width: 100%;
+		max-height: 190px;
+		border-right: none;
+		border-bottom: 1px solid var(--rv-border);
+	}
+
+	.rv-link {
+		max-width: 100%;
+	}
+}

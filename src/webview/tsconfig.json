@@ -1,0 +1,14 @@
+{
+	"compilerOptions": {
+		/* Webview code runs in a browser, not the extension host: DOM globals, no node or mocha. */
+		"module": "preserve",
+		"moduleResolution": "bundler",
+		"target": "ES2022",
+		"lib": ["ES2023", "DOM", "DOM.Iterable"],
+		"types": [],
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": true
+	},
+	"include": ["./**/*.ts"]
+}

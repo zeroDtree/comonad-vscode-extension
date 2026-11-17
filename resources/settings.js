@@ -422,6 +422,7 @@
 		put($('wd'), config.workingDirectory);
 		put($('timeout'), String(config.commandTimeout));
 		checked('timeout-override', config.commandTimeoutOverride);
+		checked('question-notification', config.questionNotification);
 		put($('plans'), config.planDirectory);
 		put($('steps'), String(config.maxSteps));
 		put($('deny'), (config.denyReadPaths || []).join('\n'));
@@ -470,7 +471,7 @@
 				agent.workMode || 'ro',
 				agent.risk === 'write' ? 'write' : 'read',
 				agent.network ? 'network' : '',
-				agent.maxTurns ? agent.maxTurns + ' turns' : '',
+				agent.maxTurns && config.subagentStepsMode !== 'inherit' ? agent.maxTurns + ' turns' : '',
 			]
 				.filter(Boolean)
 				.join(' · ');

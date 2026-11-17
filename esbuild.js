@@ -98,6 +98,29 @@ const esbuildProblemMatcherPlugin = {
 	},
 };
 
+/** A browser bundle for a webview: IIFE, no node externals, minified only for a release. */
+async function buildWebview(entry, outfile) {
+	const context = await esbuild.context({
+		entryPoints: [entry],
+		outfile,
+		bundle: true,
+		format: 'iife',
+		platform: 'browser',
+		target: 'es2022',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		logLevel: 'silent',
+		plugins: [esbuildProblemMatcherPlugin],
+	});
+	if (watch) {
+		await context.watch();
+	} else {
+		await context.rebuild();
+		await context.dispose();
+	}
+}
+
 async function main() {
 	const common = {
 		bundle: true,
@@ -140,25 +163,10 @@ async function main() {
 
 	// The chat's code highlighter, as its own browser bundle: it is loaded before chat.js and exposes
 	// the `hljs` global. Built here (not as a plugin) because every chat uses it.
-	const highlight = await esbuild.context({
-		entryPoints: ['src/webview/highlight.ts'],
-		outfile: 'resources/highlight.js',
-		bundle: true,
-		format: 'iife',
-		platform: 'browser',
-		target: 'es2022',
-		minify: production,
-		sourcemap: !production,
-		sourcesContent: false,
-		logLevel: 'silent',
-		plugins: [esbuildProblemMatcherPlugin],
-	});
-	if (watch) {
-		await highlight.watch();
-	} else {
-		await highlight.rebuild();
-		await highlight.dispose();
-	}
+	await buildWebview('src/webview/highlight.ts', 'resources/highlight.js');
+	// The Review tab's guest: one browser bundle against the resource directory, so the tab has no
+	// runtime dependency beyond the extension's own files.
+	await buildWebview('src/webview/review.ts', 'resources/review.js');
 
 	const ctx = await esbuild.context(
 		tests
@@ -179,6 +187,8 @@ async function main() {
 						'src/test/locks.test.ts',
 						'src/test/mailbox.test.ts',
 						'src/test/orchestration.test.ts',
+						'src/test/plans.test.ts',
+						'src/test/review.test.ts',
 					],
 					outdir: 'out/test',
 					sourcemap: true,

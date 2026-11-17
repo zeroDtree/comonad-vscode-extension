@@ -1630,8 +1630,9 @@
 		const command = shellCommandOf(step);
 		const failed = step.status === 'error' || /^Error:/.test(step.result || '');
 		const state = step.result === undefined ? 'running' : failed ? 'error' : 'ok';
+		const plan = step.name === 'write_plan' && step.plan && typeof step.plan.name === 'string' ? step.plan : null;
 		const title = shell ? oneLine(shellDescriptionOf(step), 120) || humanToolName(step.name) : humanToolName(step.name);
-		const summary = shell ? shellUtilities(command) || oneLine(command, 100) : argSummary(step, parsed);
+		const summary = plan ? plan.name : shell ? shellUtilities(command) || oneLine(command, 100) : argSummary(step, parsed);
 		const openSubagent =
 			(step.name === 'agent' || step.name === 'delegate') && step.subagentId
 				? '<button type="button" class="tool-open-subagent" data-subagent="' + esc(step.subagentId) + '" data-tip="Open the subagent session">Open session</button>'
@@ -1675,6 +1676,29 @@
 		if (preview) {
 			// Output is text, never markup: a command may print anything.
 			head.querySelector('.tool-preview').textContent = preview;
+		}
+		if (plan) {
+			// The actions live in the head row, so they stay visible while the card is folded.
+			const bar = document.createElement('span');
+			bar.className = 'tool-plan';
+			const option = (action, label, tip) => {
+				const button = document.createElement('button');
+				button.type = 'button';
+				button.className = action === 'build' ? 'plan-build primary' : 'plan-preview';
+				button.dataset.plan = plan.name;
+				button.dataset.planAction = action;
+				button.dataset.session = plan.sessionId || '';
+				button.dataset.tip = tip;
+				button.textContent = label;
+				if (action === 'build') {
+					button.disabled = running;
+				}
+				bar.appendChild(button);
+			};
+			option('preview', 'Preview', 'Open this plan in the Markdown preview');
+			option('build', 'Build', 'Implement this plan in Semi-Write mode');
+			const row = head.querySelector('.tool-head-row');
+			row.insertBefore(bar, row.querySelector('.tool-time'));
 		}
 		// A picture is not printed on the folded card: one chip names it, and opening the card shows it.
 		const reveal = imageReveal(step, details);
@@ -2746,6 +2770,7 @@
 		}
 		step.result = message.output || '';
 		step.images = Array.isArray(message.images) ? message.images : [];
+		step.plan = message.plan && typeof message.plan.name === 'string' ? message.plan : undefined;
 		step.status = /^Error:/.test(step.result) ? 'error' : 'ok';
 		freeze(step);
 		// A click may not have dispatched its toggle yet: read the live element, then redraw the card
@@ -2877,6 +2902,134 @@
 		}
 	}
 
+	/* ------------------------------------------------------------------ questions */
+
+	function question(message) {
+		// A repost after a chat switch or a reload is the same card, not a second question.
+		if (document.querySelector('.question[data-id="' + message.id + '"]')) {
+			return;
+		}
+		const options = Array.isArray(message.options) ? message.options : [];
+		const multi = options.length > 0 && message.multi === true;
+		const root = document.createElement('div');
+		root.className = 'msg question';
+		root.dataset.id = message.id;
+		root.dataset.session = message.sessionId || '';
+		const card = document.createElement('div');
+		card.className = 'question-card';
+		const title = document.createElement('div');
+		title.className = 'q-title';
+		title.textContent = 'Question';
+		const text = document.createElement('div');
+		text.className = 'q-text';
+		text.textContent = message.question || '';
+		card.append(title, text);
+		const actions = document.createElement('div');
+		actions.className = 'actions';
+		if (options.length) {
+			const list = document.createElement('div');
+			list.className = 'q-options';
+			if (multi) {
+				for (const option of options) {
+					const label = document.createElement('label');
+					label.className = 'q-option';
+					const box = document.createElement('input');
+					box.type = 'checkbox';
+					box.value = option;
+					const span = document.createElement('span');
+					span.textContent = option;
+					label.append(box, span);
+					list.appendChild(label);
+				}
+				const send = document.createElement('button');
+				send.className = 'primary';
+				send.dataset.q = 'send';
+				send.textContent = 'Send';
+				send.disabled = true;
+				actions.appendChild(send);
+			} else {
+				for (const option of options) {
+					const button = document.createElement('button');
+					button.className = 'q-option';
+					button.dataset.q = 'option';
+					button.dataset.value = option;
+					button.textContent = option;
+					list.appendChild(button);
+				}
+			}
+			card.appendChild(list);
+		} else {
+			const input = document.createElement('textarea');
+			input.className = 'q-input';
+			input.rows = 1;
+			input.placeholder = 'Type your answer…';
+			input.addEventListener('input', () => {
+				input.style.height = 'auto';
+				input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+			});
+			card.appendChild(input);
+			const send = document.createElement('button');
+			send.className = 'primary';
+			send.dataset.q = 'send';
+			send.textContent = 'Send';
+			actions.appendChild(send);
+		}
+		const skip = document.createElement('button');
+		skip.className = 'ghost';
+		skip.dataset.q = 'skip';
+		skip.textContent = 'Skip';
+		actions.appendChild(skip);
+		card.appendChild(actions);
+		root.appendChild(card);
+		// The question belongs to the turn that asked it, so it sits with that turn's steps.
+		if (live) {
+			live.turn._steps.appendChild(root);
+		} else {
+			messagesEl.appendChild(root);
+		}
+		// A question belongs at the end of the turn, but it may not drag a reader there.
+		scroll();
+	}
+
+	function settleQuestion(card, answers) {
+		if (card.classList.contains('answered') || card.classList.contains('withdrawn')) {
+			return;
+		}
+		card.classList.add('answered');
+		for (const control of card.querySelectorAll('button, input, textarea')) {
+			control.disabled = true;
+		}
+		const actions = card.querySelector('.actions');
+		if (actions) {
+			const done = document.createElement('span');
+			done.className = 'q-done';
+			done.textContent = answers.length ? answers.join(', ').slice(0, 200) : 'Skipped';
+			actions.replaceChildren(done);
+		}
+		vscode.postMessage({ type: 'answer', id: card.dataset.id, answers });
+	}
+
+	/** A stopped turn withdraws its question: the card stays as a record, but nothing can be chosen. */
+	function withdrawQuestions(ids) {
+		for (const id of ids || []) {
+			const card = document.querySelector('.question[data-id="' + id + '"]');
+			if (!card || card.classList.contains('answered') || card.classList.contains('withdrawn')) {
+				continue;
+			}
+			card.classList.add('withdrawn');
+			for (const control of card.querySelectorAll('button, input, textarea')) {
+				control.disabled = true;
+			}
+			const actions = card.querySelector('.actions');
+			if (actions) {
+				const cancelled = document.createElement('span');
+				cancelled.className = 'a-cancelled';
+				cancelled.textContent = 'Cancelled';
+				actions.replaceChildren(cancelled);
+			}
+		}
+	}
+
 	/* ------------------------------------------------------------------ event delegation */
 
 	/** Clipboard first, the host second: the webview API can be denied where the host's cannot. */
@@ -2950,6 +3103,20 @@
 			}
 			return true;
 		}
+		const plan = event.target.closest('button[data-plan]');
+		if (plan) {
+			// The buttons sit in the card's <summary>: a click must not fold or unfold the card.
+			event.preventDefault();
+			event.stopPropagation();
+			if (!plan.disabled) {
+				vscode.postMessage({
+					type: plan.dataset.planAction === 'build' ? 'buildPlan' : 'previewPlan',
+					name: plan.dataset.plan,
+					sessionId: plan.dataset.session || undefined,
+				});
+			}
+			return true;
+		}
 		const more = event.target.closest('button.tool-more');
 		if (more) {
 			event.stopPropagation();
@@ -2995,6 +3162,65 @@
 			card.classList.add('answered');
 			decision.classList.add('chosen');
 			vscode.postMessage({ type: 'approve', id: card.dataset.id, decision: decision.dataset.d });
+			return;
+		}
+		const control = event.target.closest('.question button[data-q]');
+		if (!control || control.disabled) {
+			return;
+		}
+		const card = control.closest('.question');
+		const action = control.dataset.q;
+		const area = card.querySelector('textarea.q-input');
+		let answers;
+		if (action === 'option') {
+			control.classList.add('chosen');
+			answers = [control.dataset.value];
+		} else if (action === 'send' && area) {
+			const text = area.value.trim();
+			if (!text) {
+				area.focus();
+				return;
+			}
+			answers = [text];
+		} else if (action === 'send') {
+			answers = [...card.querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value);
+		} else {
+			answers = [];
+		}
+		settleQuestion(card, answers);
+	});
+
+	// Enter and Escape belong to the open question, not to the global Stop shortcut.
+	messagesEl.addEventListener('keydown', (event) => {
+		const card = event.target.closest('.question');
+		if (!card || card.classList.contains('answered') || card.classList.contains('withdrawn')) {
+			return;
+		}
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			event.stopPropagation();
+			settleQuestion(card, []);
+			return;
+		}
+		if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.target.classList.contains('q-input')) {
+			event.preventDefault();
+			const text = event.target.value.trim();
+			if (text) {
+				settleQuestion(card, [text]);
+			}
+		}
+	});
+
+	// The multi-select Send waits for at least one checked option.
+	messagesEl.addEventListener('change', (event) => {
+		const box = event.target.closest('.question input[type="checkbox"]');
+		if (!box) {
+			return;
+		}
+		const card = box.closest('.question');
+		const send = card.querySelector('button[data-q="send"]');
+		if (send) {
+			send.disabled = !card.querySelector('input[type="checkbox"]:checked');
 		}
 	});
 
@@ -3051,6 +3277,10 @@
 		$('stop').hidden = !value;
 		// Every generation type is refused while a turn runs; a disabled menu says so up front.
 		generationPill.trigger.disabled = value;
+		// A plan cannot be built on top of the turn that is still writing it.
+		for (const button of document.querySelectorAll('.tool-card button.plan-build')) {
+			button.disabled = value;
+		}
 		refreshActions();
 	}
 
@@ -3591,6 +3821,12 @@
 			case 'approval-withdraw':
 				withdrawApprovals(message.ids);
 				break;
+			case 'question':
+				question(message);
+				break;
+			case 'question-withdraw':
+				withdrawQuestions(message.ids);
+				break;
 			case 'stop-ack':
 				if (message.ok === false) {
 					stopping = false;
@@ -3611,6 +3847,9 @@
 						button.disabled = true;
 					}
 				}
+				withdrawQuestions(
+					[...document.querySelectorAll('.question:not(.answered):not(.withdrawn)')].map((card) => card.dataset.id),
+				);
 				if (mine) {
 					draft = false;
 					endTurn(message);

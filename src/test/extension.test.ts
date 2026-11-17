@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { issueAuthorization } from '../lib/authorization';
+import { planTargetFor } from '../lib/plans';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { limitEffort } from '../lib/effort';
@@ -67,9 +68,9 @@ import {
 	type SandboxOptions,
 } from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
-import { applyHunk, diffLines, editForHunk, revertHunk } from '../lib/line-diff';
+import { applyHunk, diffLines, editForHunk, hunkKey, revertHunk } from '../lib/line-diff';
 import { listEndpointModels, openAiChat } from '../lib/openai';
-import type { ApprovalDecision, ApprovalRequest, ImageAttachment, ImagePart, Message, ModelContext, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
+import type { ApprovalDecision, ApprovalRequest, ImageAttachment, ImagePart, Message, ModelContext, QuestionRequest, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
 import { findSymbolRange, formatReference, parseReferences, rankPaths } from '../lib/references';
@@ -110,6 +111,7 @@ import {
 	subagentStepBudget,
 } from '../services/settings';
 import { toolset } from '../services/tools';
+import { askTools } from '../tools/misc';
 import { promptText, scratchDirectory } from '../services/agent';
 import { PLUGINS, ROWS } from '../app';
 import type { Plugins, PluginState } from '../services/plugins';
@@ -170,11 +172,13 @@ const MATH_PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-mat
 const MATH_RESOURCES = join(MATH_PACKAGE, 'resources');
 import mathEntry from 'comonad-plugin-math';
 import { ChatWebviewAssets } from '../services/chat-assets';
-import { chatDocument } from '../ui/chat-panel';
+import { MAX_ANSWER_CHARS, chatDocument, sanitizeQuestionAnswers } from '../ui/chat-panel';
 import tavernEntry from 'comonad-plugin-tavern';
 import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
 import { contentController } from 'comonad-plugin-tavern/panel/controller';
 import { settingsDocument, settingsPanel } from '../ui/settings-panel';
+import { reviewDocument } from '../ui/review-panel';
+import { undoHunkAction } from '../ui/hunk-actions';
 import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
 import { McpConnection } from '../services/mcp';
@@ -464,17 +468,29 @@ suite('Comonad domain', () => {
 		assert.strictEqual(outcome.state.value, 200);
 	});
 
-	test("a subagent's step budget is inherited or its own, and maxTurns only tightens it", () => {
+	test("a subagent's step budget is inherited exactly or its own, and maxTurns only tightens custom", () => {
 		const custom = { subagentStepsMode: 'custom' as const, subagentSteps: 40 };
 		const inherit = { subagentStepsMode: 'inherit' as const, subagentSteps: 40 };
 		assert.strictEqual(subagentStepBudget(custom, 0), 40, 'custom spends its own budget');
 		assert.strictEqual(subagentStepBudget(inherit, 12), 12, 'inherit shares the turn budget');
 		assert.strictEqual(subagentStepBudget(inherit, 0), 0, 'inheriting an unlimited turn is unlimited');
-		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 0 }, 0), 0, 'custom 0 means no limit');
-		assert.strictEqual(subagentStepBudget(inherit, 0, 20), 40, 'maxTurns bounds an inherited unlimited budget');
+		assert.strictEqual(subagentStepBudget(inherit, 0, 20), 0, 'maxTurns does not bound an inherited unlimited budget');
+		assert.strictEqual(subagentStepBudget(inherit, 12, 2), 12, 'maxTurns does not tighten an inherited finite budget');
+		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 0 }, 0), 0, 'custom 0 with no maxTurns means no limit');
+		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 0 }, 0, 10), 20, 'custom 0 falls back to maxTurns, two steps a turn');
 		assert.strictEqual(subagentStepBudget(custom, 0, 10), 20, 'maxTurns counts two steps a turn');
 		assert.strictEqual(subagentStepBudget(custom, 0, 1), 4, 'and never below four steps');
-		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 100 }, 0, 20), 40, 'maxTurns can only tighten');
+		assert.strictEqual(subagentStepBudget({ ...custom, subagentSteps: 100 }, 0, 20), 40, 'maxTurns can only tighten a custom budget');
+	});
+
+	test('question answers are sanitized against the offered options', () => {
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['b', 'x', 'a'], ['a', 'b'], false), ['b']);
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['a', 'b', 'a'], ['a', 'b'], true), ['a', 'b']);
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['  text  '], undefined, false), ['text']);
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['   '], undefined, false), []);
+		assert.deepStrictEqual(sanitizeQuestionAnswers('nope', undefined, false), []);
+		const long = sanitizeQuestionAnswers(['x'.repeat(MAX_ANSWER_CHARS + 10)], undefined, false);
+		assert.strictEqual(long[0]?.length, MAX_ANSWER_CHARS);
 	});
 
 	test('invalid graphs are rejected', () => {
@@ -834,6 +850,7 @@ suite('Comonad domain', () => {
 			displayForm: 'rendered' as const,
 			toolCard: 'collapsed' as const,
 			contextForm: 'rendered' as const,
+			questionNotification: true,
 			network: false,
 			sandboxMode: 'workspace-write' as const,
 			workingDirectory: '/ws',
@@ -850,6 +867,8 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(normalizeAgentPatch({ commandTimeoutOverride: false }, current), { commandTimeoutOverride: false });
 		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'open' }, current), { toolCard: 'open' });
 		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'nonsense' }, current), { toolCard: 'collapsed' });
+		assert.deepStrictEqual(normalizeAgentPatch({ questionNotification: false }, current), { questionNotification: false });
+		assert.deepStrictEqual(normalizeAgentPatch({ questionNotification: true }, current), { questionNotification: true });
 		assert.deepStrictEqual(
 			normalizeAgentPatch(
 				{ workingDirectory: '  /next  ', commandTimeout: '45', denyReadPaths: 'a\n b ', mode: 'nonsense', network: true },
@@ -867,6 +886,7 @@ suite('Comonad domain', () => {
 				'displayForm',
 				'toolCard',
 				'contextForm',
+				'questionNotification',
 				'network',
 				'sandboxMode',
 				'workingDirectory',
@@ -2375,6 +2395,20 @@ suite('Comonad domain', () => {
 		assert.match(guest, /checked\('timeout-override', config\.commandTimeoutOverride\)/, 'the guest renders it');
 	});
 
+	test('the UI tab carries the question notification switch', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		assert.match(panel, /id="question-notification"[^>]*data-key="questionNotification"/, 'the switch is a live UI-tab control');
+		assert.match(panel, /questionNotification: config\.questionNotification/, 'its state is pushed with the rest of the config');
+		assert.match(panel, /<h2 class="group-title">Notifications<\/h2>/, 'it has its own notifications group');
+		assert.match(
+			panel,
+			/Show a VS Code notification when a question waits for an answer and the chat panel is closed\./,
+			'the hint explains when it fires',
+		);
+		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
+		assert.match(guest, /checked\('question-notification', config\.questionNotification\)/, 'the guest renders it');
+	});
+
 	test('a write without a scope follows the layer that already owns the key', async () => {
 		const kernel = await createTestKernel();
 		try {
@@ -2463,7 +2497,7 @@ suite('Comonad domain', () => {
 			'host', 'log', 'settings',
 		]);
 		// Helpers and pane factories take the caller's context; they are not plugins and declare no inject.
-		const helpers = new Set(['journal-actions.ts', 'mentions.ts']);
+		const helpers = new Set(['hunk-actions.ts', 'journal-actions.ts', 'mentions.ts']);
 		const scanned: string[] = [];
 		for (const file of readdirSync(dir).filter((name) => name.endsWith('.ts') && !helpers.has(name))) {
 			const source = readFileSync(join(dir, file), 'utf8');
@@ -3904,6 +3938,17 @@ suite('Cordis kernel', () => {
 		}
 	});
 
+	test('the question notification defaults on and can be turned off', async () => {
+		const kernel = await createTestKernel();
+		try {
+			assert.strictEqual(kernel.ctx.settings.get().questionNotification, true);
+			await kernel.ctx.settings.update('questionNotification', false);
+			assert.strictEqual(kernel.ctx.settings.get().questionNotification, false);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('the command timeout override reaches the session policy', async () => {
 		const kernel = await createTestKernel({ config: { commandTimeout: 90, commandTimeoutOverride: true } });
 		try {
@@ -5266,6 +5311,100 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(requests.length, 2);
 			assert.strictEqual(toolStarts, 1);
 			assert.strictEqual(allowed.text, 'executed ok');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('ask_user renders through question/request and falls back to the native host', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.plugin(askTools);
+			let calls = 0;
+			const toolResults: string[] = [];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					calls += 1;
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user') {
+						const toolCall: ToolCall = {
+							id: `c${calls}`,
+							name: 'ask_user',
+							arguments: JSON.stringify({ question: 'Pick one', options: ['a', 'b'] }),
+						};
+						return { message: { role: 'assistant', content: 'asking', toolCalls: [toolCall] }, toolCalls: [toolCall] };
+					}
+					toolResults.push(last?.content ?? '');
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [] };
+				},
+			});
+			const seen: QuestionRequest[] = [];
+			kernel.ctx.on('question/request', (request, next) => {
+				if (request.surface !== 'test') {
+					return next();
+				}
+				seen.push(request);
+				return request.options?.length ? ['b'] : ['typed'];
+			});
+			let native = 0;
+			kernel.host.ask = async () => {
+				native += 1;
+				return ['native'];
+			};
+
+			const panel = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			assert.strictEqual(panel.text, 'done');
+			assert.strictEqual(seen.length, 1);
+			assert.deepStrictEqual(seen[0]?.options, ['a', 'b']);
+			assert.strictEqual(seen[0]?.multi, undefined);
+			assert.strictEqual(seen[0]?.sessionId, panel.sessionId);
+			assert.strictEqual(toolResults[0], 'b');
+			assert.strictEqual(native, 0);
+
+			const other = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'other' });
+			assert.strictEqual(other.text, 'done');
+			assert.strictEqual(seen.length, 1, 'a different surface delegates');
+			assert.strictEqual(toolResults[1], 'native');
+			assert.strictEqual(native, 1);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a stopped ask_user question settles without an answer', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.plugin(askTools);
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					const toolCall: ToolCall = { id: 'c1', name: 'ask_user', arguments: JSON.stringify({ question: 'Pick' }) };
+					return { message: { role: 'assistant', content: 'asking', toolCalls: [toolCall] }, toolCalls: [toolCall] };
+				},
+			});
+			let request: QuestionRequest | undefined;
+			let asked!: () => void;
+			const seen = new Promise<void>((resolve) => {
+				asked = resolve;
+			});
+			kernel.ctx.on('question/request', (value, next) => {
+				if (value.surface !== 'test') {
+					return next();
+				}
+				request = value;
+				asked();
+				return new Promise<string[]>((resolve) => {
+					value.signal.addEventListener('abort', () => resolve([]), { once: true });
+				});
+			});
+			const turn = kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			await seen;
+			kernel.ctx.agent.stop();
+			const result = await turn;
+			assert.ok(request);
+			assert.strictEqual(request.signal.aborted, true);
+			assert.ok(result.sessionId);
 		} finally {
 			await kernel.dispose();
 		}
@@ -8865,6 +9004,53 @@ suite('Per-file checkpoints', () => {
 			h.dispose();
 		}
 	});
+
+	test('a block can be undone in the open document, and the journal notes it', async () => {
+		const h = await harness();
+		const file = join(h.work, 'a.txt');
+		let document: vscode.TextDocument | undefined;
+		try {
+			writeFileSync(file, 'one\nkeep\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'ONE\nkeep\nTWO\n');
+			const change = await h.checkpoints.change(h.work, 's', 'a.txt');
+			assert.strictEqual(change.hunks.length, 2, 'two blocks separated by context');
+			document = (await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: true })).document;
+			const outcome = await undoHunkAction(h.ctx, { sessionId: 's', workspace: h.work }, 'a.txt', hunkKey(change.hunks[0]!));
+			assert.strictEqual(outcome.kind, 'done');
+			assert.strictEqual(readFileSync(file, 'utf8'), 'one\nkeep\nTWO\n', 'the first block is back on disk');
+			const after = await h.checkpoints.change(h.work, 's', 'a.txt');
+			assert.strictEqual(after.changedOutside, false, 'amend kept the review edit inside the journal');
+			assert.strictEqual(after.hunks.length, 1, 'the block that was not undone is still pending');
+		} finally {
+			if (document?.isDirty) {
+				await document.save();
+			}
+			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+			h.dispose();
+		}
+	});
+
+	test('a dirty editor refuses a block undo before the disk is touched', async () => {
+		const h = await harness();
+		const file = join(h.work, 'a.txt');
+		writeFileSync(file, 'one\n');
+		await agentWrite(h, 's', 1, 'a.txt', 'one\ntwo\n');
+		const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+		const editor = await vscode.window.showTextDocument(document, { preview: true });
+		try {
+			await editor.edit((edit) => edit.insert(new vscode.Position(0, 0), 'unsaved\n'));
+			const change = await h.checkpoints.change(h.work, 's', 'a.txt');
+			const outcome = await undoHunkAction(h.ctx, { sessionId: 's', workspace: h.work }, 'a.txt', hunkKey(change.hunks[0]!));
+			assert.strictEqual(outcome.kind, 'dirty');
+			assert.strictEqual(readFileSync(file, 'utf8'), 'one\ntwo\n', 'nothing was written');
+		} finally {
+			if (document.isDirty) {
+				await document.save();
+			}
+			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+			h.dispose();
+		}
+	});
 });
 
 suite('Plan tools', () => {
@@ -8939,6 +9125,34 @@ suite('Plan tools', () => {
 			assert.strictEqual(decide('list_plans', {}, 'whitelist_accept'), 'allow');
 			assert.strictEqual(decide('read_plan', { name: 'plan.md' }, 'whitelist_accept'), 'allow');
 			assert.strictEqual(decide('write_plan', { name: 'plan.md', content: 'x' }, 'whitelist_accept'), 'allow');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('write_plan writes exactly the file the panel resolves', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'pl', planDirectory: 'notes/plans' } });
+		try {
+			await kernel.ctx.plugin(planTools);
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plan-parity');
+			const base = directToolContext(kernel, ['1']);
+			const context = {
+				...base,
+				sessionId: session.id,
+				rootSessionId: session.id,
+				policy: { ...kernel.ctx.agent.policyFor(), workMode: 'pl' as const },
+				// The grant names the session and call id the direct dispatch checks against.
+				authorization: issueAuthorization({ sessionId: session.id, batch: base.batch, callIds: ['1'] }),
+			};
+			const outcome = await kernel.ctx.tools.invoke(
+				call('write_plan', { name: '../draft.md', content: '# Draft' }),
+				context,
+			);
+			assert.strictEqual(outcome.isError, false, outcome.content);
+			const target = planTargetFor(kernel.host.workspace(), 'notes/plans', session.id, '../draft.md');
+			assert.ok(target);
+			assert.strictEqual(target.name, 'draft.md');
+			assert.strictEqual(readFileSync(join(kernel.host.workspace(), target.path), 'utf8'), '# Draft');
 		} finally {
 			await kernel.dispose();
 		}
@@ -9564,6 +9778,50 @@ suite('Markdown math plugin', () => {
 			assert.strictEqual([...plain.matchAll(/<script nonce="[^"]*" src="/g)].length, 2, 'the highlighter and the chat script, even with no contribution');
 		} finally {
 			panel.dispose();
+		}
+	});
+
+	test('the review document loads its guest and stylesheet under a nonce', () => {
+		const root = join(__dirname, '..', '..');
+		const panel = vscode.window.createWebviewPanel('comonad.test.review', 'review', vscode.ViewColumn.Active, {
+			enableScripts: true,
+			localResourceRoots: [vscode.Uri.file(root)],
+		});
+		try {
+			const document = reviewDocument(panel.webview, vscode.Uri.file(root));
+			const scripts = [...document.matchAll(/<script nonce="[^"]*" src="([^"]+)"/g)].map((match) => basename(decodeURIComponent(match[1]!)));
+			assert.deepStrictEqual(scripts, ['review.js']);
+			const styles = [...document.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map((match) => basename(decodeURIComponent(match[1]!)));
+			assert.deepStrictEqual(styles, ['review.css']);
+			assert.match(document, /default-src 'none'/);
+			assert.match(document, /script-src 'nonce-[^']+';/);
+			assert.doesNotMatch(document, /script-src [^;]*unsafe-inline/, 'no inline script may run');
+			assert.match(document, /img-src [^;]*data:/);
+			for (const id of ['rv-top', 'rv-files-toggle', 'rv-wrap', 'rv-files', 'rv-files-head', 'rv-hunks', 'rv-notice']) {
+				assert.match(document, new RegExp(`id="${id}"`), `${id} is part of the shell`);
+			}
+		} finally {
+			panel.dispose();
+		}
+	});
+
+	test('the review command opens the review tab', async () => {
+		await vscode.commands.executeCommand('comonad.review');
+		let labels: string[] = [];
+		for (let attempt = 0; attempt < 20; attempt += 1) {
+			labels = vscode.window.tabGroups.all.flatMap((group) => group.tabs.map((tab) => tab.label));
+			if (labels.some((label) => label.includes('Review'))) {
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		const tab = vscode.window.tabGroups.all.flatMap((group) => group.tabs).find((candidate) => candidate.label.includes('Review'));
+		try {
+			assert.ok(tab, `the command opened the Review tab; tabs: ${labels.join(' | ')}`);
+		} finally {
+			if (tab) {
+				await vscode.window.tabGroups.close(tab);
+			}
 		}
 	});
 

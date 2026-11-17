@@ -88,6 +88,10 @@ Highlights are below; the full implementation notes are linked at the end. The u
   card gains **Open session** as soon as the child exists. The read-only overlay shows the
   subagent's prompt, steps and tool results and follows the run live, without touching the parent
   chat's stream or scroll. Removing the parent removes its children.
+- **Review is its own tab.** `Comonad: Review Changes` — the chat's Review button and `Cmd+Alt+D` —
+  opens a multi-file diff with the pending listing, three lines of context, and Keep/Undo on every
+  block. It replaces the old QuickPick; the accepted baseline, the chat's pending list and the
+  editor's inline review all still read the same journal.
 - **Remote SSH, WSL and Dev Containers** are first-class; credentials stay client-side and model calls
   originate on the remote host.
 - **Images, `@` references and in-place prompt editing** make the chat a working surface, not just a
@@ -99,6 +103,12 @@ Highlights are below; the full implementation notes are linked at the end. The u
 - **Every feature is a plugin** — including the tool tree and the journal — and a plugin can be
   installed, disabled or uninstalled from the settings panel.
 - **Markdown math and syntax highlighting** ship as optional or generated assets, not core weight.
+- **`ask_user` is inline in the chat.** The Comonad panel renders the model's question as a card in
+  the transcript — options as buttons (single-select) or checkboxes (multi-select), or a free-text
+  box — and the answer resumes the tool without a native popup. The `@comonad` participant and
+  turns with no panel surface keep VS Code's quick pick/input box. A panel-surface question with no
+  attached panel stays pending, blocks the turn, and is replayed when the panel reopens; an optional
+  `questionNotification` (default on) shows an **Open Chat** notification.
 
 ### Detailed notes
 

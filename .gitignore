@@ -8,6 +8,8 @@ docs/.vitepress/cache
 pkgs/
 resources/highlight.js
 resources/highlight.js.map
+resources/review.js
+resources/review.js.map
 packages/comonad-plugin-math/resources/math.js
 packages/comonad-plugin-math/resources/math.js.map
 packages/comonad-plugin-math/resources/katex.min.css

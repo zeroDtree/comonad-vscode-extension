@@ -364,6 +364,7 @@ export function settingsPanel(ctx: Context): void {
 				displayForm: config.displayForm,
 				toolCard: config.toolCard,
 				contextForm: config.contextForm,
+				questionNotification: config.questionNotification,
 				model: config.model,
 				permissions: config.permissions,
 			},
@@ -1161,6 +1162,14 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <select id="toolCard" class="control" data-key="toolCard"></select>
       </div>
     </div>
+    <h2 class="group-title">Notifications</h2>
+    <div class="group">
+      <div class="field">
+        <label for="question-notification">Question notification</label>
+        <p class="hint">Show a VS Code notification when a question waits for an answer and the chat panel is closed.</p>
+        <label class="check"><input type="checkbox" id="question-notification" data-key="questionNotification" /></label>
+      </div>
+    </div>
   </section>
 
   <section data-pane="subagents" hidden>
@@ -1169,7 +1178,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     <div class="group">
       <div class="field">
         <label for="subagent-steps-mode">Subagent steps</label>
-        <p class="hint">Where a subagent's step budget comes from. A definition's <code>maxTurns</code> can tighten it, never loosen it.</p>
+        <p class="hint">Where a subagent's step budget comes from. A definition's <code>maxTurns</code> can tighten a Custom budget; an inherited budget is used exactly.</p>
         <select id="subagent-steps-mode" class="control" data-key="subagentStepsMode">
           <option value="inherit">Inherit — same as Max steps</option>
           <option value="custom">Custom — the budget below</option>

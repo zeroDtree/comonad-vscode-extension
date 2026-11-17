@@ -21,7 +21,8 @@ flowchart TB
 
 - **Surface 通过类型化事件与 agent 通信。** surface 调用 `ctx.agent.runTurn({ surface })`，并渲染属于
   自己 surface id 的 `agent/*` 事件。`approval/request` 是 Cordis waterfall：每个 surface 回答自己的
-  回合，命令面板提供模态回退。
+  回合，命令面板提供模态回退。`question/request` 对 `ask_user` 采用同样的形状；没有 surface 认领时，
+  原生 host 是默认回退。
 - **工具是插件 effect。** `ctx.tools.register(spec)` 附着在调用插件的生命周期上。MCP 为每个服务器挂载
   一个子插件。
 - **单一回合管线。** UI 从不组装提示词；`ctx.agent` 拥有图循环、策略门控、hooks、usage 和子代理，并把

@@ -9,7 +9,7 @@ flowchart LR
   Journal --> Pending["待处理列表<br/>输入框上方"]
   Pending --> Keep["Keep<br/>写入影子索引"]
   Pending --> Undo["Undo<br/>恢复内容"]
-  Pending --> Review["Review<br/>内联 diff"]
+  Pending --> Review["Review 标签页<br/>文件列表 + 内联 diff"]
   Prompt["编辑提示词 · Regenerate"] --> Restore["Restore files too"]
   Restore --> Journal
 ```
@@ -22,10 +22,14 @@ flowchart LR
 
 - **Keep** 接受一个文件或 hunk。
 - **Undo** 恢复 agent 写入之前的内容。
-- **Review** 打开 diff 编辑器，按文件或 hunk 决定。
+- **Review** 打开 **Review Changes** 标签页：左侧是带 `+N −M` 的文件列表，右侧是选中文件的内联
+  diff（3 行上下文），每个改动块都有 **Keep** / **Undo**。顶栏作用于全部文件，文件头作用于当前
+  文件。点击行号会在旁边打开真实文件并定位到该行。
 
-如果你在 agent 上次写入后又编辑过文件，或文件有未保存内容，它永远不会被静默覆盖：审查会询问，或直到
-你保存前拒绝。
+Review 标签页从日志派生，不保存第二份变更：关闭再打开看到的是同一份待处理状态；在编辑器内联审查里
+keep 掉的块会立刻从标签页消失。它审查的是已保存内容：有未保存文本时，该文件的块操作和文件操作都会
+禁用，直到你保存；文件被 agent 之外改动过时块操作禁用，**Undo File** 会先询问再恢复。任一待处理
+文件未保存时 **Keep All** 会拒绝；**Keep** 接受文件在磁盘上的现状，包括外部编辑。
 
 子 Agent 的文件工具写入记在**主会话**的日志里，而不是它自己的会话。它们与主 Agent 的写入出现在同一个
 待处理列表、同一份 diff 和同一组恢复点中。
@@ -48,7 +52,7 @@ flowchart LR
 
 | 命令 | 用途 |
 | --- | --- |
-| **Comonad: Review Pending Changes** | 打开 diff，按文件/hunk Keep/Undo，或全部处理 |
+| **Comonad: Review Changes** | 打开 Review 标签页，按块、按文件或全部 Keep/Undo |
 | `Cmd+Alt+D` / `Ctrl+Alt+D` | 同上 |
 | `/review [focus]` | 让 agent 只读审查待处理变更 |
 

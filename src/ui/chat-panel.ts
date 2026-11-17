@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
@@ -19,8 +20,9 @@ import { clip, describe, preview } from '../lib/util';
 import type { Approval, ApprovalDecision, AttachmentPart, SandboxMode, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
 import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
+import { buildPlanPrompt, planTargetFor, type PlanTarget } from '../lib/plans';
 import { formatReference } from '../lib/references';
-import { isInside } from '../lib/sandbox';
+import { guardPath, isInside } from '../lib/sandbox';
 import { countRaw } from '../lib/tokens';
 import { ChatWebviewAssets, type ChatAssetSpec } from '../services/chat-assets';
 import { inWorkspace, markForRestore, type Session } from '../services/sessions';
@@ -28,6 +30,29 @@ import { explainDirty, restoreTo, unsavedPaths } from './journal-actions';
 import { WorkspaceFileCache, mentionResults } from './mentions';
 import { REFERENCE_LIMITS, scopeOf } from '../services/references';
 import { registerCommand } from './register';
+
+/** Bounds for a model-authored question and the untrusted answer it can receive. */
+export const MAX_ANSWER_CHARS = 8_000;
+export const MAX_QUESTION_CHARS = 8_000;
+export const MAX_QUESTION_OPTIONS = 100;
+
+/** The webview is not trusted: answers may only name the options the card displayed. */
+export function sanitizeQuestionAnswers(
+	value: unknown,
+	options: string[] | undefined,
+	multi: boolean,
+): string[] {
+	const answers = Array.isArray(value)
+		? value.filter((answer): answer is string => typeof answer === 'string')
+		: [];
+	if (options?.length) {
+		const allowed = new Set(options);
+		const picked = [...new Set(answers.filter((answer) => allowed.has(answer)))];
+		return multi ? picked : picked.slice(0, 1);
+	}
+	const text = answers[0]?.trim().slice(0, MAX_ANSWER_CHARS) ?? '';
+	return text ? [text] : [];
+}
 
 /**
  * How full the window was on the last request, as a share of the window. It reads the prompt size the
@@ -95,6 +120,16 @@ export function chatPanel(ctx: Context): void {
 		resolve(answer: ApprovalDecision): void;
 	}
 	const approvals = new Map<string, PendingApproval>();
+	interface PendingQuestion {
+		sessionId: string;
+		options?: string[];
+		multi: boolean;
+		payload: Record<string, unknown>;
+		/** One notification per question, however often the panel closes. */
+		notified: boolean;
+		resolve(answers: string[]): void;
+	}
+	const questions = new Map<string, PendingQuestion>();
 	/** The subagent conversation each guest has open over the chat, if any. */
 	const subagentViews = new Map<vscode.Webview, string>();
 
@@ -148,6 +183,33 @@ export function chatPanel(ctx: Context): void {
 	};
 
 	/**
+	 * Points at a question no attached chat can show. One notification per question: `notified`
+	 * survives reopening the panel and another detach. The setting gates only the notification;
+	 * the question stays pending either way.
+	 */
+	const notifyQuestion = (pending: PendingQuestion): void => {
+		if (pending.notified || !ctx.settings.get().questionNotification) {
+			return;
+		}
+		pending.notified = true;
+		const session = ctx.sessions.get(pending.sessionId);
+		const where = session?.title ? ` in "${trimTitle(session.title)}"` : '';
+		const excerpt = clip(String(pending.payload.question ?? '').replace(/\s+/g, ' '), 120);
+		void vscode.window
+			.showInformationMessage(`Comonad: a question is waiting${where}${excerpt ? ` — ${excerpt}` : ''}`, 'Open Chat')
+			.then((action) => {
+				if (action !== 'Open Chat') {
+					return;
+				}
+				// The session may have been deleted while the question waited; the chat still opens.
+				if (ctx.sessions.get(pending.sessionId)) {
+					ctx.sessions.setActive(pending.sessionId);
+				}
+				void vscode.commands.executeCommand('comonad.openChat');
+			});
+	};
+
+	/**
 	 * The folders the chat webview may read: its own assets, the plugin library (where every install
 	 * lives, so a contribution that arrives after the webview was created still resolves), and any
 	 * folders the current contributions declare.
@@ -185,6 +247,11 @@ export function chatPanel(ctx: Context): void {
 				approval.resolve('deny');
 			}
 			approvals.clear();
+			// Questions are not dropped with the last guest: the turn waits and the card is replayed
+			// when the panel reopens. Point at it if the user asked for notifications.
+			for (const question of questions.values()) {
+				notifyQuestion(question);
+			}
 		}
 	};
 
@@ -274,6 +341,42 @@ export function chatPanel(ctx: Context): void {
 		return text ? clip(text, 120) : undefined;
 	};
 
+	interface PlanInfo {
+		name: string;
+		relative: string;
+		sessionId: string;
+	}
+
+	/** Plans whose preview already opened this turn: one per file, however often it was rewritten. */
+	const previewedPlans = new Set<string>();
+
+	/** The plan a chat's write_plan name resolves to; the root id matches ToolContext.rootSessionId. */
+	const planTarget = (session: Session, name: unknown): PlanTarget | null =>
+		planTargetFor(
+			session.policy.workingDirectory || ctx.settings.workspace(),
+			session.policy.planDirectory,
+			session.parentId ?? session.id,
+			name,
+		);
+
+	/** The plan a successful write_plan recorded; undefined for a failed, stopped or unnamed call. */
+	const planInfoOf = (session: Session | undefined, args: string | undefined, output: string | undefined): PlanInfo | undefined => {
+		if (!session || !output?.startsWith('wrote plan ')) {
+			return undefined;
+		}
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(args ?? '');
+		} catch {
+			return undefined;
+		}
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+			return undefined;
+		}
+		const target = planTarget(session, (parsed as Record<string, unknown>).name);
+		return target ? { name: target.name, relative: target.relative, sessionId: session.id } : undefined;
+	};
+
 	// The transcript is sent as turns: one prompt plus the steps the agent took for it. The webview
 	// renders live turns and replayed turns with the same code, so the two always look the same.
 	const stepPayload = (step: Step, session?: Session): unknown => ({
@@ -294,6 +397,8 @@ export function chatPanel(ctx: Context): void {
 			step.kind === 'tool' && step.id && session?.subagents && Object.hasOwn(session.subagents, step.id)
 				? session.subagents[step.id]
 				: undefined,
+		// A recorded plan carries the file it wrote, so a replayed card keeps its Build/Preview buttons.
+		plan: step.kind === 'tool' && step.name === 'write_plan' ? planInfoOf(session, step.args, step.result) : undefined,
 		status: step.status,
 		ms: step.ms,
 		at: step.at,
@@ -495,6 +600,7 @@ export function chatPanel(ctx: Context): void {
 		}
 		// After a repaint, not before it: a card the guest already holds is deduped by id.
 		postPendingApprovals();
+		postPendingQuestions();
 	};
 
 	// Pending checkpoint changes: the list above the composer, with the per-file counts the review
@@ -561,6 +667,12 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'reasoning', text });
 		}
 	});
+	// A new turn may rewrite the same plan: its preview is opened again, once per file.
+	ctx.on('agent/turn-start', (ref) => {
+		if (ref.surface === SURFACE) {
+			previewedPlans.clear();
+		}
+	});
 	ctx.on('agent/tool-start', (ref, call) => {
 		if (ref.surface === SURFACE) {
 			streamed = true;
@@ -575,8 +687,21 @@ export function chatPanel(ctx: Context): void {
 		}
 	});
 	ctx.on('agent/tool-result', (ref, call, output, images) => {
-		if (ref.surface === SURFACE) {
-			post({ type: 'tool-result', id: call.id, output: clip(output, 30_000), images: publicImages(images) });
+		if (ref.surface !== SURFACE) {
+			return;
+		}
+		// Route by the turn's own session: a switch mid-turn must not target the chat now on screen.
+		const session = ctx.sessions.get(ref.sessionId);
+		const plan = call.name === 'write_plan' ? planInfoOf(session, call.arguments, output) : undefined;
+		post({ type: 'tool-result', id: call.id, output: clip(output, 30_000), images: publicImages(images), plan });
+		// The plan is written; show it beside the chat. A preview already open on it refreshes itself,
+		// so one open per file per turn is enough.
+		if (plan && session) {
+			const key = `${plan.sessionId}:${plan.name}`;
+			if (!previewedPlans.has(key)) {
+				previewedPlans.add(key);
+				void openPlanPreview(session, plan.name, undefined, true);
+			}
 		}
 	});
 	ctx.on('agent/attachments', (ref, attachments) => {
@@ -681,12 +806,81 @@ export function chatPanel(ctx: Context): void {
 		});
 	});
 
+	// Questions from `ask_user` (and plugin tools) for panel turns are answered by the webview card.
+	ctx.on('question/request', (request, next): Promise<string[]> | string[] => {
+		if (request.surface !== SURFACE) {
+			return next();
+		}
+		// A stopped turn answers itself. Otherwise the panel owns the question even with no guest:
+		// it waits in `questions` (the turn blocks) and the next ready/refresh replays its card.
+		if (request.signal.aborted) {
+			return [];
+		}
+		return new Promise<string[]>((resolvePromise) => {
+			const id = `q-${++seq}`;
+			const offered = Array.isArray(request.options)
+				? request.options
+						.filter((option): option is string => typeof option === 'string')
+						.slice(0, MAX_QUESTION_OPTIONS)
+				: [];
+			const options = offered.length ? offered : undefined;
+			const multi = options !== undefined && request.multi === true;
+			const payload = {
+				type: 'question',
+				id,
+				sessionId: request.sessionId,
+				question: clip(String(request.question ?? ''), MAX_QUESTION_CHARS),
+				...(options ? { options, multi } : {}),
+			};
+			const pending: PendingQuestion = {
+				sessionId: request.sessionId,
+				options,
+				multi,
+				payload,
+				notified: false,
+				resolve: (answers) => {
+					request.signal.removeEventListener('abort', withdraw);
+					questions.delete(id);
+					resolvePromise(answers);
+				},
+			};
+			const withdraw = (): void => {
+				if (!questions.has(id)) {
+					return;
+				}
+				questions.delete(id);
+				request.signal.removeEventListener('abort', withdraw);
+				resolvePromise([]);
+				post({ type: 'question-withdraw', ids: [id] });
+			};
+			questions.set(id, pending);
+			request.signal.addEventListener('abort', withdraw, { once: true });
+			// A card belongs to the chat that asked; a switch away keeps it pending for the way back.
+			if (request.sessionId === ctx.sessions.active()?.id) {
+				post(payload);
+			}
+			if (!clients.size) {
+				notifyQuestion(pending);
+			}
+		});
+	});
+
 	/** Hand the guest the cards of the chat now on screen, e.g. after a switch or a reload. */
 	const postPendingApprovals = (): void => {
 		const active = ctx.sessions.active()?.id;
 		for (const approval of approvals.values()) {
 			if (approval.sessionId === active) {
 				post(approval.payload);
+			}
+		}
+	};
+
+	/** The same replay for questions: only the chat on screen gets its card back. */
+	const postPendingQuestions = (): void => {
+		const active = ctx.sessions.active()?.id;
+		for (const question of questions.values()) {
+			if (question.sessionId === active) {
+				post(question.payload);
 			}
 		}
 	};
@@ -1172,6 +1366,107 @@ export function chatPanel(ctx: Context): void {
 		}
 	};
 
+	/** Opens a plan: the built-in Markdown preview, or a text editor for a non-Markdown name. */
+	const openPlanPreview = async (
+		session: Session,
+		name: unknown,
+		source?: vscode.Webview,
+		quiet = false,
+	): Promise<void> => {
+		const target = planTarget(session, name);
+		if (!target) {
+			if (!quiet) {
+				post({ type: 'notice', text: 'That plan name is not valid.' }, source);
+			}
+			return;
+		}
+		try {
+			const workspace = session.policy.workingDirectory || ctx.settings.workspace();
+			const absolute = await guardPath(workspace, target.path, {
+				access: 'read',
+				sandboxMode: session.policy.sandboxMode,
+				denyReadPaths: session.policy.denyReadPaths,
+			});
+			if (!existsSync(absolute)) {
+				if (!quiet) {
+					post({ type: 'notice', text: `The plan ${target.relative} is no longer on disk.` }, source);
+				}
+				return;
+			}
+			const uri = vscode.Uri.file(absolute);
+			if (/\.(?:md|markdown)$/i.test(target.name)) {
+				try {
+					await vscode.commands.executeCommand('markdown.showPreviewToSide', uri);
+				} catch {
+					// No built-in Markdown extension is active: show the source rather than nothing.
+					await vscode.window.showTextDocument(uri, { preview: true });
+				}
+			} else {
+				await vscode.window.showTextDocument(uri, { preview: true });
+			}
+		} catch (error) {
+			ctx.log.message(`plan preview failed: ${describe(error)}`);
+			if (!quiet) {
+				post({ type: 'notice', text: `Could not open ${target.relative}.` }, source);
+			}
+		}
+	};
+
+	const previewPlan = async (name: unknown, owner: unknown, source: vscode.Webview): Promise<void> => {
+		const session = ctx.sessions.active();
+		if (!session) {
+			return;
+		}
+		if (typeof owner === 'string' && owner && owner !== session.id) {
+			post({ type: 'notice', text: 'That plan belongs to another chat.' }, source);
+			return;
+		}
+		await openPlanPreview(session, name, source);
+	};
+
+	/** Build: read the plan, switch to Semi-Write, and send the implementing turn. No confirmation. */
+	const buildPlan = async (name: unknown, owner: unknown, source: vscode.Webview): Promise<void> => {
+		if (running) {
+			post({ type: 'notice', text: 'A turn is already running — wait for it to finish.' }, source);
+			return;
+		}
+		const session = ctx.sessions.active();
+		if (!session) {
+			return;
+		}
+		if (typeof owner === 'string' && owner && owner !== session.id) {
+			post({ type: 'notice', text: 'That plan belongs to another chat.' }, source);
+			return;
+		}
+		const target = planTarget(session, name);
+		if (!target) {
+			post({ type: 'notice', text: 'That plan name is not valid.' }, source);
+			return;
+		}
+		let content: string;
+		try {
+			const workspace = session.policy.workingDirectory || ctx.settings.workspace();
+			const absolute = await guardPath(workspace, target.path, {
+				access: 'read',
+				sandboxMode: session.policy.sandboxMode,
+				denyReadPaths: session.policy.denyReadPaths,
+			});
+			content = await readFile(absolute, 'utf8');
+		} catch (error) {
+			ctx.log.message(`plan build read failed: ${describe(error)}`);
+			post({ type: 'notice', text: `Could not read ${target.relative}.` }, source);
+			return;
+		}
+		// The reads above leave time for a switch or a second click; check again before starting work.
+		if (running || ctx.sessions.active()?.id !== session.id) {
+			post({ type: 'notice', text: 'The chat changed — press Build again.' }, source);
+			return;
+		}
+		// Only the mode moves: approval, sandbox and network stay exactly as the user set them.
+		await ctx.settings.applyPolicy({ mode: 'sw' });
+		await send(buildPlanPrompt(target.relative, content), undefined, source);
+	};
+
 	const handle = async (message: Record<string, unknown>, source: vscode.Webview): Promise<void> => {
 		try {
 			switch (message.type) {
@@ -1182,6 +1477,7 @@ export function chatPanel(ctx: Context): void {
 					published.delete(source);
 					refresh();
 					postPendingApprovals();
+					postPendingQuestions();
 					// References picked before the composer loaded are finally in place to receive them.
 					for (const token of pendingReferences.splice(0)) {
 						post({ type: 'insertReference', token }, source);
@@ -1204,6 +1500,7 @@ export function chatPanel(ctx: Context): void {
 					post(await state(), source);
 					publishTurns(ctx.sessions.active(), source);
 					postPendingApprovals();
+					postPendingQuestions();
 					break;
 				}
 				case 'focusState':
@@ -1246,12 +1543,24 @@ export function chatPanel(ctx: Context): void {
 					pending?.resolve(decision);
 					break;
 				}
+				case 'answer': {
+					const id = String(message.id ?? '');
+					const pending = questions.get(id);
+					if (!pending || !Array.isArray(message.answers)) {
+						break;
+					}
+					pending.resolve(sanitizeQuestionAnswers(message.answers, pending.options, pending.multi));
+					// Another panel showing the same card is done with it too.
+					post({ type: 'question-withdraw', ids: [id] });
+					break;
+				}
 				case 'newSession':
 					await vscode.commands.executeCommand('comonad.newSession');
 					break;
 				case 'switchSession':
 					ctx.sessions.setActive(String(message.id ?? ''));
 					postPendingApprovals();
+					postPendingQuestions();
 					break;
 				case 'setHistoryScope':
 					historyScope = message.scope === 'all' ? 'all' : 'workspace';
@@ -1378,6 +1687,12 @@ export function chatPanel(ctx: Context): void {
 					if (typeof message.mode === 'string' && message.mode in MODE_LABELS) {
 						await ctx.settings.applyPolicy({ mode: message.mode as WorkMode });
 					}
+					break;
+				case 'previewPlan':
+					await previewPlan(message.name, message.sessionId, source);
+					break;
+				case 'buildPlan':
+					await buildPlan(message.name, message.sessionId, source);
 					break;
 				case 'setApproval':
 					if (typeof message.approval === 'string' && message.approval in APPROVAL_LABELS) {

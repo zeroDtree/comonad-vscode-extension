@@ -37,6 +37,12 @@ JSON files hold the same names.
 | `toolCard` | `collapsed` | Tool card starts as `collapsed`, `preview` or `open` |
 | `chatWindow` | `false` | Open the chat in its own floating window |
 
+## Notifications
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `questionNotification` | `true` | Show a VS Code notification with an **Open Chat** action when a question waits for an answer and the chat panel is closed; the question stays pending either way |
+
 ## Policy and workspace
 
 | Key | Default | Purpose |
@@ -53,7 +59,7 @@ JSON files hold the same names.
 | `commandTimeoutOverride` | `false` | Always use that value and ignore the model's timeout |
 | `maxSteps` | `0` (no limit) | Maximum graph steps per turn |
 | `subagentStepsMode` | `custom` | `inherit` shares the turn's `maxSteps`; `custom` spends `subagentSteps` |
-| `subagentSteps` | `40` | Subagent step budget under `custom`; `0` means no limit. A definition's `maxTurns` can only tighten it |
+| `subagentSteps` | `40` | Subagent step budget under `custom`; `0` means no limit, though a definition's `maxTurns` still caps it. `maxTurns` does not tighten an `inherit` budget |
 | `filterSensitiveEnv` | `true` | Strip keys, tokens and passwords from command environments |
 | `permissions` | `{allow:[], ask:[], deny:[]}` | User rules; see [Safety](/guide/safety#_3-user-rules) |
 | `subagents` | `{}` | Per-role subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Defaults come from the role table: `coder`, `tester`, `data-analyst` and `scientist` get both; `technical-writer` gets files; `math-researcher` gets test; every other built-in is read-only. |
@@ -97,9 +103,11 @@ stores the full effective policy, its revision and its parent. See
 [Safety](/guide/safety#orchestrator-and-subagents) and [Orchestration](/guide/orchestration).
 
 Steps: `subagentStepsMode` defaults to `custom`, where each subagent spends `subagentSteps` (40)
-graph steps; `inherit` gives it the turn's `maxSteps` instead. A role's `maxTurns` counts turns and
-can lower either budget (two steps per turn, four at the minimum), but never raise it. A task's
-`budget` can tighten the resulting step count further.
+graph steps; when that is `0` it falls back to the role's `maxTurns` cap, if any. `inherit` gives
+the child exactly the turn's `maxSteps`, including `0` (no limit), and ignores `maxTurns`. Under
+`custom`, a role's `maxTurns` counts turns and can lower the budget (two steps per turn, four at the
+minimum), but never raise it. A task's `budget` can tighten the resulting step count further in
+either mode.
 
 ## Checkpoints
 

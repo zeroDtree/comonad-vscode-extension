@@ -49,5 +49,9 @@
     "include": [
         "src",
         "packages"
+    ],
+    /* Webview guests run against DOM types and are checked by src/webview/tsconfig.json. */
+    "exclude": [
+        "src/webview"
     ]
 }

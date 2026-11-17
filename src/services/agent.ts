@@ -2211,7 +2211,23 @@ export class Agent extends Service {
 				: undefined,
 			resolveReference: (path, options) => this.ctx.references.resolvePath(path, scopeOf(state.policy), signal, options),
 			log: (text) => this.notice(state.ref, text),
-			ask: (question, options, multi) => this.ctx.host.ask(question, options, multi),
+			ask: async (question, options, multi) => {
+				if (signal.aborted) {
+					return [];
+				}
+				// A surface may render the question (the panel's inline card); the native host answers
+				// when nobody claims it, which is the participant and turns with no surface.
+				const answers = await Promise.resolve(
+					this.ctx.waterfall(
+						'question/request',
+						{ question, options, multi, sessionId: state.sessionId, surface: state.ref.surface, signal },
+						() => this.ctx.host.ask(question, options, multi),
+					),
+				);
+				return Array.isArray(answers)
+					? answers.filter((answer): answer is string => typeof answer === 'string')
+					: [];
+			},
 			todos: (items) => {
 				if (items) {
 					this.todoLists.set(state.sessionId, items);

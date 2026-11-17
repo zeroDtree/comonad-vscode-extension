@@ -249,7 +249,7 @@ export interface AgentSpawnRequest {
 	sandboxMode?: SandboxMode;
 	/** The child's own tool approval policy; absent inherits the parent's. */
 	approval?: Approval;
-	/** A per-task step ceiling; the role and settings still cap it. */
+	/** A per-task step ceiling on top of the subagent step budget; it can only tighten it. */
 	maxTurns?: number;
 	/** The parent's tool call, so its card can link to the child session. */
 	callId?: string;
@@ -385,4 +385,17 @@ export interface ApprovalRequest {
 	surface?: string;
 	/** `never` rejects without reaching a surface; absent reads as `ask`. */
 	response?: ApprovalResponse;
+}
+
+/** One `ask_user` question, before a surface renders it. */
+export interface QuestionRequest {
+	question: string;
+	options?: string[];
+	multi?: boolean;
+	/** The chat that owns the request; a surface shows the card only for that chat. */
+	sessionId: string;
+	/** The turn's surface id; absent for child runs and surfaces without a UI. */
+	surface?: string;
+	/** The turn's cancellation: an aborted request resolves with no answer. */
+	signal: AbortSignal;
 }

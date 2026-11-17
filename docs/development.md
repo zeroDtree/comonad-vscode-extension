@@ -23,7 +23,8 @@ flowchart TB
 - **Surfaces talk to the agent through typed events.** A surface calls
   `ctx.agent.runTurn({ surface })` and renders `agent/*` events for its own surface id.
   `approval/request` is a Cordis waterfall: each surface answers for its own turns, and the command
-  palette provides the modal fallback.
+  palette provides the modal fallback. `question/request` is the same shape for `ask_user`; the
+  native host is its default when no surface claims the question.
 - **Tools are plugin effects.** `ctx.tools.register(spec)` is attached to the calling plugin's
   lifetime. MCP mounts one child plugin per server.
 - **One turn pipeline.** UI never assembles prompts; `ctx.agent` owns the graph loop, policy gate,

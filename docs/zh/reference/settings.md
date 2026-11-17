@@ -34,6 +34,12 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 | `toolCard` | `collapsed` | 工具卡初始为 `collapsed`、`preview` 或 `open` |
 | `chatWindow` | `false` | 在独立浮动窗口中打开聊天 |
 
+## 通知
+
+| 键 | 默认值 | 用途 |
+| --- | --- | --- |
+| `questionNotification` | `true` | 提问等待回答且聊天面板关闭时，弹一条带 **Open Chat** 按钮的 VS Code 通知；无论是否通知，提问都会保持等待 |
+
 ## 策略与工作区
 
 | 键 | 默认值 | 用途 |
@@ -50,7 +56,7 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 | `commandTimeoutOverride` | `false` | 始终使用该值，忽略模型选择的超时 |
 | `maxSteps` | `0`（无限制） | 每回合最大图步数 |
 | `subagentStepsMode` | `custom` | `inherit` 共享该回合的 `maxSteps`；`custom` 使用 `subagentSteps` |
-| `subagentSteps` | `40` | `custom` 下子 Agent 的步数预算；`0` 表示无限制。定义的 `maxTurns` 只能收紧它 |
+| `subagentSteps` | `40` | `custom` 下子 Agent 的步数预算；`0` 表示无限制，但定义的 `maxTurns` 仍会封顶。`maxTurns` 不会收紧 `inherit` 预算 |
 | `filterSensitiveEnv` | `true` | 从命令环境中移除 key、token 与密码 |
 | `permissions` | `{allow:[], ask:[], deny:[]}` | 用户规则；见[安全](/zh/guide/safety#_3-user-rule) |
 | `subagents` | `{}` | 子角色的逐角色授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。默认值来自角色表：`coder`、`tester`、`data-analyst`、`scientist` 两者都有；`technical-writer` 只有 files；`math-researcher` 只有 test；其它内置角色默认只读。 |
@@ -87,9 +93,10 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 否则请在主线程完成写。子会话保存完整有效策略、revision 和父会话。见
 [安全](/zh/guide/safety#编排器与子-agent)与[编排](/zh/guide/orchestration)。
 
-步数：`subagentStepsMode` 默认 `custom`，每个子代理花费 `subagentSteps`（40）个图步；`inherit` 改用该
-回合的 `maxSteps`。角色的 `maxTurns` 按回合计数，只会收紧预算（每回合两图步，最少四步），不会放宽。
-任务的 `budget` 可以进一步收紧。
+步数：`subagentStepsMode` 默认 `custom`，每个子代理花费 `subagentSteps`（40）个图步；为 `0` 时回落到
+角色的 `maxTurns` 上限（若有）。`inherit` 原样使用该回合的 `maxSteps`（包括 `0` 即无限制），并忽略
+`maxTurns`。在 `custom` 下，角色的 `maxTurns` 按回合计数（每回合两图步，最少四步），只会收紧预算，不会
+放宽。两种模式下任务的 `budget` 都可以进一步收紧。
 
 ## 检查点
 

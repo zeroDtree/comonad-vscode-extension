@@ -466,14 +466,43 @@ suite('Cancellation', () => {
 		}
 	});
 
-	test('the webview turns Stop into a stopping state and withdraws approvals', () => {
+	test('the webview turns Stop into a stopping state and withdraws approvals and questions', () => {
 		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.js'), 'utf8');
 		assert.match(guest, /function requestStop/);
 		assert.match(guest, /Stopping…/);
 		assert.match(guest, /A turn is still running in this chat/);
 		assert.match(guest, /case 'approval-withdraw'/);
 		assert.match(guest, /function withdrawApprovals/);
+		assert.match(guest, /function question\(/);
+		assert.match(guest, /function settleQuestion/);
+		assert.match(guest, /function withdrawQuestions/);
+		assert.match(guest, /case 'question'/);
+		assert.match(guest, /case 'question-withdraw'/);
+		assert.match(guest, /type: 'answer'/);
 		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.css'), 'utf8');
 		assert.match(css, /#stop:disabled/);
+		assert.match(css, /\.question-card/);
+		assert.match(css, /\.q-option/);
+		assert.match(css, /\.q-input/);
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(panel, /question\/request/);
+		assert.match(panel, /case 'answer':/);
+		assert.match(panel, /postPendingQuestions/);
+	});
+
+	test('a waiting question survives a closed panel and notifies once', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(panel, /if \(request\.signal\.aborted\) \{\s*return \[\];/);
+		assert.ok(!/!clients\.size \|\| request\.signal\.aborted/.test(panel), 'a closed panel does not answer');
+		assert.match(panel, /if \(!clients\.size\) \{\s*notifyQuestion\(pending\);/);
+		assert.match(panel, /notifyQuestion\(question\)/, 'detach notifies instead of resolving');
+		assert.ok(!/question\.resolve\(\[\]\)/.test(panel), 'a pending question is not discarded');
+		assert.ok(!/questions\.clear\(\)/.test(panel), 'the pending map survives a detach');
+		assert.match(panel, /approval\.resolve\('deny'\)/, 'approvals still fail closed');
+		assert.match(panel, /pending\.notified/);
+		assert.match(panel, /questionNotification/);
+		assert.match(panel, /showInformationMessage\([\s\S]*?'Open Chat'/);
+		assert.match(panel, /sessions\.setActive\(pending\.sessionId\)/);
+		assert.match(panel, /executeCommand\('comonad\.openChat'\)/);
 	});
 });

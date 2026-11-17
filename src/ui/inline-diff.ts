@@ -5,9 +5,10 @@ import type { Context } from 'cordis';
 import { describe } from '../lib/util';
 import type { FileChange } from '../lib/journal';
 import { DirtyEditorError } from '../lib/journal';
-import { applyHunk, diffLines, editForHunk, hunkKey, stripEol, type LineHunk } from '../lib/line-diff';
+import { applyHunk, diffLines, hunkKey, stripEol, type LineHunk } from '../lib/line-diff';
+import { keepHunkAction, undoHunkAction } from './hunk-actions';
+import { explainDirty, journalScope, undoPaths, unsavedPaths, type JournalScope } from './journal-actions';
 import { registerCommand } from './register';
-import { explainDirty, undoPaths, unsavedPaths } from './journal-actions';
 
 /**
  * The inline review of what the agent wrote: each changed block is painted in the editor, with
@@ -33,18 +34,6 @@ const GREEN_EDGE = 'rgba(46, 160, 67, 0.9)';
 const RED_FILL = 'rgba(248, 81, 73, 0.24)';
 const RED_WASH = 'rgba(248, 81, 73, 0.1)';
 const RED_EDGE = 'rgba(248, 81, 73, 0.9)';
-
-interface Scope {
-	sessionId: string;
-	workspace: string;
-}
-
-/** The active chat and the folder its journal is about, or `undefined` when there is neither. */
-function scopeOf(ctx: Context): Scope | undefined {
-	const session = ctx.sessions.active();
-	const workspace = session?.policy.workingDirectory;
-	return session && workspace ? { sessionId: session.id, workspace } : undefined;
-}
 
 /** A file's path relative to the workspace with forward slashes; `undefined` when it is outside. */
 function relativeOf(workspace: string, uri: vscode.Uri, scheme = 'file'): string | undefined {
@@ -206,7 +195,7 @@ export function inlineDiff(ctx: Context): void {
 		}
 	}
 
-	function baselineUri(file: vscode.Uri, current: Scope): vscode.Uri {
+	function baselineUri(file: vscode.Uri, current: JournalScope): vscode.Uri {
 		const uri = file.with({ scheme: BASELINE_SCHEME, query: encodeURIComponent(JSON.stringify(current)) });
 		baselines.set(uri.toString(), uri);
 		return uri;
@@ -284,7 +273,7 @@ export function inlineDiff(ctx: Context): void {
 			return;
 		}
 		const run = ++generation;
-		const current = scopeOf(ctx);
+		const current = journalScope(ctx);
 		if (!current || !enabled()) {
 			changes = new Map();
 			scopeKey = '';
@@ -402,8 +391,8 @@ export function inlineDiff(ctx: Context): void {
 	);
 
 	/** The scope and relative path a command's URI belongs to. */
-	function target(uri: vscode.Uri | undefined): { current: Scope; path: string } | undefined {
-		const current = scopeOf(ctx);
+	function target(uri: vscode.Uri | undefined): { current: JournalScope; path: string } | undefined {
+		const current = journalScope(ctx);
 		if (!current || !uri) {
 			return undefined;
 		}
@@ -523,9 +512,7 @@ export function inlineDiff(ctx: Context): void {
 		let kept = false;
 		mutating += 1;
 		try {
-			await ctx.checkpoints.keepHunk(resolved.current.workspace, resolved.current.sessionId, resolved.path, hunk, {
-				isDirty: unsavedPaths(resolved.current.workspace),
-			});
+			await keepHunkAction(ctx, resolved.current, resolved.path, hunk);
 			kept = true;
 		} catch (error) {
 			void vscode.window.showErrorMessage(`Comonad: ${describe(error)}`);
@@ -543,50 +530,30 @@ export function inlineDiff(ctx: Context): void {
 		if (!resolved) {
 			return;
 		}
-		const document = await vscode.workspace.openTextDocument(uri);
-		if (document.isDirty) {
-			void vscode.window.showWarningMessage('Comonad: save the file first — the inline review works on the saved content.');
-			return;
-		}
+		mutating += 1;
 		try {
-			// The cached change is exactly what the lens was drawn from; only a stale cache pays for a
-			// journal read, and the truth is still re-checked below.
-			let change = changes.get(uri.fsPath);
-			let located = change?.hunks.find((candidate) => hunkKey(candidate) === hunkKey(hunk));
-			if (!located) {
-				change = await ctx.checkpoints.change(resolved.current.workspace, resolved.current.sessionId, resolved.path);
-				located = change.hunks.find((candidate) => hunkKey(candidate) === hunkKey(hunk));
+			const outcome = await undoHunkAction(ctx, resolved.current, resolved.path, hunkKey(hunk));
+			if (outcome.kind === 'dirty') {
+				void vscode.window.showWarningMessage('Comonad: save the file first — the inline review works on the saved content.');
+				return;
 			}
-			if (!change || !located) {
+			if (outcome.kind === 'stale') {
 				void vscode.window.showInformationMessage('Comonad: this change moved — the editor has been refreshed.');
 				await refresh();
 				return;
 			}
-			const eol = document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
-			const edit = editForHunk(document.getText(), eol, located);
-			if (edit.start === edit.end && !edit.text) {
+			if (outcome.kind === 'outside') {
+				void vscode.window.showWarningMessage('Comonad: this file changed outside the agent — use Undo File, where the journal can ask before restoring.');
+				await refresh();
 				return;
 			}
-			const workspaceEdit = new vscode.WorkspaceEdit();
-			workspaceEdit.replace(uri, new vscode.Range(document.positionAt(edit.start), document.positionAt(edit.end)), edit.text);
-			mutating += 1;
-			try {
-				if (!(await vscode.workspace.applyEdit(workspaceEdit))) {
-					throw new Error('the editor refused the change');
-				}
-				// The block is gone from the editor; draw that now, then persist and note it.
-				undoneLocally(uri, change, document.getText());
-				if (!(await document.save())) {
-					throw new Error('the file could not be saved');
-				}
-				// The review made this edit itself: it must not read as a change from outside the agent.
-				await ctx.checkpoints.amend(resolved.current.workspace, resolved.current.sessionId, resolved.path);
-			} finally {
-				mutating = Math.max(0, mutating - 1);
-			}
+			// The block is gone from the editor and the journal already knows: draw that now.
+			undoneLocally(uri, outcome.change, outcome.text);
 		} catch (error) {
 			void vscode.window.showErrorMessage(`Comonad: ${describe(error)}`);
 			await refresh();
+		} finally {
+			mutating = Math.max(0, mutating - 1);
 		}
 	});
 
