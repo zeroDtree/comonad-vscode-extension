@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
 import { BUILTIN_ROLES, READ_ONLY_GRANT, type AgentRole, type SubagentGrant } from '../lib/agents';
-import { normalizeBudget, type BudgetLimits } from '../lib/budget';
+import { normalizeBudget, type BudgetLimits, type SubagentBudgetMode } from '../lib/budget';
 import type { EffortTop } from '../lib/effort';
 import { asApproval, asApprovalResponse, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
 import type { ContextForm } from '../lib/prompt';
@@ -19,6 +19,8 @@ export const TOOL_CARD_MODES: readonly ToolCardMode[] = ['collapsed', 'preview',
 /** The root agent is unlimited unless the user sets a budget; a child gets a focused default. */
 export const DEFAULT_ROOT_BUDGET: BudgetLimits = { turns: 0, tools: 0, tokens: 0, milliseconds: 0 };
 export const DEFAULT_SUBAGENT_BUDGET: BudgetLimits = { turns: 24, tools: 100, tokens: 0, milliseconds: 0 };
+export const SUBAGENT_BUDGET_MODES: readonly SubagentBudgetMode[] = ['inherit', 'custom'];
+export const DEFAULT_SUBAGENT_BUDGET_MODE: SubagentBudgetMode = 'inherit';
 
 export interface Profile {
 	id: string;
@@ -226,6 +228,8 @@ export interface Config {
 	budget: BudgetLimits;
 	/** Default native budget for a child agent; a role or task can only tighten it. */
 	subagentBudget: BudgetLimits;
+	/** `inherit` copies the parent's four limits; `custom` spends `subagentBudget`. */
+	subagentBudgetMode: SubagentBudgetMode;
 	model: string;
 	profiles: Profile[];
 	mcpServers: Record<string, McpServerSettings>;
@@ -278,6 +282,7 @@ export const CONFIG_KEYS = [
 	'planDirectory',
 	'budget',
 	'subagentBudget',
+	'subagentBudgetMode',
 	'model',
 	'profiles',
 	'mcpServers',
@@ -342,7 +347,7 @@ export type AgentConfig = Pick<Config, (typeof AGENT_KEYS)[number]>;
 
 export function normalizeAgentPatch(
 	patch: Record<string, unknown>,
-	current: AgentConfig & Partial<Pick<Config, 'budget' | 'subagentBudget'>>,
+	current: AgentConfig & Partial<Pick<Config, 'budget' | 'subagentBudget' | 'subagentBudgetMode'>>,
 ): Partial<Config> {
 	const next: Partial<Config> = {};
 	const budgetOf = (value: unknown, fallback: BudgetLimits): BudgetLimits =>
@@ -411,6 +416,13 @@ export function normalizeAgentPatch(
 	if (has('subagentBudget')) {
 		next.subagentBudget = budgetOf(patch.subagentBudget, current.subagentBudget ?? DEFAULT_SUBAGENT_BUDGET);
 	}
+	if (has('subagentBudgetMode')) {
+		const mode = patch.subagentBudgetMode;
+		next.subagentBudgetMode =
+			typeof mode === 'string' && (SUBAGENT_BUDGET_MODES as readonly string[]).includes(mode)
+				? (mode as SubagentBudgetMode)
+				: (current.subagentBudgetMode ?? DEFAULT_SUBAGENT_BUDGET_MODE);
+	}
 	return next;
 }
 
@@ -476,6 +488,7 @@ export class Settings extends Service {
 			planDirectory: typeof raw.planDirectory === 'string' ? raw.planDirectory : '',
 			budget: budget('budget', DEFAULT_ROOT_BUDGET),
 			subagentBudget: budget('subagentBudget', DEFAULT_SUBAGENT_BUDGET),
+			subagentBudgetMode: oneOf('subagentBudgetMode', SUBAGENT_BUDGET_MODES, DEFAULT_SUBAGENT_BUDGET_MODE),
 			model: typeof raw.model === 'string' ? raw.model : 'auto',
 			// An empty list means "nothing configured", which would leave the chat without a model, so
 			// the built-in DeepSeek profiles stand in for it.

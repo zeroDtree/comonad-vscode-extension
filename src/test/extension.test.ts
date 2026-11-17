@@ -109,7 +109,7 @@ import {
 	sanitizeSubagentGrants,
 	subagentGrant,
 } from '../services/settings';
-import { mergeBudget, normalizeBudget, RunBudget, sealPartial } from '../lib/budget';
+import { mergeBudget, normalizeBudget, resolveSubagentBudget, RunBudget, sealPartial } from '../lib/budget';
 import { toolset } from '../services/tools';
 import { askTools } from '../tools/misc';
 import { promptText, scratchDirectory } from '../services/agent';
@@ -491,6 +491,36 @@ suite('Comonad domain', () => {
 		const revived = RunBudget.from(JSON.parse(JSON.stringify(budget)));
 		assert.ok(revived instanceof RunBudget, 'a cursor JSON round-trip revives the tracker methods');
 		assert.strictEqual(revived.check(1500), 'turns');
+	});
+
+	test('a subagent inherits the parent limits or spends the custom stack', () => {
+		const parent = { turns: 40, tools: 50 };
+		const global = { turns: 1, tools: 1 };
+		const role = { turns: 16, tools: 60 };
+		assert.deepStrictEqual(resolveSubagentBudget({ mode: 'inherit', parent, global, role }), {
+			turns: 40,
+			tools: 50,
+			tokens: 0,
+			milliseconds: 0,
+		});
+		assert.deepStrictEqual(resolveSubagentBudget({ mode: 'inherit', parent, global, role, task: { turns: 5 } }), {
+			turns: 5,
+			tools: 50,
+			tokens: 0,
+			milliseconds: 0,
+		});
+		assert.deepStrictEqual(resolveSubagentBudget({ mode: 'custom', parent, global, role }), {
+			turns: 1,
+			tools: 1,
+			tokens: 0,
+			milliseconds: 0,
+		});
+		assert.deepStrictEqual(resolveSubagentBudget({ mode: 'custom', parent, global, role, task: { tokens: 100 } }), {
+			turns: 1,
+			tools: 1,
+			tokens: 100,
+			milliseconds: 0,
+		});
 	});
 
 	test('a tool budget stops independently of turns and tokens', () => {
@@ -1083,6 +1113,12 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(normalizeAgentPatch({ subagentBudget: { tools: 20 } }, current), {
 			subagentBudget: { turns: 24, tools: 20, tokens: 0, milliseconds: 0 },
 		});
+		assert.deepStrictEqual(normalizeAgentPatch({ subagentBudgetMode: 'custom' }, current), {
+			subagentBudgetMode: 'custom',
+		});
+		assert.deepStrictEqual(normalizeAgentPatch({ subagentBudgetMode: 'nonsense' }, current), {
+			subagentBudgetMode: 'inherit',
+		});
 		assert.deepStrictEqual(
 			normalizeAgentPatch(
 				{ workingDirectory: '  /next  ', commandTimeout: '45', denyReadPaths: 'a\n b ', mode: 'nonsense', network: true },
@@ -1165,6 +1201,18 @@ suite('Comonad domain', () => {
 			assert.deepStrictEqual(kernel.ctx.agent.policyFor().budget, { turns: 12, tools: 0, tokens: 0, milliseconds: 0 });
 		} finally {
 			await kernel.dispose();
+		}
+	});
+
+	test('the subagent budget source defaults to inherit and accepts custom', async () => {
+		const fallback = await createTestKernel({ config: { subagentBudgetMode: undefined } });
+		const custom = await createTestKernel({ config: { subagentBudgetMode: 'custom' } });
+		try {
+			assert.strictEqual(fallback.ctx.settings.get().subagentBudgetMode, 'inherit');
+			assert.strictEqual(custom.ctx.settings.get().subagentBudgetMode, 'custom');
+		} finally {
+			await fallback.dispose();
+			await custom.dispose();
 		}
 	});
 
@@ -3998,10 +4046,13 @@ suite('Cordis kernel', () => {
 			]) {
 				assert.match(document, new RegExp(`id="${id}"`), `the ${id} control is in the document`);
 			}
+			assert.match(document, /id="subagent-budget-mode"[^>]*data-key="subagentBudgetMode"/, 'the child budget source is a control');
+			assert.match(document, /id="subagent-budget-note"/, 'with an effective-value note');
 			const hostScript = readFileSync(join(root, 'resources', 'settings.js'), 'utf8');
 			assert.match(hostScript, /function renderBudget\(/, 'the client draws all four dimensions');
 			assert.match(hostScript, /saveBudget\('budget'/, 'and saves the root budget as one object');
 			assert.match(hostScript, /saveBudget\('subagentBudget'/, 'and the child budget as one object');
+			assert.match(hostScript, /function syncSubagentBudget\(/, 'the inherit mode disables the child inputs');
 			assert.match(hostScript, /function renderSubagents\(/, 'the client draws the matrix');
 			assert.match(hostScript, /type: 'saveSubagents'/, 'and saves a grant');
 			assert.match(hostScript, /settingsScope/, 'the guest remembers the chosen scope');

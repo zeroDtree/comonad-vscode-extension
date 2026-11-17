@@ -50,10 +50,11 @@ makes a task a **write task**. See the role defaults in [Settings](/reference/se
 - `dependsOn` (acyclic), `acceptance`, `maxAttempts`, `maxResumes` and `budget`.
 
 `budget` is an object with four independent native limits: `turns` (model round trips), `tools`
-(tool calls), `tokens` (input + output) and `milliseconds` (wall clock). `0` means no limit; a task
-budget can only tighten the role/global defaults. A budget that runs out pauses the task, not rejects
-it: the child session and transcript survive, and `resume` continues them with a new segment budget
-without spending an attempt.
+(tool calls), `tokens` (input + output) and `milliseconds` (wall clock). `0` means no limit. By
+default `subagentBudgetMode: inherit` copies the main agent's current four limits to the child;
+`custom` instead uses `subagentBudget` tightened by the role. A task budget can tighten either
+mode. A budget that runs out pauses the task, not rejects it: the child session and transcript
+survive, and `resume` continues them with a new segment budget without spending an attempt.
 
 The plan is declarative: on every revision send all nodes you still want. A running or verifying
 node blocks a revision. An accepted node may be kept unchanged; changing its definition is refused.

@@ -58,7 +58,8 @@ JSON files hold the same names.
 | `commandTimeout` | `60` | Fallback shell timeout in seconds |
 | `commandTimeoutOverride` | `false` | Always use that value and ignore the model's timeout |
 | `budget` | `{turns:0, tools:0, tokens:0, milliseconds:0}` | Four independent hard budgets for the main agent; `0` means no limit |
-| `subagentBudget` | `{turns:24, tools:100, tokens:0, milliseconds:0}` | Default child budget; a role or task can only tighten each dimension |
+| `subagentBudget` | `{turns:24, tools:100, tokens:0, milliseconds:0}` | Child budget under `subagentBudgetMode: custom`; a role or task can only tighten each dimension |
+| `subagentBudgetMode` | `inherit` | `inherit` copies the main agent's four limits; `custom` spends `subagentBudget` |
 | `filterSensitiveEnv` | `true` | Strip keys, tokens and passwords from command environments |
 | `permissions` | `{allow:[], ask:[], deny:[]}` | User rules; see [Safety](/guide/safety#_3-user-rules) |
 | `subagents` | `{}` | Per-role subagent grants: `files` (tracked file tools) and `test` (`run_shell_test`). Defaults come from the role table: `coder`, `tester`, `data-analyst` and `scientist` get both; `technical-writer` gets files; `math-researcher` gets test; every other built-in is read-only. |
@@ -103,11 +104,14 @@ stores the full effective policy, its revision and its parent. See
 
 Budgets: every run has four independent native limits — `turns` (model round trips), `tools`
 (tool calls), `tokens` (provider input + output) and `milliseconds` (wall clock). `0` means no
-limit. The effective child budget takes the tightest non-zero value per dimension across
-`subagentBudget`, the role's own budget and the task's `budget`; a task can only tighten. A run
-that reaches a limit stops at a message boundary, keeps a partial transcript and, for a child,
-pauses the task. `resume` continues the same child session with a new segment budget; it does not
-count as a new attempt.
+limit. `subagentBudgetMode` defaults to `inherit`: a child copies the main agent's current four
+limits (not its remaining budget) and ignores `subagentBudget` and the role budget, while a task or
+resume budget can still tighten. Under `custom`, the child takes the tightest non-zero value per
+dimension across `subagentBudget`, the role's own budget and the task's `budget`. A run that reaches
+a limit stops at a message boundary, keeps a partial transcript and, for a child, pauses the task.
+`resume` continues the same child session with a new segment budget; it does not count as a new
+attempt. Because the root default is all zeros, `inherit` with the default root settings leaves a
+child unlimited; set a finite root budget if you want a cap.
 
 ## Checkpoints
 

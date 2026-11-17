@@ -214,10 +214,12 @@ built-in default grant. See [Safety](/guide/safety#orchestrator-and-subagents) a
 
 A custom role can set flat `maxTurns`, `maxTools`, `maxTokens` and `maxMilliseconds` fields. They
 are four independent native limits: turns are model round trips, tools are tool calls, tokens are
-input + output, and milliseconds are wall clock. `0` means no limit. Each field can tighten
-`comonad.subagentBudget` but never loosen it; a task's `budget` can tighten the result further. A
-child paused by a limit keeps its session and transcript and can be resumed with a new segment
-budget. See [Settings](/reference/settings#orchestrator-and-subagents).
+input + output, and milliseconds are wall clock. `0` means no limit. Under
+`comonad.subagentBudgetMode: custom`, each field can tighten `comonad.subagentBudget` but never
+loosen it; under the default `inherit`, the parent's limits are used and the role fields are
+ignored. A task's `budget` can tighten either result. A child paused by a limit keeps its session
+and transcript and can be resumed with a new segment budget.
+See [Settings](/reference/settings#orchestrator-and-subagents).
 
 ### MCP
 

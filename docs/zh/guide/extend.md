@@ -201,9 +201,10 @@ frontmatter **选择**工具；写能力还需要 `subagents` 设置中的授权
 
 自定义角色可以设置扁平的 `maxTurns`、`maxTools`、`maxTokens`、`maxMilliseconds` 字段。它们是四个
 独立原生上限：turns 是模型往返次数，tools 是工具调用次数，tokens 是输入 + 输出，milliseconds 是墙钟
-毫秒；`0` 表示无限制。每个字段只能收紧 `comonad.subagentBudget`，不会放宽；任务的 `budget` 可以进一步
-收紧。被上限暂停的子代理保留会话与 transcript，可以用新的分段预算 `resume`。
-见[设置](/zh/reference/settings#子-agent)。
+毫秒；`0` 表示无限制。在 `comonad.subagentBudgetMode: custom` 下，每个字段只能收紧
+`comonad.subagentBudget`，不会放宽；默认的 `inherit` 使用父级上限，忽略这些角色字段。任务的
+`budget` 在两种模式下都能进一步收紧。被上限暂停的子代理保留会话与 transcript，可以用新的分段预算
+`resume`。见[设置](/zh/reference/settings#子-agent)。
 
 ### MCP
 

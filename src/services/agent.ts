@@ -94,7 +94,7 @@ import type { JournalApi } from '../lib/journal';
 import { DEFAULT_CONTEXT_WINDOW, subagentGrant } from './settings';
 import {
 	budgetLabel,
-	mergeBudget,
+	resolveSubagentBudget,
 	RunBudget,
 	sealPartial,
 	type BudgetDimension,
@@ -2666,7 +2666,15 @@ export class Agent extends Service {
 			: '';
 		const memory = config.memory ? await readMemory(memoryDir(this.ctx.host.storage.root, policy.workingDirectory)) : '';
 		const skills = config.skills && allow.includes('skill') ? skillLines(this.ctx.catalog.skills) : '';
-		const budgetLimits = mergeBudget(config.subagentBudget, role.budget, request.budget);
+		// Inherit copies the root run's current limits (not its remaining budget); the task/resume
+		// budget can still tighten both modes.
+		const budgetLimits = resolveSubagentBudget({
+			mode: config.subagentBudgetMode,
+			parent: parent.budget?.limits ?? parent.policy.budget,
+			global: config.subagentBudget,
+			role: role.budget,
+			task: request.budget,
+		});
 		const system = buildSubagentSystemPrompt({
 			role,
 			contract: request.contract ?? 'worker',

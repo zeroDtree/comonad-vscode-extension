@@ -463,11 +463,13 @@
 		}
 	}
 
-	/** The Subagents tab: its step budget and one card per catalog agent, with the grant each
-	 *  capability needs. The tools live behind an expander so the list stays scannable. */
+	/** The Subagents tab: its budget source/default and one card per catalog agent, with the grant
+	 *  each capability needs. The tools live behind an expander so the list stays scannable. */
 	function renderSubagents() {
 		const config = state.config;
+		put($('subagent-budget-mode'), config.subagentBudgetMode);
 		renderBudget('subagent-', config.subagentBudget);
+		syncSubagentBudget();
 		const data = state.subagents;
 		const list = $('subagent-rows');
 		if (!data || !list) {
@@ -603,6 +605,34 @@
 		post({ type: 'saveSubagents', subagents: grants, scope: activeScope });
 	}
 
+	function formatBudget(budget) {
+		return BUDGET_FIELDS.map((dimension) => {
+			const unit = dimension === 'milliseconds' ? 'ms' : dimension;
+			return `${Number(budget[dimension]) || 0} ${unit}`;
+		}).join(', ');
+	}
+
+	// The source select decides whether the four child inputs are active. Inherit copies the main
+	// agent's limits, so the numbers below are ignored and the note shows what is actually in force.
+	function syncSubagentBudget() {
+		const mode = $('subagent-budget-mode');
+		const inherit =
+			(mode ? mode.value : state && state.config ? state.config.subagentBudgetMode : 'inherit') === 'inherit';
+		for (const dimension of BUDGET_FIELDS) {
+			const node = $('subagent-budget-' + dimension);
+			if (node) {
+				node.disabled = inherit;
+			}
+		}
+		const note = $('subagent-budget-note');
+		if (!note || !state || !state.config) {
+			return;
+		}
+		note.textContent = inherit
+			? `Inherited from Agent → Run budgets: ${formatBudget(state.config.budget || {})}.`
+			: 'Custom: subagentBudget, tightened by the role and task budgets.';
+	}
+
 	// Each budget input saves the whole four-dimensional object, so a change to one field never
 	// resets the others. The host normalizes and writes the object under one key.
 	for (const dimension of BUDGET_FIELDS) {
@@ -611,6 +641,8 @@
 		const child = $('subagent-budget-' + dimension);
 		child && child.addEventListener('change', () => saveBudget('subagentBudget', 'subagent-'));
 	}
+	const budgetMode = $('subagent-budget-mode');
+	budgetMode && budgetMode.addEventListener('change', syncSubagentBudget);
 
 	/** The tabs the Save button owns: a state push leaves them alone while the form is dirty. */
 	function renderDraftForm() {

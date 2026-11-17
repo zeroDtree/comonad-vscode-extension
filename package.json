@@ -764,22 +764,26 @@
           },
           "properties": {
             "turns": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 0,
               "default": 0,
               "markdownDescription": "Model round trips per run. `0` means no limit."
             },
             "tools": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 0,
               "default": 0,
               "markdownDescription": "Tool calls per run. `0` means no limit."
             },
             "tokens": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 0,
               "default": 0,
               "markdownDescription": "Provider-reported input + output tokens per run. `0` means no limit."
             },
             "milliseconds": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 0,
               "default": 0,
               "markdownDescription": "Wall-clock milliseconds per run. `0` means no limit."
             }
@@ -797,28 +801,45 @@
           },
           "properties": {
             "turns": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 0,
               "default": 24,
               "markdownDescription": "Model round trips per child run. `0` means no limit."
             },
             "tools": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 0,
               "default": 100,
               "markdownDescription": "Tool calls per child run. `0` means no limit."
             },
             "tokens": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 0,
               "default": 0,
               "markdownDescription": "Input + output tokens per child run. `0` means no limit."
             },
             "milliseconds": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 0,
               "default": 0,
               "markdownDescription": "Wall-clock milliseconds per child run. `0` means no limit."
             }
           },
           "additionalProperties": false,
-          "markdownDescription": "Default native budget for a child agent. A role definition and a task plan can only tighten it; a paused child keeps its session and transcript and can be resumed."
+          "markdownDescription": "Default native budget for a child agent when `comonad.subagentBudgetMode` is `custom`. A role definition and a task plan can only tighten it; a paused child keeps its session and transcript and can be resumed."
+        },
+        "comonad.subagentBudgetMode": {
+          "type": "string",
+          "enum": [
+            "inherit",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Subagents copy the main agent's four run limits.",
+            "Subagents use comonad.subagentBudget, tightened by the role and task budgets."
+          ],
+          "default": "inherit",
+          "markdownDescription": "Where a child's turns/tools/tokens/milliseconds come from. `inherit` copies the parent's current limits (not a shared pool); task and resume budgets can still tighten. A root budget of `0` means unlimited, so an inherited child is unlimited too."
         },
         "comonad.planDirectory": {
           "type": "string",

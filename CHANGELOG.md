@@ -27,8 +27,10 @@ Highlights are below; the full implementation notes are linked at the end. The u
 - **Native run budgets and resumable pauses.** Every run has four independent hard limits — turns
   (model round trips), tool calls, tokens and wall-clock time. A limit stops the run at a message
   boundary, keeps the partial transcript and pauses the task; `resume` continues the same child
-  session with a new segment budget and does not spend an attempt. The old single-dimensional
-  `maxSteps`/`subagentSteps`/`maxTurns` concepts are removed.
+  session with a new segment budget and does not spend an attempt. The main-agent and child-default
+  budgets are editable in Settings, and `subagentBudgetMode` (default `inherit`) makes a child copy
+  the parent's four limits. The old single-dimensional `maxSteps`/`subagentSteps`/`maxTurns`
+  concepts are removed.
 - **Graphs are plugins.** The graph engine now owns named Mermaid graphs and a node/route registry.
   The source lives in `comonad.graph`; empty uses the shipped `agent` loop.
 - **The tool loop is a gate, not a route.** The shipped graph is now `llm → calls → gate →

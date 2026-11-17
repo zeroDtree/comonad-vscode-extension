@@ -235,6 +235,62 @@ suite('Orchestrator task loop', () => {
 		}
 	});
 
+	test('inherit mode gives the child the parent limits, not its role or default budget', async () => {
+		const kernel = await createTestKernel({
+			config: {
+				budget: { turns: 40, tools: 50, tokens: 0, milliseconds: 0 },
+				subagentBudget: { turns: 1, tools: 1, tokens: 0, milliseconds: 0 },
+				subagentBudgetMode: 'inherit',
+			},
+		});
+		try {
+			let childSystem = '';
+			kernel.ctx.llm.use({
+				name: 'inherit-budget',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('You are the explorer subagent of Comonad')) {
+						childSystem = system;
+						return reply(
+							JSON.stringify({
+								status: 'ok',
+								summary: 'mapped the entry points',
+								evidence: [{ kind: 'note', text: 'entry points found' }],
+								acceptance: [{ id: 'a1', met: true }],
+							}),
+						);
+					}
+					const last = rootStep(request);
+					if (!last) {
+						return reply('', [
+							planCall([
+								{
+									id: 'look',
+									title: 'Map the entry points',
+									role: 'explorer',
+									objective: 'List the entry points.',
+									acceptance: [{ id: 'a1', description: 'Entry points listed', check: 'evidence' }],
+								},
+							]),
+						]);
+					}
+					if (last === 'task_plan') {
+						return reply('', [delegateCall(['look'])]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(orchestrateTools);
+			await kernel.ctx.agent.runTurn({ text: 'map it', surface: 'test' });
+			assert.match(childSystem, /Native run budget: 40 turns, 50 tools\./, 'the child copies the root limits');
+			assert.doesNotMatch(childSystem, /Native run budget: 1 turns, 1 tools\./, 'the child default is ignored');
+			assert.doesNotMatch(childSystem, /Native run budget: 6 turns, 25 tools\./, 'the role default is ignored under inherit');
+			assert.strictEqual(kernel.ctx.sessions.active()!.taskGraph!.nodes[0]!.status, 'accepted');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('parallel write tasks run together and coordinate through the mailbox', async () => {
 		const kernel = await createTestKernel({ config: { checkpoints: true } });
 		try {

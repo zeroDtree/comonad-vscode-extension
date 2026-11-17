@@ -48,8 +48,10 @@ scratch；有效能力含 `rw` 才算**写任务**。默认授权见[设置](/zh
 - `dependsOn`（无环）、`acceptance`、`maxAttempts`、`maxResumes`、`budget`。
 
 `budget` 是四维对象：`turns`（模型往返）、`tools`（工具调用）、`tokens`（输入 + 输出）、
-`milliseconds`（墙钟）。`0` 表示无限制；任务预算只能收紧角色/全局默认。触顶时任务进入 `paused`
-而不是 `rejected`：子会话与 transcript 保留，`resume` 用新的分段预算继续，不消耗 attempt。
+`milliseconds`（墙钟）。`0` 表示无限制。默认 `subagentBudgetMode: inherit`：子代理复制主 Agent
+当前的四维上限；`custom` 则使用 `subagentBudget` 并由角色预算收紧。任务预算在两种模式下都能进一步
+收紧。触顶时任务进入 `paused` 而不是 `rejected`：子会话与 transcript 保留，`resume` 用新的分段
+预算继续，不消耗 attempt。
 
 计划是声明式的：每次修订都重发仍需要的全部节点。`running` / `verifying` 节点会阻止修订；`accepted`
 节点保持不变，改定义会被拒绝；`rejected` / `paused` 节点改定义后回到 `pending` 并保留尝试次数。图默认

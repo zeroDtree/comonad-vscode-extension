@@ -345,6 +345,7 @@ export function settingsPanel(ctx: Context): void {
 				denyReadPaths: config.denyReadPaths,
 				budget: config.budget,
 				subagentBudget: config.subagentBudget,
+				subagentBudgetMode: config.subagentBudgetMode,
 				displayForm: config.displayForm,
 				toolCard: config.toolCard,
 				contextForm: config.contextForm,
@@ -1175,7 +1176,16 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     <h1 class="page-title">Subagents</h1>
     <h2 class="group-title">Default budget</h2>
     <div class="group">
-      <p class="hint">Default four-dimensional budget for a child agent. A role definition and a task plan can only tighten it. 0 means no limit.</p>
+      <div class="field">
+        <label for="subagent-budget-mode">Budget source</label>
+        <select id="subagent-budget-mode" class="control" data-key="subagentBudgetMode">
+          <option value="inherit">Inherit from parent</option>
+          <option value="custom">Custom — the budget below</option>
+        </select>
+        <p class="hint">Inherit copies the main agent's four limits (not a shared pool); task and resume budgets can still tighten. If the main agent is unlimited (all 0), children are unlimited too.</p>
+      </div>
+      <p class="hint" id="subagent-budget-note"></p>
+      <p class="hint">Custom four-dimensional budget for a child agent. A role definition and a task plan can only tighten it. 0 means no limit.</p>
       <div class="field">
         <label for="subagent-budget-turns">Turns</label>
         <input id="subagent-budget-turns" class="control" type="number" min="0" step="1" />

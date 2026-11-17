@@ -17,6 +17,9 @@ export interface BudgetLimits {
 export type BudgetDimension = keyof BudgetLimits;
 export type BudgetInput = Partial<Record<BudgetDimension, number>>;
 
+/** Where a child's four limits come from: the parent's run or its own default stack. */
+export type SubagentBudgetMode = 'inherit' | 'custom';
+
 export interface BudgetUsage {
 	turns: number;
 	tools: number;
@@ -67,6 +70,29 @@ export function mergeBudget(...inputs: readonly (BudgetInput | undefined)[]): Bu
 		tokens: tightest(found.map((limit) => limit.tokens)),
 		milliseconds: tightest(found.map((limit) => limit.milliseconds)),
 	};
+}
+
+export interface SubagentBudgetInput {
+	mode: SubagentBudgetMode;
+	/** The parent run's current limits; used by `inherit`. */
+	parent?: BudgetInput;
+	/** The global child default; used by `custom`. */
+	global?: BudgetInput;
+	/** The role's default; used by `custom`. */
+	role?: BudgetInput;
+	/** The task plan or resume override; tightens either mode. */
+	task?: BudgetInput;
+}
+
+/**
+ * Resolve one child segment's limits. `inherit` copies the parent's limits (not its remaining
+ * budget) and ignores the child defaults/role so a role's 6–16 turns cannot silently shorten an
+ * inherited 40. A task/resume budget still tightens both modes.
+ */
+export function resolveSubagentBudget(input: SubagentBudgetInput): BudgetLimits {
+	return input.mode === 'inherit'
+		? mergeBudget(input.parent, input.task)
+		: mergeBudget(input.global, input.role, input.task);
 }
 
 /** `0` (unlimited) leaves the other side alone, so a role can only narrow. */

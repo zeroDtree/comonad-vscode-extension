@@ -126,6 +126,7 @@ export async function createTestKernel(
 		denyReadPaths: [],
 		budget: { turns: 12, tools: 0, tokens: 0, milliseconds: 0 },
 		subagentBudget: { turns: 24, tools: 100, tokens: 0, milliseconds: 0 },
+		subagentBudgetMode: 'custom',
 		checkpoints: false,
 		instructions: false,
 		memory: false,

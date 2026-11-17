@@ -55,7 +55,8 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 | `commandTimeout` | `60` | shell 超时回退值（秒） |
 | `commandTimeoutOverride` | `false` | 始终使用该值，忽略模型选择的超时 |
 | `budget` | `{turns:0, tools:0, tokens:0, milliseconds:0}` | 主 Agent 的四维原生硬预算；`0` 表示无限制 |
-| `subagentBudget` | `{turns:24, tools:100, tokens:0, milliseconds:0}` | 子 Agent 默认预算；角色或任务只能收紧各维度 |
+| `subagentBudget` | `{turns:24, tools:100, tokens:0, milliseconds:0}` | `subagentBudgetMode: custom` 下的子 Agent 预算；角色或任务只能收紧各维度 |
+| `subagentBudgetMode` | `inherit` | `inherit` 复制主 Agent 的四维上限；`custom` 使用 `subagentBudget` |
 | `filterSensitiveEnv` | `true` | 从命令环境中移除 key、token 与密码 |
 | `permissions` | `{allow:[], ask:[], deny:[]}` | 用户规则；见[安全](/zh/guide/safety#_3-user-rule) |
 | `subagents` | `{}` | 子角色的逐角色授权：`files`（可跟踪文件工具）与 `test`（`run_shell_test`）。默认值来自角色表：`coder`、`tester`、`data-analyst`、`scientist` 两者都有；`technical-writer` 只有 files；`math-researcher` 只有 test；其它内置角色默认只读。 |
@@ -93,10 +94,12 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 [安全](/zh/guide/safety#编排器与子-agent)与[编排](/zh/guide/orchestration)。
 
 预算：每次运行有四个独立原生上限——`turns`（模型往返次数）、`tools`（工具调用次数）、`tokens`
-（输入 + 输出 token）、`milliseconds`（墙钟毫秒）。`0` 表示无限制。子代理的有效预算按维度取
-`subagentBudget`、角色预算、任务 `budget` 中最小的非零值；任务只能收紧。任一维触顶后，运行停在消息
-边界，保留 partial transcript；子任务进入 `paused`。`resume` 用新的分段预算继续同一子会话，不消耗
-attempt。见[设置](/zh/reference/settings#编排器与子-agent)。
+（输入 + 输出 token）、`milliseconds`（墙钟毫秒）。`0` 表示无限制。`subagentBudgetMode` 默认
+`inherit`：子代理复制主 Agent 当前的四维上限（不是剩余预算），忽略 `subagentBudget` 与角色预算；
+任务或 resume 预算仍可收紧。`custom` 下则按维度取 `subagentBudget`、角色预算、任务 `budget` 中
+最小的非零值。任一维触顶后，运行停在消息边界，保留 partial transcript；子任务进入 `paused`。
+`resume` 用新的分段预算继续同一子会话，不消耗 attempt。因为 root 默认全 0，默认 `inherit` 下子代理
+也不限；需要上限时给 root 设置有限值。见[设置](/zh/reference/settings#编排器与子-agent)。
 
 ## 检查点
 
