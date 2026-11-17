@@ -99,6 +99,10 @@ Highlights are below; the full implementation notes are linked at the end. The u
   opens a multi-file diff with the pending listing, three lines of context, and Keep/Undo on every
   block. It replaces the old QuickPick; the accepted baseline, the chat's pending list and the
   editor's inline review all still read the same journal.
+- **A file review tab draws deletions whole.** Clicking a pending file (or `Comonad: Review Changed
+  File`) opens the file in a webview editor whose removed lines are real, wrapping rows — the inline
+  diff VS Code's decoration API cannot draw — with Undo/Keep under every block and **Open in
+  Editor** one click away. Same journal, same block keys, same refusals as the other surfaces.
 - **Remote SSH, WSL and Dev Containers** are first-class; credentials stay client-side and model calls
   originate on the remote host.
 - **Images, `@` references and in-place prompt editing** make the chat a working surface, not just a

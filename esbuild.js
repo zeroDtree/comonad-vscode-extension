@@ -167,6 +167,9 @@ async function main() {
 	// The Review tab's guest: one browser bundle against the resource directory, so the tab has no
 	// runtime dependency beyond the extension's own files.
 	await buildWebview('src/webview/review.ts', 'resources/review.js');
+	// The File Review tab's guest: CodeMirror plus the unified merge view, which draws removed lines
+	// as real rows. Bundled the same way — no runtime dependency outside the resource directory.
+	await buildWebview('src/webview/file-review.ts', 'resources/file-review.js');
 
 	const ctx = await esbuild.context(
 		tests

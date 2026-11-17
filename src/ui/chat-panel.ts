@@ -1805,8 +1805,8 @@ export function chatPanel(ctx: Context): void {
 					await vscode.commands.executeCommand('comonad.undoAll');
 					break;
 				case 'openFile': {
-					// The row names a workspace-relative path; open the file itself, where the inline
-					// review paints its blocks, rather than the separate Comonad diff tab.
+					// The row names a workspace-relative path; open the File Review tab, whose merge view
+					// can draw the deleted lines whole — the real file is one button away inside it.
 					const session = ctx.sessions.active();
 					const workspace = session?.policy.workingDirectory;
 					const path = String(message.path ?? '');
@@ -1815,11 +1815,8 @@ export function chatPanel(ctx: Context): void {
 						if (!isInside(workspace, target)) {
 							break;
 						}
-						if (!existsSync(target)) {
-							post({ type: 'notice', text: `${path} is no longer on disk.` });
-							break;
-						}
-						await vscode.window.showTextDocument(vscode.Uri.file(target), { preview: true });
+						// A deleted file still reviews: the tab draws the baseline it was restored from.
+						await vscode.commands.executeCommand('comonad.reviewFile', path);
 					}
 					break;
 				}

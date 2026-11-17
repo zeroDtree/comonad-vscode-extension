@@ -177,6 +177,7 @@ import tavernEntry from 'comonad-plugin-tavern';
 import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
 import { contentController } from 'comonad-plugin-tavern/panel/controller';
 import { settingsDocument, settingsPanel } from '../ui/settings-panel';
+import { fileReviewDocument } from '../ui/file-review-panel';
 import { reviewDocument } from '../ui/review-panel';
 import { undoHunkAction } from '../ui/hunk-actions';
 import { panesPlugin } from '../services/panes';
@@ -10081,6 +10082,92 @@ suite('Markdown math plugin', () => {
 			for (const id of ['rv-top', 'rv-files-toggle', 'rv-wrap', 'rv-files', 'rv-files-head', 'rv-hunks', 'rv-notice']) {
 				assert.match(document, new RegExp(`id="${id}"`), `${id} is part of the shell`);
 			}
+		} finally {
+			panel.dispose();
+		}
+	});
+
+	test('the file review document loads its editor bundle under a nonce', () => {
+		const root = join(__dirname, '..', '..');
+		const panel = vscode.window.createWebviewPanel('comonad.test.fileReview', 'file review', vscode.ViewColumn.Active, {
+			enableScripts: true,
+			localResourceRoots: [vscode.Uri.file(root)],
+		});
+		try {
+			const document = fileReviewDocument(panel.webview, vscode.Uri.file(root));
+			const scripts = [...document.matchAll(/<script nonce="[^"]*" src="([^"]+)"/g)].map((match) => basename(decodeURIComponent(match[1]!)));
+			assert.deepStrictEqual(scripts, ['file-review.js']);
+			const styles = [...document.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map((match) => basename(decodeURIComponent(match[1]!)));
+			assert.deepStrictEqual(styles, ['file-review.css']);
+			assert.match(document, /default-src 'none'/);
+			assert.match(document, /script-src 'nonce-[^']+';/);
+			assert.doesNotMatch(document, /script-src [^;]*unsafe-inline/, 'no inline script may run');
+			for (const id of ['fr-top', 'fr-path', 'fr-open', 'fr-diff', 'fr-undo', 'fr-keep', 'fr-editor', 'fr-notice']) {
+				assert.match(document, new RegExp(`id="${id}"`), `${id} is part of the shell`);
+			}
+		} finally {
+			panel.dispose();
+		}
+	});
+
+	test('the file review command opens a tab named after the file', async () => {
+		await vscode.commands.executeCommand('comonad.reviewFile', 'src/example.ts');
+		let tabs: vscode.Tab[] = [];
+		for (let attempt = 0; attempt < 20; attempt += 1) {
+			tabs = vscode.window.tabGroups.all.flatMap((group) => group.tabs);
+			if (tabs.some((tab) => tab.label.includes('(Comonad)'))) {
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		const tab = tabs.find((candidate) => candidate.label.includes('(Comonad)'));
+		try {
+			assert.ok(tab, `the command opened the file review tab; tabs: ${tabs.map((tab) => tab.label).join(' | ')}`);
+			assert.strictEqual(tab.label, 'example.ts (Comonad)');
+		} finally {
+			if (tab) {
+				await vscode.window.tabGroups.close(tab);
+			}
+		}
+	});
+
+	test('the file review guest loads and renders a diff without failing', async () => {
+		const root = join(__dirname, '..', '..');
+		const panel = vscode.window.createWebviewPanel('comonad.test.fileReviewGuest', 'file review guest', vscode.ViewColumn.Active, {
+			enableScripts: true,
+			localResourceRoots: [vscode.Uri.file(root)],
+		});
+		const messages: Array<Record<string, unknown>> = [];
+		panel.webview.onDidReceiveMessage((message: Record<string, unknown>) => messages.push(message));
+		try {
+			panel.webview.html = fileReviewDocument(panel.webview, vscode.Uri.file(root));
+			const deadline = Date.now() + 8000;
+			while (Date.now() < deadline && !messages.some((message) => message.type === 'ready')) {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			assert.ok(messages.some((message) => message.type === 'ready'), 'the guest bundle loads and installs its listener');
+			// The webview DOM is not reachable from the extension host: a state that draws and reports
+			// no error is the assertion that CodeMirror and the merge view constructed.
+			await panel.webview.postMessage({
+				type: 'state',
+				state: {
+					path: 'src/a.py',
+					reason: 'ready',
+					message: '',
+					baseline: 'import os\nold line\nkeep\n',
+					current: 'import os\nnew line\nkeep\n',
+					hunks: [{ key: '["2",1,"2",1]', anchorLine: 2, oldStart: 2, oldLines: 1, newStart: 2, newLines: 1, additions: 1, deletions: 1 }],
+					created: false,
+					deleted: false,
+					changedOutside: false,
+					dirty: false,
+					truncated: false,
+					blockedReason: '',
+				},
+			});
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			const failure = messages.find((message) => message.type === 'notice' && message.level === 'error');
+			assert.strictEqual(failure, undefined, `the guest reported: ${String(failure?.text ?? '')}`);
 		} finally {
 			panel.dispose();
 		}

@@ -1,0 +1,312 @@
+/*
+ * The File Review tab: a whole file in a CodeMirror editor, with the unified merge view drawing
+ * deleted lines as real red rows and a Keep/Undo bar under every block. The palette is the editor's
+ * own theme variables, so the tab reads like the file tab it stands in for.
+ */
+
+:root {
+	color-scheme: light dark;
+	--fr-border: var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	--fr-surface: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	--fr-muted: var(--vscode-descriptionForeground, rgba(204, 204, 204, 0.72));
+	--fr-warn: var(--vscode-editorWarning-foreground, #d7a12a);
+	--fr-add-fg: var(--vscode-charts-green, #3fb950);
+	--fr-del-fg: var(--vscode-charts-red, #f85149);
+}
+
+* {
+	box-sizing: border-box;
+}
+
+[hidden] {
+	display: none !important;
+}
+
+html,
+body {
+	height: 100%;
+	margin: 0;
+}
+
+body {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size, 13px);
+	color: var(--vscode-foreground);
+	background: var(--vscode-editor-background);
+}
+
+button {
+	font-family: inherit;
+	font-size: 12px;
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+	border: none;
+	border-radius: 3px;
+	padding: 3px 10px;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+button:hover:not(:disabled) {
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+
+button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+button:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, #007fd4);
+	outline-offset: 1px;
+}
+
+#fr-keep {
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+}
+
+#fr-keep:hover:not(:disabled) {
+	background: var(--vscode-button-hoverBackground);
+}
+
+/* ------------------------------------------------------------------ header */
+
+#fr-top {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px 10px;
+	padding: 6px 12px;
+	border-bottom: 1px solid var(--fr-border);
+	background: var(--fr-surface);
+	flex: none;
+}
+
+#fr-path {
+	font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 12px;
+	color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+	max-width: 52ch;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#fr-badges {
+	display: inline-flex;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+.fr-badge {
+	font-size: 10px;
+	padding: 0 5px;
+	border: 1px solid var(--fr-border);
+	border-radius: 999px;
+	color: var(--fr-muted);
+	line-height: 16px;
+}
+
+.fr-badge.created {
+	color: var(--fr-add-fg);
+	border-color: var(--fr-add-fg);
+}
+
+.fr-badge.deleted {
+	color: var(--fr-del-fg);
+	border-color: var(--fr-del-fg);
+}
+
+.fr-badge.outside,
+.fr-badge.dirty {
+	color: var(--fr-warn);
+	border-color: var(--fr-warn);
+}
+
+.fr-spacer {
+	flex: 1;
+}
+
+#fr-actions {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+	margin-left: auto;
+}
+
+/* ------------------------------------------------------------------- body */
+
+#fr-main {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	min-height: 0;
+}
+
+#fr-empty {
+	padding: 28px 24px;
+	max-width: 70ch;
+	color: var(--fr-muted);
+	line-height: 1.5;
+}
+
+.fr-empty-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+#fr-editor {
+	flex: 1;
+	min-height: 0;
+	overflow: hidden;
+}
+
+#fr-editor .cm-editor {
+	height: 100%;
+}
+
+#fr-editor .cm-editor.cm-focused {
+	outline: none;
+}
+
+/* --------------------------------------------------------- per-block actions */
+
+/*
+ * The bar is a CodeMirror block widget inside the content: it takes a real row under the block it
+ * acts on, so it scrolls and wraps with the file. Left side: what the block does. Right side: the
+ * two journal actions, Undo first, as in the editor's lens.
+ */
+.fr-hunk-actions {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 4px;
+	padding: 2px 18px 4px;
+	font-family: var(--vscode-font-family);
+	font-size: 11px;
+	color: var(--fr-muted);
+	user-select: none;
+}
+
+.fr-hunk-meta {
+	margin-right: auto;
+	font-family: var(--vscode-editor-font-family, monospace);
+	opacity: 0.8;
+}
+
+.fr-hunk-button {
+	padding: 1px 8px;
+	font-size: 11px;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.18));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
+.fr-hunk-button.fr-hunk-keep {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.fr-hunk-button:hover:not(:disabled) {
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+
+.fr-hunk-button.fr-hunk-keep:hover:not(:disabled) {
+	background: var(--vscode-button-hoverBackground);
+}
+
+/* CodeMirror's search panel, in the workbench's input colours. */
+.cm-panels {
+	background: var(--fr-surface);
+	color: var(--vscode-foreground);
+	border-color: var(--fr-border);
+}
+
+.cm-panels input,
+.cm-panels select {
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent);
+}
+
+.cm-panels button {
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
+.cm-searchMatch {
+	background: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33));
+}
+
+.cm-searchMatch.cm-searchMatch-selected {
+	background: var(--vscode-editor-findMatchBackground, rgba(81, 92, 106, 0.7));
+}
+
+/* ----------------------------------------------------------------- notice */
+
+#fr-notice {
+	position: fixed;
+	right: 12px;
+	bottom: 12px;
+	z-index: 10;
+	max-width: 60ch;
+	padding: 8px 12px;
+	border-radius: 6px;
+	border: 1px solid var(--vscode-notifications-border, var(--fr-border));
+	background: var(--vscode-notifications-background, var(--fr-surface));
+	color: var(--vscode-notifications-foreground, var(--vscode-foreground));
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
+	font-size: 12px;
+	line-height: 1.45;
+}
+
+#fr-notice.fr-notice-error {
+	border-color: var(--vscode-inputValidation-errorBorder, var(--fr-del-fg));
+	color: var(--vscode-errorForeground, var(--fr-del-fg));
+}
+
+#fr-notice.fr-notice-warn {
+	border-color: var(--vscode-inputValidation-warningBorder, var(--fr-warn));
+	color: var(--fr-warn);
+}
+
+/* ---------------------------------------------------------- syntax colours */
+
+/*
+ * VS Code exposes no CSS variables for grammar tokens, so the editor's defaults are written down
+ * here (dark: VS Code Dark+, light: VS Code Light+). The guest's highlight style reads them, which
+ * keeps every other colour on the workbench's own theme variables.
+ */
+body.vscode-dark,
+body.vscode-high-contrast {
+	--fr-tok-keyword: #569cd6;
+	--fr-tok-control: #c586c0;
+	--fr-tok-string: #ce9178;
+	--fr-tok-comment: #6a9955;
+	--fr-tok-number: #b5cea8;
+	--fr-tok-function: #dcdcaa;
+	--fr-tok-type: #4ec9b0;
+	--fr-tok-variable: #9cdcfe;
+	--fr-tok-operator: #d4d4d4;
+	--fr-tok-link: #4daafc;
+}
+
+body.vscode-light,
+body.vscode-high-contrast-light {
+	--fr-tok-keyword: #0000ff;
+	--fr-tok-control: #af00db;
+	--fr-tok-string: #a31515;
+	--fr-tok-comment: #008000;
+	--fr-tok-number: #098658;
+	--fr-tok-function: #795e26;
+	--fr-tok-type: #267f99;
+	--fr-tok-variable: #001080;
+	--fr-tok-operator: #383838;
+	--fr-tok-link: #006ab1;
+}

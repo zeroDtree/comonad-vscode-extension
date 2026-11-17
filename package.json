@@ -23,7 +23,8 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onWebviewPanel:comonad.review"
+    "onWebviewPanel:comonad.review",
+    "onWebviewPanel:comonad.fileReview"
   ],
   "main": "./dist/extension.js",
   "extensionKind": [
@@ -263,6 +264,12 @@
         "title": "Comonad: Open Change Diff",
         "category": "Comonad",
         "icon": "resources/diff.svg",
+        "enablement": "comonad.checkpoints"
+      },
+      {
+        "command": "comonad.reviewFile",
+        "title": "Comonad: Review Changed File",
+        "category": "Comonad",
         "enablement": "comonad.checkpoints"
       },
       {
@@ -1433,6 +1440,14 @@
     "test": "vscode-test"
   },
   "devDependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/legacy-modes": "^6.5.5",
+    "@codemirror/merge": "^6.12.3",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@lezer/highlight": "^1.2.5",
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
     "@types/vscode": "^1.137.0",

@@ -2,6 +2,7 @@
 import * as assert from 'node:assert';
 import type { FileChange, JournalFile } from '../lib/journal';
 import { diffLines, hunkKey } from '../lib/line-diff';
+import { fileReviewBlocked, fileReviewIdle, fileReviewState, hunkAnchorLine, hunkViews } from '../lib/file-review-model';
 import { fileSummary, findHunk, reviewBlocks, reviewState } from '../lib/review-model';
 import type { ReviewBlock } from '../lib/review-protocol';
 
@@ -196,5 +197,88 @@ suite('Review view model', () => {
 		assert.strictEqual(state.reason, 'ready');
 		assert.strictEqual(state.active, null);
 		assert.strictEqual(state.activeError, 'a.txt moved');
+	});
+});
+
+suite('File review view model', () => {
+	test('hunk views carry the journal key and the line just below each block', () => {
+		const baseline = Array.from({ length: 10 }, (_, index) => `line ${index + 1}\n`).join('');
+		const current = baseline.replace('line 5\n', 'changed 5\n');
+		const change = changeOf('a.txt', baseline, current);
+		const views = hunkViews(change.hunks);
+
+		assert.strictEqual(views.length, 1);
+		assert.strictEqual(views[0]!.key, hunkKey(change.hunks[0]!));
+		assert.strictEqual(views[0]!.anchorLine, 5);
+		assert.deepStrictEqual([views[0]!.additions, views[0]!.deletions], [1, 1]);
+		assert.deepStrictEqual(
+			[views[0]!.oldStart, views[0]!.oldLines, views[0]!.newStart, views[0]!.newLines],
+			[5, 1, 5, 1],
+		);
+	});
+
+	test('a pure deletion anchors on the line that took its place', () => {
+		const baseline = 'a\nb\nc\n';
+		const current = 'a\nc\n';
+		const change = changeOf('a.txt', baseline, current);
+		const views = hunkViews(change.hunks);
+
+		assert.strictEqual(views.length, 1);
+		assert.deepStrictEqual([views[0]!.additions, views[0]!.deletions], [0, 1]);
+		assert.deepStrictEqual([views[0]!.newStart, views[0]!.newLines], [1, 0]);
+		// 0-based line 1 is `c`, the line that came after the removed `b`.
+		assert.strictEqual(hunkAnchorLine(change.hunks[0]!), 1);
+	});
+
+	test('a deletion after the last line anchors past the document', () => {
+		const change = changeOf('a.txt', 'a\nb\n', 'a\n');
+		const views = hunkViews(change.hunks);
+
+		assert.strictEqual(views.length, 1);
+		// `current` has one line; an anchor of 1 is the line after it, which the guest draws at the
+		// document end. The model does not clamp: the guest owns the document's line count.
+		assert.strictEqual(views[0]!.anchorLine, 1);
+	});
+
+	test('fileReviewState carries both texts and marks binary content unreadable', () => {
+		const change = changeOf('src/a.py', 'old\n', 'new\n');
+		const state = fileReviewState(change, false);
+
+		assert.strictEqual(state.reason, 'ready');
+		assert.strictEqual(state.baseline, 'old\n');
+		assert.strictEqual(state.current, 'new\n');
+		assert.strictEqual(state.blockedReason, '');
+		assert.strictEqual(state.hunks.length, 1);
+
+		const binary = fileReviewState(changeOf('img.png', '', '', { binary: true }), false);
+		assert.strictEqual(binary.reason, 'binary');
+		assert.strictEqual(binary.baseline, '');
+		assert.strictEqual(binary.current, '');
+		assert.deepStrictEqual(binary.hunks, []);
+	});
+
+	test('blocked reasons follow the Review tab order', () => {
+		const change = changeOf('a.txt', 'a\n', 'b\n', { changedOutside: true, truncated: true });
+		assert.strictEqual(fileReviewBlocked(change, true), 'Save the file first');
+		assert.strictEqual(fileReviewBlocked(change, false), 'Changed outside the agent');
+		assert.strictEqual(fileReviewBlocked({ ...change, changedOutside: false }, false), 'Too large for block actions');
+		assert.strictEqual(fileReviewBlocked(changeOf('img.png', '', '', { binary: true }), false), 'Binary file');
+		assert.strictEqual(fileReviewBlocked(changeOf('a.txt', 'a\n', 'b\n'), false), '');
+	});
+
+	test('a truncated change still sends the file but no blocks', () => {
+		const state = fileReviewState(changeOf('big.txt', 'a\n', 'b\n', { truncated: true }), false);
+		assert.strictEqual(state.reason, 'ready');
+		assert.strictEqual(state.truncated, true);
+		assert.deepStrictEqual(state.hunks, []);
+		assert.strictEqual(state.blockedReason, 'Too large for block actions');
+	});
+
+	test('an idle review names the path and why it is empty', () => {
+		const idle = fileReviewIdle('a.txt', 'no-pending', 'No pending changes for this file.');
+		assert.strictEqual(idle.path, 'a.txt');
+		assert.strictEqual(idle.reason, 'no-pending');
+		assert.strictEqual(idle.message, 'No pending changes for this file.');
+		assert.strictEqual(idle.blockedReason, 'Nothing pending');
 	});
 });

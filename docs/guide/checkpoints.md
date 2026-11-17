@@ -18,9 +18,11 @@ flowchart LR
 ## Pending changes
 
 The list above the composer shows each file with `+N −M` counts. **Undo** and **Keep** act on all of
-them; clicking a row opens the file in the normal editor with the inline review. Once everything is
-reviewed, the list stays on screen as a **reviewed** list, newest decision first. A new pending
-change switches it back to the pending files.
+them; clicking a row opens the **File Review** tab: the whole file drawn with its deleted lines in
+place, complete and wrapping, and **Undo** / **Keep** under every block. **Open in Editor** switches
+to the real file, where the inline review paints the changed blocks on the file itself. Once
+everything is reviewed, the list stays on screen as a **reviewed** list, newest decision first. A new
+pending change switches it back to the pending files.
 
 - **Keep** accepts a file or hunk.
 - **Undo** restores the content from before the agent wrote it.
@@ -35,6 +37,14 @@ from the tab immediately. It reviews saved content. A file with unsaved text dis
 file actions until you save; a file changed outside the agent disables block actions, and **Undo
 File** asks before restoring it. **Keep All** refuses while any pending file is unsaved, and **Keep**
 accepts the file as it is on disk, including an outside edit.
+
+The **File Review** tab (`Comonad: Review Changed File`, or clicking a pending file) is the
+single-file counterpart. It is a read-only editor view: the file on disk with inserted lines green,
+deleted lines restored in place as real red rows that wrap and scroll like the rest of the file, and
+an **Undo** / **Keep** bar under each block. The deleted text is complete — VS Code's decoration API
+cannot draw inline text that spans or wraps lines, which is why the same review also exists as this
+tab. It speaks the same journal as the other surfaces, so a decision made here shows up everywhere;
+**Open in Editor** opens the real file beside it for editing.
 
 A subagent's file-tool writes are journaled under the **parent chat**, not under a session of their
 own. They appear in the same pending list, the same diff and the same restore points as the main
@@ -66,6 +76,7 @@ without the result that answers it.
 | Command | Purpose |
 | --- | --- |
 | **Comonad: Review Changes** | Open the Review tab: keep/undo a block, a file, or everything |
+| **Comonad: Review Changed File** | Draw one pending file whole, with deletions in place and a bar under every block |
 | `Cmd+Alt+D` / `Ctrl+Alt+D` | The same review |
 | `/review [focus]` | Ask the agent to review pending changes read-only |
 
