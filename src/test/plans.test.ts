@@ -2,7 +2,15 @@
 import * as assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
-import { MAX_BUILD_PLAN_CHARS, buildPlanPrompt, planFileName, planFolder, planTargetFor } from '../lib/plans';
+import {
+	BUILD_MODES,
+	MAX_BUILD_PLAN_CHARS,
+	asBuildMode,
+	buildPlanPrompt,
+	planFileName,
+	planFolder,
+	planTargetFor,
+} from '../lib/plans';
 
 suite('Plan paths', () => {
 	test('the folder follows the setting and the root chat', () => {
@@ -43,16 +51,35 @@ suite('Plan paths', () => {
 		assert.strictEqual(planTargetFor('  ', undefined, 'chat-1', 'plan.md'), null);
 	});
 
+	test('only Semi-Write and Full Access can start a build', () => {
+		assert.deepStrictEqual([...BUILD_MODES], ['sw', 'aw']);
+		assert.strictEqual(asBuildMode('sw'), 'sw');
+		assert.strictEqual(asBuildMode('aw'), 'aw');
+		for (const rejected of ['pl', 'ro', 'chat', 'SW', 'toString', '', 42, null, undefined]) {
+			assert.strictEqual(asBuildMode(rejected), undefined);
+		}
+	});
+
 	test('the plan card is wired to preview and build on both sides', () => {
 		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.js'), 'utf8');
+		assert.match(guest, /plan-card/);
 		assert.match(guest, /plan-build/);
+		assert.match(guest, /plan-trigger/);
+		assert.match(guest, /button\[data-plan-pick\]/);
 		assert.match(guest, /'buildPlan' : 'previewPlan'/);
 		assert.match(guest, /button\[data-plan\]/);
+		assert.match(guest, /mode: choice\.mode/);
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		assert.match(panel, /case 'previewPlan'/);
 		assert.match(panel, /case 'buildPlan'/);
 		assert.match(panel, /markdown\.showPreviewToSide/);
-		assert.match(panel, /applyPolicy\(\{ mode: 'sw' \}\)/);
+		assert.match(panel, /asBuildMode\(mode\)/);
+		assert.match(panel, /ctx\.llm\.keyReady\(modelPick\)/);
+		assert.match(panel, /ctx\.settings\.update\('model', modelPick\)/);
+		assert.match(panel, /applyPolicy\(\{ mode: buildMode \}\)/);
+		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.css'), 'utf8');
+		assert.match(css, /\.plan-card/);
+		assert.match(css, /\.plan-menu\s*\{[\s\S]*?position:\s*fixed/);
 	});
 
 	test('the build prompt carries the plan unless it is too large', () => {

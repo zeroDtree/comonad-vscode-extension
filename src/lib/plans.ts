@@ -12,6 +12,17 @@ export const DEFAULT_PLAN_DIRECTORY = '.comonad/plans';
 /** A plan this large is read from disk by the agent instead of repeated in the Build prompt. */
 export const MAX_BUILD_PLAN_CHARS = 200_000;
 
+/** The only modes that can carry a plan out: both write files, differing in shell access. */
+export const BUILD_MODES = ['sw', 'aw'] as const;
+export type BuildMode = (typeof BUILD_MODES)[number];
+
+/** A requested build mode. There is no fallback: an unknown value is refused, never silently narrowed. */
+export function asBuildMode(value: unknown): BuildMode | undefined {
+	return typeof value === 'string' && (BUILD_MODES as readonly string[]).includes(value)
+		? (value as BuildMode)
+		: undefined;
+}
+
 /** `planDirectory` (or the default) plus the root chat's folder. */
 export function planFolder(planDirectory: string | undefined, rootSessionId: string): string {
 	return join(planDirectory || DEFAULT_PLAN_DIRECTORY, rootSessionId);

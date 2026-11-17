@@ -20,7 +20,7 @@ import { clip, describe, preview } from '../lib/util';
 import type { Approval, ApprovalDecision, AttachmentPart, SandboxMode, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
 import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
-import { buildPlanPrompt, planTargetFor, type PlanTarget } from '../lib/plans';
+import { asBuildMode, buildPlanPrompt, planTargetFor, type PlanTarget } from '../lib/plans';
 import { formatReference } from '../lib/references';
 import { guardPath, isInside } from '../lib/sandbox';
 import { countRaw } from '../lib/tokens';
@@ -1014,6 +1014,24 @@ export function chatPanel(ctx: Context): void {
 			if (!input && !attachments.length) {
 				return;
 			}
+			// The turn needs a real chat before the panel draws it. A first prompt in a workspace with
+			// no chat creates the session inside runTurn — too late: turn-start would carry no id, and a
+			// transcript redraw during the turn could not re-attach the live stream, leaving every later
+			// tool result as a loose notice. Resolving it here also marks the chat published, so the
+			// sessions/changed this creation emits cannot hand the panels a second transcript mid-turn.
+			const opened = ctx.sessions.active();
+			const session = opened ?? ctx.sessions.ensureActive(ctx.agent.policyFor());
+			if (!opened) {
+				for (const client of clients) {
+					published.set(client, {
+						id: session.id,
+						length: session.transcript.length,
+						modelContextVersion: session.modelContext?.version,
+					});
+				}
+			}
+			turnSession = session.id;
+			runningSessionId = session.id;
 			started = true;
 			post({ type: 'turn-start', text: input, sessionId: turnSession, attachments: ctx.attachments.publicAttachments(attachments) });
 			// A command answers through the surface, and a redraw — `/compact` replaces the transcript —
@@ -1061,7 +1079,7 @@ export function chatPanel(ctx: Context): void {
 			const result = await ctx.agent.runTurn({
 				text: handled.text ?? input,
 				attachments,
-				sessionId: ctx.sessions.active()?.id,
+				sessionId: session.id,
 				policy: handled.policy,
 				trigger: handled.trigger,
 				surface: SURFACE,
@@ -1424,8 +1442,14 @@ export function chatPanel(ctx: Context): void {
 		await openPlanPreview(session, name, source);
 	};
 
-	/** Build: read the plan, switch to Semi-Write, and send the implementing turn. No confirmation. */
-	const buildPlan = async (name: unknown, owner: unknown, source: vscode.Webview): Promise<void> => {
+	/** Build: read the plan, apply the card's model and mode, then send the implementing turn. */
+	const buildPlan = async (
+		name: unknown,
+		owner: unknown,
+		model: unknown,
+		mode: unknown,
+		source: vscode.Webview,
+	): Promise<void> => {
 		if (running) {
 			post({ type: 'notice', text: 'A turn is already running — wait for it to finish.' }, source);
 			return;
@@ -1436,6 +1460,12 @@ export function chatPanel(ctx: Context): void {
 		}
 		if (typeof owner === 'string' && owner && owner !== session.id) {
 			post({ type: 'notice', text: 'That plan belongs to another chat.' }, source);
+			return;
+		}
+		// An omitted mode is the old client's `sw`; any other value must be exactly sw/aw.
+		const buildMode = mode === undefined ? 'sw' : asBuildMode(mode);
+		if (!buildMode) {
+			post({ type: 'notice', text: 'Choose Semi-Write or Full Access before building.' }, source);
 			return;
 		}
 		const target = planTarget(session, name);
@@ -1462,8 +1492,30 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text: 'The chat changed — press Build again.' }, source);
 			return;
 		}
-		// Only the mode moves: approval, sandbox and network stay exactly as the user set them.
-		await ctx.settings.applyPolicy({ mode: 'sw' });
+		const modelPick = typeof model === 'string' && model.trim() ? model.trim() : undefined;
+		if (modelPick && !(await ctx.llm.keyReady(modelPick))) {
+			post(
+				{ type: 'notice', text: `${ctx.llm.describe(modelPick)} has no API key — choose another model in the plan card.` },
+				source,
+			);
+			return;
+		}
+		// The key check is async too: a switch or a second click can land while it runs.
+		if (running || ctx.sessions.active()?.id !== session.id) {
+			post({ type: 'notice', text: 'The chat changed — press Build again.' }, source);
+			return;
+		}
+		try {
+			if (modelPick) {
+				await ctx.settings.update('model', modelPick);
+			}
+			// Only the mode moves: approval, sandbox and network stay exactly as the user set them.
+			await ctx.settings.applyPolicy({ mode: buildMode });
+		} catch (error) {
+			ctx.log.message(`plan build settings failed: ${describe(error)}`);
+			post({ type: 'notice', text: 'Could not save the model and mode for this build.' }, source);
+			return;
+		}
 		await send(buildPlanPrompt(target.relative, content), undefined, source);
 	};
 
@@ -1692,7 +1744,7 @@ export function chatPanel(ctx: Context): void {
 					await previewPlan(message.name, message.sessionId, source);
 					break;
 				case 'buildPlan':
-					await buildPlan(message.name, message.sessionId, source);
+					await buildPlan(message.name, message.sessionId, message.model, message.mode, source);
 					break;
 				case 'setApproval':
 					if (typeof message.approval === 'string' && message.approval in APPROVAL_LABELS) {

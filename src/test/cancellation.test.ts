@@ -505,4 +505,56 @@ suite('Cancellation', () => {
 		assert.match(panel, /sessions\.setActive\(pending\.sessionId\)/);
 		assert.match(panel, /executeCommand\('comonad\.openChat'\)/);
 	});
+
+	test('a first turn names the chat it runs in before the panel draws it', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const start = panel.indexOf('const send = async');
+		const end = panel.indexOf('const generate = async');
+		assert.ok(start >= 0 && end > start, 'send() sits before generate()');
+		const body = panel.slice(start, end);
+		const ensure = body.indexOf('ensureActive(ctx.agent.policyFor())');
+		const assign = body.indexOf('runningSessionId = session.id');
+		const draw = body.indexOf("type: 'turn-start'");
+		assert.ok(ensure >= 0, 'send resolves the chat a first prompt runs in');
+		assert.ok(assign > ensure && draw > assign, 'the drawn turn carries that chat id');
+		assert.match(body, /sessionId: session\.id/, 'the turn runs in the chat it announced');
+	});
+
+	test('the webview re-links tool cards after a redraw and reuses a re-attached call', () => {
+		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.js'), 'utf8');
+		assert.match(guest, /function mapToolCards\(turn\)/);
+		const resume = guest.slice(guest.indexOf('function resumeLive(turn)'), guest.indexOf('subagent overlay'));
+		assert.match(resume, /mapToolCards\(turn\)/, 'a resumed turn maps its cards');
+		const end = guest.slice(guest.indexOf('function endTurn(message)'), guest.indexOf('approvals */'));
+		assert.match(end, /mapToolCards\(turn\)/, 'a settled redraw maps its cards');
+		const start = guest.slice(guest.indexOf('function toolStart(message)'), guest.indexOf('function toolResult(message)'));
+		assert.match(start, /step\.id === message\.id/);
+		assert.match(start, /step\.result === undefined/);
+		assert.match(start, /toolCards\.set\(message\.id, known\)/, 'a re-attached call keeps its card');
+	});
+
+	test('a pre-announced draft is the chat the turn writes to', async () => {
+		const kernel = await createTestKernel();
+		try {
+			assert.strictEqual(kernel.ctx.sessions.active(), undefined, 'the workspace starts with no chat');
+			assert.strictEqual(kernel.ctx.sessions.list().length, 0);
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			assert.strictEqual(kernel.ctx.sessions.active()?.id, session.id, 'the draft is the active chat');
+			assert.strictEqual(kernel.ctx.sessions.list().length, 0, 'an unused draft is not history');
+			kernel.ctx.llm.use({
+				name: 'draft-test',
+				async chat() {
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const announced: string[] = [];
+			kernel.ctx.on('agent/turn-start', (ref) => announced.push(ref.sessionId));
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', sessionId: session.id, surface: 'panel' });
+			assert.deepStrictEqual(announced, [session.id], 'the turn runs in the chat the panel was told about');
+			assert.strictEqual(result.sessionId, session.id);
+			assert.deepStrictEqual(kernel.ctx.sessions.list().map((item) => item.id), [session.id], 'the used draft is now history');
+		} finally {
+			await kernel.dispose();
+		}
+	});
 });

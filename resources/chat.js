@@ -100,6 +100,9 @@
 		if (!event.target.closest?.('.pill') && !modelFlyout.contains(event.target)) {
 			closeMenus();
 		}
+		if (planMenuState && !event.target.closest?.('.plan-menu') && !event.target.closest?.('.plan-trigger')) {
+			closePlanMenu(false);
+		}
 		// The chat list behaves like a popover: clicking anywhere else folds it away.
 		if (!event.target.closest?.('#chats') && !event.target.closest?.('#history')) {
 			closeChats();
@@ -111,6 +114,7 @@
 	window.addEventListener('blur', () => {
 		hideTip();
 		hideFlyout();
+		closePlanMenu(false);
 		closeChats();
 		closeMention();
 	});
@@ -925,6 +929,9 @@
 	let lastTop = messagesEl.scrollTop;
 
 	messagesEl.addEventListener('scroll', () => {
+		if (planMenuState) {
+			closePlanMenu(false);
+		}
 		const height = messagesEl.scrollHeight;
 		const top = messagesEl.scrollTop;
 		const distance = height - top - messagesEl.clientHeight;
@@ -1619,20 +1626,498 @@
 		}
 	}
 
+	/* ------------------------------------------------------------------ plan build picker */
+
+	/** Build selections per plan card, keyed by session + call id: replay rebuilds the step objects. */
+	const planChoices = new Map();
+	/** The one open picker: { trigger, step, field, active, items } or null. */
+	let planMenuState = null;
+	let planMenuEl = null;
+
+	const PLAN_MODE_FALLBACK = [
+		{ id: 'sw', label: 'Semi-Write', description: 'write files, run tests in a scratch shell' },
+		{ id: 'aw', label: 'Full Access', description: 'write files, full shell' },
+	];
+
+	function planModeChoices() {
+		const modes = state && Array.isArray(state.modes)
+			? state.modes.filter((item) => item && (item.id === 'sw' || item.id === 'aw'))
+			: [];
+		return modes.length ? modes : PLAN_MODE_FALLBACK;
+	}
+
+	function planModelChoices() {
+		return state && Array.isArray(state.models) ? state.models : [];
+	}
+
+	function planChoiceKey(step) {
+		const plan = (step && step.plan) || {};
+		return (plan.sessionId || '') + ':' + ((step && step.id) || plan.name || '');
+	}
+
+	/** The build picks for a card; defaults follow the settings, mode only when it can build. */
+	function planChoice(step) {
+		const key = planChoiceKey(step);
+		let choice = planChoices.get(key);
+		if (!choice) {
+			choice = {
+				model: (state && typeof state.model === 'string' && state.model) || 'auto',
+				mode: state && (state.mode === 'sw' || state.mode === 'aw') ? state.mode : 'sw',
+			};
+			planChoices.set(key, choice);
+			if (planChoices.size > 200) {
+				planChoices.delete(planChoices.keys().next().value);
+			}
+		}
+		return choice;
+	}
+
+	function planModelItem(id) {
+		return planModelChoices().find((item) => item.id === id);
+	}
+
+	function planModelLabel(id) {
+		const item = planModelItem(id);
+		if (item) {
+			return item.label;
+		}
+		if (state && state.model === id && state.modelLabel) {
+			return state.modelLabel;
+		}
+		return id === 'auto' ? 'Auto' : id;
+	}
+
+	function planModeLabel(id) {
+		const item = planModeChoices().find((choice) => choice.id === id);
+		return (item && item.label) || (id === 'aw' ? 'Full Access' : 'Semi-Write');
+	}
+
+	function planTrigger(field, label, tip) {
+		const trigger = document.createElement('button');
+		trigger.type = 'button';
+		trigger.className = 'pill-trigger plan-trigger';
+		trigger.dataset.planPick = field;
+		trigger.setAttribute('aria-haspopup', 'listbox');
+		trigger.setAttribute('aria-expanded', 'false');
+		trigger.dataset.tip = tip;
+		const text = document.createElement('span');
+		text.className = 'pill-label';
+		text.dataset.planLabel = field;
+		text.textContent = label;
+		const chev = document.createElement('span');
+		chev.className = 'chev';
+		chev.setAttribute('aria-hidden', 'true');
+		chev.textContent = '▾';
+		trigger.append(text, chev);
+		return trigger;
+	}
+
+	function planField(label, trigger) {
+		const field = document.createElement('div');
+		field.className = 'plan-field';
+		const text = document.createElement('span');
+		text.className = 'plan-field-label';
+		text.textContent = label;
+		field.append(text, trigger);
+		return field;
+	}
+
+	/** A finished plan: its own card, not a tool row, so the build controls are always visible. */
+	function planCard(step, plan) {
+		planChoice(step);
+
+		const card = document.createElement('div');
+		card.className = 'tool-card plan-card';
+		card.dataset.status = step.status === 'error' ? 'error' : 'ok';
+		card.dataset.tool = 'write_plan';
+		if (step.id) {
+			card.dataset.callId = step.id;
+		}
+		card.dataset.plan = plan.name;
+		card.dataset.session = plan.sessionId || '';
+
+		const head = document.createElement('div');
+		head.className = 'plan-head';
+		const glyph = document.createElement('span');
+		glyph.className = 'plan-glyph';
+		glyph.setAttribute('aria-hidden', 'true');
+		glyph.innerHTML = toolIcon('write_plan');
+		const heading = document.createElement('span');
+		heading.className = 'plan-heading';
+		const eyebrow = document.createElement('span');
+		eyebrow.className = 'plan-eyebrow';
+		const dot = document.createElement('span');
+		dot.className = 'plan-dot';
+		eyebrow.append(dot, document.createTextNode('Plan ready'));
+		const name = document.createElement('span');
+		name.className = 'plan-name';
+		name.textContent = plan.name;
+		const path = document.createElement('span');
+		path.className = 'plan-path';
+		path.textContent = plan.relative || plan.name;
+		heading.append(eyebrow, name, path);
+		head.append(glyph, heading);
+		card.append(head);
+
+		const choice = planChoice(step);
+		const controls = document.createElement('div');
+		controls.className = 'plan-controls';
+		const modelTrigger = planTrigger('model', planModelLabel(choice.model), 'Model for the implementing turn');
+		const modeTrigger = planTrigger('mode', planModeLabel(choice.mode), 'Agent mode for the implementing turn');
+		const actions = document.createElement('div');
+		actions.className = 'plan-actions';
+		const preview = document.createElement('button');
+		preview.type = 'button';
+		preview.className = 'plan-preview';
+		preview.dataset.plan = plan.name;
+		preview.dataset.planAction = 'preview';
+		preview.dataset.session = plan.sessionId || '';
+		preview.dataset.tip = 'Open this plan in the Markdown preview';
+		preview.textContent = 'Preview';
+		const build = document.createElement('button');
+		build.type = 'button';
+		build.className = 'plan-build primary';
+		build.dataset.plan = plan.name;
+		build.dataset.planAction = 'build';
+		build.dataset.session = plan.sessionId || '';
+		build.textContent = 'Build plan';
+		actions.append(preview, build);
+		controls.append(planField('Model', modelTrigger), planField('Mode', modeTrigger), actions);
+		card.append(controls);
+
+		if (step.result !== undefined) {
+			const trace = document.createElement('details');
+			trace.className = 'plan-trace';
+			const summary = document.createElement('summary');
+			const record = document.createElement('span');
+			record.textContent = 'Tool record';
+			const meta = document.createElement('span');
+			meta.className = 'plan-trace-meta';
+			meta.textContent = 'write_plan · ' + (card.dataset.status === 'error' ? 'error' : 'ok');
+			summary.append(record, meta);
+			const out = document.createElement('pre');
+			out.className = 'plan-trace-out';
+			out.textContent = step.result || '(no output)';
+			trace.append(summary, out);
+			card.append(trace);
+		}
+
+		step._card = card;
+		card._planStep = step;
+		syncPlanCard(card);
+		return card;
+	}
+
+	function setPlanTrigger(card, field, label, tip, warning) {
+		const trigger = card.querySelector('button[data-plan-pick="' + field + '"]');
+		if (!trigger) {
+			return;
+		}
+		const text = trigger.querySelector('[data-plan-label="' + field + '"]');
+		if (text) {
+			text.textContent = label;
+		}
+		trigger.dataset.tip = tip;
+		trigger.classList.toggle('is-warning', Boolean(warning));
+	}
+
+	function syncPlanCard(card) {
+		const step = card && card._planStep;
+		if (!step || !step.plan) {
+			return;
+		}
+		const choice = planChoice(step);
+		const modelItem = planModelItem(choice.model);
+		const modelLabel = planModelLabel(choice.model);
+		const modeItem = planModeChoices().find((item) => item.id === choice.mode);
+		const modeLabel = planModeLabel(choice.mode);
+		const modelTip =
+			'Model for the implementing turn\nCurrent: ' +
+			(modelItem && modelItem.description ? modelLabel + ' — ' + modelItem.description : modelLabel);
+		const modeTip =
+			'Agent mode for the implementing turn\nCurrent: ' +
+			(modeItem && modeItem.description ? modeLabel + ' — ' + modeItem.description : modeLabel);
+		setPlanTrigger(card, 'model', modelLabel, modelTip, Boolean(modelItem && modelItem.needsKey));
+		setPlanTrigger(card, 'mode', modeLabel, modeTip, false);
+		const build = card.querySelector('button.plan-build');
+		if (build) {
+			const blocked = running
+				? 'A turn is running — wait for it to finish.'
+				: modelItem && modelItem.needsKey
+					? 'This model has no API key — pick another one.'
+					: '';
+			build.disabled = Boolean(blocked);
+			build.dataset.tip =
+				blocked || 'Implement ' + step.plan.name + ' with ' + modelLabel + ' in ' + modeLabel + ' mode';
+		}
+		card.dataset.buildModel = choice.model || '';
+		card.dataset.buildMode = choice.mode || 'sw';
+	}
+
+	function syncPlanCards() {
+		for (const card of document.querySelectorAll('.plan-card')) {
+			syncPlanCard(card);
+		}
+		if (planMenuState) {
+			fillPlanMenu();
+		}
+	}
+
+	function planMenuRows() {
+		return planMenuEl ? [...planMenuEl.querySelectorAll('button.plan-option')] : [];
+	}
+
+	function planOptionRow(item, current) {
+		const row = document.createElement('button');
+		row.type = 'button';
+		row.className = 'pill-choice plan-option';
+		row.setAttribute('role', 'option');
+		row.setAttribute('aria-selected', String(item.id === current));
+		row.tabIndex = -1;
+		row.dataset.planValue = item.id;
+		row.classList.toggle('is-on', item.id === current);
+		row.dataset.tip = item.description ? item.label + ' — ' + item.description : item.label;
+		const text = document.createElement('span');
+		text.className = 'plan-option-text';
+		const label = document.createElement('span');
+		label.className = 'pill-choice-label';
+		label.textContent = (item.id === current ? '✓ ' : '') + (item.label || item.id);
+		text.append(label);
+		if (item.description) {
+			const detail = document.createElement('span');
+			detail.className = 'plan-option-detail';
+			detail.textContent = item.description;
+			text.append(detail);
+		}
+		row.append(text);
+		if (item.needsKey) {
+			const note = document.createElement('span');
+			note.className = 'pill-choice-note';
+			note.textContent = 'no key';
+			row.append(note);
+			row.disabled = true;
+			row.setAttribute('aria-disabled', 'true');
+		}
+		return row;
+	}
+
+	function fillPlanMenu() {
+		const current = planMenuState;
+		if (!current || !planMenuEl) {
+			return;
+		}
+		const items = current.field === 'model' ? planModelChoices() : planModeChoices();
+		const choice = planChoice(current.step);
+		const selected = current.field === 'model' ? choice.model : choice.mode;
+		const previous = current.active;
+		planMenuEl.innerHTML = '';
+		planMenuEl.setAttribute('aria-label', current.field === 'model' ? 'Model for the build' : 'Agent mode for the build');
+		current.items = items;
+		for (const item of items) {
+			planMenuEl.append(planOptionRow(item, selected));
+		}
+		const rows = planMenuRows();
+		if (!rows.length) {
+			const hint = document.createElement('div');
+			hint.className = 'plan-menu-hint';
+			hint.textContent =
+				current.field === 'model' ? 'No models configured — add a provider in Settings.' : 'No build modes available.';
+			planMenuEl.append(hint);
+			current.active = -1;
+			return;
+		}
+		const chosen = items.findIndex((item) => item.id === selected && !item.needsKey);
+		const enabled = rows.findIndex((row) => !row.disabled);
+		current.active =
+			previous >= 0 && previous < rows.length && !rows[previous].disabled
+				? previous
+				: chosen >= 0
+					? chosen
+					: enabled;
+		if (!planMenuEl.hidden) {
+			setPlanActive(current.active);
+		}
+	}
+
+	function ensurePlanMenu(trigger) {
+		if (!planMenuEl) {
+			planMenuEl = document.createElement('div');
+			planMenuEl.id = 'plan-picker';
+			planMenuEl.className = 'pill-menu plan-menu';
+			planMenuEl.setAttribute('role', 'listbox');
+			planMenuEl.hidden = true;
+			planMenuEl.addEventListener('keydown', planMenuKey);
+			planMenuEl.addEventListener('click', (event) => {
+				const row = event.target.closest('button.plan-option');
+				if (row && !row.disabled) {
+					event.preventDefault();
+					event.stopPropagation();
+					pickPlanValue(planMenuRows().indexOf(row));
+				}
+			});
+		}
+		// The overlay makes every other body child inert, so its menu must live inside it.
+		const parent = trigger.closest('#subagent-view') || document.body;
+		if (planMenuEl.parentElement !== parent) {
+			parent.append(planMenuEl);
+		}
+		return planMenuEl;
+	}
+
+	function placePlanMenu(trigger) {
+		const rect = trigger.getBoundingClientRect();
+		const width = planMenuEl.offsetWidth;
+		const height = planMenuEl.offsetHeight;
+		let left = rect.left;
+		if (left + width > window.innerWidth - 8) {
+			left = Math.max(8, window.innerWidth - 8 - width);
+		}
+		let top = rect.bottom + 6;
+		if (top + height > window.innerHeight - 8 && rect.top - 6 - height >= 8) {
+			top = rect.top - 6 - height;
+		}
+		top = Math.max(8, Math.min(top, window.innerHeight - 8 - height));
+		planMenuEl.style.left = left + 'px';
+		planMenuEl.style.top = top + 'px';
+	}
+
+	function planMenuNextEnabled(from, delta) {
+		const rows = planMenuRows();
+		if (!rows.length) {
+			return -1;
+		}
+		let index = from;
+		for (let step = 0; step < rows.length; step += 1) {
+			index = (index + delta + rows.length) % rows.length;
+			if (!rows[index].disabled) {
+				return index;
+			}
+		}
+		return -1;
+	}
+
+	function setPlanActive(index) {
+		const current = planMenuState;
+		const rows = planMenuRows();
+		if (!current || !rows.length || index < 0) {
+			return;
+		}
+		current.active = index;
+		rows.forEach((row, at) => {
+			const active = at === index;
+			row.classList.toggle('active', active);
+			if (active) {
+				row.focus({ preventScroll: true });
+				row.scrollIntoView({ block: 'nearest' });
+			}
+		});
+	}
+
+	function planMenuKey(event) {
+		if (!planMenuState) {
+			return;
+		}
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			event.stopPropagation();
+			closePlanMenu(true);
+		} else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+			event.preventDefault();
+			setPlanActive(planMenuNextEnabled(planMenuState.active, event.key === 'ArrowDown' ? 1 : -1));
+		} else if (event.key === 'Home') {
+			event.preventDefault();
+			setPlanActive(planMenuNextEnabled(-1, 1));
+		} else if (event.key === 'End') {
+			event.preventDefault();
+			setPlanActive(planMenuNextEnabled(planMenuRows().length, -1));
+		} else if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			pickPlanValue(planMenuState.active);
+		} else if (event.key === 'Tab') {
+			closePlanMenu(false);
+		}
+	}
+
+	function pickPlanValue(index) {
+		const current = planMenuState;
+		const item = current && current.items[index];
+		if (!item || item.needsKey) {
+			return;
+		}
+		const card = current.trigger.closest('.plan-card');
+		const choice = planChoice(current.step);
+		if (current.field === 'model') {
+			choice.model = item.id;
+		} else {
+			choice.mode = item.id;
+		}
+		closePlanMenu(true);
+		if (card) {
+			syncPlanCard(card);
+		}
+	}
+
+	function openPlanMenu(trigger) {
+		const card = trigger.closest('.plan-card');
+		const step = card && card._planStep;
+		const field = trigger.dataset.planPick;
+		if (!step || (field !== 'model' && field !== 'mode')) {
+			return;
+		}
+		closePlanMenu(false);
+		closeToolMenus();
+		closeMenus();
+		hideFlyout();
+		closeMention();
+		ensurePlanMenu(trigger);
+		planMenuState = { trigger, step, field, active: -1, items: [] };
+		// Fill while hidden, then reveal and position: the measuring and focus wait for layout.
+		fillPlanMenu();
+		planMenuEl.hidden = false;
+		trigger.setAttribute('aria-expanded', 'true');
+		placePlanMenu(trigger);
+		setPlanActive(planMenuState.active);
+	}
+
+	function closePlanMenu(returnFocus) {
+		const current = planMenuState;
+		if (!current) {
+			return;
+		}
+		planMenuState = null;
+		if (planMenuEl) {
+			planMenuEl.hidden = true;
+			planMenuEl.innerHTML = '';
+		}
+		current.trigger.setAttribute('aria-expanded', 'false');
+		if (returnFocus && current.trigger.isConnected) {
+			current.trigger.focus();
+		}
+	}
+
+	window.addEventListener('resize', () => {
+		if (planMenuState) {
+			closePlanMenu(false);
+		}
+	});
+
 	/**
 	 * One tool call: a title, a utility summary and a preview of the output while closed; the whole
 	 * command (highlighted) and the whole output when open. The preview lives in the summary so it
 	 * stays visible while the card is folded; the copy menu is a sibling so it can never toggle it.
 	 */
 	function toolCard(step) {
+		const plan = step.name === 'write_plan' && step.plan && typeof step.plan.name === 'string' ? step.plan : null;
+		if (plan) {
+			return planCard(step, plan);
+		}
 		const parsed = toolArgs(step);
 		const shell = SHELL_TOOL.test(step.name || '');
 		const command = shellCommandOf(step);
 		const failed = step.status === 'error' || /^Error:/.test(step.result || '');
 		const state = step.result === undefined ? 'running' : failed ? 'error' : 'ok';
-		const plan = step.name === 'write_plan' && step.plan && typeof step.plan.name === 'string' ? step.plan : null;
 		const title = shell ? oneLine(shellDescriptionOf(step), 120) || humanToolName(step.name) : humanToolName(step.name);
-		const summary = plan ? plan.name : shell ? shellUtilities(command) || oneLine(command, 100) : argSummary(step, parsed);
+		const summary = shell ? shellUtilities(command) || oneLine(command, 100) : argSummary(step, parsed);
 		const openSubagent =
 			(step.name === 'agent' || step.name === 'delegate') && step.subagentId
 				? '<button type="button" class="tool-open-subagent" data-subagent="' + esc(step.subagentId) + '" data-tip="Open the subagent session">Open session</button>'
@@ -1676,29 +2161,6 @@
 		if (preview) {
 			// Output is text, never markup: a command may print anything.
 			head.querySelector('.tool-preview').textContent = preview;
-		}
-		if (plan) {
-			// The actions live in the head row, so they stay visible while the card is folded.
-			const bar = document.createElement('span');
-			bar.className = 'tool-plan';
-			const option = (action, label, tip) => {
-				const button = document.createElement('button');
-				button.type = 'button';
-				button.className = action === 'build' ? 'plan-build primary' : 'plan-preview';
-				button.dataset.plan = plan.name;
-				button.dataset.planAction = action;
-				button.dataset.session = plan.sessionId || '';
-				button.dataset.tip = tip;
-				button.textContent = label;
-				if (action === 'build') {
-					button.disabled = running;
-				}
-				bar.appendChild(button);
-			};
-			option('preview', 'Preview', 'Open this plan in the Markdown preview');
-			option('build', 'Build', 'Implement this plan in Semi-Write mode');
-			const row = head.querySelector('.tool-head-row');
-			row.insertBefore(bar, row.querySelector('.tool-time'));
 		}
 		// A picture is not printed on the folded card: one chip names it, and opening the card shows it.
 		const reveal = imageReveal(step, details);
@@ -2369,6 +2831,7 @@
 	}
 
 	function renderTurns(list, sessionId, summary, page) {
+		closePlanMenu(false);
 		turns = list || [];
 		summaryInfo = summary || null;
 		pageInfo = page || {
@@ -2409,10 +2872,21 @@
 		scroll(true);
 		// A reload or a resync while a turn runs: the transcript the host persisted ends at the last
 		// settled step, and the rest of the stream continues in this same turn. Without this, every
-		// event after the redraw would be dropped because `live` was cleared above.
-		const runningSessionId = state && state.running ? state.runningSessionId || runningSession : null;
+		// event after the redraw would be dropped because `live` was cleared above. `runningSession`
+		// is the guest's own record from turn-start, so a state message that was composed before
+		// Send (and still says `running: false`) cannot strand the turn.
+		const runningSessionId = (state && state.running ? state.runningSessionId : null) || runningSession;
 		if (runningSessionId && sessionId && sessionId === runningSessionId) {
 			resumeLive(turns[turns.length - 1]);
+		}
+	}
+
+	/** Registers a drawn turn's tool calls by id, so a result settles the card the redraw built. */
+	function mapToolCards(turn) {
+		for (const step of (turn && turn.steps) || []) {
+			if (step.kind === 'tool' && step.id) {
+				toolCards.set(step.id, step);
+			}
 		}
 	}
 
@@ -2426,11 +2900,7 @@
 			return;
 		}
 		live = { turn, thought: null, text: null, think: '', pending: false };
-		for (const step of turn.steps || []) {
-			if (step.kind === 'tool' && step.id) {
-				toolCards.set(step.id, step);
-			}
-		}
+		mapToolCards(turn);
 		const steps = turn.steps || [];
 		const last = steps[steps.length - 1];
 		if (last && last.kind === 'thought' && last._think) {
@@ -2451,6 +2921,7 @@
 
 	/** The chat behind the overlay is present but not reachable: the overlay is a modal dialog. */
 	function setSubagentOpen(open) {
+		closePlanMenu(false);
 		for (const node of document.body.children) {
 			if (node.id !== 'subagent-view') {
 				node.inert = open;
@@ -2714,7 +3185,9 @@
 	let resyncAt = 0;
 
 	function requestResync(force) {
-		const runningSessionId = state && state.running ? state.runningSessionId || runningSession : null;
+		// Same fallback as the redraw: the turn the guest announced is the one to resync, even when the
+		// last state message predates it.
+		const runningSessionId = (state && state.running ? state.runningSessionId : null) || runningSession;
 		if (!force && (!runningSessionId || state.sessionId !== runningSessionId)) {
 			return;
 		}
@@ -2736,6 +3209,29 @@
 		freeze(live.text);
 		live.thought = null;
 		live.text = null;
+		// A redraw or a suspended-turn resume may have drawn this call from the transcript already
+		// (a call that had not run yet). Settle that card instead of adding a twin that would spin
+		// forever beside the real one.
+		const known = message.id
+			? live.turn.steps.find((step) => step.kind === 'tool' && step.id === message.id && step.result === undefined)
+			: null;
+		if (known) {
+			known.name = message.name || known.name;
+			known.args = message.args || known.args || '';
+			known.command = message.command || known.command || '';
+			known.description = message.description || known.description || '';
+			known.status = 'running';
+			known.ms = undefined;
+			known.startedAt = Date.now();
+			known._open = (known._details && known._details.open) || known._open === true;
+			if (known._card) {
+				known._card.replaceWith(toolCard(known));
+			}
+			toolCards.set(message.id, known);
+			tick();
+			scroll();
+			return;
+		}
 		const step = appendStep(
 			live.turn,
 			{
@@ -2778,6 +3274,9 @@
 		// or the swapped-out card would replace itself.
 		step._open = (step._details && step._details.open) || step._open === true;
 		const card = step._card;
+		if (planMenuState && card.contains(planMenuState.trigger)) {
+			closePlanMenu(false);
+		}
 		card.replaceWith(toolCard(step));
 		paintTimer(step, false, Date.now());
 		scroll();
@@ -2848,6 +3347,9 @@
 		} else if (settled.length > turn.steps.length) {
 			turn.steps = settled;
 			renderSteps(turn);
+			// The redraw built new step objects: re-register them, or a later result would settle a card
+			// that is no longer on screen.
+			mapToolCards(turn);
 		}
 		renderFoot(turn);
 		refreshActions();
@@ -3103,17 +3605,37 @@
 			}
 			return true;
 		}
+		const pick = event.target.closest('button[data-plan-pick]');
+		if (pick) {
+			event.preventDefault();
+			event.stopPropagation();
+			if (planMenuState && planMenuState.trigger === pick) {
+				closePlanMenu(true);
+			} else {
+				openPlanMenu(pick);
+			}
+			return true;
+		}
 		const plan = event.target.closest('button[data-plan]');
 		if (plan) {
-			// The buttons sit in the card's <summary>: a click must not fold or unfold the card.
 			event.preventDefault();
 			event.stopPropagation();
 			if (!plan.disabled) {
-				vscode.postMessage({
-					type: plan.dataset.planAction === 'build' ? 'buildPlan' : 'previewPlan',
-					name: plan.dataset.plan,
-					sessionId: plan.dataset.session || undefined,
-				});
+				const card = plan.closest('.plan-card');
+				const step = card && card._planStep;
+				const choice = step ? planChoice(step) : { model: '', mode: 'sw' };
+				const type = plan.dataset.planAction === 'build' ? 'buildPlan' : 'previewPlan';
+				vscode.postMessage(
+					type === 'build'
+						? {
+								type,
+								name: plan.dataset.plan,
+								sessionId: plan.dataset.session || undefined,
+								model: choice.model,
+								mode: choice.mode,
+							}
+						: { type, name: plan.dataset.plan, sessionId: plan.dataset.session || undefined },
+				);
 			}
 			return true;
 		}
@@ -3234,6 +3756,15 @@
 	if (subagentMessagesEl) {
 		subagentMessagesEl.addEventListener('click', handleRichClick);
 		subagentMessagesEl.addEventListener(
+			'scroll',
+			() => {
+				if (planMenuState) {
+					closePlanMenu(false);
+				}
+			},
+			{ passive: true },
+		);
+		subagentMessagesEl.addEventListener(
 			'toggle',
 			(event) => {
 				const details = event.target.closest('.tool-details');
@@ -3263,6 +3794,7 @@
 			closeEdit();
 			closeMention();
 			closeMenus();
+			closePlanMenu(false);
 			stopping = false;
 			$('stop').disabled = false;
 			$('stop').textContent = 'Stop';
@@ -3277,10 +3809,9 @@
 		$('stop').hidden = !value;
 		// Every generation type is refused while a turn runs; a disabled menu says so up front.
 		generationPill.trigger.disabled = value;
-		// A plan cannot be built on top of the turn that is still writing it.
-		for (const button of document.querySelectorAll('.tool-card button.plan-build')) {
-			button.disabled = value;
-		}
+		// A plan cannot be built on top of the turn that is still writing it. The sync also keeps a
+		// keyless selected model's Build disabled once the turn is over.
+		syncPlanCards();
 		refreshActions();
 	}
 
@@ -3444,6 +3975,7 @@
 			// A query belongs to the session that was active when it was typed.
 			shownSession = state.sessionId;
 			closeMention();
+			closePlanMenu(false);
 			// The overlay belongs to the chat it was opened from; a chat switch leaves it.
 			closeSubagentView();
 		}
@@ -3482,6 +4014,8 @@
 		modelState.contextWindow = Number(state.contextWindow) || 0;
 		modelState.windowTokens = Number(state.windowTokens) || 0;
 		updateModelPill();
+		// The cards keep their own picks; a new model list or mode only relabels them.
+		syncPlanCards();
 		const noSandbox = state.sandbox === 'none';
 		environmentChip.hidden = !noSandbox;
 		environmentChip.textContent = noSandbox ? (state.remote ? 'remote · no sandbox' : 'no OS sandbox') : '';
@@ -4644,6 +5178,10 @@
 		}
 		if (mention) {
 			closeMention();
+			return;
+		}
+		if (planMenuState) {
+			closePlanMenu(true);
 			return;
 		}
 		if (!modelFlyout.hidden) {

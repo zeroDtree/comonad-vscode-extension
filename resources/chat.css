@@ -946,18 +946,236 @@ details.thinking summary::before {
 	text-decoration: underline;
 }
 
-/* The plan card's actions: in the head row, so they stay visible while the call is folded. */
-.tool-plan {
+/* A finished plan: a card of its own, not a tool row. The green accent reads as "ready";
+   the Build button keeps the standard primary surface, so it is still the obvious action. */
+.tool-card.plan-card {
+	--plan-accent: var(--vscode-charts-green, #3fb950);
+	border: 1px solid color-mix(in srgb, var(--plan-accent) 34%, var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.28)));
+	border-left: 3px solid var(--plan-accent);
+	border-radius: 10px;
+	background:
+		radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--plan-accent) 10%, transparent), transparent 58%),
+		var(--vscode-editorWidget-background, var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.06)));
+	overflow: hidden;
+}
+
+.plan-head {
+	display: flex;
+	align-items: flex-start;
+	gap: 9px;
+	padding: 10px 12px 8px;
+}
+
+.plan-glyph {
 	flex: none;
 	display: inline-flex;
 	align-items: center;
-	gap: 5px;
-	margin-left: auto;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	margin-top: 1px;
+	border-radius: 6px;
+	color: var(--plan-accent);
+	background: color-mix(in srgb, var(--plan-accent) 14%, transparent);
 }
 
-.tool-plan button {
-	padding: 1px 7px;
+.plan-glyph svg {
+	width: 14px;
+	height: 14px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.25;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.plan-heading {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+}
+
+.plan-eyebrow {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 9.5px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--plan-accent);
+}
+
+.plan-dot {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: var(--plan-accent);
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--plan-accent) 16%, transparent);
+}
+
+.plan-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 13px;
+	font-weight: 600;
+	line-height: 1.35;
+}
+
+.plan-path {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.85;
+}
+
+.plan-controls {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 8px 10px;
+	padding: 8px 12px 10px;
+	border-top: 1px solid color-mix(in srgb, var(--plan-accent) 18%, var(--vscode-panel-border, rgba(128, 128, 128, 0.25)));
+}
+
+.plan-field {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-width: 0;
+}
+
+.plan-field-label {
+	font-size: 9px;
+	font-weight: 600;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.8;
+}
+
+/* Specificity beats the composer's .pill-trigger rules declared further down the sheet. */
+.plan-card .plan-trigger {
+	max-width: min(220px, 48vw);
+	padding: 3px 8px;
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 55%, transparent);
+	font-size: 11.5px;
+}
+
+.plan-card .plan-trigger .chev {
+	font-size: 8px;
+}
+
+.plan-card .plan-trigger[aria-expanded='true'] {
+	border-color: var(--vscode-focusBorder, #007fd4);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 45%, transparent);
+}
+
+.plan-card .plan-trigger.is-warning {
+	border-color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.plan-actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-left: auto;
+	padding-bottom: 1px;
+}
+
+.plan-actions button {
+	padding: 4px 11px;
+	border-radius: 6px;
+	font-size: 11.5px;
+}
+
+.plan-preview {
+	background: transparent;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+}
+
+.plan-build {
+	font-weight: 600;
+}
+
+.plan-trace {
+	border-top: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+.plan-trace > summary {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 12px;
+	list-style: none;
+	cursor: pointer;
+	font-size: 9.5px;
+	font-weight: 600;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.7;
+}
+
+.plan-trace > summary::-webkit-details-marker {
+	display: none;
+}
+
+.plan-trace > summary::before {
+	content: '▸';
+	opacity: 0.6;
+	transition: transform 0.12s ease;
+}
+
+.plan-trace[open] > summary::before {
+	transform: rotate(90deg);
+}
+
+.plan-trace > summary:hover {
+	opacity: 1;
+}
+
+.plan-trace-meta {
+	margin-left: auto;
+	font-weight: 400;
+	letter-spacing: 0.04em;
+}
+
+.plan-trace-out {
+	margin: 0;
+	padding: 0 12px 10px;
+	max-height: 160px;
+	overflow: auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-family: var(--vscode-editor-font-family, monospace);
 	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+@media (max-width: 430px) {
+	.plan-field {
+		flex: 1 1 130px;
+	}
+
+	.plan-card .plan-trigger {
+		max-width: 100%;
+	}
+
+	.plan-actions {
+		width: 100%;
+		margin-left: 0;
+	}
+
+	.plan-actions .plan-build {
+		flex: 1 1 auto;
+	}
 }
 
 .tool-summary {
@@ -2011,6 +2229,61 @@ footer {
 .pill-choice.is-on {
 	font-weight: 600;
 	opacity: 1;
+}
+
+/* The plan card's picker: body-level so the transcript scroller cannot clip it.
+   Above tool menus (20) and the subagent overlay (30), below the hover tip. */
+.plan-menu {
+	position: fixed;
+	left: 0;
+	bottom: auto;
+	z-index: 35;
+	min-width: 220px;
+	max-width: min(340px, calc(100vw - 16px));
+	max-height: min(320px, 50vh);
+}
+
+.plan-option {
+	align-items: flex-start;
+}
+
+.plan-option-text {
+	display: flex;
+	flex: 1 1 auto;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+}
+
+.plan-option-detail {
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 10.5px;
+	opacity: 0.65;
+}
+
+.plan-option.active {
+	background: var(--vscode-menu-selectionBackground, rgba(128, 128, 128, 0.25));
+	color: var(--vscode-menu-selectionForeground, inherit);
+	opacity: 1;
+}
+
+.plan-option:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, #007fd4);
+	outline-offset: -2px;
+}
+
+.plan-option:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+.plan-menu-hint {
+	padding: 6px 8px;
+	font-size: 11px;
+	opacity: 0.65;
 }
 
 #controls .pill {
