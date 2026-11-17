@@ -1725,6 +1725,12 @@ footer {
 	gap: 4px 6px;
 	padding: 4px 6px 4px 4px;
 	font-size: 12px;
+	cursor: pointer;
+	user-select: none;
+}
+
+#changes-head:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
 }
 
 #changes-toggle {
@@ -1748,6 +1754,7 @@ footer {
 #changes-actions {
 	display: flex;
 	gap: 4px;
+	cursor: default;
 }
 
 #changes-actions button {

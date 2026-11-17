@@ -14,6 +14,7 @@
 	const mentionList = $('mention-list');
 	const environmentChip = $('environment');
 	const changesPanel = $('changes-panel');
+	const changesHead = $('changes-head');
 	const changesTitle = $('changes-title');
 	const changesList = $('changes-list');
 	const changesToggle = $('changes-toggle');
@@ -5236,7 +5237,12 @@
 		pinned = true;
 		scroll(true);
 	});
-	changesToggle.addEventListener('click', () => {
+	// The chevron sits inside the row, so its click bubbles here. The action group is the only
+	// part of the row that must not toggle.
+	changesHead.addEventListener('click', (event) => {
+		if (event.target.closest?.('#changes-actions')) {
+			return;
+		}
 		changesOpen = !changesOpen;
 		renderChanges(pendingChanges, reviewedChanges);
 	});
