@@ -17,8 +17,8 @@ import { registerCommand } from './register';
 /**
  * The Review tab: one editor surface for everything the journal has pending. The file list is the
  * listing; the main pane is the accepted baseline against the file on disk, block by block. Every
- * action goes through the same journal the editor's inline review and the chat's pending list use,
- * and every change comes back as `checkpoints/changed`, so all three surfaces stay one story.
+ * action goes through the same journal the File Review tab and the chat's pending list use, and
+ * every change comes back as `checkpoints/changed`, so all three surfaces stay one story.
  *
  * The guest never sees a hunk object: it names a block by `hunkKey` and the host looks it up in a
  * fresh `change()`. A stale key is a refresh, not an overwrite.

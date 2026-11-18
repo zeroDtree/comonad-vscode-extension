@@ -16,9 +16,9 @@ import { explainDirty, journalPending, journalScope, SHELL_NOTE, undoPaths, unsa
 import { registerCommand } from './register';
 
 /**
- * The File Review editor: the changed file drawn whole in a webview, with deleted lines as real red
- * rows that wrap like the rest of the file — the review Cursor shows inside the editor, which VS
- * Code's decoration API cannot draw (inline text cannot contain or wrap lines).
+ * The File Review editor: the changed file drawn whole in a webview, with changed lines tinted and
+ * deleted lines as real red rows that wrap like the rest of the file — text VS Code's decoration
+ * API cannot draw, since inline decoration text cannot contain or wrap lines.
  *
  * It is a **custom text editor**, not a webview panel: the `TextDocument` is the buffer, so the tab
  * gets VS Code's native dirty dot, Cmd/Ctrl+S, close prompt, hot exit and encoding/EOL handling,
@@ -35,7 +35,7 @@ export const FILE_REVIEW_VIEW_TYPE = 'comonad.fileReview';
 const REFRESH_MS = 150;
 /**
  * A document longer than this is not shipped to the webview: CodeMirror would hold the whole string
- * and the review could not draw a diff anyway. **Open as Text** edits it in VS Code's own editor.
+ * and the review could not draw a diff anyway. **Open in Editor** edits it in VS Code's own editor.
  */
 const MAX_TEXT = 4_000_000;
 
@@ -68,7 +68,7 @@ export function fileReviewDocument(webview: vscode.Webview, extensionUri: vscode
 	<span id="fr-badges"></span>
 	<span class="fr-spacer"></span>
 	<span id="fr-actions">
-		<button id="fr-open" type="button">Open as Text</button>
+		<button id="fr-open" type="button">Open in Editor</button>
 		<button id="fr-diff" type="button">Open Diff</button>
 		<button id="fr-undo" type="button">Undo File</button>
 		<button id="fr-keep" type="button">Keep File</button>
@@ -306,7 +306,7 @@ export class FileReviewEditor {
 
 	/**
 	 * Hands the guest its buffer once. Binary content and documents too large to draw never travel;
-	 * the tab shows the reason, and **Open as Text** edits them in VS Code's own editor.
+	 * the tab shows the reason, and **Open in Editor** edits them in VS Code's own editor.
 	 */
 	private ensureDocument(state: FileReviewState): void {
 		if (this.documentSent || !this.ready || this.disposed || state.reason === 'binary') {
@@ -350,7 +350,7 @@ export class FileReviewEditor {
 		const run = ++this.generation;
 		const path = this.displayPath();
 		if (this.document.getText().length > MAX_TEXT) {
-			const state = fileReviewIdle(path, 'too-large', `${path} is too large to draw here. Open as Text edits it in the editor.`);
+			const state = fileReviewIdle(path, 'too-large', `${path} is too large to draw here. Open in Editor edits it in the editor.`);
 			this.push(state);
 			return state;
 		}
@@ -512,7 +512,7 @@ export class FileReviewEditor {
 				case 'undoFile':
 					await this.mutate(() => this.undoFile());
 					return;
-				case 'openText':
+				case 'openEditor':
 					await vscode.commands.executeCommand('vscode.openWith', this.document.uri, 'default', { preview: true, viewColumn: vscode.ViewColumn.Beside });
 					return;
 				case 'openDiff':

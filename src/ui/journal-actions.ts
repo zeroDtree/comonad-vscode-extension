@@ -8,8 +8,8 @@ import { ChangedOutsideError, DirtyEditorError } from '../lib/journal';
 /**
  * The review actions the journal's surfaces share: what is pending, the unsaved-editor check, the
  * outside-changes question, undo with its refusals, and restoring to a turn's restore point. The
- * Review tab, the inline diff and the chat panel's prompt edit all use the same journal, so they ask
- * the same questions in the same words.
+ * Review tab, the File Review tab and the chat panel's prompt edit all use the same journal, so they
+ * ask the same questions in the same words.
  */
 
 export const SHELL_NOTE = 'Changes made by shell commands are not tracked here — review them with git.';

@@ -144,7 +144,7 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
   `manual`/`whitelist_accept` 下，请在主线程完成写，让用户可以批准。
 - `files` 只授予可跟踪的文件工具；`test` 授予 `run_shell_test`。角色默认授权来自角色表。计划读工具使用
   `ro_plan`；`write_plan` 永远不会授予子级。
-- 子级的文件写入记在**父聊天**的 journal 下，出现在它的 review、inline diff 和 Git Changes 中。
+- 子级的文件写入记在**父聊天**的 journal 下，出现在它的 review 和 Git Changes 中。
 
 ### 验收与并行
 

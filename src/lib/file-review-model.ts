@@ -12,7 +12,7 @@ import type { FileHunkView, FileReviewState } from './file-review-protocol';
  */
 
 /**
- * The 0-based line just below a block, matching the inline review's lens anchor: a block that adds
+ * The 0-based line just below a block, the anchor a block's controls sit under: a block that adds
  * lines ends after its last new line, and a pure deletion sits before the line that followed it.
  * The result may equal the file's line count, meaning "after the last line"; the guest clamps.
  */
@@ -72,7 +72,7 @@ export function fileReviewState(change: FileChange, dirty: boolean): FileReviewS
 		return {
 			path: change.path,
 			reason: 'binary',
-			message: 'Binary file — use Open as Text, Open Diff, Keep File or Undo File.',
+			message: 'Binary file — use Open in Editor, Open Diff, Keep File or Undo File.',
 			baseline: '',
 			hunks: [],
 			created: change.created,

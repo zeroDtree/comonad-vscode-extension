@@ -78,5 +78,5 @@ export type FileReviewGuestMessage =
 	| { type: 'undoHunk'; hunk: string }
 	| { type: 'keepFile' }
 	| { type: 'undoFile' }
-	| { type: 'openText' }
+	| { type: 'openEditor' }
 	| { type: 'openDiff' };

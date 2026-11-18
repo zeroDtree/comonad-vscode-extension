@@ -1806,7 +1806,7 @@ export function chatPanel(ctx: Context): void {
 					break;
 				case 'openFile': {
 					// The row names a workspace-relative path; open the File Review tab, an editable file
-					// tab whose merge view draws the deleted lines whole. Open as Text is one button away.
+					// tab whose merge view draws the deleted lines whole. Open in Editor is one button away.
 					const session = ctx.sessions.active();
 					const workspace = session?.policy.workingDirectory;
 					const path = String(message.path ?? '');

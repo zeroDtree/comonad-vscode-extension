@@ -10117,7 +10117,7 @@ suite('Markdown math plugin', () => {
 			for (const id of ['fr-top', 'fr-path', 'fr-open', 'fr-diff', 'fr-undo', 'fr-keep', 'fr-editor', 'fr-notice']) {
 				assert.match(document, new RegExp(`id="${id}"`), `${id} is part of the shell`);
 			}
-			assert.match(document, />Open as Text</, 'the escape hatch to the standard editor is named for what it does');
+			assert.match(document, />Open in Editor</, 'the escape hatch to the standard editor is named for what it does');
 		} finally {
 			panel.dispose();
 		}

@@ -10,7 +10,7 @@ import type { JournalScope } from './journal-actions';
 import { unsavedPaths } from './journal-actions';
 
 /**
- * The block-level review actions the editor's inline review and the Review tab share.
+ * The block-level review actions the File Review tab and the Review tab share.
  *
  * Keep advances the accepted baseline by one block and writes nothing to disk; undo puts the block
  * back in the file, saves it, and amends the journal so the review's own edit does not read as a

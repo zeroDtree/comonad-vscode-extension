@@ -10,7 +10,7 @@ flowchart LR
   Journal --> Pending["Pending list<br/>above the composer"]
   Pending --> Keep["Keep<br/>stage in shadow"]
   Pending --> Undo["Undo<br/>restore content"]
-  Pending --> Review["Review tab<br/>listing + inline diff"]
+  Pending --> Review["Review tab<br/>listing + diff"]
   Prompt["Edit prompt · Regenerate"] --> Restore["Restore files too"]
   Restore --> Journal
 ```
@@ -21,20 +21,20 @@ The list above the composer shows each file with `+N −M` counts. **Undo** and 
 them; clicking a row opens the **File Review** tab: an ordinary, editable file tab with the deleted
 lines drawn in place, complete and wrapping, and **Undo** / **Keep** under every block. Type in it
 and press `Cmd/Ctrl+S` like any other file; the tab carries VS Code's own dirty dot and close prompt.
-**Open as Text** switches to VS Code's editor when you want its language services. Once everything is
+**Open in Editor** switches to VS Code's editor when you want its language services. Once everything is
 reviewed, the list stays on screen as a **reviewed** list, newest decision first. A new pending
 change switches it back to the pending files.
 
 - **Keep** accepts a file or hunk.
 - **Undo** restores the content from before the agent wrote it.
 - **Review** opens the **Review Changes** tab: a file list with `+N −M` counts, the selected file's
-  inline diff with three lines of context, and **Keep** / **Undo** on every block. The top bar acts
+  diff with three lines of context, and **Keep** / **Undo** on every block. The top bar acts
   on every file; the file header acts on the selected one. Click a line number to open the real file
   beside the review at that line.
 
 The Review tab is derived from the journal, not from a second copy of the changes: closing and
-reopening it shows the same pending state, and a block kept in the editor's inline review disappears
-from the tab immediately. It reviews saved content. A file with unsaved text disables its block and
+reopening it shows the same pending state, and a block kept in the **File Review** tab disappears
+from this tab immediately. It reviews saved content. A file with unsaved text disables its block and
 file actions until you save; a file changed outside the agent disables block actions, and **Undo
 File** asks before restoring it. **Keep All** refuses while any pending file is unsaved, and **Keep**
 accepts the file as it is on disk, including an outside edit.
@@ -44,15 +44,14 @@ single-file counterpart and a full file tab: it is backed by the real `TextDocum
 undo/redo, save, the dirty dot and the close prompt are VS Code's own. Inserted lines are green;
 deleted lines are restored in place as real red rows that wrap and scroll like the rest of the file,
 with an **Undo** / **Keep** bar under each block. The deleted text is complete — VS Code's decoration
-API cannot draw inline text that spans or wraps lines, which is why the same review also exists as
-this tab. It speaks the same journal as the other surfaces, so a decision made here shows up
-everywhere.
+API cannot draw inline text that spans or wraps lines, which is why this tab exists. It speaks the
+same journal as the other surfaces, so a decision made here shows up everywhere.
 
 Editing is editing and saving is saving: a save whose bytes differ from the agent's last write marks
 the file **Changed outside** (exactly as saving it in a normal editor would), so per-block actions
 turn off until **Keep File** accepts the file as it now is or **Undo File** restores the baseline
 after asking. Unsaved text disables the review actions everywhere, and file actions, until you save.
-**Open as Text** opens the same document in VS Code's editor beside the tab; edits made in either
+**Open in Editor** opens the same document in VS Code's editor beside the tab; edits made in either
 view stay in sync.
 
 A subagent's file-tool writes are journaled under the **parent chat**, not under a session of their

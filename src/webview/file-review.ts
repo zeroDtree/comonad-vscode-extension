@@ -39,7 +39,8 @@ import { swift as swiftMode } from '@codemirror/legacy-modes/mode/swift';
 import { toml as tomlMode } from '@codemirror/legacy-modes/mode/toml';
 import { html as htmlMode, xml as xmlMode } from '@codemirror/legacy-modes/mode/xml';
 import { yaml as yamlMode } from '@codemirror/legacy-modes/mode/yaml';
-import { splitLines, stripEol } from '../lib/line-diff';
+import { diffLines, splitLines, stripEol } from '../lib/line-diff';
+import { hunkViews } from '../lib/file-review-model';
 import type { FileHunkView, FileReviewChange, FileReviewGuestMessage, FileReviewHostMessage, FileReviewState } from '../lib/file-review-protocol';
 
 /**
@@ -47,6 +48,10 @@ import type { FileHunkView, FileReviewChange, FileReviewGuestMessage, FileReview
  * from the journal's own hunks — the same blocks the Keep/Undo bars act on — so a block's paint,
  * its +/− counts and its bar cannot disagree. Deleted lines are real rows here, wrapping like the
  * rest of the file; the host owns the document and applies the edits.
+ *
+ * While the document has unsaved changes the host's hunks describe the file on disk, so the guest
+ * diffs the accepted baseline against the live buffer itself; the bars stay visible but disabled
+ * until the save brings fresh hunks.
  *
  * The view is created once and updated in place: a journal refresh may change the baseline and the
  * bars, but it must not throw away the reader's cursor, selection, scroll or undo history. External
@@ -388,25 +393,42 @@ function lineEdges(before: string, after: string): { prefix: number; suffix: num
 	return { prefix, suffix };
 }
 
+/** The block actions refuse an unsaved buffer; the bars say so and stay disabled. */
+const DIRTY_BLOCKED = 'Save the file first';
+
+/** CodeMirror's text is LF-joined; the baseline arrives as raw bytes. */
+const normalizeEol = (text: string): string => text.replace(/\r\n?/g, '\n');
+
 interface ReviewData {
 	hunks: readonly FileHunkView[];
 	blocked: string;
 	/** The accepted baseline, where a block's deleted rows are read from. */
 	baseline: string;
+	/** The host state is `ready` and small enough to diff. */
+	diffable: boolean;
+	/** Draw the baseline against the live buffer instead of the host's on-disk hunks. */
+	live: boolean;
 }
 
 const setReview = StateEffect.define<ReviewData>();
 /** The hunks and baseline the next state is built with; a state effect replaces them in place. */
-let reviewData: ReviewData = { hunks: [], blocked: '', baseline: '' };
+let reviewData: ReviewData = { hunks: [], blocked: '', baseline: '', diffable: false, live: false };
+
+/** The blocks of an unsaved buffer: the host's hunks describe the file on disk, not this text. */
+function liveHunks(doc: Text, baseline: string): readonly FileHunkView[] | null {
+	const diff = diffLines(normalizeEol(baseline), doc.toString());
+	return diff.truncated ? null : hunkViews(diff.hunks);
+}
 
 /** A block's paint: its added lines, its deleted rows and its bar, all from the same hunk. */
 function buildReview(doc: Text, data: ReviewData): DecorationSet {
-	if (!data.hunks.length) {
+	const hunks = data.live ? liveHunks(doc, data.baseline) : data.hunks;
+	if (!hunks || !hunks.length) {
 		return Decoration.none;
 	}
-	const baseline = data.baseline ? splitLines(data.baseline) : [];
+	const baseline = data.baseline ? splitLines(normalizeEol(data.baseline)) : [];
 	const ranges = [];
-	for (const hunk of data.hunks) {
+	for (const hunk of hunks) {
 		const at = hunk.anchorLine >= doc.lines ? doc.length : doc.line(Math.max(0, hunk.anchorLine) + 1).from;
 		if (hunk.newLines > 0) {
 			const first = Math.min(doc.lines, Math.max(1, hunk.newStart));
@@ -451,9 +473,9 @@ function buildReview(doc: Text, data: ReviewData): DecorationSet {
 
 /**
  * A state field, not a view plugin: block widgets take vertical space, and CodeMirror only lets
- * layout-affecting decorations come from the state. The journal's line numbers are only valid for
- * the text the host computed them from, so any local edit drops the decorations until the save
- * delivers fresh hunks.
+ * layout-affecting decorations come from the state. Clean hunks are the host's — their keys are
+ * the journal's, so the bars can act on them. An unsaved buffer is diffed here instead, against
+ * the same baseline, and keeps painting live until the save delivers fresh hunks.
  */
 const reviewField = StateField.define<DecorationSet>({
 	create: (editor) => buildReview(editor.doc, reviewData),
@@ -468,7 +490,15 @@ const reviewField = StateField.define<DecorationSet>({
 			reviewData = next;
 			return buildReview(transaction.state.doc, next);
 		}
-		return transaction.docChanged ? Decoration.none : decorations;
+		if (!transaction.docChanged) {
+			return decorations;
+		}
+		// The buffer no longer matches the text the host diffed: from here until the next state
+		// message the blocks are this guest's, and only a saved document can act on them.
+		if (reviewData.diffable && !reviewData.live) {
+			reviewData = { ...reviewData, hunks: [], live: true, blocked: DIRTY_BLOCKED };
+		}
+		return buildReview(transaction.state.doc, reviewData);
 	},
 	provide: (field) => EditorView.decorations.from(field),
 });
@@ -477,8 +507,19 @@ function updateReview(): void {
 	if (!view) {
 		return;
 	}
-	const hunks = !dirty && state?.reason === 'ready' && !state.truncated ? state.hunks : [];
-	view.dispatch({ effects: setReview.of({ hunks, blocked: state?.blockedReason ?? '', baseline: hunks.length ? (state?.baseline ?? '') : '' }) });
+	const current = state;
+	const diffable = Boolean(current && current.reason === 'ready' && !current.truncated);
+	view.dispatch({
+		effects: setReview.of({
+			// While the buffer is unsaved the host's hunks describe the file on disk, so the guest
+			// diffs the baseline against the buffer itself (see `liveHunks`).
+			hunks: current && diffable && !dirty ? current.hunks : [],
+			blocked: dirty ? DIRTY_BLOCKED : (current?.blockedReason ?? ''),
+			baseline: current && diffable ? current.baseline : '',
+			diffable,
+			live: diffable && dirty,
+		}),
+	});
 }
 
 /* ---------------------------------------------------------------- rendering */
@@ -512,7 +553,7 @@ function renderHeader(current: FileReviewState): void {
 
 	const pendingTab = current.reason === 'ready' || current.reason === 'binary' || current.reason === 'too-large';
 	openButton.disabled = false;
-	openButton.title = 'Open the file in VS Code’s own editor';
+	openButton.title = 'Open the file in VS Code’s editor beside this tab';
 	diffButton.disabled = !pendingTab;
 	diffButton.title = 'Open the baseline diff';
 	undoFileButton.disabled = !pendingTab || dirty;
@@ -635,12 +676,14 @@ function scrollToFirstChange(): void {
 function openDocument(text: string, languageId: string, size: number): void {
 	language = languageId;
 	tabSize = Number.isFinite(size) && size > 0 ? size : 4;
-	const wantsReview = state?.reason === 'ready' && !state.truncated;
-	const hunks = wantsReview && !dirty ? (state?.hunks ?? []) : [];
+	const current = state;
+	const diffable = Boolean(current && current.reason === 'ready' && !current.truncated);
 	reviewData = {
-		hunks,
-		blocked: state?.blockedReason ?? '',
-		baseline: hunks.length ? (state?.baseline ?? '') : '',
+		hunks: current && diffable && !dirty ? current.hunks : [],
+		blocked: dirty ? DIRTY_BLOCKED : (current?.blockedReason ?? ''),
+		baseline: current && diffable ? current.baseline : '',
+		diffable,
+		live: diffable && dirty,
 	};
 	const next = EditorState.create({ doc: text, extensions: extensions() });
 	if (view) {
@@ -663,8 +706,16 @@ function replaceDocument(text: string): void {
 	}
 	const scrollTop = view.scrollDOM.scrollTop;
 	const selection = view.state.selection.main;
-	// The journal's block anchors belong to the old text; the next `state` carries fresh ones.
-	reviewData = { hunks: [], blocked: state?.blockedReason ?? '', baseline: '' };
+	// The journal's block anchors belong to the old text; the next `state` carries fresh ones. The
+	// baseline still holds, so an unsaved buffer repaints against it immediately.
+	const previous = reviewData;
+	reviewData = {
+		hunks: [],
+		blocked: dirty ? DIRTY_BLOCKED : (state?.blockedReason ?? ''),
+		baseline: previous.baseline,
+		diffable: previous.diffable,
+		live: previous.diffable && dirty,
+	};
 	const next = EditorState.create({
 		doc: text,
 		selection: EditorSelection.single(Math.min(selection.anchor, text.length), Math.min(selection.head, text.length)),
@@ -722,7 +773,7 @@ window.addEventListener('message', (event: MessageEvent<FileReviewHostMessage>) 
 	}
 });
 
-openButton.addEventListener('click', () => post({ type: 'openText' }));
+openButton.addEventListener('click', () => post({ type: 'openEditor' }));
 diffButton.addEventListener('click', () => post({ type: 'openDiff' }));
 undoFileButton.addEventListener('click', () => post({ type: 'undoFile' }));
 keepFileButton.addEventListener('click', () => post({ type: 'keepFile' }));

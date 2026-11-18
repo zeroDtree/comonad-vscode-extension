@@ -159,8 +159,8 @@ Consequences:
   main thread where the user can approve it.
 - `files` grants only tracked file tools; `test` grants `run_shell_test`. A role's default grant comes
   from the role table. Plan reads use `ro_plan`; `write_plan` is never granted to a child.
-- A child's file writes are journaled under the **parent chat**, so they appear in its review, inline
-  diff and Git Changes.
+- A child's file writes are journaled under the **parent chat**, so they appear in its review and
+  Git Changes.
 
 ### Acceptance and parallel work
 

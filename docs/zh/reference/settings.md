@@ -106,7 +106,6 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 | 键 | 默认值 | 用途 |
 | --- | --- | --- |
 | `checkpoints` | `true` | 记录 agent 写过的每个文件 |
-| `inlineDiff` | `true` | 在编辑器内绘制改动，并在块上方提供 Keep/Undo |
 
 日志是插件树里的一行；关掉它会连同审查命令一起移除。见[检查点](/zh/guide/checkpoints)。
 

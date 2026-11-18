@@ -49,7 +49,7 @@ export interface Pending {
 }
 
 /**
- * One path's change as the inline review reads it: the accepted baseline against the file on disk.
+ * One path's change as the review surfaces read it: the accepted baseline against the file on disk.
  * `hunks` are line diff blocks, so `Keep`/`Undo` can act on one block at a time.
  */
 export interface FileChange {
@@ -115,7 +115,7 @@ export interface JournalApi {
 	/** Every entry the journal holds for a session, oldest first. */
 	entries(workspace: string, sessionId: string): Promise<JournalEntry[]>;
 	/** What the agent wrote and the user has not accepted or undone. `diff: false` skips the counts
-	 *  and hunks — the inline review only needs to know which files are pending. */
+	 *  and hunks — a surface that only lists pending files asks for a file's blocks when it opens it. */
 	pending(workspace: string, sessionId: string, dirty?: (path: string) => boolean, options?: { diff?: boolean }): Promise<Pending>;
 	/** Accepts the current content of these paths as the baseline. */
 	keep(workspace: string, sessionId: string, paths: string[]): Promise<void>;

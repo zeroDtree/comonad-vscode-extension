@@ -203,8 +203,8 @@
 
 - **Pending changes are a list above the composer, and Regenerate can restore files too.** The
   journal's pending files now sit above the input as a collapsible Cursor-style list — path, `+N −M`,
-  **Undo / Keep / Review** for all of them, and a click opens the file in the normal editor with the
-  inline review (the separate Comonad diff tab is still on **Show Diff**). When nothing is pending,
+  **Undo / Keep / Review** for all of them, and a click opens the **File Review** tab (the
+  accepted-baseline diff is still on **Open Diff**). When nothing is pending,
   the list stays as the files already reviewed, newest decision first; a new pending change takes
   the list back, so it never mixes the two. Regenerating the last
   reply asks whether the files the agent wrote since that prompt should be restored too, with the
@@ -213,27 +213,22 @@
   rejected when resolving its path — so it painted every current line as an addition; it now shows
   the accepted baseline and the real hunks.
 
-- **Agent edits are reviewed inline, block by block — and the repository has its own changes view.**
-  A file the agent wrote now opens with its changed lines painted in the editor — additions as solid
-  green blocks with a green gutter bar, deletions as a red-marked block with the removed text on a red
-  chip — and **Undo / Keep** at the bottom edge of every change block, while **Undo File / Keep
-  File / Show Diff** are both a text row at the top of the file and coloured actions in the editor
-  title bar (a green Keep, a neutral Undo, a blue Diff; a code lens itself cannot carry colours).
-  **Show Diff** opens the
-  one-column (inline) diff editor, so the same review is also available as real red and green lines
-  with VS Code's own hunk navigation. Keep accepts that block into the file's *accepted
-  baseline* and leaves the rest pending; Undo puts the block back; the review survives further agent
-  turns until every block is accepted. The journal therefore tracks an accepted baseline per file
-  (`keepHunk`), `undo` now restores that baseline rather than the pre-agent file, and a restore drops
-  the blocks accepted after its mark while keeping the ones accepted before it. A dirty editor hides
-  the block actions until it is saved; a file changed outside the agent keeps only the file-level
-  actions, so a manual edit is never silently folded into an agent change. `comonad.inlineDiff` turns
-  the editor layer off; the QuickPick review and `/review` are unchanged. Alongside it, the
-  new **Git Changes** view (Sessions → Git Changes) lists the real repository's **Staged**,
-  **Changes**, **Untracked** and **Merge** files through the built-in Git extension: clicking opens
-  VS Code's diff, and stage / unstage / discard (confirmed when destructive) work from the item and
-  from the view title. The journal still only records what the agent's own tools write — shell
-  commands show up in the Git view, not in the inline review.
+- **Agent edits are reviewed block by block — and the repository has its own changes view.**
+  The **File Review** tab paints changed lines and draws deleted lines as real red rows, with
+  **Undo / Keep** under every change block and **Open in Editor / Open Diff / Undo File / Keep File**
+  at the top of the file. **Open Diff** opens the one-column baseline diff with VS Code's own hunk
+  navigation. Keep accepts that block into the file's *accepted baseline* and leaves the rest
+  pending; Undo puts the block back; the review survives further agent turns until every block is
+  accepted. The journal therefore tracks an accepted baseline per file (`keepHunk`), `undo` now
+  restores that baseline rather than the pre-agent file, and a restore drops the blocks accepted
+  after its mark while keeping the ones accepted before it. Unsaved text disables the block actions
+  until it is saved; a file changed outside the agent keeps only the file-level actions, so a manual
+  edit is never silently folded into an agent change. Alongside it, the new **Git Changes** view
+  (Sessions → Git Changes) lists the real repository's **Staged**, **Changes**, **Untracked** and
+  **Merge** files through the built-in Git extension: clicking opens VS Code's diff, and stage /
+  unstage / discard (confirmed when destructive) work from the item and from the view title. The
+  journal still only records what the agent's own tools write — shell commands show up in the Git
+  view, not in the review.
 
 - **The ST world-book page is laid out without the settings cards.** The settings panel's own `.group`
   card style — border, padding, a 22px margin and a max width — leaked into the world-book toolbar,

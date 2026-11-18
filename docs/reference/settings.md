@@ -118,7 +118,6 @@ child unlimited; set a finite root budget if you want a cap.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `checkpoints` | `true` | Journal every file the agent writes |
-| `inlineDiff` | `true` | Draw changes inline with Keep/Undo above each block |
 
 The journal is a row of the plugin tree; turning it off removes the review commands with it. See
 [Checkpoints](/guide/checkpoints).

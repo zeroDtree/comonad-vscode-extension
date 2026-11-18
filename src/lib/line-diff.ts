@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * Line-level diffs, for the editor's inline review.
+ * Line-level diffs, for the block review surfaces.
  *
  * `git diff` tells the journal what changed in a file; this module turns two texts into the blocks a
  * person accepts or undoes one at a time. Pure: no `vscode`, no `cordis`.
@@ -79,8 +79,8 @@ export function hunkKey(hunk: LineHunk): string {
 
 /**
  * The change blocks between two texts. A hunk is a maximal run of additions and deletions, so two
- * edits separated by even one unchanged line are two blocks — which is the granularity the inline
- * review offers.
+ * edits separated by even one unchanged line are two blocks — which is the granularity the review
+ * surfaces offer.
  */
 export function diffLines(oldText: string, newText: string, options: DiffOptions = {}): DiffResult {
 	const oldLines = splitLines(oldText);

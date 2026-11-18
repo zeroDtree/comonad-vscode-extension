@@ -19,8 +19,8 @@ import {
 	type Pending,
 	type RevertReport,
 } from '../lib/journal';
+import { changeDiff } from '../ui/change-diff';
 import { fileReviewEditor } from '../ui/file-review-editor';
-import { inlineDiff } from '../ui/inline-diff';
 import { reviewPanel } from '../ui/review-panel';
 
 /**
@@ -105,7 +105,7 @@ export class Checkpoints extends Service implements JournalApi {
 
 	/**
 	 * Blob contents by hash. A blob never changes, so a baseline read once is read no more: the
-	 * inline review asks for the same baseline on every click, and a `git cat-file` per click is the
+	 * diff view asks for the same baseline on every click, and a `git cat-file` per click is the
 	 * difference between an instant button and a slow one.
 	 */
 	private readonly blobs = new Map<string, Buffer>();
@@ -222,8 +222,8 @@ export class Checkpoints extends Service implements JournalApi {
 		if (changed.length === 0) {
 			return { available: true, files: [] };
 		}
-		// The counts and hunks cost a temp index and a `git diff`; the inline review only needs the
-		// list, and asks for each open file's blocks separately.
+		// The counts and hunks cost a temp index and a `git diff`; a surface that lists pending files
+		// asks with `diff: false` and reads a file's blocks only when it opens it.
 		const diffs =
 			options.diff === false
 				? new Map<string, { additions: number; deletions: number; hunks: JournalHunk[] }>()
@@ -700,8 +700,9 @@ export async function checkpointsPlugin(ctx: Context): Promise<void> {
 	// The whole file as an editable custom editor, deletions as real rows: the surface a decoration
 	// cannot draw, backed by the real TextDocument so save and dirty state are VS Code's own.
 	ctx.plugin(fileReviewEditor);
-	// The same journal, reviewed in the editor: decorations and a Keep/Undo at every block.
-	ctx.plugin(inlineDiff);
+	// The baseline a review surface opens as a plain diff: one column, the accepted content behind
+	// the file's current text.
+	ctx.plugin(changeDiff);
 	// The commands this row answers are declared in Comonad's manifest with an `enablement` of
 	// `comonad.checkpoints`: the palette and the keybinding show them while the row is loaded, and have
 	// nothing to offer (and nothing that fails) while it is not.

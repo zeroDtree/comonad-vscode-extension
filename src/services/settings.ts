@@ -255,8 +255,6 @@ export interface Config {
 	allowFullAccess: boolean;
 	/** A SillyTavern folder whose `src/tokenizers` holds the tokenizer files it ships itself. */
 	tokenizerDir: string;
-	/** Show the agent's changes inline in the editor, with Keep/Undo on each block and each file. */
-	inlineDiff: boolean;
 	/** Comonad's own prompt blocks: order, switches and the editable static prefix of each. */
 	prompts: PromptBlockSetting[];
 	/** Tool order and per-tool switches; definitions themselves stay with their plugins. */
@@ -303,7 +301,6 @@ export const CONFIG_KEYS = [
 	'filterSensitiveEnv',
 	'allowFullAccess',
 	'tokenizerDir',
-	'inlineDiff',
 	'prompts',
 	'toolPrompts',
 ] as const satisfies readonly (keyof Config)[];
@@ -518,7 +515,6 @@ export class Settings extends Service {
 			filterSensitiveEnv: flag('filterSensitiveEnv', true),
 			allowFullAccess: flag('allowFullAccess', true),
 			tokenizerDir: typeof raw.tokenizerDir === 'string' ? raw.tokenizerDir : '',
-			inlineDiff: flag('inlineDiff', true),
 			// Both are untrusted arrays: a webview save, a hand-edited settings file or a value from an
 			// older build is sanitized into the canonical shape before it reaches the prompt builder.
 			prompts: parsePromptLayout(raw.prompts),
