@@ -177,7 +177,7 @@ import tavernEntry from 'comonad-plugin-tavern';
 import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
 import { contentController } from 'comonad-plugin-tavern/panel/controller';
 import { settingsDocument, settingsPanel } from '../ui/settings-panel';
-import { fileReviewDocument } from '../ui/file-review-panel';
+import { applyFileReviewChanges, fileReviewDocument } from '../ui/file-review-editor';
 import { reviewDocument } from '../ui/review-panel';
 import { undoHunkAction } from '../ui/hunk-actions';
 import { panesPlugin } from '../services/panes';
@@ -2725,6 +2725,18 @@ suite('Comonad domain', () => {
 			[],
 			'the code reads settings the manifest does not declare',
 		);
+	});
+
+	test('the manifest contributes the file review custom editor, not a webview panel', () => {
+		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+			activationEvents?: string[];
+			contributes: { customEditors?: Array<{ viewType?: string; priority?: string; selector?: Array<{ filenamePattern?: string }> }> };
+		};
+		const fileReview = (manifest.contributes.customEditors ?? []).find((editor) => editor.viewType === 'comonad.fileReview');
+		assert.ok(fileReview, 'the custom editor is contributed');
+		assert.strictEqual(fileReview!.priority, 'option', 'normal file opens keep the text editor');
+		assert.deepStrictEqual(fileReview!.selector, [{ filenamePattern: '*' }]);
+		assert.ok(!(manifest.activationEvents ?? []).includes('onWebviewPanel:comonad.fileReview'), 'the panel view type is gone');
 	});
 
 	test('the shipped profiles in the manifest match the code defaults', () => {
@@ -10105,29 +10117,76 @@ suite('Markdown math plugin', () => {
 			for (const id of ['fr-top', 'fr-path', 'fr-open', 'fr-diff', 'fr-undo', 'fr-keep', 'fr-editor', 'fr-notice']) {
 				assert.match(document, new RegExp(`id="${id}"`), `${id} is part of the shell`);
 			}
+			assert.match(document, />Open as Text</, 'the escape hatch to the standard editor is named for what it does');
 		} finally {
 			panel.dispose();
 		}
 	});
 
-	test('the file review command opens a tab named after the file', async () => {
-		await vscode.commands.executeCommand('comonad.reviewFile', 'src/example.ts');
-		let tabs: vscode.Tab[] = [];
-		for (let attempt = 0; attempt < 20; attempt += 1) {
-			tabs = vscode.window.tabGroups.all.flatMap((group) => group.tabs);
-			if (tabs.some((tab) => tab.label.includes('(Comonad)'))) {
-				break;
-			}
-			await new Promise((resolve) => setTimeout(resolve, 50));
-		}
-		const tab = tabs.find((candidate) => candidate.label.includes('(Comonad)'));
+	test('the file review command opens the file in the custom editor', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'comonad-file-review-'));
+		const file = join(dir, 'example.ts');
+		writeFileSync(file, 'export const a = 1;\n');
+		const uri = vscode.Uri.file(file);
+		let tab: vscode.Tab | undefined;
 		try {
-			assert.ok(tab, `the command opened the file review tab; tabs: ${tabs.map((tab) => tab.label).join(' | ')}`);
-			assert.strictEqual(tab.label, 'example.ts (Comonad)');
+			await vscode.commands.executeCommand('comonad.reviewFile', uri);
+			for (let attempt = 0; attempt < 40; attempt += 1) {
+				tab = vscode.window.tabGroups.all
+					.flatMap((group) => group.tabs)
+					.find((candidate) => candidate.input instanceof vscode.TabInputCustom && candidate.input.viewType === 'comonad.fileReview' && candidate.input.uri.fsPath === file);
+				if (tab) {
+					break;
+				}
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			assert.ok(tab, 'the command opened the custom editor tab');
+			assert.strictEqual(tab.label, 'example.ts', 'the tab is named like a file tab');
 		} finally {
 			if (tab) {
 				await vscode.window.tabGroups.close(tab);
 			}
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('guest edits apply through checked ranges and keep the file byte-clean', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'comonad-edit-'));
+		try {
+			const file = join(dir, 'a.txt');
+			writeFileSync(file, 'one\ntwo\nthree\n');
+			const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+			assert.strictEqual(
+				await applyFileReviewChanges(document, [
+					{ fromLine: 0, fromCh: 0, toLine: 0, toCh: 3, removed: 'one', text: 'ONE' },
+					{ fromLine: 2, fromCh: 0, toLine: 2, toCh: 5, removed: 'three', text: 'THREE' },
+				]),
+				'ok',
+			);
+			assert.strictEqual(document.getText(), 'ONE\ntwo\nTHREE\n');
+			assert.strictEqual(document.isDirty, true);
+			await document.save();
+			assert.strictEqual(readFileSync(file, 'utf8'), 'ONE\ntwo\nTHREE\n');
+
+			// A batch whose removed text no longer matches is refused, never applied in the wrong place.
+			assert.strictEqual(
+				await applyFileReviewChanges(document, [{ fromLine: 0, fromCh: 0, toLine: 0, toCh: 3, removed: 'one', text: 'x' }]),
+				'stale',
+			);
+			assert.strictEqual(document.getText(), 'ONE\ntwo\nTHREE\n');
+
+			// A CRLF file keeps its line endings when a multi-line edit is saved.
+			const crlfFile = join(dir, 'crlf.txt');
+			writeFileSync(crlfFile, 'one\r\ntwo\r\n');
+			const crlf = await vscode.workspace.openTextDocument(vscode.Uri.file(crlfFile));
+			assert.strictEqual(
+				await applyFileReviewChanges(crlf, [{ fromLine: 0, fromCh: 0, toLine: 0, toCh: 3, removed: 'one', text: 'ONE\none' }]),
+				'ok',
+			);
+			await crlf.save();
+			assert.strictEqual(readFileSync(crlfFile, 'utf8'), 'ONE\r\none\r\ntwo\r\n');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
@@ -10148,23 +10207,26 @@ suite('Markdown math plugin', () => {
 			assert.ok(messages.some((message) => message.type === 'ready'), 'the guest bundle loads and installs its listener');
 			// The webview DOM is not reachable from the extension host: a state that draws and reports
 			// no error is the assertion that CodeMirror and the merge view constructed.
-			await panel.webview.postMessage({
-				type: 'state',
-				state: {
-					path: 'src/a.py',
-					reason: 'ready',
-					message: '',
-					baseline: 'import os\nold line\nkeep\n',
-					current: 'import os\nnew line\nkeep\n',
-					hunks: [{ key: '["2",1,"2",1]', anchorLine: 2, oldStart: 2, oldLines: 1, newStart: 2, newLines: 1, additions: 1, deletions: 1 }],
-					created: false,
-					deleted: false,
-					changedOutside: false,
-					dirty: false,
-					truncated: false,
-					blockedReason: '',
-				},
-			});
+			const state = {
+				path: 'src/a.py',
+				reason: 'ready',
+				message: '',
+				baseline: 'import os\nold line\nkeep\n',
+				hunks: [{ key: '["2",1,"2",1]', anchorLine: 2, oldStart: 2, oldLines: 1, newStart: 2, newLines: 1, additions: 1, deletions: 1 }],
+				created: false,
+				deleted: false,
+				changedOutside: false,
+				dirty: false,
+				truncated: false,
+				blockedReason: '',
+			};
+			await panel.webview.postMessage({ type: 'state', state });
+			await panel.webview.postMessage({ type: 'document', text: 'import os\nnew line\nkeep\n', languageId: 'python', tabSize: 4 });
+			await panel.webview.postMessage({ type: 'dirty', dirty: true });
+			await panel.webview.postMessage({ type: 'replace', text: 'import os\nnewer line\nkeep\n' });
+			// The diff can disappear and come back without the editor being thrown away.
+			await panel.webview.postMessage({ type: 'state', state: { ...state, reason: 'no-pending', baseline: '', hunks: [], message: 'No pending changes for this file.' } });
+			await panel.webview.postMessage({ type: 'state', state });
 			await new Promise((resolve) => setTimeout(resolve, 500));
 			const failure = messages.find((message) => message.type === 'notice' && message.level === 'error');
 			assert.strictEqual(failure, undefined, `the guest reported: ${String(failure?.text ?? '')}`);

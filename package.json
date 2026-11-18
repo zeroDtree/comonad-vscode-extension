@@ -23,8 +23,7 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onWebviewPanel:comonad.review",
-    "onWebviewPanel:comonad.fileReview"
+    "onWebviewPanel:comonad.review"
   ],
   "main": "./dist/extension.js",
   "extensionKind": [
@@ -38,6 +37,18 @@
     }
   },
   "contributes": {
+    "customEditors": [
+      {
+        "viewType": "comonad.fileReview",
+        "displayName": "Comonad Review",
+        "selector": [
+          {
+            "filenamePattern": "*"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
     "chatParticipants": [
       {
         "id": "comonad",
@@ -1440,6 +1451,7 @@
     "test": "vscode-test"
   },
   "devDependencies": {
+    "@codemirror/autocomplete": "^6.20.4",
     "@codemirror/commands": "^6.11.1",
     "@codemirror/language": "^6.13.1",
     "@codemirror/legacy-modes": "^6.5.5",

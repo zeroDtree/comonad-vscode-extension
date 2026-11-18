@@ -240,20 +240,23 @@ suite('File review view model', () => {
 		assert.strictEqual(views[0]!.anchorLine, 1);
 	});
 
-	test('fileReviewState carries both texts and marks binary content unreadable', () => {
+	test('fileReviewState carries the baseline and marks binary content unreadable', () => {
 		const change = changeOf('src/a.py', 'old\n', 'new\n');
 		const state = fileReviewState(change, false);
 
 		assert.strictEqual(state.reason, 'ready');
 		assert.strictEqual(state.baseline, 'old\n');
-		assert.strictEqual(state.current, 'new\n');
 		assert.strictEqual(state.blockedReason, '');
 		assert.strictEqual(state.hunks.length, 1);
+		assert.strictEqual(state.dirty, false);
+
+		const dirty = fileReviewState(change, true);
+		assert.strictEqual(dirty.dirty, true);
+		assert.strictEqual(dirty.blockedReason, 'Save the file first');
 
 		const binary = fileReviewState(changeOf('img.png', '', '', { binary: true }), false);
 		assert.strictEqual(binary.reason, 'binary');
 		assert.strictEqual(binary.baseline, '');
-		assert.strictEqual(binary.current, '');
 		assert.deepStrictEqual(binary.hunks, []);
 	});
 
@@ -266,10 +269,11 @@ suite('File review view model', () => {
 		assert.strictEqual(fileReviewBlocked(changeOf('a.txt', 'a\n', 'b\n'), false), '');
 	});
 
-	test('a truncated change still sends the file but no blocks', () => {
+	test('a truncated change keeps the file but drops the diff', () => {
 		const state = fileReviewState(changeOf('big.txt', 'a\n', 'b\n', { truncated: true }), false);
 		assert.strictEqual(state.reason, 'ready');
 		assert.strictEqual(state.truncated, true);
+		assert.strictEqual(state.baseline, '', 'no merge view is built without a diff');
 		assert.deepStrictEqual(state.hunks, []);
 		assert.strictEqual(state.blockedReason, 'Too large for block actions');
 	});

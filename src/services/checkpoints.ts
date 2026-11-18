@@ -19,7 +19,7 @@ import {
 	type Pending,
 	type RevertReport,
 } from '../lib/journal';
-import { fileReviewPanel } from '../ui/file-review-panel';
+import { fileReviewEditor } from '../ui/file-review-editor';
 import { inlineDiff } from '../ui/inline-diff';
 import { reviewPanel } from '../ui/review-panel';
 
@@ -697,8 +697,9 @@ export async function checkpointsPlugin(ctx: Context): Promise<void> {
 	await ctx.plugin(Checkpoints);
 	// The journal's own surface: the Review tab, with the listing and the block-by-block diff.
 	ctx.plugin(reviewPanel);
-	// The whole file in a webview editor, deletions as real rows: the surface a decoration cannot draw.
-	ctx.plugin(fileReviewPanel);
+	// The whole file as an editable custom editor, deletions as real rows: the surface a decoration
+	// cannot draw, backed by the real TextDocument so save and dirty state are VS Code's own.
+	ctx.plugin(fileReviewEditor);
 	// The same journal, reviewed in the editor: decorations and a Keep/Undo at every block.
 	ctx.plugin(inlineDiff);
 	// The commands this row answers are declared in Comonad's manifest with an `enablement` of

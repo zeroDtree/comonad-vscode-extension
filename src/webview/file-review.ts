@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { EditorState, StateField, type Extension, type Text } from '@codemirror/state';
+import { ChangeSet, Compartment, EditorSelection, EditorState, Prec, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import {
 	Decoration,
 	EditorView,
@@ -9,12 +9,15 @@ import {
 	highlightActiveLineGutter,
 	keymap,
 	lineNumbers,
+	scrollPastEnd,
 	type DecorationSet,
+	type ViewUpdate,
 } from '@codemirror/view';
-import { defaultKeymap } from '@codemirror/commands';
-import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language';
+import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
+import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { HighlightStyle, StreamLanguage, bracketMatching, syntaxHighlighting } from '@codemirror/language';
 import { search, searchKeymap } from '@codemirror/search';
-import { unifiedMergeView } from '@codemirror/merge';
+import { getOriginalDoc, originalDocChangeEffect, unifiedMergeView } from '@codemirror/merge';
 import { tags } from '@lezer/highlight';
 import { c as cMode, cpp as cppMode, csharp as csharpMode, dart as dartMode, java as javaMode, kotlin as kotlinMode, scala as scalaMode } from '@codemirror/legacy-modes/mode/clike';
 import { css as cssMode, less as lessMode, sCSS as scssMode } from '@codemirror/legacy-modes/mode/css';
@@ -37,16 +40,18 @@ import { swift as swiftMode } from '@codemirror/legacy-modes/mode/swift';
 import { toml as tomlMode } from '@codemirror/legacy-modes/mode/toml';
 import { html as htmlMode, xml as xmlMode } from '@codemirror/legacy-modes/mode/xml';
 import { yaml as yamlMode } from '@codemirror/legacy-modes/mode/yaml';
-import type { FileHunkView, FileReviewGuestMessage, FileReviewHostMessage, FileReviewState } from '../lib/file-review-protocol';
+import type { FileHunkView, FileReviewChange, FileReviewGuestMessage, FileReviewHostMessage, FileReviewState } from '../lib/file-review-protocol';
 
 /**
- * The File Review tab's guest: a whole file in a CodeMirror editor whose deletions are drawn in
- * place by the unified merge view — real rows, wrapping like the rest of the file, rather than the
- * single-line chip an editor decoration is limited to. Every block gets its own Undo/Keep bar,
- * named by the journal's hunk key; the host owns the writes and sends the state back.
+ * The File Review editor's guest: a whole file in an editable CodeMirror view whose deletions are
+ * drawn in place by the unified merge view — real rows, wrapping like the rest of the file, rather
+ * than the single-line chip an editor decoration is limited to. Every block gets its own Undo/Keep
+ * bar, named by the journal's hunk key; the host owns the document and applies the edits.
  *
- * The editor is read-only on purpose: the journal reviews saved content, and edits belong in the
- * real file, one button away.
+ * The view is created once and updated in place: a journal refresh may change the baseline and the
+ * bars, but it must not throw away the reader's cursor, selection, scroll or undo history. External
+ * document changes do replace the state on purpose — undo must never bring back text an agent or
+ * another editor has since written.
  */
 
 declare function acquireVsCodeApi(): {
@@ -77,11 +82,17 @@ const empty = byId<HTMLDivElement>('fr-empty');
 const notice = byId<HTMLDivElement>('fr-notice');
 
 let view: EditorView | null = null;
+let state: FileReviewState | null = null;
+let dirty = false;
+let language = 'plaintext';
+let tabSize = 4;
 let noticeTimer: number | undefined;
-/** The file the editor last showed, so a switch can reveal its first change instead of the top. */
-let shownPath = '';
+/** The merge view is a compartment: it appears and disappears with the pending diff. */
+const merge = new Compartment();
+let mergeOn = false;
+let baseline = '';
 
-/** The value the open tabs' theme is drawn with, read once: webviews reload on a theme change. */
+/** The value the tab is drawn with, read once: webviews reload on a theme change. */
 const dark = (() => {
 	const kind = document.body.dataset.vscodeThemeKind ?? '';
 	return kind === 'vscode-dark' || kind === 'vscode-high-contrast' || document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast');
@@ -91,113 +102,124 @@ const dark = (() => {
 
 const modeFor = (parser: Parameters<typeof StreamLanguage.define>[0]): Extension => StreamLanguage.define(parser);
 
-/** What to highlight by, from the file's name: the same common set the chat's highlighter covers. */
-function languageFor(path: string): Extension | undefined {
+const byExtension: Record<string, () => Extension> = {
+	py: () => modeFor(pythonMode),
+	pyi: () => modeFor(pythonMode),
+	pyw: () => modeFor(pythonMode),
+	pyx: () => modeFor(cythonMode),
+	js: () => modeFor(javascriptMode),
+	mjs: () => modeFor(javascriptMode),
+	cjs: () => modeFor(javascriptMode),
+	jsx: () => modeFor(javascriptMode),
+	ts: () => modeFor(typescriptMode),
+	mts: () => modeFor(typescriptMode),
+	cts: () => modeFor(typescriptMode),
+	tsx: () => modeFor(typescriptMode),
+	json: () => modeFor(jsonMode),
+	jsonc: () => modeFor(jsonMode),
+	json5: () => modeFor(jsonMode),
+	sh: () => modeFor(shellMode),
+	bash: () => modeFor(shellMode),
+	zsh: () => modeFor(shellMode),
+	ksh: () => modeFor(shellMode),
+	c: () => modeFor(cMode),
+	h: () => modeFor(cMode),
+	cc: () => modeFor(cppMode),
+	cpp: () => modeFor(cppMode),
+	cxx: () => modeFor(cppMode),
+	hpp: () => modeFor(cppMode),
+	hh: () => modeFor(cppMode),
+	hxx: () => modeFor(cppMode),
+	cs: () => modeFor(csharpMode),
+	java: () => modeFor(javaMode),
+	kt: () => modeFor(kotlinMode),
+	kts: () => modeFor(kotlinMode),
+	scala: () => modeFor(scalaMode),
+	sc: () => modeFor(scalaMode),
+	dart: () => modeFor(dartMode),
+	go: () => modeFor(goMode),
+	rs: () => modeFor(rustMode),
+	rb: () => modeFor(rubyMode),
+	rake: () => modeFor(rubyMode),
+	pl: () => modeFor(perlMode),
+	pm: () => modeFor(perlMode),
+	lua: () => modeFor(luaMode),
+	swift: () => modeFor(swiftMode),
+	r: () => modeFor(rMode),
+	jl: () => modeFor(juliaMode),
+	hs: () => modeFor(haskellMode),
+	sql: () => modeFor(sqlMode),
+	yaml: () => modeFor(yamlMode),
+	yml: () => modeFor(yamlMode),
+	toml: () => modeFor(tomlMode),
+	xml: () => modeFor(xmlMode),
+	svg: () => modeFor(xmlMode),
+	plist: () => modeFor(xmlMode),
+	html: () => modeFor(htmlMode),
+	htm: () => modeFor(htmlMode),
+	css: () => modeFor(cssMode),
+	scss: () => modeFor(scssMode),
+	less: () => modeFor(lessMode),
+	diff: () => modeFor(diffMode),
+	patch: () => modeFor(diffMode),
+	ps1: () => modeFor(powershellMode),
+	psm1: () => modeFor(powershellMode),
+};
+
+const byLanguage: Record<string, () => Extension> = {
+	python: () => modeFor(pythonMode),
+	cython: () => modeFor(cythonMode),
+	javascript: () => modeFor(javascriptMode),
+	javascriptreact: () => modeFor(javascriptMode),
+	typescript: () => modeFor(typescriptMode),
+	typescriptreact: () => modeFor(typescriptMode),
+	json: () => modeFor(jsonMode),
+	jsonc: () => modeFor(jsonMode),
+	shellscript: () => modeFor(shellMode),
+	c: () => modeFor(cMode),
+	cpp: () => modeFor(cppMode),
+	csharp: () => modeFor(csharpMode),
+	java: () => modeFor(javaMode),
+	kotlin: () => modeFor(kotlinMode),
+	scala: () => modeFor(scalaMode),
+	dart: () => modeFor(dartMode),
+	go: () => modeFor(goMode),
+	rust: () => modeFor(rustMode),
+	ruby: () => modeFor(rubyMode),
+	perl: () => modeFor(perlMode),
+	lua: () => modeFor(luaMode),
+	swift: () => modeFor(swiftMode),
+	r: () => modeFor(rMode),
+	julia: () => modeFor(juliaMode),
+	haskell: () => modeFor(haskellMode),
+	sql: () => modeFor(sqlMode),
+	yaml: () => modeFor(yamlMode),
+	toml: () => modeFor(tomlMode),
+	xml: () => modeFor(xmlMode),
+	html: () => modeFor(htmlMode),
+	css: () => modeFor(cssMode),
+	scss: () => modeFor(scssMode),
+	less: () => modeFor(lessMode),
+	diff: () => modeFor(diffMode),
+	powershell: () => modeFor(powershellMode),
+	dockerfile: () => modeFor(dockerMode),
+};
+
+/** What to highlight by: the document's language id, then its extension as a fallback. */
+function languageFor(languageId: string, path: string): Extension | undefined {
+	const direct = byLanguage[languageId];
+	if (direct) {
+		return direct();
+	}
 	const base = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
-	const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
 	if (base === 'dockerfile') {
 		return modeFor(dockerMode);
 	}
 	if (base === 'gemfile' || base === 'rakefile') {
 		return modeFor(rubyMode);
 	}
-	switch (ext) {
-		case 'py':
-		case 'pyi':
-		case 'pyw':
-			return modeFor(pythonMode);
-		case 'pyx':
-			return modeFor(cythonMode);
-		case 'js':
-		case 'mjs':
-		case 'cjs':
-		case 'jsx':
-			return modeFor(javascriptMode);
-		case 'ts':
-		case 'mts':
-		case 'cts':
-		case 'tsx':
-			return modeFor(typescriptMode);
-		case 'json':
-		case 'jsonc':
-		case 'json5':
-			return modeFor(jsonMode);
-		case 'sh':
-		case 'bash':
-		case 'zsh':
-		case 'ksh':
-			return modeFor(shellMode);
-		case 'c':
-		case 'h':
-			return modeFor(cMode);
-		case 'cc':
-		case 'cpp':
-		case 'cxx':
-		case 'hpp':
-		case 'hh':
-		case 'hxx':
-			return modeFor(cppMode);
-		case 'cs':
-			return modeFor(csharpMode);
-		case 'java':
-			return modeFor(javaMode);
-		case 'kt':
-		case 'kts':
-			return modeFor(kotlinMode);
-		case 'scala':
-		case 'sc':
-			return modeFor(scalaMode);
-		case 'dart':
-			return modeFor(dartMode);
-		case 'go':
-			return modeFor(goMode);
-		case 'rs':
-			return modeFor(rustMode);
-		case 'rb':
-		case 'rake':
-			return modeFor(rubyMode);
-		case 'pl':
-		case 'pm':
-			return modeFor(perlMode);
-		case 'lua':
-			return modeFor(luaMode);
-		case 'swift':
-			return modeFor(swiftMode);
-		case 'r':
-			return modeFor(rMode);
-		case 'jl':
-			return modeFor(juliaMode);
-		case 'hs':
-			return modeFor(haskellMode);
-		case 'sql':
-			return modeFor(sqlMode);
-		case 'yaml':
-		case 'yml':
-			return modeFor(yamlMode);
-		case 'toml':
-			return modeFor(tomlMode);
-		case 'xml':
-		case 'svg':
-		case 'plist':
-			return modeFor(xmlMode);
-		case 'html':
-		case 'htm':
-			return modeFor(htmlMode);
-		case 'css':
-			return modeFor(cssMode);
-		case 'scss':
-			return modeFor(scssMode);
-		case 'less':
-			return modeFor(lessMode);
-		case 'diff':
-		case 'patch':
-			return modeFor(diffMode);
-		case 'ps1':
-		case 'psm1':
-			return modeFor(powershellMode);
-		default:
-			return undefined;
-	}
+	const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
+	return byExtension[ext]?.();
 }
 
 /* ------------------------------------------------------------------- theme */
@@ -265,7 +287,6 @@ function button(className: string, text: string, title: string, disabled: boolea
 	element.title = title;
 	element.disabled = disabled;
 	if (!disabled) {
-		// The bar lives inside the editor's content; the editor must not swallow the click.
 		element.addEventListener('click', (event) => {
 			event.preventDefault();
 			event.stopPropagation();
@@ -305,33 +326,59 @@ class HunkBar extends WidgetType {
 	}
 }
 
+interface BarData {
+	hunks: readonly FileHunkView[];
+	blocked: string;
+}
+
+const setBars = StateEffect.define<BarData>();
+/** The hunks the next state is built with; a state effect replaces them in place. */
+let barData: BarData = { hunks: [], blocked: '' };
+
+function buildBars(doc: Text, data: BarData): DecorationSet {
+	if (!data.hunks.length) {
+		return Decoration.none;
+	}
+	const ranges = [];
+	for (const hunk of data.hunks) {
+		const at = hunk.anchorLine >= doc.lines ? doc.length : doc.line(Math.max(0, hunk.anchorLine) + 1).from;
+		// `side: -1` attaches the bar to the line that follows it, so the gutter's line numbers stay
+		// aligned; `side: 1` puts an end-of-document bar below a removal widget at the same position.
+		ranges.push(Decoration.widget({ widget: new HunkBar(hunk, data.blocked), block: true, side: at === doc.length ? 1 : -1 }).range(at));
+	}
+	return Decoration.set(ranges, true);
+}
+
 /**
- * The bars are placed from the host's hunks, not from the merge view's chunks: Keep/Undo must name
- * exactly the block the journal will revalidate, and the two diff implementations are allowed to
- * disagree about where a block starts.
- *
  * A state field, not a view plugin: a block widget takes vertical space, and CodeMirror only lets
- * the layout-affecting decorations come from the state.
+ * layout-affecting decorations come from the state. The journal's line numbers are only valid for
+ * the text the host computed them from, so any local edit drops the bars until the save delivers
+ * fresh hunks.
  */
-function hunkBarField(hunks: readonly FileHunkView[], blocked: string): Extension {
-	const build = (doc: Text): DecorationSet => {
-		const ranges = [];
-		for (const hunk of hunks) {
-			const at = hunk.anchorLine >= doc.lines ? doc.length : doc.line(Math.max(0, hunk.anchorLine) + 1).from;
-			// `side: -1` attaches the bar to the line that follows it, so the gutter's line numbers
-			// stay aligned with their lines; `side: 1` counts the bar's height against the line above.
-			// At the document's very end there is no following line, and `1` puts the bar after a
-			// removal widget at the same position — below the deleted lines, where the other bars sit.
-			ranges.push(Decoration.widget({ widget: new HunkBar(hunk, blocked), block: true, side: at === doc.length ? 1 : -1 }).range(at));
+const barField = StateField.define<DecorationSet>({
+	create: (editor) => buildBars(editor.doc, barData),
+	update: (decorations, transaction) => {
+		let next: BarData | null = null;
+		for (const effect of transaction.effects) {
+			if (effect.is(setBars)) {
+				next = effect.value;
+			}
 		}
-		return Decoration.set(ranges, true);
-	};
-	const field = StateField.define<DecorationSet>({
-		create: (state) => build(state.doc),
-		update: (decorations, transaction) => (transaction.docChanged ? build(transaction.state.doc) : decorations),
-		provide: (value) => EditorView.decorations.from(value),
-	});
-	return field;
+		if (next) {
+			barData = next;
+			return buildBars(transaction.state.doc, next);
+		}
+		return transaction.docChanged ? Decoration.none : decorations;
+	},
+	provide: (field) => EditorView.decorations.from(field),
+});
+
+function updateBars(): void {
+	if (!view) {
+		return;
+	}
+	const hunks = !dirty && state?.reason === 'ready' && !state.truncated ? state.hunks : [];
+	view.dispatch({ effects: setBars.of({ hunks, blocked: state?.blockedReason ?? '' }) });
 }
 
 /* ---------------------------------------------------------------- rendering */
@@ -356,32 +403,38 @@ function renderHeader(current: FileReviewState): void {
 	if (current.changedOutside) {
 		badge('Changed outside', 'outside');
 	}
-	if (current.dirty) {
+	if (dirty) {
 		badge('Unsaved', 'dirty');
 	}
 	if (current.truncated) {
 		badge('Large', '', 'Too large or too different to diff block by block; the file is shown as it is on disk.');
 	}
 
-	const usable = current.reason === 'ready' || current.reason === 'binary' || current.reason === 'too-large';
-	openButton.disabled = !usable || current.deleted || current.reason === 'no-pending';
-	openButton.title = current.deleted ? 'The file is deleted' : 'Open the file in the editor';
-	diffButton.disabled = !usable || current.deleted;
-	diffButton.title = current.deleted ? 'The file is deleted' : 'Open the baseline diff';
-	const fileActionBlocked = current.dirty;
-	undoFileButton.disabled = !usable || fileActionBlocked;
-	undoFileButton.title = fileActionBlocked ? 'Save the file first' : 'Restore the accepted baseline';
-	keepFileButton.disabled = !usable || fileActionBlocked;
-	keepFileButton.title = fileActionBlocked ? 'Save the file first' : 'Accept this file as it is now';
+	const pendingTab = current.reason === 'ready' || current.reason === 'binary' || current.reason === 'too-large';
+	openButton.disabled = false;
+	openButton.title = 'Open the file in VS Code’s own editor';
+	diffButton.disabled = !pendingTab;
+	diffButton.title = 'Open the baseline diff';
+	undoFileButton.disabled = !pendingTab || dirty;
+	undoFileButton.title = dirty ? 'Save the file first' : 'Restore the accepted baseline';
+	keepFileButton.disabled = !pendingTab || dirty;
+	keepFileButton.title = dirty ? 'Save the file first' : 'Accept this file as it is now';
 }
 
-function showEmpty(message: string): void {
-	empty.hidden = false;
+/** A reason without a diff still keeps the editor: this is a file tab, not a review-only view. */
+function renderBanner(current: FileReviewState): void {
+	const message = current.reason === 'ready' ? '' : current.message;
+	const replacesEditor = current.reason === 'binary' || current.reason === 'too-large';
+	empty.hidden = !message;
+	empty.className = replacesEditor ? '' : 'fr-banner';
 	empty.replaceChildren();
-	const title = document.createElement('div');
-	title.className = 'fr-empty-title';
-	title.textContent = message;
-	empty.append(title);
+	if (message) {
+		const title = document.createElement('div');
+		title.className = 'fr-empty-title';
+		title.textContent = message;
+		empty.append(title);
+	}
+	editorHost.hidden = replacesEditor;
 }
 
 function showNotice(level: 'info' | 'warn' | 'error', text: string): void {
@@ -396,81 +449,172 @@ function showNotice(level: 'info' | 'warn' | 'error', text: string): void {
 	}
 }
 
-/** The extensions of one render; a new state means new hunks and possibly a new language. */
-function extensionsFor(current: FileReviewState): Extension[] {
+function setDirty(next: boolean): void {
+	if (dirty === next) {
+		return;
+	}
+	dirty = next;
+	if (state) {
+		renderHeader(state);
+	}
+	updateBars();
+}
+
+function mergeExtensions(original: string): Extension {
+	return unifiedMergeView({
+		original,
+		mergeControls: false,
+		highlightChanges: true,
+		gutter: true,
+		syntaxHighlightDeletions: true,
+		allowInlineDiffs: false,
+	});
+}
+
+/** One editor, one document: the language and the tab size never change after this. */
+function extensions(): Extension[] {
 	const extensions: Extension[] = [
 		lineNumbers(),
 		highlightActiveLine(),
 		highlightActiveLineGutter(),
 		drawSelection(),
 		EditorView.lineWrapping,
-		EditorView.editable.of(false),
-		EditorState.readOnly.of(true),
-		keymap.of([...searchKeymap, ...defaultKeymap]),
+		scrollPastEnd(),
+		EditorState.allowMultipleSelections.of(true),
+		EditorState.tabSize.of(tabSize),
+		bracketMatching(),
+		closeBrackets(),
+		history(),
+		// Save has to win over the browser's "save page" chord; the host queues it behind its edits.
+		Prec.high(
+			keymap.of([
+				{
+					key: 'Mod-s',
+					run: () => {
+						post({ type: 'save' });
+						return true;
+					},
+				},
+			]),
+		),
+		keymap.of([...closeBracketsKeymap, ...searchKeymap, ...historyKeymap, ...defaultKeymap]),
 		search({ top: true }),
 		syntaxHighlighting(highlight),
 		theme,
-		hunkBarField(current.hunks, current.blockedReason),
+		barField,
+		merge.of(mergeOn ? mergeExtensions(baseline) : []),
+		EditorView.updateListener.of((update) => {
+			if (!update.docChanged) {
+				return;
+			}
+			const changes: FileReviewChange[] = [];
+			update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+				const from = update.startState.doc.lineAt(fromA);
+				const to = update.startState.doc.lineAt(toA);
+				changes.push({
+					fromLine: from.number - 1,
+					fromCh: fromA - from.from,
+					toLine: to.number - 1,
+					toCh: toA - to.from,
+					removed: update.startState.doc.sliceString(fromA, toA),
+					text: inserted.toString(),
+				});
+			});
+			post({ type: 'edit', changes, length: update.state.doc.length });
+		}),
 	];
-	const language = languageFor(current.path);
-	if (language) {
-		extensions.push(language);
-	}
-	// A truncated diff is a whole-file fallback: showing the file is still useful, pretending it is
-	// a readable inline diff is not.
-	if (!current.truncated) {
-		extensions.push(
-			unifiedMergeView({
-				original: current.baseline,
-				mergeControls: false,
-				highlightChanges: true,
-				gutter: true,
-				syntaxHighlightDeletions: true,
-				allowInlineDiffs: false,
-			}),
-		);
+	const mode = languageFor(language, state?.path ?? '');
+	if (mode) {
+		extensions.push(mode);
 	}
 	return extensions;
 }
 
-function render(current: FileReviewState): void {
-	renderHeader(current);
-	if (current.reason !== 'ready') {
-		empty.hidden = false;
-		// The next ready state is a fresh view even for the same path: the editor was cleared here.
-		shownPath = '';
-		view?.setState(EditorState.create({ doc: '', extensions: [] }));
-		showEmpty(current.message || 'Nothing to review');
+function scrollToFirstChange(): void {
+	if (!view || !state || state.reason !== 'ready' || dirty) {
 		return;
 	}
-	empty.hidden = true;
-	const freshFile = view === null || current.path !== shownPath;
-	shownPath = current.path;
-	const scrollTop = view?.scrollDOM.scrollTop ?? 0;
-	const next = EditorState.create({ doc: current.current, extensions: extensionsFor(current) });
-	const editor = view ?? new EditorView({ state: next, parent: editorHost });
-	if (!view) {
-		view = editor;
-	} else {
+	const first = state.hunks[0];
+	if (!first) {
+		return;
+	}
+	const line = first.newLines > 0 ? first.newStart - 1 : first.newStart;
+	const target = view.state.doc.line(Math.max(0, Math.min(view.state.doc.lines - 1, line)) + 1).from;
+	view.dispatch({ effects: EditorView.scrollIntoView(target, { y: 'center' }) });
+}
+
+/** Builds the editor for the document the host owns; the view is created exactly once. */
+function openDocument(text: string, languageId: string, size: number): void {
+	language = languageId;
+	tabSize = Number.isFinite(size) && size > 0 ? size : 4;
+	const wantsMerge = state?.reason === 'ready' && !state.truncated;
+	mergeOn = wantsMerge;
+	baseline = wantsMerge ? (state?.baseline ?? '') : '';
+	barData = {
+		hunks: wantsMerge && !dirty ? (state?.hunks ?? []) : [],
+		blocked: state?.blockedReason ?? '',
+	};
+	const next = EditorState.create({ doc: text, extensions: extensions() });
+	if (view) {
 		view.setState(next);
-		view.scrollDOM.scrollTop = scrollTop;
-		// setState re-lays the document out; restoring after a frame keeps the reader's place.
-		requestAnimationFrame(() => {
-			if (view && !freshFile) {
-				view.scrollDOM.scrollTop = scrollTop;
-			}
-		});
+	} else {
+		view = new EditorView({ state: next, parent: editorHost });
 	}
-	// A review opens at its first change, not at line 1: the change can be thousands of lines down,
-	// and a top-of-file view reads as "nothing changed". Later refreshes keep the reader's place.
-	if (freshFile) {
-		const first = current.hunks[0];
-		if (first) {
-			const line = first.newLines > 0 ? first.newStart - 1 : first.newStart;
-			const target = editor.state.doc.line(Math.max(0, Math.min(editor.state.doc.lines - 1, line)) + 1).from;
-			editor.dispatch({ effects: EditorView.scrollIntoView(target, { y: 'center' }) });
-		}
+	if (state) {
+		renderBanner(state);
 	}
+	scrollToFirstChange();
+}
+
+function replaceDocument(text: string): void {
+	if (!view) {
+		return;
+	}
+	if (view.state.doc.toString() === text) {
+		return;
+	}
+	const scrollTop = view.scrollDOM.scrollTop;
+	const selection = view.state.selection.main;
+	// The journal's block anchors belong to the old text; the next `state` carries fresh ones.
+	barData = { hunks: [], blocked: state?.blockedReason ?? '' };
+	const next = EditorState.create({
+		doc: text,
+		selection: EditorSelection.single(Math.min(selection.anchor, text.length), Math.min(selection.head, text.length)),
+		extensions: extensions(),
+	});
+	view.setState(next);
+	view.scrollDOM.scrollTop = scrollTop;
+}
+
+function applyState(next: FileReviewState): void {
+	state = next;
+	if (!view) {
+		// Before the document arrives there is no local editing, so the host's flag is the truth.
+		dirty = next.dirty;
+	}
+	renderHeader(next);
+	renderBanner(next);
+	if (!view) {
+		return;
+	}
+	const wantsMerge = next.reason === 'ready' && !next.truncated;
+	if (wantsMerge && !mergeOn) {
+		mergeOn = true;
+		baseline = next.baseline;
+		view.dispatch({ effects: merge.reconfigure(mergeExtensions(baseline)) });
+	} else if (!wantsMerge && mergeOn) {
+		mergeOn = false;
+		baseline = '';
+		view.dispatch({ effects: merge.reconfigure([]) });
+	} else if (wantsMerge && next.baseline !== baseline) {
+		// Reconfiguring the compartment would not re-run the merge field's init; the original doc is
+		// updated through the effect the merge view provides.
+		const original = getOriginalDoc(view.state);
+		const changes = ChangeSet.of([{ from: 0, to: original.length, insert: next.baseline }], original.length);
+		baseline = next.baseline;
+		view.dispatch({ effects: originalDocChangeEffect(view.state, changes) });
+	}
+	updateBars();
 }
 
 /* ---------------------------------------------------------------- messages */
@@ -480,23 +624,34 @@ window.addEventListener('message', (event: MessageEvent<FileReviewHostMessage>) 
 	if (!message || typeof message !== 'object') {
 		return;
 	}
-	if (message.type === 'state') {
-		// Remember the file so a reloaded window restores this tab on the same path.
-		vscode.setState({ path: message.state.path });
-		try {
-			render(message.state);
-		} catch (error) {
-			// A blank editor is worse than a sentence: the failure is shown, not swallowed.
-			showNotice('error', `The review view failed to render: ${String(error)}`);
+	try {
+		switch (message.type) {
+			case 'document':
+				openDocument(message.text, message.languageId, message.tabSize);
+				if (state) {
+					applyState(state);
+				}
+				return;
+			case 'state':
+				applyState(message.state);
+				return;
+			case 'dirty':
+				setDirty(message.dirty);
+				return;
+			case 'replace':
+				replaceDocument(message.text);
+				return;
+			case 'notice':
+				showNotice(message.level, message.text);
+				return;
 		}
-		return;
-	}
-	if (message.type === 'notice') {
-		showNotice(message.level, message.text);
+	} catch (error) {
+		// A blank editor is worse than a sentence: the failure is shown, not swallowed.
+		showNotice('error', `The review view failed to render: ${String(error)}`);
 	}
 });
 
-openButton.addEventListener('click', () => post({ type: 'openFile' }));
+openButton.addEventListener('click', () => post({ type: 'openText' }));
 diffButton.addEventListener('click', () => post({ type: 'openDiff' }));
 undoFileButton.addEventListener('click', () => post({ type: 'undoFile' }));
 keepFileButton.addEventListener('click', () => post({ type: 'keepFile' }));

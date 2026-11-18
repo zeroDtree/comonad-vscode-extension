@@ -1805,8 +1805,8 @@ export function chatPanel(ctx: Context): void {
 					await vscode.commands.executeCommand('comonad.undoAll');
 					break;
 				case 'openFile': {
-					// The row names a workspace-relative path; open the File Review tab, whose merge view
-					// can draw the deleted lines whole — the real file is one button away inside it.
+					// The row names a workspace-relative path; open the File Review tab, an editable file
+					// tab whose merge view draws the deleted lines whole. Open as Text is one button away.
 					const session = ctx.sessions.active();
 					const workspace = session?.policy.workingDirectory;
 					const path = String(message.path ?? '');

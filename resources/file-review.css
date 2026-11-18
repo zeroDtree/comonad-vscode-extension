@@ -154,6 +154,22 @@ button:focus-visible {
 	line-height: 1.5;
 }
 
+/* A reason without a diff keeps the editor visible; the note becomes a quiet banner above it. */
+#fr-empty.fr-banner {
+	max-width: none;
+	padding: 4px 12px;
+	border-bottom: 1px solid var(--fr-border);
+	background: var(--fr-surface);
+	line-height: 1.4;
+	user-select: none;
+}
+
+#fr-empty.fr-banner .fr-empty-title {
+	font-size: 12px;
+	font-weight: 400;
+	color: var(--fr-muted);
+}
+
 .fr-empty-title {
 	font-size: 13px;
 	font-weight: 600;

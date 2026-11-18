@@ -62,21 +62,24 @@ export function fileReviewBlocked(change: FileChange, dirty: boolean): string {
 	return '';
 }
 
-/** One pending file as the tab draws it. Binary content never reaches the guest as text. */
+/**
+ * One pending file as the tab draws it. The document's text is not part of the state: the host's
+ * `TextDocument` is the buffer. Binary content never reaches the guest as text.
+ */
 export function fileReviewState(change: FileChange, dirty: boolean): FileReviewState {
+	const truncated = change.truncated;
 	if (change.binary) {
 		return {
 			path: change.path,
 			reason: 'binary',
-			message: 'Binary file — use Open Diff, Keep File or Undo File.',
+			message: 'Binary file — use Open as Text, Open Diff, Keep File or Undo File.',
 			baseline: '',
-			current: '',
 			hunks: [],
 			created: change.created,
 			deleted: change.deleted,
 			changedOutside: change.changedOutside,
 			dirty,
-			truncated: change.truncated,
+			truncated,
 			blockedReason: fileReviewBlocked(change, dirty),
 		};
 	}
@@ -84,14 +87,14 @@ export function fileReviewState(change: FileChange, dirty: boolean): FileReviewS
 		path: change.path,
 		reason: 'ready',
 		message: '',
-		baseline: change.baseline,
-		current: change.current,
-		hunks: change.truncated ? [] : hunkViews(change.hunks),
+		// A truncated diff falls back to the whole file; there is nothing to compare against.
+		baseline: truncated ? '' : change.baseline,
+		hunks: truncated ? [] : hunkViews(change.hunks),
 		created: change.created,
 		deleted: change.deleted,
 		changedOutside: change.changedOutside,
 		dirty,
-		truncated: change.truncated,
+		truncated,
 		blockedReason: fileReviewBlocked(change, dirty),
 	};
 }
@@ -103,7 +106,6 @@ export function fileReviewIdle(path: string, reason: 'no-pending' | 'too-large' 
 		reason,
 		message,
 		baseline: '',
-		current: '',
 		hunks: [],
 		created: false,
 		deleted: false,

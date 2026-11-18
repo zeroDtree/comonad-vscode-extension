@@ -39,6 +39,7 @@ suite('Comonad extension', () => {
 			'comonad.keepFile',
 			'comonad.undoFile',
 			'comonad.openChangeDiff',
+			'comonad.reviewFile',
 			'comonad.keepHunk',
 			'comonad.undoHunk',
 			'comonad.git.openDiff',
