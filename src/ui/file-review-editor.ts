@@ -513,10 +513,14 @@ export class FileReviewEditor {
 					await this.mutate(() => this.undoFile());
 					return;
 				case 'openEditor':
-					await vscode.commands.executeCommand('vscode.openWith', this.document.uri, 'default', { preview: true, viewColumn: vscode.ViewColumn.Beside });
+					await vscode.commands.executeCommand('vscode.openWith', this.document.uri, 'default', {
+						// Pinned: the review tab is a preview tab, and another preview would replace it.
+						preview: false,
+						viewColumn: this.panel.viewColumn ?? vscode.ViewColumn.Active,
+					});
 					return;
 				case 'openDiff':
-					await vscode.commands.executeCommand('comonad.openChangeDiff', this.document.uri);
+					await vscode.commands.executeCommand('comonad.openChangeDiff', this.document.uri, this.panel.viewColumn ?? vscode.ViewColumn.Active);
 					return;
 			}
 		} catch (error) {

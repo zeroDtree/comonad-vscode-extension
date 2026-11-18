@@ -30,7 +30,7 @@ change switches it back to the pending files.
 - **Review** opens the **Review Changes** tab: a file list with `+N −M` counts, the selected file's
   diff with three lines of context, and **Keep** / **Undo** on every block. The top bar acts
   on every file; the file header acts on the selected one. Click a line number to open the real file
-  beside the review at that line.
+  in the review's editor group at that line.
 
 The Review tab is derived from the journal, not from a second copy of the changes: closing and
 reopening it shows the same pending state, and a block kept in the **File Review** tab disappears
@@ -51,8 +51,8 @@ Editing is editing and saving is saving: a save whose bytes differ from the agen
 the file **Changed outside** (exactly as saving it in a normal editor would), so per-block actions
 turn off until **Keep File** accepts the file as it now is or **Undo File** restores the baseline
 after asking. Unsaved text disables the review actions everywhere, and file actions, until you save.
-**Open in Editor** opens the same document in VS Code's editor beside the tab; edits made in either
-view stay in sync.
+**Open in Editor** opens the same document in VS Code's editor as another tab in the same group,
+leaving the review tab in place; edits made in either view stay in sync.
 
 A subagent's file-tool writes are journaled under the **parent chat**, not under a session of their
 own. They appear in the same pending list, the same diff and the same restore points as the main

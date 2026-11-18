@@ -103,9 +103,10 @@ Highlights are below; the full implementation notes are linked at the end. The u
   `Comonad: Review Changed File`) opens it as a custom text editor: removed lines are real, wrapping
   rows — text VS Code's decoration API cannot draw — with Undo/Keep under every block.
   It is backed by the real `TextDocument`, so typing, undo/redo, `Cmd/Ctrl+S`, the dirty dot, the
-  close prompt and encoding/EOL handling are VS Code's own; **Open in Editor** opens the same document
-  in the standard editor. Saving behaves like any editor: a save that diverges from the agent's last
-  write reads as *changed outside* and disables per-block actions, exactly as before. Same journal,
+  close prompt and encoding/EOL handling are VS Code's own; **Open in Editor** opens the same
+  document in the standard editor as another tab in the same group. Saving behaves like any editor:
+  a save that diverges from the agent's last write reads as *changed outside* and disables per-block
+  actions, exactly as before. Same journal,
   same block keys, same refusals as the other surfaces.
 - **Remote SSH, WSL and Dev Containers** are first-class; credentials stay client-side and model calls
   originate on the remote host.

@@ -71,17 +71,17 @@ export function changeDiff(ctx: Context): void {
 		},
 	});
 
-	registerCommand(ctx, 'comonad.openChangeDiff', async (uri?: vscode.Uri) => {
+	registerCommand(ctx, 'comonad.openChangeDiff', async (uri?: vscode.Uri, column?: vscode.ViewColumn) => {
 		const current = journalScope(ctx);
 		const file = uri instanceof vscode.Uri ? uri : vscode.window.activeTextEditor?.document.uri;
 		if (!current || !file || !relativeOf(current.workspace, file)) {
 			return;
 		}
-		// Inline, not side by side: the accepted baseline's lines and the current file's sit in one
-		// column, so the review reads like the file itself, only changed.
+		// Pinned: a review surface may already be the group's preview tab, and a preview diff would
+		// replace it. The caller passes its own column so the diff lands in the review's group.
 		await vscode.commands.executeCommand('vscode.diff', baselineUri(file, current), file, `${basename(file.fsPath)} (Comonad)`, {
-			preview: true,
-			renderSideBySide: false,
+			preview: false,
+			viewColumn: column ?? vscode.ViewColumn.Active,
 		});
 	});
 

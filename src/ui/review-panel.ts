@@ -399,7 +399,7 @@ export function reviewPanel(ctx: Context): void {
 			return;
 		}
 		const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
-		const editor = await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+		const editor = await vscode.window.showTextDocument(document, { preview: true, viewColumn: panel?.viewColumn ?? vscode.ViewColumn.Active });
 		const wanted = Number(line);
 		if (Number.isFinite(wanted)) {
 			const index = Math.max(0, Math.min(document.lineCount - 1, Math.floor(wanted) - 1));
@@ -419,7 +419,7 @@ export function reviewPanel(ctx: Context): void {
 			notify('warn', `${path} is no longer on disk.`);
 			return;
 		}
-		await vscode.commands.executeCommand('comonad.openChangeDiff', vscode.Uri.file(target));
+		await vscode.commands.executeCommand('comonad.openChangeDiff', vscode.Uri.file(target), panel?.viewColumn ?? vscode.ViewColumn.Active);
 	}
 
 	async function handle(message: Record<string, unknown>): Promise<void> {

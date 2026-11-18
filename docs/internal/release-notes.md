@@ -216,8 +216,8 @@
 - **Agent edits are reviewed block by block — and the repository has its own changes view.**
   The **File Review** tab paints changed lines and draws deleted lines as real red rows, with
   **Undo / Keep** under every change block and **Open in Editor / Open Diff / Undo File / Keep File**
-  at the top of the file. **Open Diff** opens the one-column baseline diff with VS Code's own hunk
-  navigation. Keep accepts that block into the file's *accepted baseline* and leaves the rest
+  at the top of the file. **Open Diff** opens the baseline diff in the same editor group, with
+  VS Code's own hunk navigation. Keep accepts that block into the file's *accepted baseline* and leaves the rest
   pending; Undo puts the block back; the review survives further agent turns until every block is
   accepted. The journal therefore tracks an accepted baseline per file (`keepHunk`), `undo` now
   restores that baseline rather than the pre-agent file, and a restore drops the blocks accepted
