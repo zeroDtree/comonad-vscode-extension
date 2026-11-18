@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { ChangeSet, Compartment, EditorSelection, EditorState, Prec, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
+import { EditorSelection, EditorState, Prec, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import {
 	Decoration,
 	EditorView,
@@ -17,7 +17,6 @@ import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { HighlightStyle, StreamLanguage, bracketMatching, syntaxHighlighting } from '@codemirror/language';
 import { search, searchKeymap } from '@codemirror/search';
-import { getOriginalDoc, originalDocChangeEffect, unifiedMergeView } from '@codemirror/merge';
 import { tags } from '@lezer/highlight';
 import { c as cMode, cpp as cppMode, csharp as csharpMode, dart as dartMode, java as javaMode, kotlin as kotlinMode, scala as scalaMode } from '@codemirror/legacy-modes/mode/clike';
 import { css as cssMode, less as lessMode, sCSS as scssMode } from '@codemirror/legacy-modes/mode/css';
@@ -40,13 +39,14 @@ import { swift as swiftMode } from '@codemirror/legacy-modes/mode/swift';
 import { toml as tomlMode } from '@codemirror/legacy-modes/mode/toml';
 import { html as htmlMode, xml as xmlMode } from '@codemirror/legacy-modes/mode/xml';
 import { yaml as yamlMode } from '@codemirror/legacy-modes/mode/yaml';
+import { splitLines, stripEol } from '../lib/line-diff';
 import type { FileHunkView, FileReviewChange, FileReviewGuestMessage, FileReviewHostMessage, FileReviewState } from '../lib/file-review-protocol';
 
 /**
- * The File Review editor's guest: a whole file in an editable CodeMirror view whose deletions are
- * drawn in place by the unified merge view — real rows, wrapping like the rest of the file, rather
- * than the single-line chip an editor decoration is limited to. Every block gets its own Undo/Keep
- * bar, named by the journal's hunk key; the host owns the document and applies the edits.
+ * The File Review editor's guest: a whole file in an editable CodeMirror view. Its changes are drawn
+ * from the journal's own hunks — the same blocks the Keep/Undo bars act on — so a block's paint,
+ * its +/− counts and its bar cannot disagree. Deleted lines are real rows here, wrapping like the
+ * rest of the file; the host owns the document and applies the edits.
  *
  * The view is created once and updated in place: a journal refresh may change the baseline and the
  * bars, but it must not throw away the reader's cursor, selection, scroll or undo history. External
@@ -87,10 +87,6 @@ let dirty = false;
 let language = 'plaintext';
 let tabSize = 4;
 let noticeTimer: number | undefined;
-/** The merge view is a compartment: it appears and disappears with the pending diff. */
-const merge = new Compartment();
-let mergeOn = false;
-let baseline = '';
 
 /** The value the tab is drawn with, read once: webviews reload on a theme change. */
 const dark = (() => {
@@ -261,24 +257,24 @@ const theme = EditorView.theme(
 		'.cm-activeLine': { backgroundColor: 'var(--vscode-editor-lineHighlightBackground, transparent)' },
 		'.cm-activeLineGutter': { backgroundColor: 'var(--vscode-editor-lineHighlightBackground, transparent)' },
 		'&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'var(--vscode-editor-selectionBackground, rgba(120, 150, 200, 0.35))' },
-		// The unified merge view draws an inserted line green and a removed block red, and the removed
-		// lines are ordinary rows: they wrap, select and scroll with the rest of the file. The look is
-		// background-only, Cursor style: no underline gradient and no change-gutter bars. The extra
-		// `.cm-merge-b` and structural classes out-specify the merge base theme's own rules, and the
-		// `background` shorthand also clears the gradient image it paints on changed text.
-		'&.cm-merge-b .cm-content .cm-changedLine': {
+		// Cursor style: background only, no underlines and no gutter bars. Added lines and deleted
+		// rows are drawn from the journal's hunks — the same blocks the bars act on — so the paint,
+		// the +/− counts and the bar can never disagree. The left padding matches `.cm-line`, and
+		// the rows wrap like the rest of the file.
+		'.fr-added-line': {
 			backgroundColor: 'var(--vscode-diffEditor-insertedLineBackground, rgba(46, 160, 67, 0.12))',
 		},
-		'&.cm-merge-b .cm-line .cm-changedText': {
-			background: 'var(--vscode-diffEditor-insertedTextBackground, rgba(46, 160, 67, 0.28))',
+		'.fr-changed-text': {
+			backgroundColor: 'var(--vscode-diffEditor-insertedTextBackground, rgba(46, 160, 67, 0.28))',
 		},
-		'.cm-deletedChunk': {
+		'.fr-deleted-chunk': {
 			backgroundColor: 'var(--vscode-diffEditor-removedLineBackground, rgba(248, 81, 73, 0.12))',
+			padding: '0 2px 0 6px',
 			whiteSpace: 'pre-wrap',
 			overflowWrap: 'anywhere',
 		},
-		'&.cm-merge-b .cm-deletedChunk .cm-deletedText': {
-			background: 'var(--vscode-diffEditor-removedTextBackground, rgba(248, 81, 73, 0.28))',
+		'.fr-deleted-text': {
+			backgroundColor: 'var(--vscode-diffEditor-removedTextBackground, rgba(248, 81, 73, 0.28))',
 		},
 	},
 	{ dark },
@@ -333,22 +329,119 @@ class HunkBar extends WidgetType {
 	}
 }
 
-interface BarData {
-	hunks: readonly FileHunkView[];
-	blocked: string;
+interface DeletedRow {
+	text: string;
+	/** The changed columns, when the row pairs with the line that replaced it. */
+	mark: readonly [number, number] | null;
 }
 
-const setBars = StateEffect.define<BarData>();
-/** The hunks the next state is built with; a state effect replaces them in place. */
-let barData: BarData = { hunks: [], blocked: '' };
+/** The removed lines of a block, drawn in place above the lines that replaced them. */
+class DeletedChunk extends WidgetType {
+	constructor(readonly rows: readonly DeletedRow[]) {
+		super();
+	}
 
-function buildBars(doc: Text, data: BarData): DecorationSet {
+	eq(other: DeletedChunk): boolean {
+		return (
+			other.rows.length === this.rows.length &&
+			other.rows.every((row, index) => {
+				const own = this.rows[index]!;
+				return row.text === own.text && (row.mark?.[0] ?? -1) === (own.mark?.[0] ?? -1) && (row.mark?.[1] ?? -1) === (own.mark?.[1] ?? -1);
+			})
+		);
+	}
+
+	toDOM(): HTMLElement {
+		const block = document.createElement('div');
+		block.className = 'fr-deleted-chunk';
+		for (const row of this.rows) {
+			const line = document.createElement('div');
+			line.className = 'fr-deleted-line';
+			// An empty removed line still has to occupy a row.
+			const text = row.text || '\u00a0';
+			if (!row.mark) {
+				line.textContent = text;
+			} else {
+				const [from, to] = row.mark;
+				const changed = document.createElement('span');
+				changed.className = 'fr-deleted-text';
+				changed.textContent = text.slice(from, to);
+				line.append(document.createTextNode(text.slice(0, from)), changed, document.createTextNode(text.slice(to)));
+			}
+			block.append(line);
+		}
+		return block;
+	}
+}
+
+/** The unchanged head and tail columns of a replaced line pair. */
+function lineEdges(before: string, after: string): { prefix: number; suffix: number } {
+	const max = Math.min(before.length, after.length);
+	let prefix = 0;
+	while (prefix < max && before[prefix] === after[prefix]) {
+		prefix += 1;
+	}
+	let suffix = 0;
+	while (suffix < max - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) {
+		suffix += 1;
+	}
+	return { prefix, suffix };
+}
+
+interface ReviewData {
+	hunks: readonly FileHunkView[];
+	blocked: string;
+	/** The accepted baseline, where a block's deleted rows are read from. */
+	baseline: string;
+}
+
+const setReview = StateEffect.define<ReviewData>();
+/** The hunks and baseline the next state is built with; a state effect replaces them in place. */
+let reviewData: ReviewData = { hunks: [], blocked: '', baseline: '' };
+
+/** A block's paint: its added lines, its deleted rows and its bar, all from the same hunk. */
+function buildReview(doc: Text, data: ReviewData): DecorationSet {
 	if (!data.hunks.length) {
 		return Decoration.none;
 	}
+	const baseline = data.baseline ? splitLines(data.baseline) : [];
 	const ranges = [];
 	for (const hunk of data.hunks) {
 		const at = hunk.anchorLine >= doc.lines ? doc.length : doc.line(Math.max(0, hunk.anchorLine) + 1).from;
+		if (hunk.newLines > 0) {
+			const first = Math.min(doc.lines, Math.max(1, hunk.newStart));
+			const last = Math.min(doc.lines, first + hunk.newLines - 1);
+			for (let number = first; number <= last; number += 1) {
+				ranges.push(Decoration.line({ class: 'fr-added-line' }).range(doc.line(number).from));
+			}
+		}
+		if (hunk.oldLines > 0) {
+			const start = Math.max(0, hunk.oldStart - 1);
+			const rows: DeletedRow[] = [];
+			// A replacement with the same number of lines pairs them one to one, so the changed
+			// columns can carry the stronger tint on both sides — still a background, never a line.
+			const paired = hunk.oldLines === hunk.newLines && hunk.newLines > 0;
+			for (let index = 0; index < hunk.oldLines; index += 1) {
+				const text = stripEol(baseline[start + index] ?? '');
+				let mark: readonly [number, number] | null = null;
+				const number = hunk.newStart + index;
+				if (paired && number <= doc.lines) {
+					const line = doc.line(number);
+					const { prefix, suffix } = lineEdges(text, line.text);
+					if (prefix < text.length - suffix) {
+						mark = [prefix, text.length - suffix];
+					}
+					const from = line.from + prefix;
+					const to = line.from + line.length - suffix;
+					if (from < to) {
+						ranges.push(Decoration.mark({ class: 'fr-changed-text' }).range(from, to));
+					}
+				}
+				rows.push({ text, mark });
+			}
+			const pos = hunk.newLines > 0 ? doc.line(Math.min(doc.lines, Math.max(1, hunk.newStart))).from : at;
+			ranges.push(Decoration.widget({ widget: new DeletedChunk(rows), block: true, side: -1 }).range(pos));
+		}
 		// `side: -1` attaches the bar to the line that follows it, so the gutter's line numbers stay
 		// aligned; `side: 1` puts an end-of-document bar below a removal widget at the same position.
 		ranges.push(Decoration.widget({ widget: new HunkBar(hunk, data.blocked), block: true, side: at === doc.length ? 1 : -1 }).range(at));
@@ -357,35 +450,35 @@ function buildBars(doc: Text, data: BarData): DecorationSet {
 }
 
 /**
- * A state field, not a view plugin: a block widget takes vertical space, and CodeMirror only lets
+ * A state field, not a view plugin: block widgets take vertical space, and CodeMirror only lets
  * layout-affecting decorations come from the state. The journal's line numbers are only valid for
- * the text the host computed them from, so any local edit drops the bars until the save delivers
- * fresh hunks.
+ * the text the host computed them from, so any local edit drops the decorations until the save
+ * delivers fresh hunks.
  */
-const barField = StateField.define<DecorationSet>({
-	create: (editor) => buildBars(editor.doc, barData),
+const reviewField = StateField.define<DecorationSet>({
+	create: (editor) => buildReview(editor.doc, reviewData),
 	update: (decorations, transaction) => {
-		let next: BarData | null = null;
+		let next: ReviewData | null = null;
 		for (const effect of transaction.effects) {
-			if (effect.is(setBars)) {
+			if (effect.is(setReview)) {
 				next = effect.value;
 			}
 		}
 		if (next) {
-			barData = next;
-			return buildBars(transaction.state.doc, next);
+			reviewData = next;
+			return buildReview(transaction.state.doc, next);
 		}
 		return transaction.docChanged ? Decoration.none : decorations;
 	},
 	provide: (field) => EditorView.decorations.from(field),
 });
 
-function updateBars(): void {
+function updateReview(): void {
 	if (!view) {
 		return;
 	}
 	const hunks = !dirty && state?.reason === 'ready' && !state.truncated ? state.hunks : [];
-	view.dispatch({ effects: setBars.of({ hunks, blocked: state?.blockedReason ?? '' }) });
+	view.dispatch({ effects: setReview.of({ hunks, blocked: state?.blockedReason ?? '', baseline: hunks.length ? (state?.baseline ?? '') : '' }) });
 }
 
 /* ---------------------------------------------------------------- rendering */
@@ -464,19 +557,7 @@ function setDirty(next: boolean): void {
 	if (state) {
 		renderHeader(state);
 	}
-	updateBars();
-}
-
-function mergeExtensions(original: string): Extension {
-	return unifiedMergeView({
-		original,
-		mergeControls: false,
-		highlightChanges: true,
-		// The change gutter is a 3px green/red bar; the review reads through line backgrounds alone.
-		gutter: false,
-		syntaxHighlightDeletions: true,
-		allowInlineDiffs: false,
-	});
+	updateReview();
 }
 
 /** One editor, one document: the language and the tab size never change after this. */
@@ -509,8 +590,7 @@ function extensions(): Extension[] {
 		search({ top: true }),
 		syntaxHighlighting(highlight),
 		theme,
-		barField,
-		merge.of(mergeOn ? mergeExtensions(baseline) : []),
+		reviewField,
 		EditorView.updateListener.of((update) => {
 			if (!update.docChanged) {
 				return;
@@ -555,12 +635,12 @@ function scrollToFirstChange(): void {
 function openDocument(text: string, languageId: string, size: number): void {
 	language = languageId;
 	tabSize = Number.isFinite(size) && size > 0 ? size : 4;
-	const wantsMerge = state?.reason === 'ready' && !state.truncated;
-	mergeOn = wantsMerge;
-	baseline = wantsMerge ? (state?.baseline ?? '') : '';
-	barData = {
-		hunks: wantsMerge && !dirty ? (state?.hunks ?? []) : [],
+	const wantsReview = state?.reason === 'ready' && !state.truncated;
+	const hunks = wantsReview && !dirty ? (state?.hunks ?? []) : [];
+	reviewData = {
+		hunks,
 		blocked: state?.blockedReason ?? '',
+		baseline: hunks.length ? (state?.baseline ?? '') : '',
 	};
 	const next = EditorState.create({ doc: text, extensions: extensions() });
 	if (view) {
@@ -584,7 +664,7 @@ function replaceDocument(text: string): void {
 	const scrollTop = view.scrollDOM.scrollTop;
 	const selection = view.state.selection.main;
 	// The journal's block anchors belong to the old text; the next `state` carries fresh ones.
-	barData = { hunks: [], blocked: state?.blockedReason ?? '' };
+	reviewData = { hunks: [], blocked: state?.blockedReason ?? '', baseline: '' };
 	const next = EditorState.create({
 		doc: text,
 		selection: EditorSelection.single(Math.min(selection.anchor, text.length), Math.min(selection.head, text.length)),
@@ -605,24 +685,7 @@ function applyState(next: FileReviewState): void {
 	if (!view) {
 		return;
 	}
-	const wantsMerge = next.reason === 'ready' && !next.truncated;
-	if (wantsMerge && !mergeOn) {
-		mergeOn = true;
-		baseline = next.baseline;
-		view.dispatch({ effects: merge.reconfigure(mergeExtensions(baseline)) });
-	} else if (!wantsMerge && mergeOn) {
-		mergeOn = false;
-		baseline = '';
-		view.dispatch({ effects: merge.reconfigure([]) });
-	} else if (wantsMerge && next.baseline !== baseline) {
-		// Reconfiguring the compartment would not re-run the merge field's init; the original doc is
-		// updated through the effect the merge view provides.
-		const original = getOriginalDoc(view.state);
-		const changes = ChangeSet.of([{ from: 0, to: original.length, insert: next.baseline }], original.length);
-		baseline = next.baseline;
-		view.dispatch({ effects: originalDocChangeEffect(view.state, changes) });
-	}
-	updateBars();
+	updateReview();
 }
 
 /* ---------------------------------------------------------------- messages */
