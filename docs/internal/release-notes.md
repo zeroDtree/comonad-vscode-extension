@@ -222,8 +222,9 @@
   accepted. The journal therefore tracks an accepted baseline per file (`keepHunk`), `undo` now
   restores that baseline rather than the pre-agent file, and a restore drops the blocks accepted
   after its mark while keeping the ones accepted before it. Unsaved text disables the block actions
-  until it is saved; a file changed outside the agent keeps only the file-level actions, so a manual
-  edit is never silently folded into an agent change. Alongside it, the new **Git Changes** view
+  until it is saved; a file changed outside the agent stays reviewable block by block — a merged
+  block may include adjacent outside lines — and whole-file Undo still asks, so an outside edit is
+  never silently folded into the agent's change. Alongside it, the new **Git Changes** view
   (Sessions → Git Changes) lists the real repository's **Staged**, **Changes**, **Untracked** and
   **Merge** files through the built-in Git extension: clicking opens VS Code's diff, and stage /
   unstage / discard (confirmed when destructive) work from the item and from the view title. The

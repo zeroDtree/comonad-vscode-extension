@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
 import type { FileChange, JournalFile } from '../lib/journal';
-import { diffLines, hunkKey } from '../lib/line-diff';
+import { diffLines, hunkKey, sameDocumentText } from '../lib/line-diff';
 import { fileReviewBlocked, fileReviewIdle, fileReviewState, hunkAnchorLine, hunkViews } from '../lib/file-review-model';
 import { fileSummary, findHunk, reviewBlocks, reviewState } from '../lib/review-model';
 import type { ReviewBlock } from '../lib/review-protocol';
@@ -263,10 +263,18 @@ suite('File review view model', () => {
 	test('blocked reasons follow the Review tab order', () => {
 		const change = changeOf('a.txt', 'a\n', 'b\n', { changedOutside: true, truncated: true });
 		assert.strictEqual(fileReviewBlocked(change, true), 'Save the file first');
-		assert.strictEqual(fileReviewBlocked(change, false), 'Changed outside the agent');
-		assert.strictEqual(fileReviewBlocked({ ...change, changedOutside: false }, false), 'Too large for block actions');
+		assert.strictEqual(fileReviewBlocked(change, false), 'Too large for block actions');
+		assert.strictEqual(fileReviewBlocked({ ...change, truncated: false }, false), '', 'an outside edit stays reviewable');
 		assert.strictEqual(fileReviewBlocked(changeOf('img.png', '', '', { binary: true }), false), 'Binary file');
 		assert.strictEqual(fileReviewBlocked(changeOf('a.txt', 'a\n', 'b\n'), false), '');
+		assert.strictEqual(fileReviewState(changeOf('a.txt', 'a\n', 'b\n', { changedOutside: true }), false).blockedReason, '');
+	});
+
+	test('a buffer matches the disk text across EOLs and a BOM', () => {
+		assert.strictEqual(sameDocumentText('a\nb\n', 'a\r\nb\r\n'), true);
+		assert.strictEqual(sameDocumentText('a\nb\n', 'a\rb\r'), true);
+		assert.strictEqual(sameDocumentText('a\nb\n', '\uFEFFa\nb\n'), true);
+		assert.strictEqual(sameDocumentText('a\nb\n', 'a\nB\n'), false);
 	});
 
 	test('a truncated change keeps the file but drops the diff', () => {

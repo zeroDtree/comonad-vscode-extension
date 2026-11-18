@@ -35,9 +35,11 @@ change switches it back to the pending files.
 The Review tab is derived from the journal, not from a second copy of the changes: closing and
 reopening it shows the same pending state, and a block kept in the **File Review** tab disappears
 from this tab immediately. It reviews saved content. A file with unsaved text disables its block and
-file actions until you save; a file changed outside the agent disables block actions, and **Undo
-File** asks before restoring it. **Keep All** refuses while any pending file is unsaved, and **Keep**
-accepts the file as it is on disk, including an outside edit.
+file actions until you save. A file changed outside the agent keeps the **Changed outside** badge but
+stays reviewable block by block: a block may include adjacent outside lines, block Undo is refused
+when the editor buffer is behind the disk, and **Undo File** still asks before restoring it. **Keep
+All** refuses while any pending file is unsaved, and **Keep** accepts the file as it is on disk,
+including an outside edit.
 
 The **File Review** tab (`Comonad: Review Changed File`, or clicking a pending file) is the
 single-file counterpart and a full file tab: it is backed by the real `TextDocument`, so editing,
@@ -48,9 +50,9 @@ API cannot draw inline text that spans or wraps lines, which is why this tab exi
 same journal as the other surfaces, so a decision made here shows up everywhere.
 
 Editing is editing and saving is saving: a save whose bytes differ from the agent's last write marks
-the file **Changed outside** (exactly as saving it in a normal editor would), so per-block actions
-turn off until **Keep File** accepts the file as it now is or **Undo File** restores the baseline
-after asking. Unsaved text disables the review actions everywhere, and file actions, until you save.
+the file **Changed outside** (exactly as saving it in a normal editor would). Per-block actions keep
+working on that diff; **Keep File** accepts the file as it now is and **Undo File** restores the
+baseline after asking. Unsaved text disables the review actions everywhere, and file actions, until you save.
 **Open in Editor** opens the same document in VS Code's editor as another tab in the same group,
 leaving the review tab in place; edits made in either view stay in sync.
 

@@ -409,8 +409,9 @@ export class Checkpoints extends Service implements JournalApi {
 
 	/**
 	 * Accepts one block: the baseline advances by exactly that change and the rest stays pending.
-	 * The same checks as `undo` run first — unsaved text, a file someone changed outside the agent,
-	 * and a block whose lines are no longer where the caller saw them.
+	 * Unsaved text, an outside edit the caller did not opt into, and a block whose lines are no
+	 * longer where the caller saw them all refuse first. The review surfaces pass `overwrite: 'all'`
+	 * because their blocks come from a diff of the current disk text.
 	 */
 	async keepHunk(workspace: string, sessionId: string, path: string, hunk: LineHunk, options: KeepHunkOptions = {}): Promise<void> {
 		await this.queued(async () => {

@@ -293,10 +293,6 @@ export function reviewPanel(ctx: Context): void {
 			notify('info', 'This change moved — the review has been refreshed.');
 			return;
 		}
-		if (change.changedOutside) {
-			notify('warn', `${path} changed outside the agent; block actions are disabled. Use Undo File to restore the baseline.`);
-			return;
-		}
 		if (change.binary || change.truncated) {
 			notify('warn', `${path} cannot be reviewed block by block.`);
 			return;
@@ -314,8 +310,6 @@ export function reviewPanel(ctx: Context): void {
 			notify('warn', `${path} has unsaved changes. Save it first.`);
 		} else if (outcome.kind === 'stale') {
 			notify('info', 'This change moved — the review has been refreshed.');
-		} else if (outcome.kind === 'outside') {
-			notify('warn', `${path} changed outside the agent; use Undo File to restore the accepted baseline.`);
 		}
 	}
 

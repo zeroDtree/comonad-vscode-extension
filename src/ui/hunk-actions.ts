@@ -4,7 +4,7 @@ import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import type { FileChange } from '../lib/journal';
 import { DirtyEditorError } from '../lib/journal';
-import { editForHunk, revertHunk, type LineHunk } from '../lib/line-diff';
+import { editForHunk, revertHunk, sameDocumentText, type LineHunk } from '../lib/line-diff';
 import { findHunk } from '../lib/review-model';
 import type { JournalScope } from './journal-actions';
 import { unsavedPaths } from './journal-actions';
@@ -13,29 +13,32 @@ import { unsavedPaths } from './journal-actions';
  * The block-level review actions the File Review tab and the Review tab share.
  *
  * Keep advances the accepted baseline by one block and writes nothing to disk; undo puts the block
- * back in the file, saves it, and amends the journal so the review's own edit does not read as a
- * change from outside the agent. Both surfaces speak the same hunk identity (`hunkKey`) and the same
- * refusals, so a click means the same thing wherever it was made.
+ * back in the file and saves it. A file someone changed outside the agent stays reviewable block by
+ * block: the journal re-diffs the disk for Keep, and Undo refuses unless the open buffer still holds
+ * exactly the disk text the block was computed from. Either way an outside edit elsewhere in the
+ * file is preserved rather than folded into the journal. Both surfaces speak the same hunk identity
+ * (`hunkKey`) and the same refusals, so a click means the same thing wherever it was made.
  */
 
-/** Accepts one block into the baseline. A dirty editor or an outside edit refuses inside the journal. */
+/** Accepts one block into the baseline. A dirty editor refuses inside the journal; the journal itself re-checks the block against the disk. */
 export async function keepHunkAction(ctx: Context, scope: JournalScope, path: string, hunk: LineHunk): Promise<void> {
 	await ctx.checkpoints.keepHunk(scope.workspace, scope.sessionId, path, hunk, {
 		isDirty: unsavedPaths(scope.workspace),
+		overwrite: 'all',
 	});
 }
 
 export type UndoHunkOutcome =
 	| { kind: 'done'; change: FileChange; text: string }
 	| { kind: 'stale' }
-	| { kind: 'dirty'; error: DirtyEditorError }
-	| { kind: 'outside' };
+	| { kind: 'dirty'; error: DirtyEditorError };
 
 /**
  * Reverts one block in the file on disk. The change is re-read here, not taken from a caller's cache:
  * a block can be accepted in another surface at any moment, and the key must be checked against the
- * journal as it is now. The document is left alone when it has unsaved text or when the file changed
- * outside the agent — those files are the journal's to ask about, not this edit's to overwrite.
+ * journal as it is now. The document is left alone when it has unsaved text, or when it no longer
+ * holds the disk text the block was computed from — saving that buffer would overwrite an outside
+ * edit this editor never saw.
  */
 export async function undoHunkAction(ctx: Context, scope: JournalScope, path: string, key: string): Promise<UndoHunkOutcome> {
 	const uri = vscode.Uri.file(join(scope.workspace, path));
@@ -54,10 +57,12 @@ export async function undoHunkAction(ctx: Context, scope: JournalScope, path: st
 	if (!located) {
 		return { kind: 'stale' };
 	}
-	if (change.changedOutside) {
-		return { kind: 'outside' };
-	}
 	if (change.binary || change.truncated) {
+		return { kind: 'stale' };
+	}
+	// The whole buffer is saved below, so it must be the disk text the block was computed from. A
+	// clean document can still be behind an outside edit VS Code has not reloaded yet.
+	if (!sameDocumentText(document.getText(), change.current)) {
 		return { kind: 'stale' };
 	}
 	// `editForHunk` trusts the hunk's new side; the document is the authority on whether that side is
@@ -81,7 +86,11 @@ export async function undoHunkAction(ctx: Context, scope: JournalScope, path: st
 	if (!(await document.save())) {
 		throw new Error('the file could not be saved');
 	}
-	// The review made this edit itself: it must not read as a change from outside the agent.
-	await ctx.checkpoints.amend(scope.workspace, scope.sessionId, path);
+	// The review made this edit itself: it must not read as a change from outside the agent. When the
+	// file already had outside edits, amending would fold them into the journal and silence the
+	// file-level Undo/Restore confirmation, so the real last write stays on record.
+	if (!change.changedOutside) {
+		await ctx.checkpoints.amend(scope.workspace, scope.sessionId, path);
+	}
 	return { kind: 'done', change, text };
 }

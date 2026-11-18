@@ -105,8 +105,8 @@ Highlights are below; the full implementation notes are linked at the end. The u
   It is backed by the real `TextDocument`, so typing, undo/redo, `Cmd/Ctrl+S`, the dirty dot, the
   close prompt and encoding/EOL handling are VS Code's own; **Open in Editor** opens the same
   document in the standard editor as another tab in the same group. Saving behaves like any editor:
-  a save that diverges from the agent's last write reads as *changed outside* and disables per-block
-  actions, exactly as before. Same journal,
+  a save that diverges from the agent's last write reads as *changed outside*; block actions stay
+  available against that diff, and a whole-file Undo still asks before restoring. Same journal,
   same block keys, same refusals as the other surfaces.
 - **Remote SSH, WSL and Dev Containers** are first-class; credentials stay client-side and model calls
   originate on the remote host.

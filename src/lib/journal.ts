@@ -71,7 +71,7 @@ export interface FileChange {
 	binary: boolean;
 }
 
-/** How a per-block Keep treats a file someone changed outside the agent. */
+/** How a per-block Keep treats a file someone changed outside the agent; the review surfaces allow it. */
 export interface KeepHunkOptions {
 	overwrite?: Overwrite;
 	isDirty?: (path: string) => boolean;

@@ -179,7 +179,7 @@ import { contentController } from 'comonad-plugin-tavern/panel/controller';
 import { settingsDocument, settingsPanel } from '../ui/settings-panel';
 import { applyFileReviewChanges, fileReviewDocument } from '../ui/file-review-editor';
 import { reviewDocument } from '../ui/review-panel';
-import { undoHunkAction } from '../ui/hunk-actions';
+import { keepHunkAction, undoHunkAction } from '../ui/hunk-actions';
 import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
 import { McpConnection } from '../services/mcp';
@@ -9233,6 +9233,29 @@ suite('Per-file checkpoints', () => {
 		}
 	});
 
+	test('a block stays keepable when the file changed outside the agent', async () => {
+		const h = await harness();
+		try {
+			writeFileSync(join(h.work, 'a.txt'), 'one\ntwo\nthree\nfour\nfive\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'ONE\ntwo\nthree\nfour\nFIVE\n');
+			// A shell edit in an untouched region: outside the journal, still part of the diff.
+			writeFileSync(join(h.work, 'a.txt'), 'ONE\ntwo\nthree\nFOUR\nFIVE\n');
+			const change = await h.checkpoints.change(h.work, 's', 'a.txt');
+			assert.strictEqual(change.changedOutside, true);
+			const target = change.hunks.find((hunk) => hunk.newStart === 1)!;
+
+			await keepHunkAction(h.ctx, { sessionId: 's', workspace: h.work }, 'a.txt', target);
+			const after = await h.checkpoints.change(h.work, 's', 'a.txt');
+			assert.strictEqual(after.baseline, 'ONE\ntwo\nthree\nfour\nfive\n', 'only the shown block advanced');
+			assert.strictEqual(readFileSync(join(h.work, 'a.txt'), 'utf8'), 'ONE\ntwo\nthree\nFOUR\nFIVE\n', 'keep writes nothing');
+			assert.strictEqual(after.changedOutside, true, 'the outside edit is still reported');
+			assert.strictEqual(after.hunks.length, 1, 'the outside block stays pending');
+			assert.strictEqual(after.hunks[0]!.newStart, 4);
+		} finally {
+			h.dispose();
+		}
+	});
+
 	test('amend turns an edit the review made itself into the new written state', async () => {
 		const h = await harness();
 		try {
@@ -9339,6 +9362,84 @@ suite('Per-file checkpoints', () => {
 			assert.strictEqual(readFileSync(file, 'utf8'), 'one\ntwo\n', 'nothing was written');
 		} finally {
 			if (document.isDirty) {
+				await document.save();
+			}
+			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+			h.dispose();
+		}
+	});
+
+	test('a block undo keeps an outside edit elsewhere in the file', async () => {
+		const h = await harness();
+		const file = join(h.work, 'a.txt');
+		let document: vscode.TextDocument | undefined;
+		try {
+			writeFileSync(file, 'one\ntwo\nthree\nfour\nfive\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'ONE\ntwo\nthree\nfour\nFIVE\n');
+			writeFileSync(file, 'ONE\ntwo\nthree\nFOUR\nFIVE\n');
+			const change = await h.checkpoints.change(h.work, 's', 'a.txt');
+			assert.strictEqual(change.changedOutside, true);
+			const target = change.hunks.find((hunk) => hunk.newStart === 1)!;
+			document = (await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: true })).document;
+
+			const outcome = await undoHunkAction(h.ctx, { sessionId: 's', workspace: h.work }, 'a.txt', hunkKey(target));
+			assert.strictEqual(outcome.kind, 'done');
+			assert.strictEqual(readFileSync(file, 'utf8'), 'one\ntwo\nthree\nFOUR\nFIVE\n', 'the block is back, the outside edit survives');
+			const after = await h.checkpoints.change(h.work, 's', 'a.txt');
+			assert.strictEqual(after.changedOutside, true, 'no amend: the outside edit is still reported');
+			assert.strictEqual(after.baseline, 'one\ntwo\nthree\nfour\nfive\n', 'the baseline did not move');
+			assert.strictEqual(after.hunks.length, 1, 'the outside block is still pending');
+		} finally {
+			if (document?.isDirty) {
+				await document.save();
+			}
+			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+			h.dispose();
+		}
+	});
+
+	test('a block undo refuses a buffer that is behind the disk', async () => {
+		const h = await harness();
+		const file = join(h.work, 'a.txt');
+		let document: vscode.TextDocument | undefined;
+		try {
+			writeFileSync(file, 'one\ntwo\n');
+			await agentWrite(h, 's', 1, 'a.txt', 'ONE\ntwo\n');
+			const change = await h.checkpoints.change(h.work, 's', 'a.txt');
+			document = (await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: true })).document;
+			// The disk moves on while the editor still holds the old text.
+			writeFileSync(file, 'ONE\ntwo\noutside\n');
+			const outcome = await undoHunkAction(h.ctx, { sessionId: 's', workspace: h.work }, 'a.txt', hunkKey(change.hunks[0]!));
+			assert.ok(outcome.kind === 'stale' || outcome.kind === 'done', 'the review never writes from a stale buffer');
+			assert.match(readFileSync(file, 'utf8'), /outside/, 'the outside edit is never lost');
+			if (outcome.kind === 'stale') {
+				assert.strictEqual(readFileSync(file, 'utf8'), 'ONE\ntwo\noutside\n', 'a refusal writes nothing');
+			}
+		} finally {
+			if (document?.isDirty) {
+				await document.save();
+			}
+			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+			h.dispose();
+		}
+	});
+
+	test('a block undo handles a UTF-8 BOM file', async () => {
+		const h = await harness();
+		const file = join(h.work, 'a.txt');
+		let document: vscode.TextDocument | undefined;
+		try {
+			writeFileSync(file, '\uFEFFone\ntwo\nthree\n');
+			await agentWrite(h, 's', 1, 'a.txt', '\uFEFFone\nTWO\nTHREE\n');
+			const change = await h.checkpoints.change(h.work, 's', 'a.txt');
+			document = (await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: true })).document;
+			const outcome = await undoHunkAction(h.ctx, { sessionId: 's', workspace: h.work }, 'a.txt', hunkKey(change.hunks[0]!));
+			assert.strictEqual(outcome.kind, 'done');
+			const onDisk = readFileSync(file);
+			assert.strictEqual(onDisk[0], 0xef, 'the BOM survives the save');
+			assert.strictEqual(onDisk.toString('utf8'), '\uFEFFone\ntwo\nthree\n');
+		} finally {
+			if (document?.isDirty) {
 				await document.save();
 			}
 			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');

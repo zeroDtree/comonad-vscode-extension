@@ -62,6 +62,16 @@ export function stripEol(line: string): string {
 	return line.replace(/\r?\n$/, '');
 }
 
+/**
+ * Whether an editor buffer and the disk text it was read from are the same document. The buffer
+ * drops a UTF-8 BOM and joins lines with one dominant EOL, while the journal keeps the file's raw
+ * bytes, so both sides lose a leading BOM and normalize line endings before comparing.
+ */
+export function sameDocumentText(documentText: string, diskText: string): boolean {
+	const normalize = (text: string): string => text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+	return normalize(documentText) === normalize(diskText);
+}
+
 /** The text a hunk removes from the old file, and the text it puts there instead. */
 function sides(hunk: LineHunk): { old: string[]; new: string[] } {
 	const old: string[] = [];

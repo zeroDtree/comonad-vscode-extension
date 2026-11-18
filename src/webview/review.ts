@@ -72,9 +72,6 @@ function blockReason(file: ReviewFileView): string {
 	if (isDirty(file)) {
 		return 'Save the file first';
 	}
-	if (file.changedOutside) {
-		return 'Changed outside the agent';
-	}
 	if (file.binary) {
 		return 'Binary file';
 	}

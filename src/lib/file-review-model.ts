@@ -50,9 +50,6 @@ export function fileReviewBlocked(change: FileChange, dirty: boolean): string {
 	if (dirty) {
 		return 'Save the file first';
 	}
-	if (change.changedOutside) {
-		return 'Changed outside the agent';
-	}
 	if (change.binary) {
 		return 'Binary file';
 	}

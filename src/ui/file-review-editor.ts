@@ -27,8 +27,10 @@ import { registerCommand } from './register';
  * the removed text before touching the document — a stale edit is a refresh, never an overwrite.
  *
  * Saving is an ordinary save. Nothing is amended: a save whose bytes differ from the journal's last
- * recorded write surfaces as `changedOutside`, exactly as editing in a normal editor would, and the
- * block actions disable until **Keep File** accepts the file or **Undo File** restores it.
+ * recorded write surfaces as `changedOutside`, exactly as editing in a normal editor would. Block
+ * actions stay available against that diff — Keep advances the baseline, Undo refuses unless the
+ * buffer still holds the disk text the block was computed from — while **Undo File** asks before
+ * restoring, since an outside edit is never folded into the journal silently.
  */
 
 export const FILE_REVIEW_VIEW_TYPE = 'comonad.fileReview';
@@ -561,10 +563,6 @@ export class FileReviewEditor {
 			this.notify('info', 'This change moved — the review has been refreshed.');
 			return;
 		}
-		if (change.changedOutside) {
-			this.notify('warn', `${target.path} changed outside the agent; block actions are disabled. Use Undo File to restore the baseline.`);
-			return;
-		}
 		if (change.binary || change.truncated) {
 			this.notify('warn', `${target.path} cannot be reviewed block by block.`);
 			return;
@@ -582,8 +580,6 @@ export class FileReviewEditor {
 			this.notify('warn', `${target.path} has unsaved changes. Save it first.`);
 		} else if (outcome.kind === 'stale') {
 			this.notify('info', 'This change moved — the review has been refreshed.');
-		} else if (outcome.kind === 'outside') {
-			this.notify('warn', `${target.path} changed outside the agent; use Undo File to restore the accepted baseline.`);
 		}
 	}
 
