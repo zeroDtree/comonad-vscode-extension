@@ -262,17 +262,24 @@ const theme = EditorView.theme(
 		'.cm-activeLineGutter': { backgroundColor: 'var(--vscode-editor-lineHighlightBackground, transparent)' },
 		'&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'var(--vscode-editor-selectionBackground, rgba(120, 150, 200, 0.35))' },
 		// The unified merge view draws an inserted line green and a removed block red, and the removed
-		// lines are ordinary rows: they wrap, select and scroll with the rest of the file.
-		'.cm-changedLine': { backgroundColor: 'var(--vscode-diffEditor-insertedLineBackground, rgba(46, 160, 67, 0.2))' },
-		'.cm-changedText': { backgroundColor: 'var(--vscode-diffEditor-insertedTextBackground, rgba(46, 160, 67, 0.4))' },
+		// lines are ordinary rows: they wrap, select and scroll with the rest of the file. The look is
+		// background-only, Cursor style: no underline gradient and no change-gutter bars. The extra
+		// `.cm-merge-b` and structural classes out-specify the merge base theme's own rules, and the
+		// `background` shorthand also clears the gradient image it paints on changed text.
+		'&.cm-merge-b .cm-content .cm-changedLine': {
+			backgroundColor: 'var(--vscode-diffEditor-insertedLineBackground, rgba(46, 160, 67, 0.12))',
+		},
+		'&.cm-merge-b .cm-line .cm-changedText': {
+			background: 'var(--vscode-diffEditor-insertedTextBackground, rgba(46, 160, 67, 0.28))',
+		},
 		'.cm-deletedChunk': {
-			backgroundColor: 'var(--vscode-diffEditor-removedLineBackground, rgba(248, 81, 73, 0.2))',
+			backgroundColor: 'var(--vscode-diffEditor-removedLineBackground, rgba(248, 81, 73, 0.12))',
 			whiteSpace: 'pre-wrap',
 			overflowWrap: 'anywhere',
 		},
-		'.cm-deletedChunk .cm-deletedText': { backgroundColor: 'var(--vscode-diffEditor-removedTextBackground, rgba(248, 81, 73, 0.4))' },
-		'.cm-deletedLineGutter': { backgroundColor: 'var(--vscode-diffEditor-removedLineBackground, rgba(248, 81, 73, 0.9))' },
-		'.cm-changedLineGutter': { backgroundColor: 'var(--vscode-diffEditor-insertedLineBackground, rgba(46, 160, 67, 0.9))' },
+		'&.cm-merge-b .cm-deletedChunk .cm-deletedText': {
+			background: 'var(--vscode-diffEditor-removedTextBackground, rgba(248, 81, 73, 0.28))',
+		},
 	},
 	{ dark },
 );
@@ -465,7 +472,8 @@ function mergeExtensions(original: string): Extension {
 		original,
 		mergeControls: false,
 		highlightChanges: true,
-		gutter: true,
+		// The change gutter is a 3px green/red bar; the review reads through line backgrounds alone.
+		gutter: false,
 		syntaxHighlightDeletions: true,
 		allowInlineDiffs: false,
 	});
