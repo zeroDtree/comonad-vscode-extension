@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
+import { buildOrchestratorBody } from '../lib/agent-prompts';
 import {
 	agentLines,
 	allowedToolsFor,
@@ -88,5 +89,54 @@ suite('Agent roles', () => {
 		assert.strictEqual(lines.split('\n').length, 14);
 		assert.match(lines, /- researcher \[ro, network; 10 turns, 40 tools\]:/);
 		assert.match(lines, /- coder \[sw; 16 turns, 60 tools\]:/);
+	});
+});
+
+suite('Orchestrator prompt', () => {
+	const body = (patch: Partial<Parameters<typeof buildOrchestratorBody>[0]> = {}) =>
+		buildOrchestratorBody({
+			roles: BUILTIN_ROLES,
+			canWrite: true,
+			planMode: false,
+			writePlanVisible: true,
+			...patch,
+		});
+
+	test('Plan mode delegates read-only research and stops after write_plan', () => {
+		const text = body({ planMode: true, canWrite: false });
+		assert.match(text, /This is Plan mode: the session is read-only/);
+		assert.match(text, /delegate only read-only research nodes/);
+		assert.match(text, /Record the implementation plan yourself with write_plan/);
+		assert.match(text, /After write_plan, stop and summarize/);
+		assert.ok(!text.includes('Independent tasks, including independent write tasks'), 'the write protocol is replaced');
+		assert.ok(!text.includes('must have at least one review or command criterion'), 'write-task criteria do not apply');
+	});
+
+	test('Plan mode without a plan writer delivers the plan in the summary', () => {
+		const text = body({ planMode: true, canWrite: false, writePlanVisible: false });
+		assert.match(text, /put the implementation plan in your final summary/);
+		assert.ok(!text.includes('Record the implementation plan yourself with write_plan'));
+	});
+
+	test('a read-only session keeps the full protocol and adds the read-only rule', () => {
+		const text = body({ canWrite: false });
+		assert.match(text, /This session is read-only: delegate only read-only tasks/);
+		assert.match(text, /Independent tasks, including independent write tasks/, 'the full protocol is kept');
+		assert.ok(!text.includes('This is Plan mode'));
+	});
+
+	test('a write-capable session keeps the full protocol unchanged', () => {
+		const text = body();
+		assert.ok(!text.includes('This session is read-only'));
+		assert.ok(!text.includes('This is Plan mode'));
+		assert.match(text, /Delegate only ready nodes/);
+		assert.match(text, /must have at least one review or command criterion/);
+	});
+
+	test('the planner role is read-only and admissible in Plan mode', () => {
+		const planner = BUILTIN_ROLE_BY_ID.get('planner')!;
+		assert.deepStrictEqual(planner.capabilities, ['ro', 'ro_plan', 'shell_ro']);
+		assert.ok(!planner.capabilities.includes('rw'));
+		assert.ok(!planner.capabilities.includes('shell_test'));
 	});
 });

@@ -7,7 +7,7 @@
 | 命令 | 用途 |
 | --- | --- |
 | `/help` | 列出命令 |
-| `/plan [task]` | 只读研究，然后写计划 |
+| `/plan [task]` | 只读研究，写计划后停下等待审阅 |
 | `/review [focus]` | 只读审查待处理变更 |
 | `/summarize [notes] [--rebuild]` | 扩展模型上下文摘要；`--rebuild` 从完整聊天重写（`/compress`、`/compact`） |
 | `/clear`、`/new` | 新建会话 |

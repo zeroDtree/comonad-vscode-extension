@@ -101,6 +101,18 @@ shows the recent notes. Messages from other agents are **untrusted data**, never
 child prompt says so. Each child also gets its own scratch subtree, so parallel test runs do not share
 a build or temp directory.
 
+## Plan mode
+
+Plan mode is a read-only phase with its own artifact. The Orchestrator stays available, but it may
+delegate read-only research only: a `planner` node can return the implementation plan in its report,
+and `explorer`/`reviewer` work the same way. `task_plan` refuses a node whose effective capabilities
+include `rw` or whose acceptance needs a `command` criterion, and `delegate`/`resume` repeat the
+refusal before spawning.
+
+Record the final implementation plan with `write_plan`. The recorded plan is the deliverable: the
+turn stops and summarizes it, and the plan card's **Build plan** switches to Semi-Write or Full
+Access and sends a new turn, where write delegation is available again.
+
 ## Approval and limits
 
 A child inherits the parent's approval policy and its approval response is fixed `never`. A write
@@ -144,5 +156,9 @@ interrupted: it keeps its child session and waits for `resume`.
 
 `task_plan` then `delegate(["explore"])`, then `delegate(["code"])`. The second batch derives the
 reviewer and tester from the two criteria; `task_status` shows the board before the final answer.
+
+In Plan mode `task_plan` refuses this plan because of the `code` node. Delegate the `explore` node
+alone, record the implementation plan with `write_plan`, and leave the `code` node to the
+write-capable turn started by **Build plan**.
 
 Custom roles are Markdown files; see [Extending](/guide/extend#subagent-roles).

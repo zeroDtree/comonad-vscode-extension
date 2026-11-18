@@ -14,11 +14,43 @@ import {
 	type TaskResult,
 	type TaskVerificationCheck,
 } from '../lib/task-graph';
-import { objectSchema, type ToolContext } from '../lib/types';
+import { objectSchema, type Capability, type SessionPolicy, type ToolContext } from '../lib/types';
 
 /** The Orchestrator's task tools and the shared coordination mailbox. */
 
 const FAILED = (error: unknown): string => `Error: ${error instanceof Error ? error.message : String(error)}`;
+
+/**
+ * A task that needs `rw` cannot run here. Plan mode refuses it even when the session was given
+ * `rw` explicitly: the phase itself is read-only, not merely the default capability set.
+ */
+function writeRefusal(policy: SessionPolicy, capabilities: readonly Capability[], id: string): string | undefined {
+	if (!capabilities.includes('rw')) {
+		return undefined;
+	}
+	if (policy.workMode !== 'pl' && capabilitiesOf(policy).has('rw')) {
+		return undefined;
+	}
+	return policy.workMode === 'pl'
+		? `${id} needs rw, but Plan mode delegates only read-only research; record the implementation plan with write_plan and let the user build it`
+		: `${id} writes, but this session has no rw capability; switch to Semi-Write/Full Access to run it`;
+}
+
+/** A command criterion needs the test shell, which Plan mode never grants. */
+function commandRefusal(policy: SessionPolicy, acceptance: unknown, id: string): string | undefined {
+	if (!Array.isArray(acceptance)) {
+		return undefined;
+	}
+	if (!acceptance.some((criterion) => criterion && typeof criterion === 'object' && (criterion as { check?: unknown }).check === 'command')) {
+		return undefined;
+	}
+	if (policy.workMode !== 'pl' && capabilitiesOf(policy).has('shell_test')) {
+		return undefined;
+	}
+	return policy.workMode === 'pl'
+		? `${id} has a command criterion, but Plan mode has no test shell; use evidence criteria or let the user build the plan`
+		: `${id} needs command verification, but this session has no shell_test capability`;
+}
 
 const budgetSchema = {
 	type: 'object',
@@ -79,7 +111,7 @@ export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
 		name: 'task_plan',
 		description:
-			'Record or revise the Orchestrator task DAG. Send the complete desired node set on every revision. A task whose effective capabilities include rw needs at least one review or command criterion. Dependencies must be acyclic; only pending, ready nodes can be delegated. The runtime derives a fixed independent reviewer/tester for review/command criteria, so you cannot mark a task accepted yourself.',
+			'Record or revise the Orchestrator task DAG. Send the complete desired node set on every revision. A task whose effective capabilities include rw needs at least one review or command criterion. Dependencies must be acyclic; only pending, ready nodes can be delegated. The runtime derives a fixed independent reviewer/tester for review/command criteria, so you cannot mark a task accepted yourself. Read-only sessions can plan only read-only tasks; Plan mode never accepts rw tasks or command criteria — record the implementation plan with write_plan instead.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: false,
@@ -98,13 +130,36 @@ export function orchestrateTools(ctx: Context): void {
 			}
 			const input = args as { objective: string; nodes: TaskNodeInput[] };
 			try {
-				const result = await ctx.orchestrator.run(access, async () =>
-					ctx.orchestrator.plan(access, { objective: input.objective, nodes: input.nodes }),
-				);
-				const warnings = result.warnings.length
-					? `\n\nWarnings:\n${result.warnings.map((warning) => `- ${warning}`).join('\n')}`
-					: '';
-				return `${formatBoard(boardOf(result.graph))}${warnings}`;
+				return await ctx.orchestrator.run(access, async () => {
+					// Refuse an unusable node before recording it. An accepted node is kept unchanged by
+					// a revision, so a later mode switch must not invalidate the whole plan.
+					const nodes = Array.isArray(input.nodes) ? input.nodes : [];
+					const roles = ctx.orchestrator.roles();
+					const accepted = new Set((access.get()?.nodes ?? []).filter((node) => node.status === 'accepted').map((node) => node.id));
+					const refusals: string[] = [];
+					for (const node of nodes) {
+						if (!node || typeof node !== 'object' || accepted.has(node.id)) {
+							continue;
+						}
+						const role = roles.get(node.role);
+						if (!role) {
+							continue;
+						}
+						const capabilities = effectiveCapabilities(role, Array.isArray(node.capabilities) ? node.capabilities : undefined);
+						const refusal = writeRefusal(toolCtx.policy, capabilities, node.id) ?? commandRefusal(toolCtx.policy, node.acceptance, node.id);
+						if (refusal) {
+							refusals.push(refusal);
+						}
+					}
+					if (refusals.length) {
+						return `Error: ${refusals.join('\n')}`;
+					}
+					const result = ctx.orchestrator.plan(access, { objective: input.objective, nodes: input.nodes });
+					const warnings = result.warnings.length
+						? `\n\nWarnings:\n${result.warnings.map((warning) => `- ${warning}`).join('\n')}`
+						: '';
+					return `${formatBoard(boardOf(result.graph))}${warnings}`;
+				});
 			} catch (error) {
 				return FAILED(error);
 			}
@@ -114,7 +169,7 @@ export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
 		name: 'delegate',
 		description:
-			'Run 1..8 ready tasks from the current plan in parallel. All selected tasks must be pending and ready; a batch may not contain dependencies within itself. Read and write tasks may run together; the runtime serialises writes to the same file and parallel workers can coordinate through the message tool. A worker that exhausts a native budget is paused, not rejected: use resume to continue its session. After the workers finish, the runtime derives fixed independent reviewer/tester children for review/command criteria. You cannot mark a task accepted; read the board and verdicts, then replan rejected work within its attempt budget.',
+			'Run 1..8 ready tasks from the current plan in parallel. All selected tasks must be pending and ready; a batch may not contain dependencies within itself. Read and write tasks may run together; the runtime serialises writes to the same file and parallel workers can coordinate through the message tool. A worker that exhausts a native budget is paused, not rejected: use resume to continue its session. After the workers finish, the runtime derives fixed independent reviewer/tester children for review/command criteria. You cannot mark a task accepted; read the board and verdicts, then replan rejected work within its attempt budget. Read-only sessions run only read-only tasks; Plan mode records the implementation plan with write_plan and then stops.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -144,7 +199,6 @@ export function orchestrateTools(ctx: Context): void {
 						return 'Error: no task plan exists; call task_plan first';
 					}
 					const roles = ctx.orchestrator.roles();
-					const parentCaps = new Set(capabilitiesOf(toolCtx.policy));
 					for (const id of tasks) {
 						const node = graph.nodes.find((candidate) => candidate.id === id);
 						if (!node) {
@@ -155,15 +209,17 @@ export function orchestrateTools(ctx: Context): void {
 							return `Error: ${id}: role ${node.role} is not available`;
 						}
 						const caps = effectiveCapabilities(role, node.capabilities);
-						if (caps.includes('rw') && !parentCaps.has('rw')) {
-							return `Error: ${id} writes, but this session has no rw capability; switch to Semi-Write/Full Access or do the write in the main thread`;
+						const write = writeRefusal(toolCtx.policy, caps, id);
+						if (write) {
+							return `Error: ${write}`;
 						}
 						const network = node.network ?? role.network;
 						if (network && !toolCtx.policy.network) {
 							return `Error: ${id} needs network, but the session has network off`;
 						}
-						if (node.acceptance.some((criterion) => criterion.check === 'command') && !parentCaps.has('shell_test')) {
-							return `Error: ${id} needs command verification, but this session has no shell_test capability`;
+						const command = commandRefusal(toolCtx.policy, node.acceptance, id);
+						if (command) {
+							return `Error: ${command}`;
 						}
 					}
 					const runs = ctx.orchestrator.begin(access, tasks);
@@ -306,7 +362,7 @@ export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
 		name: 'resume',
 		description:
-			'Resume 1..8 paused tasks with a new segment budget. Resuming continues the same child session and transcript; it does not spend an attempt. The default segment budget is the task plan budget; pass a budget to set this segment. Each dimension is still capped by the role and global defaults. A resumed worker returns a new result and derived verifiers.',
+			'Resume 1..8 paused tasks with a new segment budget. Resuming continues the same child session and transcript; it does not spend an attempt. The default segment budget is the task plan budget; pass a budget to set this segment. Each dimension is still capped by the role and global defaults. A resumed worker returns a new result and derived verifiers. A write task cannot be resumed from a read-only session.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -337,7 +393,6 @@ export function orchestrateTools(ctx: Context): void {
 						return 'Error: no task plan exists; call task_plan first';
 					}
 					const roles = ctx.orchestrator.roles();
-					const parentCaps = new Set(capabilitiesOf(toolCtx.policy));
 					const priorWrites = new Map<string, string[]>();
 					for (const id of tasks) {
 						const node = graph.nodes.find((candidate) => candidate.id === id);
@@ -355,14 +410,16 @@ export function orchestrateTools(ctx: Context): void {
 							return `Error: ${id}: role ${node.role} is not available`;
 						}
 						const caps = effectiveCapabilities(role, node.capabilities);
-						if (caps.includes('rw') && !parentCaps.has('rw')) {
-							return `Error: ${id} writes, but this session has no rw capability`;
+						const write = writeRefusal(toolCtx.policy, caps, id);
+						if (write) {
+							return `Error: ${write}`;
 						}
 						if ((node.network ?? role.network) && !toolCtx.policy.network) {
 							return `Error: ${id} needs network, but the session has network off`;
 						}
-						if (node.acceptance.some((criterion) => criterion.check === 'command') && !parentCaps.has('shell_test')) {
-							return `Error: ${id} needs command verification, but this session has no shell_test capability`;
+						const command = commandRefusal(toolCtx.policy, node.acceptance, id);
+						if (command) {
+							return `Error: ${command}`;
 						}
 						priorWrites.set(id, [...(node.rejection?.writes ?? [])]);
 					}

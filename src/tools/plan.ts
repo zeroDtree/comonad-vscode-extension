@@ -68,7 +68,8 @@ export const planTools = toolset([
 	},
 	{
 		name: 'write_plan',
-		description: 'Write a plan file recorded for this chat by name. Use it to record the implementation plan before editing code.',
+		description:
+			'Write a plan file recorded for this chat by name. In Plan mode this is the deliverable: record the implementation plan, then stop and summarize so the user can build it from the plan card. Never edit code in Plan mode.',
 		capability: 'rw_plan',
 		trackedWrite: true,
 		needsNetwork: false,
@@ -99,7 +100,7 @@ export const planTools = toolset([
 			if (!existed) {
 				ctx.noteCreated?.(target);
 			}
-			return `wrote plan ${name}`;
+			return `wrote plan ${name}\n\nThe plan is recorded. Stop here and summarize it; do not call more tools. Implementation starts when the user builds the plan.`;
 		},
 	},
 ]);

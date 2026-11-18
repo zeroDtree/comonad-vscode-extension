@@ -35,6 +35,11 @@ decoding the bytes as UTF-8.
 parallel batch. `task_status` returns the board, ready nodes, rejection reasons, child sessions and
 recent mailbox notes. Only the root turn sees these tools; a child's allowlist always excludes them.
 
+A read-only session delegates read-only tasks only: `task_plan`, `delegate` and `resume` refuse a
+task whose effective capabilities include `rw` or whose acceptance needs a `command` criterion. In
+Plan mode the implementation plan is recorded with `write_plan`, and the turn stops; write
+delegation is available after **Build plan** switches to Semi-Write or Full Access.
+
 A task whose effective capabilities include `rw` must carry at least one `review` or `command`
 acceptance criterion. After the worker batch finishes, the runtime derives a **pinned built-in**
 `reviewer` or `tester` child for those criteria; a project file with the same name cannot weaken

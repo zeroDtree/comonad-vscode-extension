@@ -4,10 +4,12 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createTestKernel } from './harness';
 import { BUILTIN_ROLES } from '../lib/agents';
+import { COMONAD_BLOCK } from '../lib/blocks';
 import { reconcileTaskGraph } from '../lib/task-graph';
 import { fsTools } from '../tools/fs';
 import { messageTools } from '../tools/message';
 import { orchestrateTools } from '../tools/orchestrate';
+import { planTools } from '../tools/plan';
 import type { ToolCall } from '../lib/types';
 
 const reply = (content: string, toolCalls: ToolCall[] = []) => ({
@@ -428,6 +430,245 @@ suite('Orchestrator task loop', () => {
 
 			const fork = kernel.ctx.sessions.fork(session.id);
 			assert.strictEqual(fork.taskGraph, undefined, 'a fork is a new chat and inherits no tasks');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('Plan mode delegates read-only research and stops after the plan is recorded', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'pl' } });
+		try {
+			await kernel.ctx.plugin(orchestrateTools);
+			await kernel.ctx.plugin(planTools);
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			const names = kernel.ctx.tools.visible(session.policy).map((tool) => tool.name);
+			assert.ok(names.includes('delegate'), 'read-only delegation stays available');
+			assert.ok(names.includes('write_plan'), 'the plan writer stays available');
+
+			const blocks = await kernel.ctx.agent.promptBlocks(session);
+			const orchestrator = blocks.find((block) => block.id === COMONAD_BLOCK.orchestrator);
+			assert.ok(orchestrator, 'the Orchestration block is still present');
+			assert.match(orchestrator.text, /This is Plan mode: the session is read-only/);
+			assert.match(orchestrator.text, /delegate only read-only research nodes/);
+			assert.match(orchestrator.text, /After write_plan, stop and summarize/);
+			assert.ok(!orchestrator.text.includes('Independent tasks, including independent write tasks'));
+
+			const tools = blocks.find((block) => block.id === COMONAD_BLOCK.tools);
+			assert.ok(tools);
+			assert.match(tools.text, /then stop and summarize/);
+			assert.match(tools.text, /Do not implement or delegate write work/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('Read-Only mode keeps delegation and adds the read-only rule', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'ro' } });
+		try {
+			await kernel.ctx.plugin(orchestrateTools);
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			const blocks = await kernel.ctx.agent.promptBlocks(session);
+			const orchestrator = blocks.find((block) => block.id === COMONAD_BLOCK.orchestrator);
+			assert.ok(orchestrator);
+			assert.match(orchestrator.text, /This session is read-only: delegate only read-only tasks/);
+			assert.ok(!orchestrator.text.includes('This is Plan mode'));
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('Plan mode without a plan writer asks for the plan in the summary', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'pl', sandboxMode: 'read-only' } });
+		try {
+			await kernel.ctx.plugin(orchestrateTools);
+			await kernel.ctx.plugin(planTools);
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			const names = kernel.ctx.tools.visible(session.policy).map((tool) => tool.name);
+			assert.ok(!names.includes('write_plan'), 'a write-refusing sandbox hides the plan writer');
+			const blocks = await kernel.ctx.agent.promptBlocks(session);
+			const orchestrator = blocks.find((block) => block.id === COMONAD_BLOCK.orchestrator);
+			assert.ok(orchestrator);
+			assert.match(orchestrator.text, /put the implementation plan in your final summary/);
+			assert.ok(!orchestrator.text.includes('Record the implementation plan yourself with write_plan'));
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('Plan mode refuses a write task when the plan is recorded', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'plan-refusal',
+				async chat(request) {
+					const last = rootStep(request);
+					if (!last) {
+						return reply('', [
+							planCall([
+								{
+									id: 'code',
+									title: 'Code',
+									role: 'coder',
+									objective: 'Write x.txt.',
+									writes: ['x.txt'],
+									acceptance: [{ id: 'a1', description: 'x.txt exists', check: 'review' }],
+								},
+							]),
+						]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(orchestrateTools);
+			await kernel.ctx.agent.runTurn({
+				text: 'plan it',
+				surface: 'test',
+				policy: { workMode: 'pl', approval: 'whitelist_accept', network: false },
+			});
+
+			const session = kernel.ctx.sessions.active()!;
+			assert.strictEqual(session.taskGraph, undefined, 'the write plan was not recorded');
+			const result = session.transcript.find((message) => message.role === 'tool' && message.toolCallId === 'plan-1');
+			assert.ok(result, 'the model saw the refusal');
+			assert.match(result.content ?? '', /Plan mode delegates only read-only research/);
+			assert.match(result.content ?? '', /write_plan/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('Plan mode delegates a planner and records its plan', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'pl' } });
+		try {
+			const workspace = kernel.host.workspace();
+			let plannerOffered: string[] = [];
+			kernel.ctx.llm.use({
+				name: 'plan-orchestrator',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('You are the planner subagent of Comonad')) {
+						plannerOffered = (request.tools ?? []).map((tool) => tool.name);
+						return reply(
+							JSON.stringify({
+								status: 'ok',
+								summary: '1. Read the module. 2. Change the parser.',
+								evidence: [{ kind: 'note', text: 'mapped the parser' }],
+								acceptance: [{ id: 'a1', met: true }],
+							}),
+						);
+					}
+					const last = rootStep(request);
+					if (!last) {
+						return reply('', [
+							planCall([
+								{
+									id: 'research',
+									title: 'Draft the plan',
+									role: 'planner',
+									objective: 'Draft an implementation plan for the change.',
+									acceptance: [{ id: 'a1', description: 'Ordered steps are returned', check: 'evidence' }],
+								},
+							]),
+						]);
+					}
+					if (last === 'task_plan') {
+						return reply('', [delegateCall(['research'])]);
+					}
+					if (last === 'delegate') {
+						return reply('', [
+							{
+								id: 'write-plan',
+								name: 'write_plan',
+								arguments: JSON.stringify({
+									name: 'plan.md',
+									content: '# Plan\n\n1. Read the module.\n2. Change the parser.\n',
+								}),
+							},
+						]);
+					}
+					return reply('Plan recorded; ready to build.');
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.plugin(orchestrateTools);
+			await kernel.ctx.plugin(planTools);
+			await kernel.ctx.agent.runTurn({ text: 'plan it', surface: 'test' });
+
+			const parent = kernel.ctx.sessions.active()!;
+			const node = parent.taskGraph!.nodes[0]!;
+			assert.strictEqual(node.status, 'accepted');
+			assert.ok(node.subagentSessionId, 'the planner has a child session');
+			const child = kernel.ctx.sessions.require(node.subagentSessionId!);
+			assert.strictEqual(child.subagent, 'planner');
+			assert.deepStrictEqual([...(child.policy.capabilities ?? [])].sort(), ['ro', 'ro_plan', 'shell_ro']);
+			assert.ok(plannerOffered.includes('list_plans'));
+			assert.ok(plannerOffered.includes('read_plan'));
+			assert.ok(!plannerOffered.includes('write_plan'), 'a child never writes plan files');
+
+			const planPath = join(workspace, '.comonad', 'plans', parent.id, 'plan.md');
+			assert.ok(existsSync(planPath), 'the root recorded the returned plan');
+			assert.match(readFileSync(planPath, 'utf8'), /Change the parser/);
+			const result = parent.transcript.find((message) => message.role === 'tool' && message.toolCallId === 'write-plan');
+			assert.ok(result);
+			assert.match(result.content ?? '', /^wrote plan plan\.md/);
+			assert.match(result.content ?? '', /Stop here and summarize it/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('Plan mode refuses to delegate a write task with a plan-first message', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plan-delegate-refusal');
+			const planned = reconcileTaskGraph(
+				undefined,
+				{
+					objective: 'write it',
+					nodes: [
+						{
+							id: 'code',
+							title: 'Code',
+							role: 'coder',
+							objective: 'Write x.txt.',
+							writes: ['x.txt'],
+							acceptance: [{ id: 'a1', description: 'x.txt exists', check: 'review' }],
+						},
+					],
+				},
+				new Map(BUILTIN_ROLES.map((role) => [role.id, role])),
+				0,
+				1,
+			);
+			assert.ok(planned.ok);
+			session.taskGraph = planned.graph;
+			kernel.ctx.sessions.save(session);
+
+			const starts: string[] = [];
+			kernel.ctx.on('agent/subagent-start', (_ref, info) => starts.push(info.name));
+			kernel.ctx.llm.use({
+				name: 'delegate-refusal',
+				async chat(request) {
+					const last = rootStep(request);
+					if (!last) {
+						return reply('', [delegateCall(['code'])]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(orchestrateTools);
+			await kernel.ctx.agent.runTurn({
+				text: 'do it',
+				sessionId: session.id,
+				surface: 'test',
+				policy: { workMode: 'pl', approval: 'whitelist_accept', network: false },
+			});
+
+			const result = session.transcript.find((message) => message.role === 'tool' && message.toolCallId === 'delegate');
+			assert.ok(result);
+			assert.match(result.content ?? '', /Plan mode delegates only read-only research/);
+			assert.strictEqual(session.taskGraph!.nodes[0]!.status, 'pending', 'the task did not start');
+			assert.deepStrictEqual(starts, [], 'no child session was spawned');
 		} finally {
 			await kernel.dispose();
 		}

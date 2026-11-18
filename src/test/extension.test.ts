@@ -9544,6 +9544,8 @@ suite('Plan tools', () => {
 				context,
 			);
 			assert.strictEqual(outcome.isError, false, outcome.content);
+			assert.match(outcome.content, /^wrote plan /);
+			assert.match(outcome.content, /Stop here and summarize it/);
 			const target = planTargetFor(kernel.host.workspace(), 'notes/plans', session.id, '../draft.md');
 			assert.ok(target);
 			assert.strictEqual(target.name, 'draft.md');

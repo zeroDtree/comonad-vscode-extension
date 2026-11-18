@@ -150,6 +150,9 @@ starts. It can only narrow the parent:
 Consequences:
 
 - A parent in `ro` refuses every child write.
+- A parent in Plan mode delegates read-only research only. `task_plan`, `delegate` and `resume`
+  refuse a task whose effective capabilities include `rw` or whose acceptance needs a `command`;
+  record the implementation plan with `write_plan` and build it in a write-capable mode.
 - A parent with network off keeps it off for the child; a researcher task that needs network fails
   before it starts.
 - An ancestor `deny` beats any child `allow`; an ancestor `ask` is denied by the child's fixed

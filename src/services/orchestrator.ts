@@ -5,6 +5,7 @@ import { buildOrchestratorBody } from '../lib/agent-prompts';
 import type { BudgetReport } from '../lib/budget';
 import { KeyedMutex } from '../lib/locks';
 import { labelOf } from '../lib/mailbox';
+import { capabilitiesOf } from '../lib/policy';
 import {
 	boardOf,
 	formatBoard,
@@ -379,11 +380,15 @@ export class Orchestrator extends Service {
 	}
 
 	/** The dynamic body of the Orchestration prompt block. */
-	prompt(session: Session): string {
+	prompt(session: Session, options: { writePlanVisible?: boolean } = {}): string {
 		const graph = session.taskGraph;
 		const messages = this.messages(session.id);
+		const capabilities = capabilitiesOf(session.policy);
 		return buildOrchestratorBody({
 			roles: [...this.roles().values()],
+			canWrite: capabilities.has('rw'),
+			planMode: session.policy.workMode === 'pl',
+			writePlanVisible: options.writePlanVisible ?? capabilities.has('rw_plan'),
 			...(graph ? { board: formatBoard(boardOf(graph, messages)) } : {}),
 			messages: messages.map((message) => `${message.from} -> ${message.to}: ${message.text}`),
 		});

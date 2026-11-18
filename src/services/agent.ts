@@ -3033,7 +3033,10 @@ export class Agent extends Service {
 			toolBody.push('Prefer edit_ranges for precise changes and write_file for new files or full rewrites.');
 		}
 		if (has('write_plan')) {
-			toolBody.push('Record the accepted implementation plan with write_plan; list_plans and read_plan show the plans recorded for this chat.');
+			toolBody.push(
+				'Plan mode: the recorded plan is the deliverable. Record the implementation plan with write_plan, then stop and summarize; the user starts implementation from the plan card. ' +
+					'Do not implement or delegate write work in this turn. list_plans and read_plan show the plans recorded for this chat.',
+			);
 		}
 		if (!session.policy.workingDirectory) {
 			toolBody.push('This session has no working directory: file, shell and task tools are unavailable.');
@@ -3065,7 +3068,7 @@ export class Agent extends Service {
 			push(COMONAD_BLOCK.skills, skillLines(this.ctx.catalog.skills));
 		}
 		if (has('delegate') && !session.parentId && !session.subagent) {
-			push(COMONAD_BLOCK.orchestrator, this.ctx.orchestrator.prompt(session));
+			push(COMONAD_BLOCK.orchestrator, this.ctx.orchestrator.prompt(session, { writePlanVisible: has('write_plan') }));
 		}
 		// The books a chat can look up, without the plugin's own heading: the prefix above is the
 		// block's editable opening, and this is only the list it adds below.
