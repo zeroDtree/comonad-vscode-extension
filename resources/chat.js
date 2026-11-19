@@ -190,7 +190,14 @@
 		}
 	}
 
-	const modePill = setupPill('mode', (mode) => vscode.postMessage({ type: 'setMode', mode }));
+	const modePill = setupPill('mode', (mode) => {
+		// The card's build default follows the pick at once; the next host state confirms it.
+		if (state) {
+			state.mode = mode;
+		}
+		syncPlanCards();
+		vscode.postMessage({ type: 'setMode', mode });
+	});
 	// The generation menu is not a setting: every entry runs a generation of that type, which is how
 	// SillyTavern's own generate button works. The host owns the list (and its wording).
 	const GENERATION_TIPS = {
@@ -232,6 +239,11 @@
 		if (value && typeof value === 'object') {
 			vscode.postMessage(value);
 		} else {
+			// The card's build default follows the pick at once; the next host state confirms it.
+			if (state && typeof value === 'string') {
+				state.model = value;
+			}
+			syncPlanCards();
 			vscode.postMessage({ type: 'setModel', model: value });
 		}
 	});
@@ -1661,21 +1673,34 @@
 		return (plan.sessionId || '') + ':' + ((step && step.id) || plan.name || '');
 	}
 
-	/** The build picks for a card; defaults follow the settings, mode only when it can build. */
+	/** A card's explicit build picks. Until one is made the card follows the live session below. */
 	function planChoice(step) {
 		const key = planChoiceKey(step);
 		let choice = planChoices.get(key);
 		if (!choice) {
-			choice = {
-				model: (state && typeof state.model === 'string' && state.model) || 'auto',
-				mode: state && (state.mode === 'sw' || state.mode === 'aw') ? state.mode : 'sw',
-			};
+			choice = {};
 			planChoices.set(key, choice);
 			if (planChoices.size > 200) {
 				planChoices.delete(planChoices.keys().next().value);
 			}
 		}
 		return choice;
+	}
+
+	/** The mode the build will run in: an explicit pick, else the session's — only sw/aw can build. */
+	function planBuildMode(choice) {
+		if (choice && (choice.mode === 'sw' || choice.mode === 'aw')) {
+			return choice.mode;
+		}
+		return state && (state.mode === 'sw' || state.mode === 'aw') ? state.mode : 'sw';
+	}
+
+	/** The model the build will run with: an explicit pick, else the session's. */
+	function planBuildModel(choice) {
+		if (choice && typeof choice.model === 'string' && choice.model) {
+			return choice.model;
+		}
+		return (state && typeof state.model === 'string' && state.model) || 'auto';
 	}
 
 	function planModelItem(id) {
@@ -1730,8 +1755,6 @@
 
 	/** A finished plan: its own card, not a tool row, so the build controls are always visible. */
 	function planCard(step, plan) {
-		planChoice(step);
-
 		const card = document.createElement('div');
 		card.className = 'tool-card plan-card';
 		card.dataset.status = step.status === 'error' ? 'error' : 'ok';
@@ -1769,8 +1792,8 @@
 		const choice = planChoice(step);
 		const controls = document.createElement('div');
 		controls.className = 'plan-controls';
-		const modelTrigger = planTrigger('model', planModelLabel(choice.model), 'Model for the implementing turn');
-		const modeTrigger = planTrigger('mode', planModeLabel(choice.mode), 'Agent mode for the implementing turn');
+		const modelTrigger = planTrigger('model', planModelLabel(planBuildModel(choice)), 'Model for the implementing turn');
+		const modeTrigger = planTrigger('mode', planModeLabel(planBuildMode(choice)), 'Agent mode for the implementing turn');
 		const actions = document.createElement('div');
 		actions.className = 'plan-actions';
 		const preview = document.createElement('button');
@@ -1834,10 +1857,12 @@
 			return;
 		}
 		const choice = planChoice(step);
-		const modelItem = planModelItem(choice.model);
-		const modelLabel = planModelLabel(choice.model);
-		const modeItem = planModeChoices().find((item) => item.id === choice.mode);
-		const modeLabel = planModeLabel(choice.mode);
+		const model = planBuildModel(choice);
+		const mode = planBuildMode(choice);
+		const modelItem = planModelItem(model);
+		const modelLabel = planModelLabel(model);
+		const modeItem = planModeChoices().find((item) => item.id === mode);
+		const modeLabel = planModeLabel(mode);
 		const modelTip =
 			'Model for the implementing turn\nCurrent: ' +
 			(modelItem && modelItem.description ? modelLabel + ' — ' + modelItem.description : modelLabel);
@@ -1857,8 +1882,6 @@
 			build.dataset.tip =
 				blocked || 'Implement ' + step.plan.name + ' with ' + modelLabel + ' in ' + modeLabel + ' mode';
 		}
-		card.dataset.buildModel = choice.model || '';
-		card.dataset.buildMode = choice.mode || 'sw';
 	}
 
 	function syncPlanCards() {
@@ -1915,7 +1938,7 @@
 		}
 		const items = current.field === 'model' ? planModelChoices() : planModeChoices();
 		const choice = planChoice(current.step);
-		const selected = current.field === 'model' ? choice.model : choice.mode;
+		const selected = current.field === 'model' ? planBuildModel(choice) : planBuildMode(choice);
 		const previous = current.active;
 		planMenuEl.innerHTML = '';
 		planMenuEl.setAttribute('aria-label', current.field === 'model' ? 'Model for the build' : 'Agent mode for the build');
@@ -3633,25 +3656,17 @@
 			if (!plan.disabled) {
 				const card = plan.closest('.plan-card');
 				const step = card && card._planStep;
-				const choice = step ? planChoice(step) : { model: '', mode: 'sw' };
-				const type = plan.dataset.planAction === 'build' ? 'buildPlan' : 'previewPlan';
-				vscode.postMessage(
-					type === 'build'
-						? {
-								type,
-								name: plan.dataset.plan,
-								relative: (card && card.dataset.relative) || undefined,
-								sessionId: plan.dataset.session || undefined,
-								model: choice.model,
-								mode: choice.mode,
-							}
-						: {
-								type,
-								name: plan.dataset.plan,
-								relative: (card && card.dataset.relative) || undefined,
-								sessionId: plan.dataset.session || undefined,
-							},
-				);
+				const choice = step ? planChoice(step) : undefined;
+				const build = plan.dataset.planAction === 'build';
+				vscode.postMessage({
+					// The button names the action; its own field decides the payload.
+					type: build ? 'buildPlan' : 'previewPlan',
+					name: plan.dataset.plan,
+					relative: (card && card.dataset.relative) || undefined,
+					sessionId: plan.dataset.session || undefined,
+					// Only a build carries the picks; a preview has no use for them.
+					...(build ? { model: planBuildModel(choice), mode: planBuildMode(choice) } : {}),
+				});
 			}
 			return true;
 		}

@@ -68,14 +68,25 @@ suite('Plan paths', () => {
 		assert.match(guest, /plan-build/);
 		assert.match(guest, /plan-trigger/);
 		assert.match(guest, /button\[data-plan-pick\]/);
-		assert.match(guest, /'buildPlan' : 'previewPlan'/);
 		assert.match(guest, /button\[data-plan\]/);
-		assert.match(guest, /mode: choice\.mode/);
+		// The action is read from the button once: comparing the derived type to 'build' is always false.
+		assert.ok(!guest.includes("type === 'build'"), 'the payload branches on the button, not the derived type');
+		assert.match(guest, /const build = plan\.dataset\.planAction === 'build'/);
+		assert.match(guest, /type: build \? 'buildPlan' : 'previewPlan'/);
+		assert.match(guest, /model: planBuildModel\(choice\)/);
+		assert.match(guest, /mode: planBuildMode\(choice\)/);
+		assert.match(guest, /function planBuildMode\(/);
+		assert.match(guest, /function planBuildModel\(/);
+		assert.ok(!guest.includes('model: (state && typeof state.model'), 'a card stores only explicit picks');
+		assert.ok(!guest.includes("mode: state && (state.mode === 'sw'"), 'a card does not freeze the session mode');
+		assert.ok(!guest.includes('.dataset.buildMode'), 'the write-only card defaults are gone');
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		assert.match(panel, /case 'previewPlan'/);
 		assert.match(panel, /case 'buildPlan'/);
 		assert.match(panel, /markdown\.showPreviewToSide/);
-		assert.match(panel, /asBuildMode\(mode\)/);
+		assert.ok(!panel.includes("mode === undefined ? 'sw'"), 'a missing mode is refused, never narrowed');
+		assert.match(panel, /const buildMode = asBuildMode\(mode\)/);
+		assert.match(panel, /buildPlanPrompt\(target\.relative, content, buildMode\)/);
 		assert.match(panel, /ctx\.llm\.keyReady\(modelPick\)/);
 		assert.match(panel, /ctx\.settings\.update\('model', modelPick\)/);
 		assert.match(panel, /applyPolicy\(\{ mode: buildMode \}\)/);
@@ -111,16 +122,25 @@ suite('Plan paths', () => {
 		assert.strictEqual(planPathForRecorded('/repo', 'chat-1', { name: 'plan.md' }), null);
 	});
 
-	test('the build prompt carries the plan unless it is too large', () => {
-		const prompt = buildPlanPrompt('.comonad/plans/chat-1/plan.md', '# Plan\n\nDo it.');
+	test('the build prompt carries the plan and the shell that may write', () => {
+		const prompt = buildPlanPrompt('.comonad/plans/chat-1/plan.md', '# Plan\n\nDo it.', 'aw');
 		assert.match(prompt, /`\.comonad\/plans\/chat-1\/plan\.md`/);
 		assert.match(prompt, /# Plan/);
 		assert.match(prompt, /Carry out the plan now/);
+		assert.match(prompt, /Full Access/);
+		assert.match(prompt, /`run_shell`/);
+		assert.match(prompt, /`run_shell_test` can only write `\.comonad\/scratch`/);
 
-		const fallback = buildPlanPrompt('a.md', 'x'.repeat(MAX_BUILD_PLAN_CHARS + 1));
+		const semi = buildPlanPrompt('a.md', '# Plan', 'sw');
+		assert.match(semi, /Semi-Write/);
+		assert.match(semi, /file tools/);
+		assert.ok(!semi.includes('Full Access'));
+
+		const fallback = buildPlanPrompt('a.md', 'x'.repeat(MAX_BUILD_PLAN_CHARS + 1), 'sw');
 		assert.match(fallback, /Read the plan at `a\.md`/);
 		assert.ok(!fallback.includes('xxxx'));
+		assert.match(fallback, /Semi-Write/, 'the fallback still names the shell rule');
 
-		assert.match(buildPlanPrompt('a.md', '   '), /Read the plan at `a\.md`/);
+		assert.match(buildPlanPrompt('a.md', '   ', 'aw'), /Read the plan at `a\.md`/);
 	});
 });

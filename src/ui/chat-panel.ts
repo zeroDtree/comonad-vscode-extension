@@ -1532,8 +1532,8 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text: 'That plan belongs to another chat.' }, source);
 			return;
 		}
-		// An omitted mode is the old client's `sw`; any other value must be exactly sw/aw.
-		const buildMode = mode === undefined ? 'sw' : asBuildMode(mode);
+		// The card always names its mode; anything else is a client bug, never silently narrowed to sw.
+		const buildMode = asBuildMode(mode);
 		if (!buildMode) {
 			post({ type: 'notice', text: 'Choose Semi-Write or Full Access before building.' }, source);
 			return;
@@ -1592,7 +1592,7 @@ export function chatPanel(ctx: Context): void {
 		}
 		// The plan file is the handoff: the research graph is history, and the build turn starts fresh.
 		ctx.orchestrator.archiveTaskGraph(session);
-		await send(buildPlanPrompt(target.relative, content), undefined, source);
+		await send(buildPlanPrompt(target.relative, content, buildMode), undefined, source);
 	};
 
 	const handle = async (message: Record<string, unknown>, source: vscode.Webview): Promise<void> => {

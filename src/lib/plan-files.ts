@@ -106,11 +106,19 @@ export function planPathForRecorded(
 	return { name, relative, path };
 }
 
-/** What a Build click sends: the file the plan lives in, then the plan itself. */
-export function buildPlanPrompt(relativePath: string, content: string): string {
+/**
+ * What a Build click sends: the file the plan lives in, then the plan itself. The closing line names
+ * the shell a workspace write needs — in Full Access a `run_shell_test` call would still be confined
+ * to the scratch tree and fail.
+ */
+export function buildPlanPrompt(relativePath: string, content: string, mode: BuildMode): string {
 	const body = content.trim();
+	const shell =
+		mode === 'aw'
+			? 'This build runs in Full Access: use `run_shell` for commands that change the workspace; `run_shell_test` can only write `.comonad/scratch`.'
+			: 'This build runs in Semi-Write: change the workspace with the file tools, not the shell; `run_shell_test` can only write `.comonad/scratch`.';
 	if (!body || body.length > MAX_BUILD_PLAN_CHARS) {
-		return `Read the plan at \`${relativePath}\` and implement it. Carry out the changes and verify them.`;
+		return `Read the plan at \`${relativePath}\` and implement it. Carry out the changes and verify them.\n\n${shell}`;
 	}
-	return `Implement the plan at \`${relativePath}\`:\n\n${body}\n\nCarry out the plan now: make the described changes and verify them.`;
+	return `Implement the plan at \`${relativePath}\`:\n\n${body}\n\nCarry out the plan now: make the described changes and verify them.\n\n${shell}`;
 }
