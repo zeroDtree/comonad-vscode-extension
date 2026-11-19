@@ -2129,7 +2129,7 @@ export function chatDocument(webview: vscode.Webview, extensionUri: vscode.Uri, 
 	const nonce = randomBytes(16).toString('base64');
 	const uri = (file: string): string => String(webview.asWebviewUri(vscode.Uri.file(file)));
 	const script = String(webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'chat.js')));
-	const highlight = String(webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'highlight.js')));
+	const markdown = String(webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'markdown.js')));
 	const style = String(webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'chat.css')));
 	const assetStyles = assets.flatMap((asset) => asset.styles ?? []).map(uri);
 	const assetScripts = assets.flatMap((asset) => asset.scripts ?? []).map(uri);
@@ -2230,7 +2230,7 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 </footer>
 <div id="tip" hidden></div>
 ${assetScripts.map((src) => `<script nonce="${nonce}" src="${escapeAttribute(src)}"></script>`).join('\n')}
-<script nonce="${nonce}" src="${escapeAttribute(highlight)}"></script>
+<script nonce="${nonce}" src="${escapeAttribute(markdown)}"></script>
 <script nonce="${nonce}" src="${escapeAttribute(script)}"></script>
 </body>
 </html>`;

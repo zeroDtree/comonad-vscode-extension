@@ -10195,14 +10195,14 @@ suite('Markdown math plugin', () => {
 			const scripts = [...document.matchAll(/<script nonce="[^"]*" src="([^"]+)"/g)].map((match) =>
 				basename(decodeURIComponent(match[1]!)),
 			);
-			assert.deepStrictEqual(scripts, ['math.js', 'highlight.js', 'chat.js'], 'hooks and the highlighter load before the chat script');
+			assert.deepStrictEqual(scripts, ['math.js', 'markdown.js', 'chat.js'], 'hooks and the renderer load before the chat script');
 			const styles = [...document.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map((match) =>
 				basename(decodeURIComponent(match[1]!)),
 			);
 			assert.deepStrictEqual(styles, ['chat.css', 'katex.min.css', 'math.css']);
 			assert.match(document, /font-src [^;]+;/, 'KaTeX may load its fonts');
 			const plain = chatDocument(panel.webview, vscode.Uri.file(root));
-			assert.strictEqual([...plain.matchAll(/<script nonce="[^"]*" src="/g)].length, 2, 'the highlighter and the chat script, even with no contribution');
+			assert.strictEqual([...plain.matchAll(/<script nonce="[^"]*" src="/g)].length, 2, 'the renderer and the chat script, even with no contribution');
 		} finally {
 			panel.dispose();
 		}
@@ -10463,24 +10463,28 @@ suite('Markdown math plugin', () => {
 	});
 
 	test('the core and plugin sources carry the math and copy seams', () => {
-		const chat = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.js'), 'utf8');
-		for (const needle of ['__comonadMath', 'mathHost', 'data-tex', 'math-block', 'displayMathAt']) {
-			assert.ok(chat.includes(needle), needle);
+		const math = readFileSync(join(__dirname, '..', '..', 'src', 'webview', 'math.ts'), 'utf8');
+		for (const needle of ['__comonadMath', 'mathHost', 'data-tex', 'math-block', 'math_inline', 'math_block']) {
+			assert.ok(math.includes(needle), needle);
 		}
+		const chat = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.js'), 'utf8');
+		assert.ok(chat.includes('__comonadMarkdown'), 'the chat delegates rendering to the bundle');
 		const copy = readFileSync(join(MATH_PACKAGE, 'src', 'copy.js'), 'utf8');
 		for (const needle of ['clipboardData', 'cloneContents', 'data-tex', "getElementById('messages')"]) {
 			assert.ok(copy.includes(needle), needle);
 		}
 	});
 
-	test('the code highlighter bundle is built and loaded before chat.js', () => {
+	test('the markdown renderer bundle is built and loaded before chat.js', () => {
 		const root = join(__dirname, '..', '..');
-		const bundle = join(root, 'resources', 'highlight.js');
-		assert.ok(existsSync(bundle), 'the highlighter is built beside chat.js');
+		const bundle = join(root, 'resources', 'markdown.js');
+		assert.ok(existsSync(bundle), 'the renderer is built beside chat.js');
 		execFileSync(process.execPath, ['--check', bundle]);
-		assert.ok(readFileSync(bundle, 'utf8').includes('hljs'));
+		const source = readFileSync(bundle, 'utf8');
+		assert.ok(source.includes('__comonadMarkdown') && source.includes('highlightCode'));
 		const chat = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
-		assert.ok(chat.includes('highlightCode') && chat.includes('window.hljs'));
+		assert.ok(chat.includes('__comonadMarkdown'), 'the chat calls the renderer');
+		assert.ok(!chat.includes('window.hljs'), 'the highlighter no longer rides on a separately loaded global');
 		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
 		assert.ok(css.includes('.hljs-keyword') && css.includes('.hljs-string'));
 	});
@@ -10497,6 +10501,91 @@ suite('Markdown math plugin', () => {
 		}
 		const host = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		assert.strictEqual(host.match(/description: shellDescription\(/g)?.length, 2, 'replay and live payloads carry the title');
+	});
+});
+
+suite('Chat markdown renderer', () => {
+	type MarkdownApi = { render(src: string): string; highlightCode(lang: string, code: string): string };
+
+	const load = (() => {
+		let pending: Promise<MarkdownApi> | null = null;
+		return (): Promise<MarkdownApi> => {
+			pending ??= import(pathToFileURL(join(__dirname, '..', '..', 'resources', 'markdown.js')).href).then(() => {
+				const api = (globalThis as { __comonadMarkdown?: MarkdownApi }).__comonadMarkdown;
+				assert.ok(api, 'resources/markdown.js exposes the renderer');
+				return api;
+			});
+			return pending;
+		};
+	})();
+
+	test('a fence indented under a list item renders as a code block', async () => {
+		const api = await load();
+		const source = [
+			'1. 目前只是本地提交，还没有 `git push`。要让新仓库克隆也拿到这个结构，需要推送：',
+			'',
+			'   ```bash',
+			'   git push',
+			'   ```',
+			'',
+			'2. 已有旧 clone 拉取后需要：',
+			'',
+			'   ```bash',
+			'   git submodule sync --recursive',
+			'   ```',
+		].join('\n');
+		const html = api.render(source);
+		assert.match(
+			html,
+			/<ol>[\s\S]*<div class="codeblock">[\s\S]*<pre data-lang="bash">[\s\S]*git push[\s\S]*<\/ol>/,
+			'the fence lives inside the list',
+		);
+		assert.strictEqual([...html.matchAll(/<div class="codeblock">/g)].length, 2, 'both fences render');
+		assert.ok(!html.includes('```'), 'no fence markers survive as text');
+	});
+
+	test('tilde, long and annotated fences render', async () => {
+		const api = await load();
+		assert.match(api.render('~~~js\nconst x = 1;\n~~~'), /data-lang="js"/);
+		assert.match(api.render('```bash title="x"\ngit status\n```'), /data-lang="bash"/);
+		const long = api.render('````\n```\ninner\n```\n````');
+		assert.strictEqual([...long.matchAll(/<div class="codeblock">/g)].length, 1, 'the inner fence stays code');
+		assert.ok(long.includes('```'), 'the inner three backticks are content');
+	});
+
+	test('links keep the host contract and unsafe markup stays text', async () => {
+		const api = await load();
+		assert.match(
+			api.render('[site](https://example.com/?a=1&b=2)'),
+			/<a href="#" data-url="https:\/\/example\.com\/\?a=1&amp;b=2">site<\/a>/,
+		);
+		assert.match(api.render('<b>x</b>'), /&lt;b&gt;x&lt;\/b&gt;/, 'raw HTML is escaped');
+		assert.ok(!api.render('[x](javascript:alert(1))').includes('data-url="javascript:'), 'protocols are validated');
+	});
+
+	test('the bundle highlights and escapes without a DOM', async () => {
+		const api = await load();
+		assert.match(api.highlightCode('bash', 'if [ -f x ]; then echo "$HOME"; fi'), /hljs-keyword/);
+		assert.strictEqual(api.highlightCode('text', 'a<b'), 'a&lt;b');
+	});
+
+	test('the math hook keeps its wrappers and waits for a closer', async () => {
+		const api = await load();
+		const host = globalThis as { __comonadMath?: { render(tex: string, display: boolean): string } };
+		try {
+			host.__comonadMath = {
+				render: (tex, display) => '<i class="' + (display ? 'D' : 'I') + '">' + tex + '</i>',
+			};
+			assert.match(api.render('$x^2$'), /<span class="math-inline" data-tex="x\^2">/);
+			const block = api.render('$$\na+b\n$$');
+			assert.match(block, /<span class="math-block" data-tex="a\+b/);
+			assert.ok(!block.includes('<p>'), 'a display formula is a block, not a paragraph');
+			const open = api.render('$$\nstreaming');
+			assert.ok(!open.includes('math-block'), 'without a closer the source stays literal');
+		} finally {
+			delete host.__comonadMath;
+		}
+		assert.ok(api.render('\\(x\\)').includes('\\('), 'without a renderer the backslashes stay');
 	});
 });
 

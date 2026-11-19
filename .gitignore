@@ -6,8 +6,8 @@ docs/.vitepress/dist
 docs/.vitepress/cache
 *.vsix
 pkgs/
-resources/highlight.js
-resources/highlight.js.map
+resources/markdown.js
+resources/markdown.js.map
 resources/review.js
 resources/review.js.map
 resources/file-review.js

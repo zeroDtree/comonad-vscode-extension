@@ -161,9 +161,10 @@ async function main() {
 		return;
 	}
 
-	// The chat's code highlighter, as its own browser bundle: it is loaded before chat.js and exposes
-	// the `hljs` global. Built here (not as a plugin) because every chat uses it.
-	await buildWebview('src/webview/highlight.ts', 'resources/highlight.js');
+	// The chat's markdown renderer, as its own browser bundle: it carries markdown-it, the highlighter
+	// and the math hooks, is loaded before chat.js, and exposes the `__comonadMarkdown` global. Built
+	// here (not as a plugin) because every chat uses it.
+	await buildWebview('src/webview/markdown.ts', 'resources/markdown.js');
 	// The Review tab's guest: one browser bundle against the resource directory, so the tab has no
 	// runtime dependency beyond the extension's own files.
 	await buildWebview('src/webview/review.ts', 'resources/review.js');
