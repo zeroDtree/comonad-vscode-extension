@@ -14,7 +14,6 @@ a command — elsewhere it is ordinary text.
 | Command | Purpose |
 | --- | --- |
 | `/help` | List commands |
-| `/plan [task]` | Research read-only, write a plan (or return it in the summary when plan writes are unavailable), then stop for review |
 | `/review [focus]` | Review pending changes without editing |
 | `/summarize [notes] [--rebuild]` | Extend the model-context summary; `--rebuild` rewrites it from the full chat (`/compress`, `/compact`) |
 | `/clear`, `/new` | Start a fresh session |

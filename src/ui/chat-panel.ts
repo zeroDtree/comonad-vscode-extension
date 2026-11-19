@@ -1083,7 +1083,7 @@ export function chatPanel(ctx: Context): void {
 				}
 				return;
 			}
-			// A command that hands the turn over (`/plan`, `/review`) says what it printed first, and then
+			// A command that hands the turn over (`/review`) says what it printed first, and then
 			// the turn's own streaming takes over.
 			flush();
 			const result = await ctx.agent.runTurn({

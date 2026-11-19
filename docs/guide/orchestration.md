@@ -135,9 +135,10 @@ Record the final implementation plan with `write_plan`. When the writer is offer
 is the deliverable: the turn stops and summarizes it, and the plan card's **Build plan** switches to
 Semi-Write or Full Access and sends a new turn. When the sandbox or the Prompts switch hides
 `write_plan`, the same turn asks for the plan in its final summary instead. The current sandbox,
-Prompts switch and approval policy decide whether the writer is offered and whether the call runs;
-`/plan` is the workflow entry and sets the turn's approval and network. Build archives the research
-graph, so the implementation turn starts with a fresh task graph and the file as its handoff.
+Prompts switch and approval policy decide whether the writer is offered and whether the call runs.
+Select the Plan mode from the mode picker and ask for the plan; Plan mode sets the capability ceiling
+but not approval or network. Build archives the research graph, so the implementation turn starts
+with a fresh task graph and the file as its handoff.
 
 ## Approval and limits
 

@@ -3867,14 +3867,18 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
 		try {
 			await kernel.ctx.plugin(slashCommands);
-			const builtin = kernel.ctx.commands.suggestions().find((row) => row.name === 'plan');
-			assert.ok(builtin && !builtin.custom && builtin.hint === '[task]', 'a built-in row carries its argument hint');
+			assert.ok(
+				!kernel.ctx.commands.suggestions().some((row) => row.name === 'plan'),
+				'the /plan command is removed',
+			);
+			const builtin = kernel.ctx.commands.suggestions().find((row) => row.name === 'review');
+			assert.ok(builtin && !builtin.custom && builtin.hint === '[focus]', 'a built-in row carries its argument hint');
 
 			const dir = join(kernel.host.workspace(), '.comonad', 'commands');
 			mkdirSync(dir, { recursive: true });
 			writeFileSync(join(dir, 'explain.md'), '---\ndescription: Explain a file\nargument-hint: <path>\n---\nRead $ARGUMENTS.\n');
 			// A custom file under a registered name never runs: `handle()` resolves the spec first.
-			writeFileSync(join(dir, 'plan.md'), '---\ndescription: shadowed\n---\nnot this\n');
+			writeFileSync(join(dir, 'review.md'), '---\ndescription: shadowed\n---\nnot this\n');
 			await kernel.ctx.catalog.reload();
 
 			const rows = kernel.ctx.commands.suggestions();
@@ -3882,8 +3886,14 @@ suite('Cordis kernel', () => {
 			assert.ok(explain?.custom === true, 'the custom command is in the menu');
 			assert.strictEqual(explain.description, 'Explain a file');
 			assert.strictEqual(explain.hint, '<path>');
-			const plan = rows.find((row) => row.name === 'plan');
-			assert.ok(plan && !plan.custom && plan.description !== 'shadowed', 'the registered command owns the name');
+			const review = rows.find((row) => row.name === 'review');
+			assert.ok(review && !review.custom && review.description !== 'shadowed', 'the registered command owns the name');
+
+			// A user plan.md, previously shadowed by the built-in, now runs as a custom command.
+			writeFileSync(join(dir, 'plan.md'), '---\ndescription: user plan\n---\nuser plan\n');
+			await kernel.ctx.catalog.reload();
+			const customPlan = kernel.ctx.commands.suggestions().find((row) => row.name === 'plan');
+			assert.ok(customPlan?.custom === true, 'a user plan.md runs as an ordinary custom command');
 		} finally {
 			await kernel.dispose();
 		}

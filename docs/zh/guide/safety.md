@@ -42,8 +42,9 @@ flowchart TB
 模式是硬上限：显式能力集只能收窄它。Plan 会话即使显式给了 `rw`，也不能写项目文件。模式是一个设置；
 每轮把当前设置合并进该聊天的策略。
 
-模式不设置审批或沙箱。计划文件还需要允许写入的沙箱，以及会放行 `rw_plan` 的审批策略（或 allow 规则）；
-`/plan` 会设置本轮的审批与网络，否则 `write_plan` 会被隐藏或拒绝，计划留在总结中。
+模式不设置审批、网络或沙箱。要开始一个计划，选择 Plan 模式（聊天模式 pill、`Comonad: Select Mode`，
+或 Settings → Policies → Work mode）并提出计划请求。计划文件还需要允许写入的沙箱，以及会放行 `rw_plan`
+的审批策略（或 allow 规则）；否则 `write_plan` 会被隐藏或拒绝，计划留在总结中。
 
 ## 2. Network access policy
 

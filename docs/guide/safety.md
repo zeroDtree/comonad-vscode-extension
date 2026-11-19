@@ -44,9 +44,10 @@ The mode is a hard ceiling: an explicit capability set can only narrow it. A Pla
 explicit `rw` still cannot write project files. The mode is a setting; each turn merges the current
 setting into the chat's policy.
 
-The mode does not set approval or sandbox. A plan file also needs a sandbox that permits writes and
-an approval policy that runs `rw_plan` (or an allow rule); `/plan` sets the turn's approval and
-network, and otherwise `write_plan` is hidden or refused and the plan stays in the summary.
+The mode does not set approval, network or sandbox. To start a plan, select the Plan mode (chat mode
+pill, `Comonad: Select Mode`, or Settings → Policies → Work mode) and ask for it. A plan file also
+needs a sandbox that permits writes and an approval policy that runs `rw_plan` (or an allow rule);
+otherwise `write_plan` is hidden or refused and the plan stays in the summary.
 
 ## 2. Network access policy
 

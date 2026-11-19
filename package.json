@@ -58,10 +58,6 @@
         "isSticky": true,
         "commands": [
           {
-            "name": "plan",
-            "description": "Research read-only, then write a plan"
-          },
-          {
             "name": "review",
             "description": "Review pending changes without editing"
           },
