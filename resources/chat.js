@@ -320,11 +320,8 @@
 		modelFlyout.style.top = top + 'px';
 	}
 
-	function showFlyout(page, row) {
-		clearTimeout(flyoutShowTimer);
-		clearTimeout(flyoutHideTimer);
-		hideTip();
-		flyoutPage = page;
+	/** The rows of one page. Kept apart from placement so a list that lands while the flyout is open can refill it. */
+	function fillFlyout(page) {
 		modelFlyout.innerHTML = '';
 		for (const item of pageItems(page)) {
 			modelFlyout.append(choiceRow(item, pageCurrent(page), (id) => pagePick(page, id), modelPill));
@@ -340,6 +337,14 @@
 				),
 			);
 		}
+	}
+
+	function showFlyout(page, row) {
+		clearTimeout(flyoutShowTimer);
+		clearTimeout(flyoutHideTimer);
+		hideTip();
+		flyoutPage = page;
+		fillFlyout(page);
 		modelFlyout.hidden = false;
 		placeFlyout(row);
 	}
@@ -1648,7 +1653,7 @@
 	}
 
 	function planModelChoices() {
-		return state && Array.isArray(state.models) ? state.models : [];
+		return modelState.models;
 	}
 
 	function planChoiceKey(step) {
@@ -3038,10 +3043,12 @@
 	function beginTurn(message) {
 		// A turn started anywhere invalidates an editor that was open on an older prompt.
 		closeEdit();
+		// Only an impersonation streams into the composer. Every other start says so — a turn whose end
+		// was lost while hidden must not leave the next turn's text in the box.
+		draft = message.draft === true;
 		// An impersonation is not a turn: upstream clears the composer and streams your next message
 		// into it, so the chat is left alone until you send it yourself.
 		if (message.draft) {
-			draft = true;
 			live = null;
 			input.value = '';
 			resizeInput();
@@ -3193,8 +3200,9 @@
 		if (!force && (!runningSessionId || state.sessionId !== runningSessionId)) {
 			return;
 		}
+		// A forced resync is recovery, not chatter: it must not be swallowed by the throttle.
 		const now = Date.now();
-		if (now - resyncAt < 1_000) {
+		if (!force && now - resyncAt < 1_000) {
 			return;
 		}
 		resyncAt = now;
@@ -4014,7 +4022,7 @@
 		if (!running && !live) {
 			shownToolCard = cardMode;
 		}
-		modelState.models = state.models || [];
+		// The model list arrives on its own `models` message; the state only names the current pick.
 		modelState.model = state.model;
 		modelState.modelLabel = state.modelLabel || state.model || 'auto';
 		modelState.reasoningEffort = state.reasoningEffort || 'auto';
@@ -4220,6 +4228,15 @@
 					renderMention();
 				}
 				break;
+			case 'models':
+				// The list travels on its own message so a slow endpoint never delays the state above.
+				modelState.models = Array.isArray(message.models) ? message.models : [];
+				// Open pickers read the list live: relabel the plan cards and refill a flyout on screen.
+				syncPlanCards();
+				if (flyoutPage === 'model' && !modelFlyout.hidden) {
+					fillFlyout('model');
+				}
+				break;
 			case 'toggleHistory':
 				// The title-bar icon (comonad.toggleHistory) flips the chat list.
 				chatsOpen = !chatsOpen;
@@ -4371,10 +4388,18 @@
 				break;
 			case 'stop-ack':
 				if (message.ok === false) {
-					stopping = false;
-					$('stop').disabled = false;
-					$('stop').textContent = 'Stop';
+					if (message.running === true) {
+						// The host still owns a turn that is already aborting: its turn-end settles this.
+						break;
+					}
+					// Nothing was running where Stop was sent: this guest lost the turn-end (a hidden
+					// panel receives no messages). Clear the stale flag and repaint from the host's
+					// transcript, which has what the live stream missed.
+					runningSession = null;
+					draft = false;
+					setRunning(false);
 					addNotice('Nothing to stop — the turn already ended.');
+					requestResync(true);
 				}
 				break;
 			case 'turn-end': {

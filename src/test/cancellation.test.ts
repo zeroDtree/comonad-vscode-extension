@@ -490,6 +490,59 @@ suite('Cancellation', () => {
 		assert.match(panel, /postPendingQuestions/);
 	});
 
+	test('a state snapshot cannot outlive the turn it describes', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(panel, /const state = \(\): Record<string, unknown> => \{/);
+		const start = panel.indexOf('const state = ');
+		const end = panel.indexOf('/** run_shell_readonly', start);
+		assert.ok(start >= 0 && end > start, 'state() sits before the shell helpers');
+		const body = panel.slice(start, end);
+		assert.ok(!/\bawait\b/.test(body), 'the snapshot has no suspension point');
+		assert.ok(!body.includes('availableModels'), 'the model list is not part of the snapshot');
+		const refresh = panel.slice(panel.indexOf('const refreshState ='), panel.indexOf('// Pending checkpoint changes'));
+		assert.match(refresh, /post\(state\(\)\)/, 'the snapshot is posted, not awaited');
+		assert.ok(!panel.includes('await state()'), 'no sender waits before posting a snapshot');
+	});
+
+	test('the model list is fetched off the state path and posted on its own', () => {
+		const root = join(__dirname, '..', '..');
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(panel, /const refreshModels = \(\): void => \{/);
+		assert.match(panel, /modelsInFlight/);
+		assert.match(panel, /modelsDirty/);
+		assert.match(panel, /type: 'models', models: lastModels/);
+		const refresh = panel.slice(panel.indexOf('const refresh = '), panel.indexOf('const resyncClient'));
+		assert.match(refresh, /refreshModels\(\)/, 'a refresh also refreshes the list');
+		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		assert.match(guest, /case 'models':/);
+		assert.match(guest, /modelState\.models = Array\.isArray\(message\.models\)/);
+		assert.match(guest, /function planModelChoices\(\) \{\s*return modelState\.models;/);
+		assert.ok(!/modelState\.models\s*=\s*state\.models/.test(guest), 'a state message cannot clear a newer list');
+	});
+
+	test('a chat panel resyncs from the session when it is shown again', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const opened = panel.slice(panel.indexOf('const openPanel ='), panel.indexOf('// The chat view lives'));
+		assert.match(opened, /onDidChangeViewState/);
+		assert.match(opened, /created\.visible === shown/, 'an active change in a visible tab does not replay');
+		assert.match(opened, /resyncClient\(created\.webview\)/);
+		const view = panel.slice(panel.indexOf('onDidChangeVisibility'), panel.indexOf('attach(webviewView.webview)'));
+		assert.match(view, /resyncClient\(webviewView\.webview\)/, 'one resync path for view and panel');
+	});
+
+	test('a stop the host could not perform clears the guest turn instead of wedging it', () => {
+		const root = join(__dirname, '..', '..');
+		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		const ack = guest.slice(guest.indexOf("case 'stop-ack':"), guest.indexOf("case 'turn-end':"));
+		assert.match(ack, /message\.running/);
+		assert.match(ack, /runningSession = null/);
+		assert.match(ack, /setRunning\(false\)/);
+		assert.match(ack, /requestResync\(true\)/);
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(panel, /post\(\{ type: 'stop-ack', ok, running \}, source\)/);
+		assert.match(panel, /stopped \|\|= ok/, 'a second Stop cannot un-stop a stopped turn');
+	});
+
 	test('a waiting question survives a closed panel and notifies once', () => {
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		assert.match(panel, /if \(request\.signal\.aborted\) \{\s*return \[\];/);

@@ -263,7 +263,12 @@ export function chatPanel(ctx: Context): void {
 		}
 	};
 
-	const state = async (): Promise<Record<string, unknown>> => {
+	/**
+	 * The chat's snapshot. It is composed synchronously on purpose: a snapshot that waits can outlive
+	 * the turn it describes, landing after `turn-end` and re-arming the guest's running state. Anything
+	 * that needs an endpoint belongs on its own message (`refreshModels`).
+	 */
+	const state = (): Record<string, unknown> => {
 		const config = ctx.settings.get();
 		const session = ctx.sessions.active();
 		const all = ctx.sessions.list().filter(inHistory);
@@ -308,7 +313,8 @@ export function chatPanel(ctx: Context): void {
 			commands: ctx.commands.suggestions(),
 			model: config.model,
 			modelLabel: ctx.llm.describe(config.model),
-			models: await ctx.llm.availableModels(),
+			// The list of models to pick from is not part of this snapshot: `refreshModels()` posts it
+			// on its own message, so a slow endpoint can never delay state.
 			historyScope,
 			sessionTotal: all.length,
 			tavern: tavernState(session),
@@ -536,12 +542,65 @@ export function chatPanel(ctx: Context): void {
 	};
 	ctx.on('chatWebview/changed', rebuildAssets);
 
+	/**
+	 * The model list the composer offers, fetched off the state path: an endpoint that is slow or down
+	 * must never stall a snapshot. `Llm` caches the lists, so a read per refresh is cheap; a request
+	 * that lands while one is in flight folds into one more pass, so only the newest list is posted.
+	 */
+	let lastModels: Awaited<ReturnType<typeof ctx.llm.availableModels>> | null = null;
+	let modelsInFlight: Promise<void> | null = null;
+	let modelsDirty = false;
+
+	const postModels = (only?: vscode.Webview): void => {
+		if (lastModels) {
+			post({ type: 'models', models: lastModels }, only);
+		}
+	};
+
+	const refreshModels = (): void => {
+		// A guest that just (re)attached gets the list known now instead of waiting for a read.
+		postModels();
+		if (!clients.size) {
+			return;
+		}
+		if (modelsInFlight) {
+			modelsDirty = true;
+			return;
+		}
+		modelsInFlight = (async () => {
+			try {
+				do {
+					modelsDirty = false;
+					lastModels = await ctx.llm.availableModels();
+				} while (modelsDirty);
+				postModels();
+			} catch (error) {
+				ctx.log.message(`model list failed: ${describe(error)}`);
+			} finally {
+				modelsInFlight = null;
+			}
+		})();
+	};
+
 	const refresh = (): void => {
 		if (assetsDirty && !running) {
 			rebuildAssets();
 		}
-		void refreshState();
+		refreshState();
+		refreshModels();
 		void refreshChanges();
+	};
+
+	/** A chat that may have missed messages while hidden: forget what it was sent and hand it the session again. */
+	const resyncClient = (webview: vscode.Webview): void => {
+		published.delete(webview);
+		refresh();
+	};
+
+	/** A hidden chat is not where the keyboard is. */
+	const forgetFocus = (webview: vscode.Webview): void => {
+		focusedClients.delete(webview);
+		syncFocus();
 	};
 
 	/**
@@ -570,14 +629,13 @@ export function chatPanel(ctx: Context): void {
 		return streamed ? null : { type: 'command', text: text || '(no reply)' };
 	};
 
-	const refreshState = async (): Promise<void> => {
+	const refreshState = (): void => {
 		if (!clients.size) {
 			return;
 		}
-		// The session is read *after* the wait, never before it: a fork announces itself twice — as a new
-		// chat, and then as that copy with everything after the turn removed — and a snapshot taken
-		// before the wait would hand the panel the conversation as it stood before the cut.
-		post(await state());
+		// Composed and posted in one turn, so it is enqueued in call order with turn-start/turn-end: a
+		// snapshot can never arrive behind the turn it describes.
+		post(state());
 		const session = ctx.sessions.active();
 		if (panel) {
 			panel.title = session ? `Comonad · ${trimTitle(session.title)}` : 'Comonad';
@@ -1567,7 +1625,8 @@ export function chatPanel(ctx: Context): void {
 					// The guest lost the live stream (a dropped message, a race with a reload) and
 					// asks for the transcript the host persisted while the turn ran. Only this client
 					// is redrawn; a live turn re-attaches to it and the stream continues there.
-					post(await state(), source);
+					post(state(), source);
+					postModels(source);
 					publishTurns(ctx.sessions.active(), source);
 					postPendingApprovals();
 					postPendingQuestions();
@@ -1601,8 +1660,11 @@ export function chatPanel(ctx: Context): void {
 					if (ctx.agent.stop(target ?? undefined)) {
 						ok = true;
 					}
-					stopped = ok;
-					post({ type: 'stop-ack', ok }, source);
+					// A second Stop must not un-stop a turn that is already aborting.
+					stopped ||= ok;
+					// The ack carries the host's truth: a guest that asks to stop something the host
+					// does not have can settle itself from this instead of waiting for a turn-end.
+					post({ type: 'stop-ack', ok, running }, source);
 					break;
 				}
 				case 'approve': {
@@ -1906,6 +1968,22 @@ export function chatPanel(ctx: Context): void {
 			panel = null;
 			syncActive();
 		});
+		// A background tab receives no messages, even with `retainContextWhenHidden`: whatever it missed
+		// — a turn-end included — is replayed from the session when it comes back. `visible` change
+		// only: the same event fires when an already-visible tab merely gains focus, and that must not
+		// repaint the transcript.
+		let shown = created.visible;
+		created.onDidChangeViewState(() => {
+			if (created.visible === shown) {
+				return;
+			}
+			shown = created.visible;
+			if (shown) {
+				resyncClient(created.webview);
+			} else {
+				forgetFocus(created.webview);
+			}
+		});
 		panel = created;
 		attach(created.webview);
 		syncActive();
@@ -1934,11 +2012,9 @@ export function chatPanel(ctx: Context): void {
 					// Messages posted while the view is hidden are dropped: resync from the session.
 					// Only this view is forgotten — the transcript now includes the running turn, so
 					// the guest can re-attach its live stream to it.
-					published.delete(webviewView.webview);
-					refresh();
+					resyncClient(webviewView.webview);
 				} else {
-					focusedClients.delete(webviewView.webview);
-					syncFocus();
+					forgetFocus(webviewView.webview);
 				}
 			});
 			attach(webviewView.webview);
