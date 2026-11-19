@@ -88,6 +88,7 @@ import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { allowedToolsFor, BUILTIN_ROLE_BY_ID, SUBAGENT_EXCLUDED_TOOLS, type AgentRole } from '../lib/agents';
 import { buildSubagentSystemPrompt } from '../lib/agent-prompts';
+import { planRules } from '../lib/plan-rules';
 import { KeyedMutex } from '../lib/locks';
 import { skillLines } from './catalog';
 import type { JournalApi } from '../lib/journal';
@@ -3008,6 +3009,7 @@ export class Agent extends Service {
 		// A silent generation is offered no tools, so the prompt must not advertise any either.
 		const visible = SILENT_TRIGGERS.has(trigger ?? 'normal') ? [] : this.ctx.tools.visible(session.policy);
 		const has = (name: string): boolean => visible.some((tool) => tool.name === name);
+		const rules = planRules({ policy: session.policy, visible: new Set(visible.map((tool) => tool.name)) });
 		const setting = new Map(config.prompts.map((entry) => [entry.id, entry]));
 		const prefixOf = (id: ComonadBlockId): string => setting.get(id)?.prefix ?? DEFAULT_BLOCK_PREFIX[id];
 		const blocks: PromptBlock[] = [];
@@ -3032,10 +3034,13 @@ export class Agent extends Service {
 		if (has('edit_ranges') || has('write_file')) {
 			toolBody.push('Prefer edit_ranges for precise changes and write_file for new files or full rewrites.');
 		}
-		if (has('write_plan')) {
+		if (rules.planMode && visible.length > 0 && !session.parentId && !session.subagent) {
+			const readers = rules.canReadPlans ? ' list_plans and read_plan show the plans recorded for this chat.' : '';
 			toolBody.push(
-				'Plan mode: the recorded plan is the deliverable. Record the implementation plan with write_plan, then stop and summarize; the user starts implementation from the plan card. ' +
-					'Do not implement or delegate write work in this turn. list_plans and read_plan show the plans recorded for this chat.',
+				rules.deliverable === 'plan-file'
+					? 'Plan mode: the recorded plan is the deliverable. Record the implementation plan with write_plan, then stop and summarize; the user starts implementation from the plan card. ' +
+							`Do not implement or delegate write work in this turn.${readers}`
+					: 'Plan mode: the implementation plan is the deliverable, but this session cannot write plan files. Put the plan in your final summary and stop; the user can switch to a write-capable mode to implement.',
 			);
 		}
 		if (!session.policy.workingDirectory) {
@@ -3068,7 +3073,7 @@ export class Agent extends Service {
 			push(COMONAD_BLOCK.skills, skillLines(this.ctx.catalog.skills));
 		}
 		if (has('delegate') && !session.parentId && !session.subagent) {
-			push(COMONAD_BLOCK.orchestrator, this.ctx.orchestrator.prompt(session, { writePlanVisible: has('write_plan') }));
+			push(COMONAD_BLOCK.orchestrator, this.ctx.orchestrator.prompt(session, rules));
 		}
 		// The books a chat can look up, without the plugin's own heading: the prefix above is the
 		// block's editable opening, and this is only the list it adds below.

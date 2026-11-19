@@ -192,7 +192,6 @@ async function loadAgents(roots: { project?: string; user?: string }): Promise<A
 					title: stringField(data, 'title') ?? id,
 					description: stringField(data, 'description') ?? '',
 					prompt: body,
-					workMode,
 					capabilities,
 					network: booleanField(data, 'network') === true,
 					tools: stringListField(data, 'tools'),

@@ -125,6 +125,8 @@ export interface Session {
 	subagents?: Record<string, string>;
 	/** The Orchestrator's persistent task DAG; root chats only. */
 	taskGraph?: TaskGraph;
+	/** Task graphs archived by Build; root chats only, newest last. */
+	archivedTaskGraphs?: TaskGraph[];
 	usage: SessionUsage;
 	/**
 	 * The prompt size the provider reported for the last request, in tokens. It is the only exact
@@ -409,6 +411,7 @@ export class SessionStore {
 			createdRoot: undefined,
 			// A fork is a new chat: accepted tasks belong to the conversation it copied, not to it.
 			taskGraph: undefined,
+			archivedTaskGraphs: undefined,
 			usage: emptyUsage(),
 		};
 		this.save(session);
@@ -501,10 +504,23 @@ export class SessionStore {
 			subagentDone: session.subagentDone === true,
 			subagents: sanitizeSubagentLinks(session.subagents),
 			taskGraph: delegated ? undefined : sanitizeTaskGraph(session.taskGraph),
+			archivedTaskGraphs: delegated ? undefined : sanitizeArchivedTaskGraphs(session.archivedTaskGraphs),
 			usage: session.usage ?? emptyUsage(),
 			instructions: session.instructions ?? [],
 		};
 	}
+}
+
+/** Archived graphs are untrusted like the active one; malformed entries are dropped, newest kept. */
+function sanitizeArchivedTaskGraphs(value: unknown): TaskGraph[] | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const graphs = value
+		.map((entry) => sanitizeTaskGraph(entry))
+		.filter((graph): graph is TaskGraph => graph !== undefined)
+		.slice(-5);
+	return graphs.length ? graphs : undefined;
 }
 
 /** A stored message list with its attachments validated; a hand-edited file is untrusted input. */

@@ -24,6 +24,9 @@ flowchart LR
 `%% graph: id` 命名一个图，`%% default: id` 指定回合默认使用的图，`%% soft node: instruct` 让模型
 选择目标。每个回合只运行默认图；其它命名图仍可供插件通过 `ctx.graphs.get(id)` 使用。
 
+编排器的 `task_graph`、`delegate`、`task_status`、`resume` 是这个循环里的普通工具；任务编排不增加图节点。
+任务图是编排器的执行状态，与工具执行图以及独立的计划文件都不是同一个东西。
+
 ## Graph、Policy 与 Executor
 
 - **Graph** 驱动回合。`agent.calls` 开始一个工具批次，`agent.gate` 把策略结果映射成路由；

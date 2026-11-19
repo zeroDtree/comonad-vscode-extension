@@ -1,47 +1,65 @@
 # Orchestration
 
 The root turn is the **Orchestrator**. It answers directly when the work is trivial; otherwise it
-records a task DAG, delegates ready nodes to leaf subagents, reads their structured results and the
+records a task graph, delegates ready nodes to leaf subagents, reads their structured results and the
 independent verdicts, and delivers the integrated answer. There is no second model loop: the
-Orchestrator is the existing agent loop with three extra tools.
+Orchestrator is the existing agent loop with four extra tools.
 
 ```text
 root turn (Orchestrator)
-  ├─ task_plan    record or revise the DAG
+  ├─ task_graph   record or revise the task graph
   ├─ delegate     run 1..8 ready nodes; write and read tasks may run together
   ├─ task_status  board, ready nodes, rejections, sessions, recent notes
+  ├─ resume       continue a paused node with a new segment budget
   └─ message      shared coordination mailbox (also available to every child)
 ```
 
 A child is a hidden session with its own policy. It never receives the Orchestrator tools, cannot
 spawn or fork, and cannot ask the user. If it is blocked it returns `status: "blocked"`.
 
+## Task graph and plan file
+
+Two artifacts have different jobs.
+
+The **task graph** is execution state. `task_graph` records the nodes for the current phase; the
+runtime versions it, derives verifiers, and persists it on the root chat. A later revision is
+declarative: send all nodes you still want. **Build plan** archives the graph and starts the
+implementation turn with no active graph, so a new `task_graph` begins at version 1.
+
+The **plan file** is the durable deliverable. `write_plan` writes it under
+`<planDirectory>/<root chat id>/`; the plan card previews it and **Build plan** hands its content to
+the next turn. The file survives the graph archive and is the source of truth the user builds from.
+
+A Plan session is read-only because its mode grants no `rw`; its capabilities are `ro`, `shell_ro`,
+`ro_plan` and `rw_plan`. The phase may hold read-only research nodes plus the plan file.
+
 ## The fourteen roles
 
-| Role | Mode | Network | Direction |
+| Role | Capabilities | Network | Direction |
 | --- | --- | --- | --- |
-| `general-purpose` | `ro` | off | Lightweight read-only tasks without a clear specialist |
+| `general-purpose` | `ro`, `shell_ro` | off | Lightweight read-only tasks without a clear specialist |
 | `researcher` | `ro` | on (parent switch still applies) | External research with cited sources |
-| `math-researcher` | `sw` | off | Derivation and numerical verification (scratch shell only) |
-| `explorer` | `ro` | off | Codebase search and code-path mapping |
-| `planner` | `pl` | off | Implementation plan; returns it in the report (no plan writes) |
-| `coder` | `sw` | off | Focused implementation through tracked file tools |
-| `tester` | `sw` | off | Test design and execution |
-| `reviewer` | `ro` | off | Independent review against acceptance criteria |
-| `debugger` | `ro` | off | Reproduce and diagnose from evidence |
-| `security-auditor` | `ro` | off | Threat modeling and vulnerability review |
-| `data-analyst` | `sw` | off | Data profiling, statistics and reproducible analysis |
-| `scientist` | `sw` | off | Hypothesis-driven investigation and experiment design |
-| `technical-writer` | `sw` | off | Accurate documentation for a named audience |
-| `architect` | `pl` | off | Options, interfaces, trade-offs and evolution |
+| `math-researcher` | `ro`, `shell_ro`, `shell_test` | off | Derivation and numerical verification (scratch shell only) |
+| `explorer` | `ro`, `shell_ro` | off | Codebase search and code-path mapping |
+| `planner` | `ro`, `ro_plan`, `shell_ro` | off | Implementation plan; returns it in the report (no plan writes) |
+| `coder` | `ro`, `rw`, `shell_ro`, `shell_test` | off | Focused implementation through tracked file tools |
+| `tester` | `ro`, `rw`, `shell_ro`, `shell_test` | off | Test design and execution |
+| `reviewer` | `ro`, `ro_plan`, `shell_ro` | off | Independent review against acceptance criteria |
+| `debugger` | `ro`, `shell_ro` | off | Reproduce and diagnose from evidence |
+| `security-auditor` | `ro`, `shell_ro` | off | Threat modeling and vulnerability review |
+| `data-analyst` | `ro`, `rw`, `shell_ro`, `shell_test` | off | Data profiling, statistics and reproducible analysis |
+| `scientist` | `ro`, `rw`, `shell_ro`, `shell_test` | off | Hypothesis-driven investigation and experiment design |
+| `technical-writer` | `ro`, `rw`, `shell_ro` | off | Accurate documentation for a named audience |
+| `architect` | `ro`, `ro_plan`, `shell_ro` | off | Options, interfaces, trade-offs and evolution |
 
-The displayed mode is a ceiling. The role's own capability set, the task's capability filter and the
-parent policy all narrow it. `shell_test` writes only the test scratch tree; an effective `rw` is what
-makes a task a **write task**. See the role defaults in [Settings](/reference/settings#orchestrator-and-subagents).
+A role's `capabilities` is its ceiling. The parent policy, the task's capability filter and the
+subagent hard cap narrow it further. `shell_test` writes only the test scratch tree; an effective
+`rw` is what makes a task a **write task**. See the role defaults in
+[Settings](/reference/settings#orchestrator-and-subagents).
 
-## Planning
+## The task graph
 
-`task_plan` takes the goal and the complete desired node set. Each node carries:
+`task_graph` takes the goal and the complete desired node set. Each node carries:
 
 - `id`, `title`, `role`;
 - `objective`, optional `inputs`/`outputs`;
@@ -56,7 +74,7 @@ default `subagentBudgetMode: inherit` copies the main agent's current four limit
 mode. A budget that runs out pauses the task, not rejects it: the child session and transcript
 survive, and `resume` continues them with a new segment budget without spending an attempt.
 
-The plan is declarative: on every revision send all nodes you still want. A running or verifying
+The graph is declarative: on every revision send all nodes you still want. A running or verifying
 node blocks a revision. An accepted node may be kept unchanged; changing its definition is refused.
 A changed rejected or paused node resets to pending and keeps its attempt count. The graph has at
 most 32 nodes, six replans and two attempts per node by default; a paused node can be resumed up to
@@ -80,7 +98,7 @@ is also a JSON envelope. Its self-declared `verdict` is advisory: acceptance is 
 per-criterion `met` values, and a command criterion also needs matching `exitCode: 0` evidence.
 
 A write task must have at least one `review` or `command` criterion. The model has no tool that can
-mark a task accepted. A rejected node carries a code and reason; revise the plan within the attempt
+mark a task accepted. A rejected node carries a code and reason; revise the graph within the attempt
 budget, or report the blocker.
 
 ## Parallel writes and the mailbox
@@ -103,15 +121,23 @@ a build or temp directory.
 
 ## Plan mode
 
-Plan mode is a read-only phase with its own artifact. The Orchestrator stays available, but it may
-delegate read-only research only: a `planner` node can return the implementation plan in its report,
-and `explorer`/`reviewer` work the same way. `task_plan` refuses a node whose effective capabilities
-include `rw` or whose acceptance needs a `command` criterion, and `delegate`/`resume` repeat the
-refusal before spawning.
+Plan mode is a read-only phase with its own artifact. The mode is a capability ceiling: a Plan
+session grants `ro`, `shell_ro`, `ro_plan` and `rw_plan`, so it can read the workspace and plan files
+but cannot write project files, even if a caller supplied an explicit `rw`. The Orchestrator stays
+available, but it may delegate read-only research only: a `planner` node can return the
+implementation plan in its report, and `explorer`/`reviewer` work the same way.
 
-Record the final implementation plan with `write_plan`. The recorded plan is the deliverable: the
-turn stops and summarizes it, and the plan card's **Build plan** switches to Semi-Write or Full
-Access and sends a new turn, where write delegation is available again.
+`task_graph` refuses a new or revised node whose effective capabilities include `rw` or whose
+acceptance needs a `command` criterion; `delegate` and `resume` repeat the refusal before spawning.
+An accepted node is history: a later mode switch keeps it, and only new or revised work is refused.
+
+Record the final implementation plan with `write_plan`. When the writer is offered, the recorded plan
+is the deliverable: the turn stops and summarizes it, and the plan card's **Build plan** switches to
+Semi-Write or Full Access and sends a new turn. When the sandbox or the Prompts switch hides
+`write_plan`, the same turn asks for the plan in its final summary instead. The current sandbox,
+Prompts switch and approval policy decide whether the writer is offered and whether the call runs;
+`/plan` is the workflow entry and sets the turn's approval and network. Build archives the research
+graph, so the implementation turn starts with a fresh task graph and the file as its handoff.
 
 ## Approval and limits
 
@@ -125,7 +151,7 @@ attempts per node and 3 resumes of a paused node by default. Stop aborts the roo
 an interrupted running node is marked `interrupted` at the next root turn. A paused node is not
 interrupted: it keeps its child session and waits for `resume`.
 
-## A small plan
+## A small task graph
 
 ```json
 {
@@ -154,10 +180,10 @@ interrupted: it keeps its child session and waits for `resume`.
 }
 ```
 
-`task_plan` then `delegate(["explore"])`, then `delegate(["code"])`. The second batch derives the
+`task_graph` then `delegate(["explore"])`, then `delegate(["code"])`. The second batch derives the
 reviewer and tester from the two criteria; `task_status` shows the board before the final answer.
 
-In Plan mode `task_plan` refuses this plan because of the `code` node. Delegate the `explore` node
+In Plan mode `task_graph` refuses this graph because of the `code` node. Delegate the `explore` node
 alone, record the implementation plan with `write_plan`, and leave the `code` node to the
 write-capable turn started by **Build plan**.
 

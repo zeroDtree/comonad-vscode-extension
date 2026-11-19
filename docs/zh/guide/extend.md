@@ -187,14 +187,14 @@ maxMilliseconds: 0
 写这篇说明。所有项目写入都走文件工具；run_shell_test 只写 scratch 目录。
 ```
 
-角色 id 是小写 slug（`name` 或文件名）。`mode`（或 `workMode`）是能力上限；`capabilities` 是默认有效能力，
-必须留在子代理硬上限内（`ro`、`ro_plan`、`shell_ro`、`rw`、`shell_test`）。`network: true` 只是请求网络，
-父开关仍须开启。`risk` 由有效能力推导，不能在文件里覆盖。自定义角色出现在编排块中，任务的 `role` 可以
-引用它。
+角色 id 是小写 slug（`name` 或文件名）。`mode`（或 `workMode`）是收窄角色能力的输入，不再作为运行时模式
+存储或展示。`capabilities` 是角色的有效能力，必须留在子代理硬上限内（`ro`、`ro_plan`、`shell_ro`、`rw`、
+`shell_test`）。`network: true` 只是请求网络，父开关仍须开启。`risk` 由有效能力推导，不能在文件里覆盖。
+自定义角色出现在编排块中，任务的 `role` 可以引用它。
 
 frontmatter **选择**工具；写能力还需要 `subagents` 设置中的授权（Settings → Subagents）：`files` 启用
 可跟踪文件工具（`write_file`、`edit_text`、`edit_ranges`），`test` 启用 `run_shell_test`。只读工具不需要
-授权。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级处于 Plan 模式时可用；计划写入
+授权。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级有效能力含它时可用；计划写入
 （`write_plan`）、`run_shell`/`start_shell` 和编排工具永远不会授予子级。没有 `tools` 列表的定义视为
 只读。复用内置 id 的自定义角色不继承内置默认授权。见[安全](/zh/guide/safety#编排器与子-agent)与
 [编排](/zh/guide/orchestration)。

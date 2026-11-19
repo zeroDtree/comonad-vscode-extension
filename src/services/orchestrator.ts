@@ -5,7 +5,7 @@ import { buildOrchestratorBody } from '../lib/agent-prompts';
 import type { BudgetReport } from '../lib/budget';
 import { KeyedMutex } from '../lib/locks';
 import { labelOf } from '../lib/mailbox';
-import { capabilitiesOf } from '../lib/policy';
+import type { PlanRules } from '../lib/plan-rules';
 import {
 	boardOf,
 	formatBoard,
@@ -17,7 +17,7 @@ import {
 	type TaskGraph,
 	type TaskGraphAccess,
 	type TaskNode,
-	type TaskPlanInput,
+	type TaskGraphInput,
 	type TaskRejection,
 	type TaskResult,
 	type TaskVerificationCheck,
@@ -85,15 +85,46 @@ export class Orchestrator extends Service {
 		}
 	}
 
-	/** Reconciles a declarative plan with the current graph. */
-	plan(access: TaskGraphAccess, input: TaskPlanInput): { graph: TaskGraph; warnings: string[] } {
+	/**
+	 * Archives the active task graph before a phase change (Build). The archived graph is audit
+	 * history: it is never offered to the tools again, and a new graph starts at version 1.
+	 */
+	archiveTaskGraph(session: Session): boolean {
+		if (!session.taskGraph || session.parentId || session.subagent) {
+			return false;
+		}
+		this.recover(session);
+		const graph = session.taskGraph;
+		session.archivedTaskGraphs = [...(session.archivedTaskGraphs ?? []), graph].slice(-5);
+		session.taskGraph = undefined;
+		this.ctx.sessions.save(session);
+		this.audit(session.id, {
+			kind: 'task-graph-archive',
+			version: graph.version,
+			replans: graph.replans,
+			nodes: graph.nodes.map((node) => ({ id: node.id, status: node.status, risk: node.risk })),
+		});
+		this.ctx.emit('orchestrator/changed', session.id, undefined);
+		return true;
+	}
+
+	/** Reconciles a declarative task graph with the current graph. */
+	recordTaskGraph(
+		access: TaskGraphAccess,
+		input: TaskGraphInput,
+		rules: PlanRules,
+	): { graph: TaskGraph; warnings: string[] } {
 		const result = reconcileTaskGraph(access.get(), input, this.roles(), access.turn);
 		if (!result.ok) {
 			throw new Error(result.errors.join('\n'));
 		}
+		const refusals = rules.refuseGraph(result.graph, this.roles());
+		if (refusals.length) {
+			throw new Error(refusals.join('\n'));
+		}
 		access.set(result.graph);
 		this.audit(access.sessionId, {
-			kind: 'task-plan',
+			kind: 'task-graph',
 			version: result.graph.version,
 			replans: result.graph.replans,
 			nodes: result.graph.nodes.map((node) => ({ id: node.id, role: node.role, risk: node.risk, dependsOn: node.dependsOn })),
@@ -140,7 +171,7 @@ export class Orchestrator extends Service {
 				throw new Error(`${id}: the role no longer allows its declared capabilities`);
 			}
 			if (roleRisk(effectiveCapabilities(role, node.capabilities)) !== node.risk) {
-				throw new Error(`${id}: the role's risk changed since the plan was made; replan`);
+				throw new Error(`${id}: the role's risk changed since the task graph was recorded; replan`);
 			}
 			runs.push({ node, role });
 		}
@@ -237,7 +268,7 @@ export class Orchestrator extends Service {
 				throw new Error(`${id}: the role no longer allows its declared capabilities`);
 			}
 			if (roleRisk(effectiveCapabilities(role, node.capabilities)) !== node.risk) {
-				throw new Error(`${id}: the role's risk changed since the plan was made; replan`);
+				throw new Error(`${id}: the role's risk changed since the task graph was recorded; replan`);
 			}
 			runs.push({ node, role });
 		}
@@ -380,15 +411,12 @@ export class Orchestrator extends Service {
 	}
 
 	/** The dynamic body of the Orchestration prompt block. */
-	prompt(session: Session, options: { writePlanVisible?: boolean } = {}): string {
+	prompt(session: Session, rules: PlanRules): string {
 		const graph = session.taskGraph;
 		const messages = this.messages(session.id);
-		const capabilities = capabilitiesOf(session.policy);
 		return buildOrchestratorBody({
 			roles: [...this.roles().values()],
-			canWrite: capabilities.has('rw'),
-			planMode: session.policy.workMode === 'pl',
-			writePlanVisible: options.writePlanVisible ?? capabilities.has('rw_plan'),
+			rules,
 			...(graph ? { board: formatBoard(boardOf(graph, messages)) } : {}),
 			messages: messages.map((message) => `${message.from} -> ${message.to}: ${message.text}`),
 		});
@@ -402,7 +430,7 @@ export class Orchestrator extends Service {
 	private require(access: TaskGraphAccess): TaskGraph {
 		const graph = access.get();
 		if (!graph) {
-			throw new Error('no task plan exists; call task_plan first');
+			throw new Error('no task graph exists; call task_graph first');
 		}
 		return graph;
 	}

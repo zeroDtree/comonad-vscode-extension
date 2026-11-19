@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
 import { readFileSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import {
 	BUILD_MODES,
 	MAX_BUILD_PLAN_CHARS,
 	asBuildMode,
 	buildPlanPrompt,
+	parsePlanWriteResult,
 	planFileName,
 	planFolder,
+	planPathForRecorded,
 	planTargetFor,
-} from '../lib/plans';
+} from '../lib/plan-files';
 
 suite('Plan paths', () => {
 	test('the folder follows the setting and the root chat', () => {
@@ -55,7 +57,7 @@ suite('Plan paths', () => {
 		assert.deepStrictEqual([...BUILD_MODES], ['sw', 'aw']);
 		assert.strictEqual(asBuildMode('sw'), 'sw');
 		assert.strictEqual(asBuildMode('aw'), 'aw');
-		for (const rejected of ['pl', 'ro', 'chat', 'SW', 'toString', '', 42, null, undefined]) {
+		for (const rejected of ['plan', 'ro', 'chat', 'SW', 'toString', '', 42, null, undefined]) {
 			assert.strictEqual(asBuildMode(rejected), undefined);
 		}
 	});
@@ -80,6 +82,33 @@ suite('Plan paths', () => {
 		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.css'), 'utf8');
 		assert.match(css, /\.plan-card/);
 		assert.match(css, /\.plan-menu\s*\{[\s\S]*?position:\s*fixed/);
+	});
+
+	test('a recorded plan path survives a changed plan directory', () => {
+		const recorded = parsePlanWriteResult(
+			'wrote plan plan.md\nplan path: notes/plans/chat-1/plan.md\n\nThe plan is recorded. Stop here and summarize it.',
+		);
+		assert.deepStrictEqual(recorded, { name: 'plan.md', relative: 'notes/plans/chat-1/plan.md' });
+		const target = planPathForRecorded('/repo', 'chat-1', recorded!);
+		assert.ok(target);
+		assert.strictEqual(target.relative, 'notes/plans/chat-1/plan.md');
+		assert.strictEqual(target.path, resolve('/repo', 'notes/plans/chat-1/plan.md'));
+		// The current planDirectory is irrelevant: the recorded path wins.
+		assert.ok(planPathForRecorded('/repo', 'chat-1', { name: 'plan.md', relative: '.comonad/plans/chat-1/plan.md' }));
+	});
+
+	test('a recorded path must match the chat and the basename', () => {
+		assert.strictEqual(planPathForRecorded('/repo', 'chat-1', { name: 'plan.md', relative: 'notes/plans/chat-2/plan.md' }), null);
+		assert.strictEqual(planPathForRecorded('/repo', 'chat-1', { name: 'plan.md', relative: 'notes/plans/chat-1/other.md' }), null);
+		assert.strictEqual(planPathForRecorded('/repo', 'chat-1', { name: 'plan.md', relative: '../escape/plan.md' }), null);
+		assert.strictEqual(planPathForRecorded('/repo', 'chat-1', { name: 'plan.md', relative: 'notes/plans/xchat-1/plan.md' }), null);
+		assert.strictEqual(planPathForRecorded('', 'chat-1', { name: 'plan.md', relative: 'notes/plans/chat-1/plan.md' }), null);
+	});
+
+	test('an older write_plan result falls back to the current setting', () => {
+		assert.deepStrictEqual(parsePlanWriteResult('wrote plan plan.md\n\nThe plan is recorded.'), { name: 'plan.md' });
+		assert.strictEqual(parsePlanWriteResult('wrote something else'), undefined);
+		assert.strictEqual(planPathForRecorded('/repo', 'chat-1', { name: 'plan.md' }), null);
 	});
 
 	test('the build prompt carries the plan unless it is too large', () => {

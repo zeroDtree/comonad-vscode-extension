@@ -12,9 +12,16 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 ### Highlights
 
-- **The root turn is an Orchestrator.** It records a persistent task DAG with `task_plan`, runs ready
-  nodes with `delegate`, and reads `task_status`; a shared `message` mailbox lets parallel children
-  coordinate through one JSONL file. The old `agent` tool and the four generic built-ins
+- **One plan vocabulary.** The Orchestrator's execution DAG is `task_graph`; the Plan work mode is
+  `plan`; `write_plan` / `read_plan` / `list_plans` are the plan-file tools. The mode is now a hard
+  capability ceiling, Build archives the research task graph and starts a fresh one, and role
+  `workMode` labels are gone. The tool rename has no alias; a stored `workMode: "pl"` still reads as
+  `plan` only so an old Plan chat cannot silently become write-capable. The `plan` policy preset is
+  removed; the mode, `/plan` and the plan-file tools are unchanged, and the five policy layers stay
+  independently configurable.
+- **The root turn is an Orchestrator.** It records a persistent task graph with `task_graph`, runs
+  ready nodes with `delegate`, and reads `task_status`; a shared `message` mailbox lets parallel
+  children coordinate through one JSONL file. The old `agent` tool and the four generic built-ins
   (`explore`/`plan`/`review`/`implement`) are replaced by fourteen leaf roles: `general-purpose`,
   `researcher`, `math-researcher`, `explorer`, `planner`, `coder`, `tester`, `reviewer`, `debugger`,
   `security-auditor`, `data-analyst`, `scientist`, `technical-writer` and `architect`. There is no

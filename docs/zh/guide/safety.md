@@ -20,7 +20,7 @@ flowchart TB
 
 | 层 | 设置 | 取值 |
 | --- | --- | --- |
-| Work mode | `comonad.mode` | `chat`、`ro`、`sw`、`aw`、`pl` |
+| Work mode | `comonad.mode` | `chat`、`ro`、`sw`、`aw`、`plan` |
 | Network access policy | `comonad.network` | `on`、`off` |
 | User rule | `comonad.permissions` | `deny`、`ask`、`allow` 三个列表 |
 | Tool approval policy | `comonad.approval` | `manual`、`whitelist_accept`、`blacklist_reject`、`universal_accept`、`universal_reject` |
@@ -37,9 +37,13 @@ flowchart TB
 | Read-Only（`ro`） | 读文件、只读 shell |
 | Semi-Write（`sw`） | + 写文件，+ 测试 shell（工作区只读、仅 scratch 可写） |
 | Full Access（`aw`） | + 工作区内完整 shell |
-| Plan（`pl`） | 读文件、只读 shell，读写计划文件 |
+| Plan（`plan`） | 读文件、只读 shell，读写计划文件 |
 
-模式按聊天记忆；新聊天从 `comonad.mode` 开始。
+模式是硬上限：显式能力集只能收窄它。Plan 会话即使显式给了 `rw`，也不能写项目文件。模式是一个设置；
+每轮把当前设置合并进该聊天的策略。
+
+模式不设置审批或沙箱。计划文件还需要允许写入的沙箱，以及会放行 `rw_plan` 的审批策略（或 allow 规则）；
+`/plan` 会设置本轮的审批与网络，否则 `write_plan` 会被隐藏或拒绝，计划留在总结中。
 
 ## 2. Network access policy
 
@@ -121,14 +125,14 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
 
 ## 编排器与子 Agent
 
-根轮次是 **编排器**：它规划任务 DAG、委派 ready 节点并整合交付。十四个内置角色是叶子 worker。子级永远
-拿不到 `task_plan`、`delegate`、`task_status` 或旧的 `agent` 工具，`spawnAgent` 也会拒绝子级发起的 spawn。
+根轮次是 **编排器**：它记录任务图、委派 ready 节点并整合交付。十四个内置角色是叶子 worker。子级永远
+拿不到 `task_graph`、`delegate`、`task_status`、`resume` 或旧的 `agent` 工具，`spawnAgent` 也会拒绝子级发起的 spawn。
 
 子代理运行同样的六层，但拥有委派时构建的**独立有效策略**。它只能收紧父级：
 
 | 策略 | 子级得到什么 |
 | --- | --- |
-| Work mode | 父级有效能力 ∩ 角色能力 ∩ 任务级 capability filter ∩ 硬上限（`ro`、`ro_plan`、`shell_ro`、`rw`、`shell_test`） |
+| 能力 | 父级有效能力 ∩ 角色能力 ∩ 任务级 capability filter ∩ 硬上限（`ro`、`ro_plan`、`shell_ro`、`rw`、`shell_test`） |
 | 网络 | 父开关 AND 角色默认；任务可以关闭，不能打开 |
 | 用户规则 | 全部祖先规则；`deny` > `ask` > `allow` |
 | 工具审批 | 父级审批策略 |
@@ -138,6 +142,9 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
 由此：
 
 - 父级为 `ro` 时，子级写入被拒绝。
+- 父级处于 Plan 模式时只委派只读研究。`task_graph`、`delegate`、`resume` 拒绝新的或修订过的、有效能力含
+  `rw` 或验收需要 `command` 的任务；`accepted` 节点是历史，会保留。用 `write_plan` 记录实现计划，在写模式中
+  构建。Build 会归档研究任务图，因此实现轮次从空任务图开始，以计划文件作为交接物。
 - 父级关闭网络时，需要网络的 researcher 任务在启动前失败。
 - 祖先 `deny` 胜过子级 `allow`（规则在审批策略之前执行）；祖先 `ask` 会被子级固定的 `never` 应答直接拒绝。
 - 写委派需要父策略自动放行写（`universal_accept`、`blacklist_reject` 或 allow 规则）。在
@@ -182,13 +189,13 @@ scratch 和工作区 `.comonad/tmp` —— 时，目标才算本会话所有。`
 
 ## 预设
 
-这些层可组合为预设：**Ask**、**Plan**、**Auto**、**Read only** 和 **Full access**。预设位于模式和审批
-控件中。`comonad.allowFullAccess: false` 会隐藏 unrestricted 预设。
+这些层可组合为预设：**Ask**、**Auto**、**Read only** 和 **Full access**。预设是快捷方式，不是新的层：
+五个字段仍可独立配置，Plan 模式不是预设。预设位于模式和审批控件中。
+`comonad.allowFullAccess: false` 会隐藏 unrestricted 预设。
 
 | 预设 | Work mode | Tool approval | Network | Sandbox mode |
 | --- | --- | --- | --- | --- |
 | Ask | `sw` | `manual` | off | `workspace-write` |
-| Plan | `pl` | `whitelist_accept` | off | `workspace-write` |
 | Auto | `aw` | `universal_accept` | off | `workspace-write` |
 | Read only | `ro` | `whitelist_accept` | off | `read-only` |
 | Full access | `aw` | `universal_accept` | on | `danger-full-access` |

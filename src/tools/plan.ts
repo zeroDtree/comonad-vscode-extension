@@ -2,7 +2,7 @@
 import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { missingAncestor } from '../lib/created';
-import { planFileName, planFolder } from '../lib/plans';
+import { planFileName, planFolder, planTargetFor } from '../lib/plan-files';
 import { guardPath, PathEscapeError } from '../lib/sandbox';
 import { objectSchema, type ToolContext } from '../lib/types';
 import { toolset } from '../services/tools';
@@ -69,7 +69,7 @@ export const planTools = toolset([
 	{
 		name: 'write_plan',
 		description:
-			'Write a plan file recorded for this chat by name. In Plan mode this is the deliverable: record the implementation plan, then stop and summarize so the user can build it from the plan card. Never edit code in Plan mode.',
+			'Write a plan file for this chat by name. The file is the durable deliverable the user can build; when plan writes are unavailable, return the plan in your summary instead.',
 		capability: 'rw_plan',
 		trackedWrite: true,
 		needsNetwork: false,
@@ -100,7 +100,14 @@ export const planTools = toolset([
 			if (!existed) {
 				ctx.noteCreated?.(target);
 			}
-			return `wrote plan ${name}\n\nThe plan is recorded. Stop here and summarize it; do not call more tools. Implementation starts when the user builds the plan.`;
+			const file = planFileName(name) ?? name;
+			const recorded = planTargetFor(
+				ctx.policy.workingDirectory,
+				ctx.policy.planDirectory,
+				ctx.rootSessionId ?? ctx.sessionId,
+				file,
+			);
+			return `wrote plan ${file}\nplan path: ${recorded?.relative ?? file}\n\nThe plan is recorded. Stop here and summarize it; do not call more tools. Implementation starts when the user builds the plan.`;
 		},
 	},
 ]);

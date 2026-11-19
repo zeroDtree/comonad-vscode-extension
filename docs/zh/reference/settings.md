@@ -44,7 +44,7 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 
 | 键 | 默认值 | 用途 |
 | --- | --- | --- |
-| `mode` | `sw` | Work mode：`chat`、`ro`、`sw`、`aw` 或 `pl` |
+| `mode` | `sw` | Work mode：`chat`、`ro`、`sw`、`aw` 或 `plan`。模式是硬上限：有效能力集只能收窄它 |
 | `approval` | `manual` | Tool approval policy：`manual`、`whitelist_accept`、`blacklist_reject`、`universal_accept`、`universal_reject` |
 | `approvalResponse` | `ask` | Approval response policy：`ask` 交给应答方并失败关闭；`never` 直接拒绝 |
 | `network` | `false` | Network access policy：网络工具与 shell 内网络；回环仍可用 |
@@ -85,8 +85,9 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 ```
 
 只读工具始终可用。只有 `files` 和 `test` 两种授权；`run_shell`、`start_shell`、`run_task` 和计划写入永远
-不会授予子级。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级处于 Plan 模式时可用。没有
-`tools` 列表的自定义角色视为只读；复用内置 id 的自定义角色不继承内置默认授权。父模式仍需允许该能力。
+不会授予子级。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级有效能力含它时可用。没有
+`tools` 列表的自定义角色视为只读；复用内置 id 的自定义角色不继承内置默认授权。父级有效能力仍需包含该
+能力。
 
 委派继承父级有效策略并只能收紧，也继承父级的工具审批策略；审批应答固定为 `never`，任何需要询问的调用
 都会被拒绝。因此写任务需要父策略自动放行写（`universal_accept`、`blacklist_reject` 或 allow 规则）；

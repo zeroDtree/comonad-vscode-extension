@@ -197,16 +197,17 @@ Write the note. Use the file tools for every project write; run_shell_test write
 directory.
 ```
 
-The role id is a lowercase slug (`name` or the file name). `mode` (or `workMode`) is the capability
-ceiling; `capabilities` is the default effective set and must stay inside the subagent hard cap
-(`ro`, `ro_plan`, `shell_ro`, `rw`, `shell_test`). `network: true` only requests network; the parent
-switch still has to be on. `risk` is derived from the effective capabilities and cannot be set in the
-file. A custom role appears in the Orchestration block and can be named by a task's `role`.
+The role id is a lowercase slug (`name` or the file name). `mode` (or `workMode`) is an input that
+caps the role's capabilities; it is not stored or displayed as a runtime mode. `capabilities` is the
+role's effective set and must stay inside the subagent hard cap (`ro`, `ro_plan`, `shell_ro`, `rw`,
+`shell_test`). `network: true` only requests network; the parent switch still has to be on. `risk` is
+derived from the effective capabilities and cannot be set in the file. A custom role appears in the
+Orchestration block and can be named by a task's `role`.
 
 The frontmatter **selects** tools. Writes also need a grant in the `subagents` setting (Settings →
 Subagents); `files` enables tracked file tools (`write_file`, `edit_text`, `edit_ranges`) and `test`
 enables `run_shell_test`. Read-only tools need no grant. Plan readers (`list_plans`, `read_plan`) use
-`ro_plan` and are available only when the parent is in Plan mode; plan writes (`write_plan`),
+`ro_plan` and are available only when the parent's effective capabilities include it; plan writes (`write_plan`),
 `run_shell`/`start_shell` and the orchestrator tools are never granted to a child. A definition
 without a `tools` list is read-only. A custom role that reuses a built-in id does not inherit the
 built-in default grant. See [Safety](/guide/safety#orchestrator-and-subagents) and

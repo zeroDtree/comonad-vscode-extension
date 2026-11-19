@@ -18,9 +18,9 @@ const reply = (content: string, toolCalls: ToolCall[] = []) => ({
 	usage: { input: 1, output: 1 },
 });
 
-const planCall = (tasks: unknown[]): ToolCall => ({
+const graphCall = (tasks: unknown[]): ToolCall => ({
 	id: 'plan-1',
-	name: 'task_plan',
+	name: 'task_graph',
 	arguments: JSON.stringify({ objective: 'ship the change', nodes: tasks }),
 });
 
@@ -80,7 +80,7 @@ suite('Orchestrator task loop', () => {
 					const last = rootStep(request);
 					if (!last) {
 						return reply('', [
-							planCall([
+							graphCall([
 								{
 									id: 'code',
 									title: 'Write made.txt',
@@ -92,7 +92,7 @@ suite('Orchestrator task loop', () => {
 							]),
 						]);
 					}
-					if (last === 'task_plan') {
+					if (last === 'task_graph') {
 						return reply('', [delegateCall(['code'])]);
 					}
 					return reply('done');
@@ -124,7 +124,7 @@ suite('Orchestrator task loop', () => {
 			coderApproval = child.policy.approval;
 			assert.strictEqual(coderApproval, 'universal_accept', 'the child inherits the parent approval');
 			assert.ok(!coderOffered.includes('delegate'), `delegate is not offered to a child: ${coderOffered.join(', ')}`);
-			assert.ok(!coderOffered.includes('task_plan'));
+			assert.ok(!coderOffered.includes('task_graph'));
 			assert.ok(!coderOffered.includes('task_status'));
 			assert.ok(!coderOffered.includes('agent'));
 
@@ -184,7 +184,7 @@ suite('Orchestrator task loop', () => {
 					const last = rootStep(request);
 					if (!last) {
 						return reply('', [
-							planCall([
+							graphCall([
 								{
 									id: 'code',
 									title: 'Write a.txt',
@@ -197,7 +197,7 @@ suite('Orchestrator task loop', () => {
 							]),
 						]);
 					}
-					if (last === 'task_plan') {
+					if (last === 'task_graph') {
 						return reply('', [delegateCall(['code'])]);
 					}
 					if (last === 'delegate') {
@@ -265,7 +265,7 @@ suite('Orchestrator task loop', () => {
 					const last = rootStep(request);
 					if (!last) {
 						return reply('', [
-							planCall([
+							graphCall([
 								{
 									id: 'look',
 									title: 'Map the entry points',
@@ -276,7 +276,7 @@ suite('Orchestrator task loop', () => {
 							]),
 						]);
 					}
-					if (last === 'task_plan') {
+					if (last === 'task_graph') {
 						return reply('', [delegateCall(['look'])]);
 					}
 					return reply('done');
@@ -334,7 +334,7 @@ suite('Orchestrator task loop', () => {
 					const last = rootStep(request);
 					if (!last) {
 						return reply('', [
-							planCall([
+							graphCall([
 								{
 									id: 'a',
 									title: 'Write a.txt',
@@ -354,7 +354,7 @@ suite('Orchestrator task loop', () => {
 							]),
 						]);
 					}
-					if (last === 'task_plan') {
+					if (last === 'task_graph') {
 						return reply('', [delegateCall(['a', 'b'])]);
 					}
 					return reply('done');
@@ -435,8 +435,61 @@ suite('Orchestrator task loop', () => {
 		}
 	});
 
+	test('Build archives the task graph and starts a fresh one', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'archive-test');
+			const result = reconcileTaskGraph(
+				undefined,
+				{
+					objective: 'archive the research',
+					nodes: [
+						{
+							id: 'code',
+							title: 'Code',
+							role: 'coder',
+							objective: 'do the work',
+							acceptance: [{ id: 'a1', description: 'it is correct', check: 'review' }],
+						},
+					],
+				},
+				new Map(BUILTIN_ROLES.map((role) => [role.id, role])),
+				0,
+				1,
+			);
+			assert.ok(result.ok);
+			session.taskGraph = result.graph;
+			kernel.ctx.sessions.save(session);
+
+			const changes: unknown[] = [];
+			kernel.ctx.on('orchestrator/changed', (_id, board) => changes.push(board));
+			assert.strictEqual(kernel.ctx.orchestrator.archiveTaskGraph(session), true);
+			assert.strictEqual(session.taskGraph, undefined, 'the active graph is cleared');
+			assert.strictEqual(session.archivedTaskGraphs?.length, 1, 'the research graph is kept as history');
+			assert.ok(changes.includes(undefined), 'the board is cleared');
+			const reloaded = kernel.ctx.sessions.get(session.id)!;
+			assert.strictEqual(reloaded.archivedTaskGraphs?.length, 1, 'the archive survives a reload');
+
+			const fresh = reconcileTaskGraph(undefined, { objective: 'build it', nodes: result.graph.nodes.map((node) => ({
+				id: node.id,
+				title: node.title,
+				role: node.role,
+				objective: node.objective,
+				acceptance: node.acceptance,
+			})) }, new Map(BUILTIN_ROLES.map((role) => [role.id, role])), 1, 2);
+			assert.ok(fresh.ok);
+			assert.strictEqual(fresh.graph.version, 1, 'a fresh graph starts at version 1');
+			assert.strictEqual(fresh.graph.replans, 0, 'and spends no replans');
+
+			const fork = kernel.ctx.sessions.fork(session.id);
+			assert.strictEqual(fork.archivedTaskGraphs, undefined, 'a fork inherits no archive');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('Plan mode delegates read-only research and stops after the plan is recorded', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'pl' } });
+		const kernel = await createTestKernel({ config: { mode: 'plan' } });
 		try {
 			await kernel.ctx.plugin(orchestrateTools);
 			await kernel.ctx.plugin(planTools);
@@ -478,7 +531,7 @@ suite('Orchestrator task loop', () => {
 	});
 
 	test('Plan mode without a plan writer asks for the plan in the summary', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'pl', sandboxMode: 'read-only' } });
+		const kernel = await createTestKernel({ config: { mode: 'plan', sandboxMode: 'read-only' } });
 		try {
 			await kernel.ctx.plugin(orchestrateTools);
 			await kernel.ctx.plugin(planTools);
@@ -504,7 +557,7 @@ suite('Orchestrator task loop', () => {
 					const last = rootStep(request);
 					if (!last) {
 						return reply('', [
-							planCall([
+							graphCall([
 								{
 									id: 'code',
 									title: 'Code',
@@ -520,10 +573,11 @@ suite('Orchestrator task loop', () => {
 				},
 			});
 			await kernel.ctx.plugin(orchestrateTools);
+			await kernel.ctx.plugin(planTools);
 			await kernel.ctx.agent.runTurn({
 				text: 'plan it',
 				surface: 'test',
-				policy: { workMode: 'pl', approval: 'whitelist_accept', network: false },
+				policy: { workMode: 'plan', approval: 'whitelist_accept', network: false },
 			});
 
 			const session = kernel.ctx.sessions.active()!;
@@ -538,7 +592,7 @@ suite('Orchestrator task loop', () => {
 	});
 
 	test('Plan mode delegates a planner and records its plan', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'pl' } });
+		const kernel = await createTestKernel({ config: { mode: 'plan' } });
 		try {
 			const workspace = kernel.host.workspace();
 			let plannerOffered: string[] = [];
@@ -560,7 +614,7 @@ suite('Orchestrator task loop', () => {
 					const last = rootStep(request);
 					if (!last) {
 						return reply('', [
-							planCall([
+							graphCall([
 								{
 									id: 'research',
 									title: 'Draft the plan',
@@ -571,7 +625,7 @@ suite('Orchestrator task loop', () => {
 							]),
 						]);
 					}
-					if (last === 'task_plan') {
+					if (last === 'task_graph') {
 						return reply('', [delegateCall(['research'])]);
 					}
 					if (last === 'delegate') {
@@ -661,7 +715,7 @@ suite('Orchestrator task loop', () => {
 				text: 'do it',
 				sessionId: session.id,
 				surface: 'test',
-				policy: { workMode: 'pl', approval: 'whitelist_accept', network: false },
+				policy: { workMode: 'plan', approval: 'whitelist_accept', network: false },
 			});
 
 			const result = session.transcript.find((message) => message.role === 'tool' && message.toolCallId === 'delegate');

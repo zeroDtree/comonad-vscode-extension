@@ -1154,7 +1154,7 @@
 		ask_user: 'Ask you',
 		agent: 'Run agent',
 		delegate: 'Delegate tasks',
-		task_plan: 'Plan tasks',
+		task_graph: 'Record task graph',
 		task_status: 'Task status',
 		message: 'Coordination note',
 		skill: 'Run skill',
@@ -1735,6 +1735,7 @@
 			card.dataset.callId = step.id;
 		}
 		card.dataset.plan = plan.name;
+		card.dataset.relative = plan.relative || '';
 		card.dataset.session = plan.sessionId || '';
 
 		const head = document.createElement('div');
@@ -3631,11 +3632,17 @@
 						? {
 								type,
 								name: plan.dataset.plan,
+								relative: (card && card.dataset.relative) || undefined,
 								sessionId: plan.dataset.session || undefined,
 								model: choice.model,
 								mode: choice.mode,
 							}
-						: { type, name: plan.dataset.plan, sessionId: plan.dataset.session || undefined },
+						: {
+								type,
+								name: plan.dataset.plan,
+								relative: (card && card.dataset.relative) || undefined,
+								sessionId: plan.dataset.session || undefined,
+							},
 				);
 			}
 			return true;

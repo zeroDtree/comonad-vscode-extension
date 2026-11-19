@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { issueAuthorization } from '../lib/authorization';
-import { planTargetFor } from '../lib/plans';
+import { planTargetFor } from '../lib/plan-files';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { limitEffort } from '../lib/effort';
@@ -23,6 +23,7 @@ import {
 	parseRule,
 	parseRules,
 	presetPolicy,
+	PRESET_LABELS,
 	ruleMatches,
 	suggestAllowRule,
 	type GateEnvironment,
@@ -289,13 +290,16 @@ suite('Token counting', () => {
 
 suite('Comonad domain', () => {
 	test('policy presets', () => {
-		assert.deepStrictEqual(presetPolicy('plan'), {
-			workMode: 'pl',
-			approval: 'whitelist_accept',
-			approvalResponse: 'ask',
+		assert.deepStrictEqual(Object.keys(PRESET_LABELS), ['ask', 'auto', 'readonly', 'full'], 'the Plan preset is removed; the rows keep insertion order');
+		const ask = {
+			workMode: 'sw' as const,
+			approval: 'manual' as const,
+			approvalResponse: 'ask' as const,
 			network: false,
 			sandboxMode: 'workspace-write' as const,
-		});
+		};
+		assert.deepStrictEqual(presetPolicy('ask'), ask);
+		assert.deepStrictEqual(presetPolicy('plan'), ask, 'the removed name has no alias and falls through to Ask');
 		assert.deepStrictEqual(presetPolicy('auto'), {
 			workMode: 'aw',
 			approval: 'universal_accept',
@@ -362,12 +366,12 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(caps('ro'), ['ro', 'shell_ro']);
 		assert.deepStrictEqual(caps('sw'), ['ro', 'rw', 'shell_ro', 'shell_test']);
 		assert.deepStrictEqual(caps('aw'), ['ro', 'rw', 'shell_ro', 'shell_rw', 'shell_test']);
-		assert.deepStrictEqual(caps('pl'), ['ro', 'ro_plan', 'rw_plan', 'shell_ro']);
+		assert.deepStrictEqual(caps('plan'), ['ro', 'ro_plan', 'rw_plan', 'shell_ro']);
 		assert.match(MODE_LABELS.chat, /Chat Only — no tools/);
 		assert.match(MODE_LABELS.ro, /Read-Only — read files, read-only shell/);
 		assert.match(MODE_LABELS.sw, /Semi-Write — write files, run tests in a scratch shell/);
 		assert.match(MODE_LABELS.aw, /Full Access — write files, full shell/);
-		assert.match(MODE_LABELS.pl, /Plan — read files, read-only shell, reads and writes plan files/);
+		assert.match(MODE_LABELS.plan, /Plan — read files, read-only shell, reads and writes plan files/);
 	});
 
 	test('deny rules win over accept policies', () => {
@@ -1174,7 +1178,6 @@ suite('Comonad domain', () => {
 			title: id,
 			description: '',
 			prompt: '',
-			workMode: 'ro',
 			capabilities: ['ro'],
 			network: false,
 			grant: { files: false, test: false },
@@ -3562,11 +3565,11 @@ suite('Cordis kernel', () => {
 	test('the Subagents tab shows each role’s ceiling and grant defaults', () => {
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
 		const script = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
-		assert.match(panel, /workMode: agent\.workMode/, 'the host sends the role mode');
+		assert.match(panel, /capabilities: agent\.capabilities/, 'the host sends the role capabilities');
 		assert.match(panel, /risk: agent\.risk/, 'and its read/write risk');
 		assert.match(panel, /network: agent\.network/, 'and its network default');
 		assert.match(panel, /subagentGrant\(config, agent\)/, 'the grant comes from the role, not a duplicate table');
-		assert.match(script, /agent\.workMode/, 'the pane renders the mode');
+		assert.match(script, /agent\.capabilities/, 'the pane renders the capabilities');
 		assert.match(script, /agent\.risk/, 'and the risk');
 	});
 
@@ -3839,6 +3842,22 @@ suite('Cordis kernel', () => {
 			for (const name of ['char', 'persona', 'lore', 'preset']) {
 				assert.ok(!slash.includes(name), `/${name} came with the tavern plugin, so it is gone`);
 			}
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a custom role mode is only an input that narrows its capabilities', async () => {
+		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
+		try {
+			const dir = join(kernel.host.workspace(), '.comonad', 'agents');
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, 'narrow.md'), '---\nmode: ro\ncapabilities: [ro, rw, shell_ro]\n---\nNarrow role.');
+			await kernel.ctx.catalog.reload();
+			const role = kernel.ctx.catalog.agents.find((agent) => agent.id === 'narrow');
+			assert.ok(role);
+			assert.deepStrictEqual(role.capabilities, ['ro', 'shell_ro'], 'rw is outside the ro ceiling');
+			assert.ok(!('workMode' in role), 'the role stores capabilities, not the input mode');
 		} finally {
 			await kernel.dispose();
 		}
@@ -4506,7 +4525,7 @@ suite('Cordis kernel', () => {
 			'function renderTasks(',
 			"case 'task-board'",
 			"delegate: 'Delegate tasks'",
-			"task_plan: 'Plan tasks'",
+			"task_graph: 'Record task graph'",
 			"task_status: 'Task status'",
 			"message: 'Coordination note'",
 			"step.name === 'delegate'",
@@ -9469,7 +9488,7 @@ suite('Plan tools', () => {
 			const names = (mode: WorkMode) => kernel.ctx.tools.visible(policy({ workMode: mode })).map((tool) => tool.name);
 			const planToolNames = ['list_plans', 'read_plan', 'write_plan'];
 			for (const name of planToolNames) {
-				assert.ok(names('pl').includes(name), `${name} is offered in plan mode`);
+				assert.ok(names('plan').includes(name), `${name} is offered in plan mode`);
 			}
 			for (const mode of ['ro', 'sw', 'aw', 'chat'] as WorkMode[]) {
 				for (const name of planToolNames) {
@@ -9486,7 +9505,7 @@ suite('Plan tools', () => {
 		try {
 			await kernel.ctx.plugin(planTools);
 			for (const sandboxMode of ['read-only', 'workspace-read'] as const) {
-				const names = kernel.ctx.tools.visible(policy({ workMode: 'pl', sandboxMode })).map((tool) => tool.name);
+				const names = kernel.ctx.tools.visible(policy({ workMode: 'plan', sandboxMode })).map((tool) => tool.name);
 				assert.ok(names.includes('list_plans'), `list_plans survives ${sandboxMode}`);
 				assert.ok(names.includes('read_plan'), `read_plan survives ${sandboxMode}`);
 				assert.ok(!names.includes('write_plan'), `write_plan is refused under ${sandboxMode}`);
@@ -9495,7 +9514,7 @@ suite('Plan tools', () => {
 			const rejected = gateCalls(
 				[call('write_plan', { name: 'plan.md', content: 'x' })],
 				lookupPlan,
-				policy({ workMode: 'pl', sandboxMode: 'read-only' }),
+				policy({ workMode: 'plan', sandboxMode: 'read-only' }),
 				{ allow: [], ask: [], deny: [] },
 				gateEnv(),
 			);
@@ -9513,7 +9532,7 @@ suite('Plan tools', () => {
 			const lookupPlan = (name: string) => kernel.ctx.tools.get(name);
 			const empty = { allow: [], ask: [], deny: [] };
 			const decide = (name: string, args: Record<string, unknown>, approval: 'blacklist_reject' | 'whitelist_accept') =>
-				gateCalls([call(name, args)], lookupPlan, policy({ workMode: 'pl', approval }), empty, gateEnv()).decision;
+				gateCalls([call(name, args)], lookupPlan, policy({ workMode: 'plan', approval }), empty, gateEnv()).decision;
 			assert.strictEqual(decide('list_plans', {}, 'blacklist_reject'), 'allow');
 			assert.strictEqual(decide('read_plan', { name: 'plan.md' }, 'blacklist_reject'), 'allow');
 			assert.strictEqual(decide('write_plan', { name: 'plan.md', content: 'x' }, 'blacklist_reject'), 'reject');
@@ -9526,7 +9545,7 @@ suite('Plan tools', () => {
 	});
 
 	test('write_plan writes exactly the file the panel resolves', async () => {
-		const kernel = await createTestKernel({ config: { mode: 'pl', planDirectory: 'notes/plans' } });
+		const kernel = await createTestKernel({ config: { mode: 'plan', planDirectory: 'notes/plans' } });
 		try {
 			await kernel.ctx.plugin(planTools);
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plan-parity');
@@ -9535,7 +9554,7 @@ suite('Plan tools', () => {
 				...base,
 				sessionId: session.id,
 				rootSessionId: session.id,
-				policy: { ...kernel.ctx.agent.policyFor(), workMode: 'pl' as const },
+				policy: { ...kernel.ctx.agent.policyFor(), workMode: 'plan' as const },
 				// The grant names the session and call id the direct dispatch checks against.
 				authorization: issueAuthorization({ sessionId: session.id, batch: base.batch, callIds: ['1'] }),
 			};
@@ -9545,6 +9564,7 @@ suite('Plan tools', () => {
 			);
 			assert.strictEqual(outcome.isError, false, outcome.content);
 			assert.match(outcome.content, /^wrote plan /);
+			assert.match(outcome.content, /plan path: notes\/plans\/plan-parity\/draft\.md/);
 			assert.match(outcome.content, /Stop here and summarize it/);
 			const target = planTargetFor(kernel.host.workspace(), 'notes/plans', session.id, '../draft.md');
 			assert.ok(target);

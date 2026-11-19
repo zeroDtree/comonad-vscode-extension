@@ -20,9 +20,17 @@ import { clip, describe, preview } from '../lib/util';
 import type { Approval, ApprovalDecision, AttachmentPart, SandboxMode, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
 import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
-import { asBuildMode, buildPlanPrompt, planTargetFor, type PlanTarget } from '../lib/plans';
+import {
+	asBuildMode,
+	buildPlanPrompt,
+	parsePlanWriteResult,
+	planFileName,
+	planPathForRecorded,
+	planTargetFor,
+	type PlanTarget,
+} from '../lib/plan-files';
 import { formatReference } from '../lib/references';
-import { guardPath, isInside } from '../lib/sandbox';
+import { guardPath, isInside, sandboxAllowsWrites } from '../lib/sandbox';
 import { countRaw } from '../lib/tokens';
 import { ChatWebviewAssets, type ChatAssetSpec } from '../services/chat-assets';
 import { inWorkspace, markForRestore, type Session } from '../services/sessions';
@@ -350,30 +358,32 @@ export function chatPanel(ctx: Context): void {
 	/** Plans whose preview already opened this turn: one per file, however often it was rewritten. */
 	const previewedPlans = new Set<string>();
 
-	/** The plan a chat's write_plan name resolves to; the root id matches ToolContext.rootSessionId. */
-	const planTarget = (session: Session, name: unknown): PlanTarget | null =>
-		planTargetFor(
-			session.policy.workingDirectory || ctx.settings.workspace(),
-			session.policy.planDirectory,
-			session.parentId ?? session.id,
-			name,
-		);
+	/**
+	 * The plan a card names. A recorded path wins, so a later `planDirectory` change cannot re-point
+	 * an old card; without one (an older transcript) the current setting resolves it.
+	 */
+	const planTargetOf = (session: Session, name: unknown, relative?: unknown): PlanTarget | null => {
+		const file = planFileName(name);
+		if (!file) {
+			return null;
+		}
+		const workspace = session.policy.workingDirectory || ctx.settings.workspace();
+		const rootId = session.parentId ?? session.id;
+		const recorded =
+			typeof relative === 'string' && relative ? planPathForRecorded(workspace, rootId, { name: file, relative }) : undefined;
+		return recorded ?? planTargetFor(workspace, session.policy.planDirectory, rootId, file);
+	};
 
 	/** The plan a successful write_plan recorded; undefined for a failed, stopped or unnamed call. */
-	const planInfoOf = (session: Session | undefined, args: string | undefined, output: string | undefined): PlanInfo | undefined => {
-		if (!session || !output?.startsWith('wrote plan ')) {
+	const planInfoOf = (session: Session | undefined, output: string | undefined): PlanInfo | undefined => {
+		if (!session || !output) {
 			return undefined;
 		}
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(args ?? '');
-		} catch {
+		const recorded = parsePlanWriteResult(output);
+		if (!recorded) {
 			return undefined;
 		}
-		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-			return undefined;
-		}
-		const target = planTarget(session, (parsed as Record<string, unknown>).name);
+		const target = planTargetOf(session, recorded.name, recorded.relative);
 		return target ? { name: target.name, relative: target.relative, sessionId: session.id } : undefined;
 	};
 
@@ -398,7 +408,7 @@ export function chatPanel(ctx: Context): void {
 				? session.subagents[step.id]
 				: undefined,
 		// A recorded plan carries the file it wrote, so a replayed card keeps its Build/Preview buttons.
-		plan: step.kind === 'tool' && step.name === 'write_plan' ? planInfoOf(session, step.args, step.result) : undefined,
+		plan: step.kind === 'tool' && step.name === 'write_plan' ? planInfoOf(session, step.result) : undefined,
 		status: step.status,
 		ms: step.ms,
 		at: step.at,
@@ -692,15 +702,15 @@ export function chatPanel(ctx: Context): void {
 		}
 		// Route by the turn's own session: a switch mid-turn must not target the chat now on screen.
 		const session = ctx.sessions.get(ref.sessionId);
-		const plan = call.name === 'write_plan' ? planInfoOf(session, call.arguments, output) : undefined;
+		const plan = call.name === 'write_plan' ? planInfoOf(session, output) : undefined;
 		post({ type: 'tool-result', id: call.id, output: clip(output, 30_000), images: publicImages(images), plan });
 		// The plan is written; show it beside the chat. A preview already open on it refreshes itself,
 		// so one open per file per turn is enough.
 		if (plan && session) {
-			const key = `${plan.sessionId}:${plan.name}`;
+			const key = `${plan.sessionId}:${plan.relative || plan.name}`;
 			if (!previewedPlans.has(key)) {
 				previewedPlans.add(key);
-				void openPlanPreview(session, plan.name, undefined, true);
+				void openPlanPreview(session, plan.name, plan.relative, undefined, true);
 			}
 		}
 	});
@@ -1388,10 +1398,11 @@ export function chatPanel(ctx: Context): void {
 	const openPlanPreview = async (
 		session: Session,
 		name: unknown,
+		relative?: unknown,
 		source?: vscode.Webview,
 		quiet = false,
 	): Promise<void> => {
-		const target = planTarget(session, name);
+		const target = planTargetOf(session, name, relative);
 		if (!target) {
 			if (!quiet) {
 				post({ type: 'notice', text: 'That plan name is not valid.' }, source);
@@ -1430,7 +1441,7 @@ export function chatPanel(ctx: Context): void {
 		}
 	};
 
-	const previewPlan = async (name: unknown, owner: unknown, source: vscode.Webview): Promise<void> => {
+	const previewPlan = async (name: unknown, owner: unknown, relative: unknown, source: vscode.Webview): Promise<void> => {
 		const session = ctx.sessions.active();
 		if (!session) {
 			return;
@@ -1439,13 +1450,14 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text: 'That plan belongs to another chat.' }, source);
 			return;
 		}
-		await openPlanPreview(session, name, source);
+		await openPlanPreview(session, name, relative, source);
 	};
 
 	/** Build: read the plan, apply the card's model and mode, then send the implementing turn. */
 	const buildPlan = async (
 		name: unknown,
 		owner: unknown,
+		relative: unknown,
 		model: unknown,
 		mode: unknown,
 		source: vscode.Webview,
@@ -1468,7 +1480,7 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text: 'Choose Semi-Write or Full Access before building.' }, source);
 			return;
 		}
-		const target = planTarget(session, name);
+		const target = planTargetOf(session, name, relative);
 		if (!target) {
 			post({ type: 'notice', text: 'That plan name is not valid.' }, source);
 			return;
@@ -1505,6 +1517,10 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text: 'The chat changed — press Build again.' }, source);
 			return;
 		}
+		if (!sandboxAllowsWrites(ctx.settings.get().sandboxMode)) {
+			post({ type: 'notice', text: 'The sandbox is read-only — switch it to Workspace write before building the plan.' }, source);
+			return;
+		}
 		try {
 			if (modelPick) {
 				await ctx.settings.update('model', modelPick);
@@ -1516,6 +1532,8 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text: 'Could not save the model and mode for this build.' }, source);
 			return;
 		}
+		// The plan file is the handoff: the research graph is history, and the build turn starts fresh.
+		ctx.orchestrator.archiveTaskGraph(session);
 		await send(buildPlanPrompt(target.relative, content), undefined, source);
 	};
 
@@ -1741,10 +1759,10 @@ export function chatPanel(ctx: Context): void {
 					}
 					break;
 				case 'previewPlan':
-					await previewPlan(message.name, message.sessionId, source);
+					await previewPlan(message.name, message.sessionId, message.relative, source);
 					break;
 				case 'buildPlan':
-					await buildPlan(message.name, message.sessionId, message.model, message.mode, source);
+					await buildPlan(message.name, message.sessionId, message.relative, message.model, message.mode, source);
 					break;
 				case 'setApproval':
 					if (typeof message.approval === 'string' && message.approval in APPROVAL_LABELS) {

@@ -20,7 +20,7 @@ export const MODE_CAPS: Record<WorkMode, ReadonlySet<Capability>> = {
 	ro: new Set(['ro', 'shell_ro']),
 	sw: new Set(['ro', 'rw', 'shell_ro', 'shell_test']),
 	aw: new Set(['ro', 'rw', 'shell_ro', 'shell_test', 'shell_rw']),
-	pl: new Set(['ro', 'shell_ro', 'ro_plan', 'rw_plan']),
+	plan: new Set(['ro', 'shell_ro', 'ro_plan', 'rw_plan']),
 };
 
 export const MODE_LABELS: Record<WorkMode, string> = {
@@ -28,7 +28,7 @@ export const MODE_LABELS: Record<WorkMode, string> = {
 	ro: 'Read-Only — read files, read-only shell',
 	sw: 'Semi-Write — write files, run tests in a scratch shell',
 	aw: 'Full Access — write files, full shell',
-	pl: 'Plan — read files, read-only shell, reads and writes plan files',
+	plan: 'Plan — read files, read-only shell, reads and writes plan files',
 };
 
 /** Every capability that runs a command. Kept in one place so the gate, rules and the parser agree. */
@@ -65,7 +65,10 @@ export const SANDBOX_LABELS: Record<SandboxMode, string> = {
  *  falls back, rather than reaching a gate that indexes them and crashes. Own keys only: `in` would
  *  also accept `toString` and friends off the prototype. */
 export function asWorkMode(value: unknown, fallback: WorkMode = 'sw'): WorkMode {
-	return typeof value === 'string' && Object.hasOwn(MODE_CAPS, value) ? (value as WorkMode) : fallback;
+	// A stored Plan chat keeps its read-only ceiling when the mode key was renamed. Falling back
+	// to `sw` here would silently grant `rw` to a chat that was read-only.
+	const mode = value === 'pl' ? 'plan' : value;
+	return typeof mode === 'string' && Object.hasOwn(MODE_CAPS, mode) ? (mode as WorkMode) : fallback;
 }
 
 export function asApproval(value: unknown, fallback: Approval = 'manual'): Approval {
@@ -78,7 +81,6 @@ export function asApprovalResponse(value: unknown, fallback: ApprovalResponse = 
 
 export const PRESET_LABELS: Record<string, string> = {
 	ask: 'Ask — edit files with approval, sandboxed shell',
-	plan: 'Plan — research read-only, write a plan',
 	auto: 'Auto — apply edits automatically, no network',
 	readonly: 'Read only — inspect without changes',
 	full: 'Unrestricted — no file sandbox, network on (careful)',
@@ -94,8 +96,6 @@ export interface PresetPolicy {
 
 export function presetPolicy(preset: string): PresetPolicy {
 	switch (preset) {
-		case 'plan':
-			return { workMode: 'pl', approval: 'whitelist_accept', approvalResponse: 'ask', network: false, sandboxMode: 'workspace-write' };
 		case 'auto':
 			return { workMode: 'aw', approval: 'universal_accept', approvalResponse: 'ask', network: false, sandboxMode: 'workspace-write' };
 		case 'readonly':
@@ -107,7 +107,17 @@ export function presetPolicy(preset: string): PresetPolicy {
 	}
 }
 
-export const ALL_CAPABILITIES: readonly Capability[] = ['ro', 'ro_plan', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'];
+/** The canonical order of every capability. */
+export const CAPABILITY_ORDER: readonly Capability[] = ['ro', 'ro_plan', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'];
+
+/** Every capability, in canonical order. */
+export const ALL_CAPABILITIES: readonly Capability[] = CAPABILITY_ORDER;
+
+/** Capabilities present in every list, in the canonical mode order. */
+export function intersectCapabilities(...lists: readonly (readonly Capability[])[]): Capability[] {
+	const sets = lists.map((list) => new Set(list));
+	return CAPABILITY_ORDER.filter((capability) => sets.every((set) => set.has(capability)));
+}
 
 /** A capability list from a session or a delegation: known values only, de-duplicated. */
 export function asCapabilities(value: unknown): Capability[] | undefined {
@@ -123,9 +133,16 @@ export function asCapabilities(value: unknown): Capability[] | undefined {
 	return [...seen];
 }
 
-/** The effective capabilities of a policy: the explicit set, or the mode's own set. */
+/**
+ * The effective capabilities of a policy: the explicit set narrowed by the mode. The mode is a
+ * ceiling, so an explicit set can only remove capabilities; it can never add one the mode omits.
+ * Absent an explicit set, the mode's own set is the effective set.
+ */
 export function capabilitiesOf(policy: Pick<SessionPolicy, 'workMode' | 'capabilities'>): ReadonlySet<Capability> {
-	return new Set(policy.capabilities ?? MODE_CAPS[policy.workMode]);
+	const ceiling = MODE_CAPS[policy.workMode];
+	return policy.capabilities === undefined
+		? new Set(ceiling)
+		: new Set(intersectCapabilities([...ceiling], policy.capabilities));
 }
 
 export function capabilityAllowed(capability: Capability, policy: Pick<SessionPolicy, 'workMode' | 'capabilities'>): boolean {
@@ -134,7 +151,7 @@ export function capabilityAllowed(capability: Capability, policy: Pick<SessionPo
 
 /**
  * The whitelist's built-in contents: read-only calls, including the plan reader (`ro_plan`), plus
- * the plan writer (`rw_plan`, which only `pl` mode grants anyway). A user `allow` rule is a separate
+ * the plan writer (`rw_plan`, which only `plan` mode grants anyway). A user `allow` rule is a separate
  * layer and runs its call directly.
  */
 const DEFAULT_WHITELIST: ReadonlySet<Capability> = new Set(['ro', 'shell_ro', 'ro_plan', 'rw_plan']);

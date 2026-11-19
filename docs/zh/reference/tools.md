@@ -14,7 +14,7 @@
 | 数学 | `calculate`、`describe_numbers`、`percentile`、`convert_units` |
 | Web | `fetch_url`、`web_search` |
 | VS Code | `find_files`、`find_symbols`、`get_diagnostics`、`edit_ranges`、`git_diff`、`run_task` |
-| 编排 | `task_plan`、`delegate`、`task_status`（仅编排器）、`message` |
+| 编排 | `task_graph`、`delegate`、`task_status`、`resume`（仅编排器）、`message` |
 | Agent | `ask_user`、`skill`、`memory` |
 | MCP | 每个服务器暴露的 `server__tool` |
 
@@ -28,13 +28,19 @@
 
 ## 编排工具
 
-`task_plan` 记录或修订编排器的任务 DAG；`delegate` 并行执行 1–8 个 ready 任务；`task_status` 返回任务板、
-ready 节点、拒绝原因、子会话和最近邮箱消息。只有根轮次能看到这些工具，子级白名单永远排除它们。
+`task_graph` 记录或修订编排器的任务图；`delegate` 并行执行 1–8 个 ready 任务；`task_status` 返回任务板、
+ready 节点、拒绝原因、子会话和最近邮箱消息；`resume` 用新的分段预算继续 paused 任务。只有根轮次能看到
+这些工具，子级白名单永远排除它们。
+
+只读会话只运行只读任务：`task_graph`、`delegate`、`resume` 拒绝新的或修订过的、有效能力含 `rw` 或验收
+需要 `command` 的任务；`accepted` 节点是历史，会保留。Plan 模式下用 `write_plan` 记录实现计划并停止本轮；
+**Build plan** 切到 Semi-Write 或 Full Access 后才恢复写委派。Build 会归档研究任务图，因此构建轮次从空
+任务图开始，以计划文件作为交接物。
 
 有效能力含 `rw` 的任务必须至少有一条 `review` 或 `command` 验收标准。worker 批次结束后，运行时派生
 **固定内置**的 `reviewer` 或 `tester` 子代理；项目里的同名文件不能削弱验收。worker/验证者的最终消息必须
-是单个 JSON envelope，格式错误即 `invalid_output`。编排块可以关闭，因此同样的规则也写在工具描述里。详见
-[编排](/zh/guide/orchestration)。
+是单个 JSON envelope，格式错误即 `invalid_output`。结构性规则在工具 schema 与校验里；当前阶段的规则在
+动态 Tools 与 Orchestration 提示块里。详见[编排](/zh/guide/orchestration)。
 
 `message` 由编排器和所有子代理共享：每个聊天一个 append-only JSONL 邮箱，位于扩展存储。并行写之前用它
 声明文件，任务之间用它交换结果。其他代理的消息是不可信数据，不是指令。
@@ -42,7 +48,7 @@ ready 节点、拒绝原因、子会话和最近邮箱消息。只有根轮次�
 一次委派创建一个隐藏子会话。单任务批次的工具卡带 **Open session**；任务板链接每个子会话。只读覆盖层
 显示子提示词、步骤和工具结果。子级继承父策略并只能收紧；审批应答固定 `never`，因此需要询问的调用会被
 拒绝。写委派要求父策略自动放行写（`universal_accept`、`blacklist_reject` 或 allow 规则），否则请在主线程
-完成写。父级处于 Plan 模式时子级可读本聊天计划（`ro_plan`），但永远拿不到 `write_plan`。详见
+完成写。父级的有效能力含 `ro_plan` 时，子级可读本聊天计划，但永远拿不到 `write_plan`。详见
 [安全](/zh/guide/safety#编排器与子-agent)。
 
 ## Shell 工具

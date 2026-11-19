@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
-import { evaluatePolicy, type PolicyInput } from '../lib/policy';
+import { asWorkMode, capabilitiesOf, evaluatePolicy, type PolicyInput } from '../lib/policy';
 import { DEFAULT_SANDBOX_MODE } from '../lib/sandbox';
 import type { SessionPolicy, ToolCall, ToolSpec } from '../lib/types';
 
@@ -125,5 +125,26 @@ suite('Tool policy', () => {
 		assert.strictEqual(result.calls[0]?.decision, 'reject');
 		assert.strictEqual(result.calls[0]?.traces.at(-1)?.layer, 'response');
 		assert.match(result.reason, /subagent approval response policy denies/);
+	});
+
+	test('a stored pl mode keeps its plan ceiling', () => {
+		assert.strictEqual(asWorkMode('pl'), 'plan');
+		assert.strictEqual(asWorkMode('bogus'), 'sw');
+	});
+
+	test('the mode caps explicit capabilities', () => {
+		const readOnly = policy({ workMode: 'ro', capabilities: ['ro', 'rw'] });
+		assert.deepStrictEqual([...capabilitiesOf(readOnly)].sort(), ['ro']);
+	});
+
+	test('an explicit rw cannot escape a read-only mode at the gate', () => {
+		const result = evaluatePolicy(
+			input({
+				calls: [call('c1', 'write_file')],
+				policy: policy({ workMode: 'ro', capabilities: ['ro', 'rw'] }),
+			}),
+		);
+		assert.strictEqual(result.outcome, 'reject');
+		assert.match(result.reason, /not allowed in mode ro/);
 	});
 });

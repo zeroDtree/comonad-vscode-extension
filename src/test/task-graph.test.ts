@@ -3,7 +3,7 @@ import * as assert from 'node:assert';
 import { BUILTIN_ROLES } from '../lib/agents';
 import {
 	boardOf,
-	checkTaskPlan,
+	checkTaskGraph,
 	formatBoard,
 	readyNodes,
 	reconcileTaskGraph,
@@ -13,7 +13,7 @@ import {
 	type TaskGraph,
 	type TaskNode,
 	type TaskNodeInput,
-	type TaskPlanInput,
+	type TaskGraphInput,
 } from '../lib/task-graph';
 
 const roles = new Map(BUILTIN_ROLES.map((role) => [role.id, role]));
@@ -36,10 +36,10 @@ const node = (patch: Partial<TaskNodeInput> = {}): TaskNodeInput => ({
 	...patch,
 });
 
-const plan = (...nodes: TaskNodeInput[]): TaskPlanInput => ({ objective: 'ship it', nodes });
+const graphInput = (...nodes: TaskNodeInput[]): TaskGraphInput => ({ objective: 'ship it', nodes });
 
 function graphOf(...nodes: TaskNodeInput[]): TaskGraph {
-	const result = reconcileTaskGraph(undefined, plan(...(nodes.length ? nodes : [node()])), roles, 1, 1);
+	const result = reconcileTaskGraph(undefined, graphInput(...(nodes.length ? nodes : [node()])), roles, 1, 1);
 	assert.ok(result.ok, result.ok ? '' : result.errors.join('\n'));
 	return result.graph;
 }
@@ -71,55 +71,55 @@ function accept(node: TaskNode): TaskNode {
 
 suite('Task graph validation', () => {
 	test('a valid read plan and a write plan with independent verification pass', () => {
-		const read = checkTaskPlan(plan(node({ id: 'find', role: 'explorer', acceptance: [evidence()] })), roles);
+		const read = checkTaskGraph(graphInput(node({ id: 'find', role: 'explorer', acceptance: [evidence()] })), roles);
 		assert.deepStrictEqual(read.errors, []);
-		const write = checkTaskPlan(plan(node()), roles);
+		const write = checkTaskGraph(graphInput(node()), roles);
 		assert.deepStrictEqual(write.errors, []);
 	});
 
 	test('unknown roles, duplicate ids, self-dependencies and cycles are refused', () => {
-		assert.ok(checkTaskPlan(plan(node({ role: 'nope' })), roles).errors.some((error) => /unknown role/.test(error)));
-		assert.ok(checkTaskPlan(plan(node(), node()), roles).errors.some((error) => /duplicate node id/.test(error)));
-		assert.ok(checkTaskPlan(plan(node({ dependsOn: ['code'] })), roles).errors.some((error) => /depend on itself/.test(error)));
-		const cycle = checkTaskPlan(
-			plan(node({ id: 'a', dependsOn: ['b'] }), node({ id: 'b', dependsOn: ['a'] })),
+		assert.ok(checkTaskGraph(graphInput(node({ role: 'nope' })), roles).errors.some((error) => /unknown role/.test(error)));
+		assert.ok(checkTaskGraph(graphInput(node(), node()), roles).errors.some((error) => /duplicate node id/.test(error)));
+		assert.ok(checkTaskGraph(graphInput(node({ dependsOn: ['code'] })), roles).errors.some((error) => /depend on itself/.test(error)));
+		const cycle = checkTaskGraph(
+			graphInput(node({ id: 'a', dependsOn: ['b'] }), node({ id: 'b', dependsOn: ['a'] })),
 			roles,
 		);
 		assert.ok(cycle.errors.some((error) => /dependency cycle/.test(error)));
-		assert.ok(checkTaskPlan(plan(node({ dependsOn: ['missing'] })), roles).errors.some((error) => /unknown dependency/.test(error)));
+		assert.ok(checkTaskGraph(graphInput(node({ dependsOn: ['missing'] })), roles).errors.some((error) => /unknown dependency/.test(error)));
 	});
 
 	test('a write task needs a review or command criterion', () => {
-		const errors = checkTaskPlan(plan(node({ acceptance: [evidence()] })), roles).errors;
+		const errors = checkTaskGraph(graphInput(node({ acceptance: [evidence()] })), roles).errors;
 		assert.ok(errors.some((error) => /write task needs at least one review or command/.test(error)));
 	});
 
 	test('a command criterion needs a command, and capabilities cannot widen the role', () => {
 		assert.ok(
-			checkTaskPlan(plan(node({ acceptance: [{ id: 'a1', description: 'runs', check: 'command' }] })), roles).errors.some((error) =>
+			checkTaskGraph(graphInput(node({ acceptance: [{ id: 'a1', description: 'runs', check: 'command' }] })), roles).errors.some((error) =>
 				/command is required/.test(error),
 			),
 		);
 		assert.ok(
-			checkTaskPlan(plan(node({ capabilities: ['shell_rw'] })), roles).errors.some((error) => /subset of the role/.test(error)),
+			checkTaskGraph(graphInput(node({ capabilities: ['shell_rw'] })), roles).errors.some((error) => /subset of the role/.test(error)),
 		);
-		assert.ok(checkTaskPlan(plan(node({ network: true })), roles).errors.some((error) => /does not allow network/.test(error)));
+		assert.ok(checkTaskGraph(graphInput(node({ network: true })), roles).errors.some((error) => /does not allow network/.test(error)));
 	});
 
 	test('bounds, bad paths and attempt/budget ranges are refused', () => {
-		assert.ok(checkTaskPlan(plan(node({ maxAttempts: 0 })), roles).errors.some((error) => /maxAttempts/.test(error)));
-		assert.ok(checkTaskPlan(plan(node({ budget: { turns: -1 } })), roles).errors.some((error) => /budget\.turns/.test(error)));
-		assert.ok(checkTaskPlan(plan(node({ budget: { nonsense: 1 } as never })), roles).errors.some((error) => /unknown budget dimension/.test(error)));
-		assert.ok(checkTaskPlan(plan(node({ maxResumes: 11 })), roles).errors.some((error) => /maxResumes/.test(error)));
-		assert.deepStrictEqual(checkTaskPlan(plan(node({ budget: { turns: 8, tools: 20 } })), roles).errors, []);
-		assert.ok(checkTaskPlan(plan(node({ writes: ['../escape'] })), roles).errors.some((error) => /workspace-relative/.test(error)));
-		assert.ok(checkTaskPlan(plan(node({ acceptance: [] })), roles).errors.some((error) => /acceptance criteria/.test(error)));
+		assert.ok(checkTaskGraph(graphInput(node({ maxAttempts: 0 })), roles).errors.some((error) => /maxAttempts/.test(error)));
+		assert.ok(checkTaskGraph(graphInput(node({ budget: { turns: -1 } })), roles).errors.some((error) => /budget\.turns/.test(error)));
+		assert.ok(checkTaskGraph(graphInput(node({ budget: { nonsense: 1 } as never })), roles).errors.some((error) => /unknown budget dimension/.test(error)));
+		assert.ok(checkTaskGraph(graphInput(node({ maxResumes: 11 })), roles).errors.some((error) => /maxResumes/.test(error)));
+		assert.deepStrictEqual(checkTaskGraph(graphInput(node({ budget: { turns: 8, tools: 20 } })), roles).errors, []);
+		assert.ok(checkTaskGraph(graphInput(node({ writes: ['../escape'] })), roles).errors.some((error) => /workspace-relative/.test(error)));
+		assert.ok(checkTaskGraph(graphInput(node({ acceptance: [] })), roles).errors.some((error) => /acceptance criteria/.test(error)));
 	});
 
 	test('independent write nodes with overlapping paths warn, dependent ones do not', () => {
-		const overlapping = checkTaskPlan(plan(node({ id: 'a', writes: ['src/x.ts'] }), node({ id: 'b', writes: ['src'] })), roles);
+		const overlapping = checkTaskGraph(graphInput(node({ id: 'a', writes: ['src/x.ts'] }), node({ id: 'b', writes: ['src'] })), roles);
 		assert.ok(overlapping.warnings.some((warning) => /overlapping write paths/.test(warning)));
-		const ordered = checkTaskPlan(plan(node({ id: 'a', writes: ['src/a.ts'] }), node({ id: 'b', writes: ['src/b.ts'], dependsOn: ['a'] })), roles);
+		const ordered = checkTaskGraph(graphInput(node({ id: 'a', writes: ['src/a.ts'] }), node({ id: 'b', writes: ['src/b.ts'], dependsOn: ['a'] })), roles);
 		assert.deepStrictEqual(ordered.warnings, []);
 	});
 });
@@ -133,7 +133,7 @@ suite('Task graph reconciliation', () => {
 		assert.strictEqual(first.nodes[0]!.risk, 'write');
 
 		const done = { ...first, nodes: [accept({ ...first.nodes[0]! })] };
-		const second = reconcileTaskGraph(done, plan(node()), roles, 2, 2);
+		const second = reconcileTaskGraph(done, graphInput(node()), roles, 2, 2);
 		assert.ok(second.ok, second.ok ? '' : second.errors.join('\n'));
 		assert.strictEqual(second.graph.version, 2);
 		assert.strictEqual(second.graph.nodes[0]!.status, 'accepted');
@@ -143,7 +143,7 @@ suite('Task graph reconciliation', () => {
 	test('an accepted task cannot be redefined, while a rejected one resets and keeps its attempts', () => {
 		const first = graphOf();
 		const done = { ...first, nodes: [accept({ ...first.nodes[0]! })] };
-		const changed = reconcileTaskGraph(done, plan(node({ title: 'Other' })), roles, 2, 2);
+		const changed = reconcileTaskGraph(done, graphInput(node({ title: 'Other' })), roles, 2, 2);
 		assert.ok(!changed.ok);
 		assert.ok(changed.errors.some((error) => /accepted task cannot be redefined/.test(error)));
 
@@ -151,7 +151,7 @@ suite('Task graph reconciliation', () => {
 			...first,
 			nodes: [{ ...first.nodes[0]!, status: 'rejected', attempts: 1, rejection: { code: 'verification_failed', reason: 'no', at: 1 } }],
 		};
-		const reset = reconcileTaskGraph(rejected, plan(node({ objective: 'try again' })), roles, 2, 2);
+		const reset = reconcileTaskGraph(rejected, graphInput(node({ objective: 'try again' })), roles, 2, 2);
 		assert.ok(reset.ok, reset.ok ? '' : reset.errors.join('\n'));
 		assert.strictEqual(reset.graph.nodes[0]!.status, 'pending');
 		assert.strictEqual(reset.graph.nodes[0]!.attempts, 1);
@@ -161,12 +161,12 @@ suite('Task graph reconciliation', () => {
 	test('running tasks and the replan cap stop a revision', () => {
 		const first = graphOf();
 		const running = { ...first, nodes: [{ ...first.nodes[0]!, status: 'running' as const }] };
-		const refused = reconcileTaskGraph(running, plan(node()), roles, 2, 2);
+		const refused = reconcileTaskGraph(running, graphInput(node()), roles, 2, 2);
 		assert.ok(!refused.ok);
 		assert.ok(refused.errors.some((error) => /running or being verified/.test(error)));
 
 		const capped = { ...first, replans: 6 };
-		const limited = reconcileTaskGraph(capped, plan(node()), roles, 2, 2);
+		const limited = reconcileTaskGraph(capped, graphInput(node()), roles, 2, 2);
 		assert.ok(!limited.ok);
 		assert.ok(limited.errors.some((error) => /replan limit/.test(error)));
 	});

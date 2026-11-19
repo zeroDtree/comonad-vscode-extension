@@ -37,12 +37,6 @@ export function planFileName(name: unknown): string | null {
 	return !clean || clean === '.' || clean === '..' ? null : clean;
 }
 
-/** The pre-guard path `write_plan` writes: workspace-relative unless the setting is absolute. */
-export function planFilePath(planDirectory: string | undefined, rootSessionId: string, name: unknown): string | null {
-	const file = planFileName(name);
-	return file ? join(planFolder(planDirectory, rootSessionId), file) : null;
-}
-
 export interface PlanTarget {
 	name: string;
 	/** Workspace-relative when inside it; the configured path otherwise. Forward slashes. */
@@ -67,6 +61,49 @@ export function planTargetFor(
 	const rel = relative(root, resolve(root, path));
 	const inside = rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 	return { name: file, relative: (inside ? rel : path).split(sep).join('/'), path };
+}
+
+/** The name and recorded path a successful `write_plan` result carries. */
+export interface RecordedPlan {
+	name: string;
+	/** The path line `write_plan` recorded; absent for transcripts from older builds. */
+	relative?: string;
+}
+
+/** Parses the first two lines of a successful `write_plan` result. */
+export function parsePlanWriteResult(output: string): RecordedPlan | undefined {
+	const [first, second] = output.split('\n');
+	const wrote = first?.match(/^wrote plan (.+)$/);
+	const name = planFileName(wrote?.[1]);
+	if (!name) {
+		return undefined;
+	}
+	const relative = second?.match(/^plan path: (.+)$/)?.[1]?.trim();
+	return relative ? { name, relative } : { name };
+}
+
+/**
+ * Resolves a recorded plan path without consulting the current `planDirectory`, so a card keeps
+ * working after the setting changes. The recorded path must end in `<root chat id>/<name>`;
+ * callers still pass the result through `guardPath` before reading it.
+ */
+export function planPathForRecorded(
+	workspace: string,
+	rootSessionId: string,
+	recorded: RecordedPlan,
+): PlanTarget | null {
+	const name = planFileName(recorded.name);
+	const relative = recorded.relative?.replaceAll('\\', '/').replace(/^\.\//, '');
+	if (!name || !relative || !workspace.trim()) {
+		return null;
+	}
+	const base = relative.split('/').pop();
+	const folder = `${rootSessionId}/${name}`;
+	if (base !== name || (relative !== folder && !relative.endsWith(`/${folder}`))) {
+		return null;
+	}
+	const path = isAbsolute(relative) ? relative : resolve(workspace, relative);
+	return { name, relative, path };
 }
 
 /** What a Build click sends: the file the plan lives in, then the plan itself. */

@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { isLoopbackBase } from '../lib/endpoint';
 import { APPROVAL_LABELS, APPROVAL_RESPONSE_LABELS, MODE_CAPS, MODE_LABELS, SANDBOX_LABELS } from '../lib/policy';
+import { planRules } from '../lib/plan-rules';
 import type { CommandSpec } from '../services/commands';
 import { formatUsage } from '../services/usage';
 import { sandboxStatus } from '../tools/shell';
@@ -61,10 +62,23 @@ export function slashCommands(ctx: Context): void {
 				surface.markdown('Describe what you want planned.');
 				return { done: true };
 			}
+			const policy = {
+				...ctx.agent.policyFor(),
+				workMode: 'plan' as const,
+				capabilities: [...MODE_CAPS.plan],
+				approval: 'whitelist_accept' as const,
+				network: false,
+			};
+			const rules = planRules({ policy, visible: new Set(ctx.tools.visible(policy).map((tool) => tool.name)) });
+			const readPlans = rules.canReadPlans ? ', check existing plans with list_plans' : '';
+			const text =
+				rules.deliverable === 'plan-file'
+					? `Research the workspace read-only${readPlans}, then record a step-by-step implementation plan with write_plan for:\n\n${args}\n\nDo not implement anything. After write_plan, stop and summarize the plan; the user starts implementation from the plan card.`
+					: `Research the workspace read-only${readPlans}, then put a step-by-step implementation plan in your final summary for:\n\n${args}\n\nDo not implement anything. Stop after summarizing the plan; the user can switch to a write-capable mode to implement it.`;
 			return {
 				done: false,
-				text: `Research the workspace read-only, check existing plans with list_plans, then record a step-by-step implementation plan with write_plan for:\n\n${args}\n\nDo not implement anything. After write_plan, stop and summarize the plan; the user starts implementation from the plan card.`,
-				policy: { workMode: 'pl', approval: 'whitelist_accept', network: false },
+				text,
+				policy: { workMode: 'plan', approval: 'whitelist_accept', network: false },
 			};
 		},
 		'[task]',

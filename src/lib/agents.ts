@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describeBudget, normalizeBudget, type BudgetInput } from './budget';
-import type { Capability, WorkMode } from './types';
+import type { Capability } from './types';
 
 /**
  * The built-in subagent roles. A role is a capability ceiling plus a tool selection and a prompt;
@@ -25,8 +25,6 @@ export interface AgentRole {
 	title: string;
 	description: string;
 	prompt: string;
-	/** The displayed work mode and the role's capability ceiling. */
-	workMode: WorkMode;
 	/** The role's default effective capabilities; always a subset of the subagent hard cap. */
 	capabilities: Capability[];
 	/** The child gets network only when the parent switch and this flag are both on. */
@@ -45,7 +43,7 @@ export interface AgentRole {
 }
 
 /** Tools only the root orchestrator may call. They are never offered to a child. */
-export const ORCHESTRATOR_TOOLS = ['task_plan', 'delegate', 'task_status', 'resume'] as const;
+export const ORCHESTRATOR_TOOLS = ['task_graph', 'delegate', 'task_status', 'resume'] as const;
 
 /**
  * Tools a child must never be offered, in addition to the capability cap. `write_plan` and
@@ -100,7 +98,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Read-only generalist for focused tasks without a clear specialist.',
 		prompt:
 			'You handle a focused, lightweight task that has no clear specialist. Work only with the read-only tools you are given. Inspect the workspace, answer the question, and return concise facts with file paths and line references. Never modify anything.',
-		workMode: 'ro',
 		capabilities: ['ro', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...LORE, ...MESSAGE, ...TODO],
@@ -112,7 +109,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'External research with cited sources and explicit confidence.',
 		prompt:
 			'You research external sources for a delegated question. Search the web, prefer primary sources, and record title, URL, date and confidence for every claim. Separate sourced fact from inference. Never modify the workspace.',
-		workMode: 'ro',
 		capabilities: ['ro'],
 		network: true,
 		tools: [...READ, ...WEB, ...SKILL, ...LORE, ...MESSAGE, ...TODO],
@@ -124,7 +120,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Mathematical derivation, computation and numerical verification.',
 		prompt:
 			'You formalize, derive and verify mathematical results. State every assumption, derive step by step, and use the math tools and the test shell for numerical checks. Report the method, the result and its error bounds. Do not modify project files.',
-		workMode: 'sw',
 		capabilities: ['ro', 'shell_ro', 'shell_test'],
 		network: false,
 		tools: [...READ, ...SHELL_READ, ...MATH, ...SHELL_TEST, ...SKILL, ...MESSAGE, ...TODO],
@@ -137,7 +132,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Read-only codebase search and code-path mapping.',
 		prompt:
 			'You map the workspace. Search and read only what the task needs, then report exact files, symbols and line references, plus the call path or dependency chain you found. Distinguish what you verified from what you inferred. Never modify anything.',
-		workMode: 'ro',
 		capabilities: ['ro', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...MESSAGE],
@@ -149,7 +143,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Read-only implementation planning with steps, risks and verification.',
 		prompt:
 			'You produce an implementation plan. Inspect the relevant code and existing plans, then return ordered steps with files to change, dependencies, risks and verification. You cannot write plan files; return the plan in your report so the orchestrator can record it. Never modify anything.',
-		workMode: 'pl',
 		capabilities: ['ro', 'ro_plan', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...PLAN_READ, ...SKILL, ...MESSAGE],
@@ -161,7 +154,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Implement a focused change with tracked file tools and tests.',
 		prompt:
 			'You implement exactly the delegated change. Use the tracked file tools for every project modification; never write project files through a shell. Make the smallest correct diff, run the specified tests with the test shell, and report changed files, commands and exit codes. If the task is blocked, report exactly what you need.',
-		workMode: 'sw',
 		capabilities: ['ro', 'rw', 'shell_ro', 'shell_test'],
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SHELL_TEST, ...PLAN_READ, ...SKILL, ...MESSAGE, ...TODO],
@@ -174,7 +166,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Design and run tests; report commands, exit codes and failures.',
 		prompt:
 			'You design and run tests for the delegated change. Add or adjust test files only when the task asks; never change production code. Run the specified commands with the test shell and report each command, exit code and the relevant output. Return a clear pass/fail judgement.',
-		workMode: 'sw',
 		capabilities: ['ro', 'rw', 'shell_ro', 'shell_test'],
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SHELL_TEST, ...PLAN_READ, ...SKILL, ...MESSAGE, ...TODO],
@@ -187,7 +178,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Independent read-only review against acceptance criteria.',
 		prompt:
 			'You independently review the delegated work. Inspect the workspace diff and the relevant files. Report findings ordered by severity with file:line references and concrete fixes. Judge each acceptance criterion explicitly; do not modify anything.',
-		workMode: 'ro',
 		capabilities: ['ro', 'ro_plan', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...PLAN_READ, ...SKILL, ...MESSAGE],
@@ -199,7 +189,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Reproduce and diagnose failures from evidence.',
 		prompt:
 			'You diagnose a failure. Reproduce it from the available read-only commands and logs, isolate the smallest failing path, and report the root cause with evidence. Do not modify files; if a test run is required, ask the orchestrator to delegate a tester.',
-		workMode: 'ro',
 		capabilities: ['ro', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...MESSAGE, ...TODO],
@@ -211,7 +200,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Threat modeling and vulnerability review.',
 		prompt:
 			'You audit the delegated surface for security. Model the trust boundaries and attack surface, then report exploitable findings with severity, file:line references and concrete remediation. Do not modify anything.',
-		workMode: 'ro',
 		capabilities: ['ro', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...MESSAGE],
@@ -223,7 +211,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Data profiling, statistics and reproducible analysis.',
 		prompt:
 			'You analyze data for the delegated question. Profile the inputs, state assumptions, compute statistics or transformations reproducibly, and report the method, units, results and limitations. Write analysis files only when the task asks.',
-		workMode: 'sw',
 		capabilities: ['ro', 'rw', 'shell_ro', 'shell_test'],
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SHELL_TEST, ...MATH, ...SKILL, ...MESSAGE, ...TODO],
@@ -236,7 +223,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Hypothesis-driven scientific investigation and experiment design.',
 		prompt:
 			'You investigate a scientific question. State the hypothesis, method and evidence, separate observation from interpretation, and quantify uncertainty. Write only the artifacts the task requires and report how to reproduce them.',
-		workMode: 'sw',
 		capabilities: ['ro', 'rw', 'shell_ro', 'shell_test'],
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SHELL_TEST, ...MATH, ...SKILL, ...MESSAGE, ...TODO],
@@ -249,7 +235,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Accurate technical documentation for a named audience.',
 		prompt:
 			'You write technical documentation for the delegated audience. Read the code and existing docs first; be accurate, concise and consistent with the project voice. Do not invent APIs or behavior. Report every file you change.',
-		workMode: 'sw',
 		capabilities: ['ro', 'rw', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SKILL, ...LORE, ...MESSAGE, ...TODO],
@@ -262,7 +247,6 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 		description: 'Architecture options, interfaces, trade-offs and evolution.',
 		prompt:
 			'You design a system or interface. Frame the constraints, options, trade-offs, boundaries and evolution path, then recommend one option with a decision record. Do not implement; return the design in your report.',
-		workMode: 'pl',
 		capabilities: ['ro', 'ro_plan', 'shell_ro'],
 		network: false,
 		tools: [...READ, ...DIAG, ...SHELL_READ, ...PLAN_READ, ...SKILL, ...MESSAGE],
@@ -304,7 +288,7 @@ export function agentLines(agents: readonly AgentRole[]): string {
 	return agents
 		.map(
 			(agent) =>
-				`- ${agent.id} [${agent.workMode}${agent.network ? ', network' : ''}; ${describeBudget(normalizeBudget(agent.budget))}]: ${agent.description || 'no description'}`,
+				`- ${agent.id} [${agent.capabilities.join(', ')}${agent.network ? ', network' : ''}; ${describeBudget(normalizeBudget(agent.budget))}]: ${agent.description || 'no description'}`,
 		)
 		.join('\n');
 }

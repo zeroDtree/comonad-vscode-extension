@@ -10,7 +10,7 @@ import type { TaskGraphAccess } from './task-graph';
 export type { SandboxMode } from './sandbox';
 
 /** Work modes, least capable first: chat only, then reads, writes and a full shell, then plan files. */
-export type WorkMode = 'chat' | 'ro' | 'sw' | 'aw' | 'pl';
+export type WorkMode = 'chat' | 'ro' | 'sw' | 'aw' | 'plan';
 
 /** The tool approval policy: what happens to a call no user rule matched. */
 export type Approval = 'manual' | 'universal_reject' | 'blacklist_reject' | 'whitelist_accept' | 'universal_accept';
@@ -23,8 +23,6 @@ export type ApprovalResponse = 'ask' | 'never';
  * thinking off where the model allows it; `max` is the deepest level the endpoint offers.
  */
 export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'max';
-
-export type Preset = 'ask' | 'plan' | 'auto' | 'readonly' | 'full';
 
 export type Capability = 'ro' | 'ro_plan' | 'rw' | 'rw_plan' | 'shell_ro' | 'shell_test' | 'shell_rw';
 
@@ -177,9 +175,9 @@ export interface SwipeInfo {
 }
 
 export interface SessionPolicy {
-	/** The selected mode. It is what the UI shows; `capabilities` is what the gate enforces. */
+	/** The selected mode. It caps the effective capability set; `capabilities` is the effective subset the gate enforces. */
 	workMode: WorkMode;
-	/** The effective capability set. Absent falls back to `MODE_CAPS[workMode]`. */
+	/** The effective capability set, never wider than `MODE_CAPS[workMode]`. Absent means the mode's full set. */
 	capabilities?: Capability[];
 	/** The effective user rules. Absent falls back to the global settings. */
 	rules?: RuleSet;

@@ -4,8 +4,11 @@ import { effectiveCapabilities } from '../lib/agents';
 import type { BudgetInput } from '../lib/budget';
 import { buildVerifierPrompt, buildWorkerTaskPrompt } from '../lib/agent-prompts';
 import { parseAgentEnvelope } from '../lib/agent-output';
-import { capabilitiesOf } from '../lib/policy';
+import { planRules } from '../lib/plan-rules';
+import { SUBAGENT_CAPABILITIES } from '../lib/subagent';
 import {
+	ACCEPTANCE_CHECKS,
+	WRITE_TASK_CRITERION_RULE,
 	boardOf,
 	formatBoard,
 	type TaskGraphAccess,
@@ -14,42 +17,18 @@ import {
 	type TaskResult,
 	type TaskVerificationCheck,
 } from '../lib/task-graph';
-import { objectSchema, type Capability, type SessionPolicy, type ToolContext } from '../lib/types';
+import { objectSchema, type ToolContext } from '../lib/types';
 
 /** The Orchestrator's task tools and the shared coordination mailbox. */
 
 const FAILED = (error: unknown): string => `Error: ${error instanceof Error ? error.message : String(error)}`;
 
-/**
- * A task that needs `rw` cannot run here. Plan mode refuses it even when the session was given
- * `rw` explicitly: the phase itself is read-only, not merely the default capability set.
- */
-function writeRefusal(policy: SessionPolicy, capabilities: readonly Capability[], id: string): string | undefined {
-	if (!capabilities.includes('rw')) {
-		return undefined;
-	}
-	if (policy.workMode !== 'pl' && capabilitiesOf(policy).has('rw')) {
-		return undefined;
-	}
-	return policy.workMode === 'pl'
-		? `${id} needs rw, but Plan mode delegates only read-only research; record the implementation plan with write_plan and let the user build it`
-		: `${id} writes, but this session has no rw capability; switch to Semi-Write/Full Access to run it`;
-}
-
-/** A command criterion needs the test shell, which Plan mode never grants. */
-function commandRefusal(policy: SessionPolicy, acceptance: unknown, id: string): string | undefined {
-	if (!Array.isArray(acceptance)) {
-		return undefined;
-	}
-	if (!acceptance.some((criterion) => criterion && typeof criterion === 'object' && (criterion as { check?: unknown }).check === 'command')) {
-		return undefined;
-	}
-	if (policy.workMode !== 'pl' && capabilitiesOf(policy).has('shell_test')) {
-		return undefined;
-	}
-	return policy.workMode === 'pl'
-		? `${id} has a command criterion, but Plan mode has no test shell; use evidence criteria or let the user build the plan`
-		: `${id} needs command verification, but this session has no shell_test capability`;
+/** The phase rules for the current tool context, from the one visible tool set. */
+function rulesOf(ctx: Context, toolCtx: ToolContext) {
+	return planRules({
+		policy: toolCtx.policy,
+		visible: new Set(ctx.tools.visible(toolCtx.policy).map((tool) => tool.name)),
+	});
 }
 
 const budgetSchema = {
@@ -69,7 +48,7 @@ const acceptanceSchema = {
 	properties: {
 		id: { type: 'string', description: 'Slug, unique within the node.' },
 		description: { type: 'string', description: 'What must be true; testable by a reviewer.' },
-		check: { type: 'string', enum: ['evidence', 'review', 'command'] },
+		check: { type: 'string', enum: [...ACCEPTANCE_CHECKS] },
 		command: { type: 'string', description: 'Required for a command criterion; the tester runs it exactly.' },
 		files: { type: 'array', items: { type: 'string' }, description: 'Context for the verifier.' },
 	},
@@ -80,7 +59,7 @@ const acceptanceSchema = {
 const nodeSchema = {
 	type: 'object',
 	properties: {
-		id: { type: 'string', description: 'Slug, unique in the plan.' },
+		id: { type: 'string', description: 'Slug, unique in the task graph.' },
 		title: { type: 'string' },
 		role: { type: 'string', description: 'One of the roles in the Orchestration block or a custom role.' },
 		objective: { type: 'string', description: 'A self-contained brief for one worker.' },
@@ -93,7 +72,7 @@ const nodeSchema = {
 		},
 		capabilities: {
 			type: 'array',
-			items: { type: 'string', enum: ['ro', 'ro_plan', 'rw', 'shell_ro', 'shell_test'] },
+			items: { type: 'string', enum: [...SUBAGENT_CAPABILITIES] },
 			description: 'Further narrow the role capabilities; never widen them.',
 		},
 		network: { type: 'boolean', description: 'false narrows network off; true only when the role allows it.' },
@@ -109,16 +88,16 @@ const nodeSchema = {
 
 export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
-		name: 'task_plan',
+		name: 'task_graph',
 		description:
-			'Record or revise the Orchestrator task DAG. Send the complete desired node set on every revision. A task whose effective capabilities include rw needs at least one review or command criterion. Dependencies must be acyclic; only pending, ready nodes can be delegated. The runtime derives a fixed independent reviewer/tester for review/command criteria, so you cannot mark a task accepted yourself. Read-only sessions can plan only read-only tasks; Plan mode never accepts rw tasks or command criteria — record the implementation plan with write_plan instead.',
+			`Record or revise the Orchestrator task graph. Send the complete desired node set on every revision. ${WRITE_TASK_CRITERION_RULE}. Dependencies must be acyclic; only pending, ready nodes can be delegated. The runtime derives a fixed independent reviewer/tester for review/command criteria, so you cannot mark a task accepted yourself. The runtime refuses a new or revised task the session cannot run; accepted tasks are kept as history.`,
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: false,
 		serial: true,
 		parameters: objectSchema(
 			{
-				objective: { type: 'string', description: 'The user goal this plan serves.' },
+				objective: { type: 'string', description: 'The user goal this task graph serves.' },
 				nodes: { type: 'array', minItems: 1, maxItems: 32, items: nodeSchema },
 			},
 			['objective', 'nodes'],
@@ -126,35 +105,17 @@ export function orchestrateTools(ctx: Context): void {
 		async execute(args, toolCtx) {
 			const access = toolCtx.taskGraph;
 			if (!access) {
-				return 'Error: task planning is only available to the Orchestrator';
+				return 'Error: the task graph is only available to the Orchestrator';
 			}
 			const input = args as { objective: string; nodes: TaskNodeInput[] };
+			const rules = rulesOf(ctx, toolCtx);
 			try {
 				return await ctx.orchestrator.run(access, async () => {
-					// Refuse an unusable node before recording it. An accepted node is kept unchanged by
-					// a revision, so a later mode switch must not invalidate the whole plan.
-					const nodes = Array.isArray(input.nodes) ? input.nodes : [];
-					const roles = ctx.orchestrator.roles();
-					const accepted = new Set((access.get()?.nodes ?? []).filter((node) => node.status === 'accepted').map((node) => node.id));
-					const refusals: string[] = [];
-					for (const node of nodes) {
-						if (!node || typeof node !== 'object' || accepted.has(node.id)) {
-							continue;
-						}
-						const role = roles.get(node.role);
-						if (!role) {
-							continue;
-						}
-						const capabilities = effectiveCapabilities(role, Array.isArray(node.capabilities) ? node.capabilities : undefined);
-						const refusal = writeRefusal(toolCtx.policy, capabilities, node.id) ?? commandRefusal(toolCtx.policy, node.acceptance, node.id);
-						if (refusal) {
-							refusals.push(refusal);
-						}
-					}
-					if (refusals.length) {
-						return `Error: ${refusals.join('\n')}`;
-					}
-					const result = ctx.orchestrator.plan(access, { objective: input.objective, nodes: input.nodes });
+					const result = ctx.orchestrator.recordTaskGraph(
+						access,
+						{ objective: input.objective, nodes: input.nodes },
+						rules,
+					);
 					const warnings = result.warnings.length
 						? `\n\nWarnings:\n${result.warnings.map((warning) => `- ${warning}`).join('\n')}`
 						: '';
@@ -169,14 +130,14 @@ export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
 		name: 'delegate',
 		description:
-			'Run 1..8 ready tasks from the current plan in parallel. All selected tasks must be pending and ready; a batch may not contain dependencies within itself. Read and write tasks may run together; the runtime serialises writes to the same file and parallel workers can coordinate through the message tool. A worker that exhausts a native budget is paused, not rejected: use resume to continue its session. After the workers finish, the runtime derives fixed independent reviewer/tester children for review/command criteria. You cannot mark a task accepted; read the board and verdicts, then replan rejected work within its attempt budget. Read-only sessions run only read-only tasks; Plan mode records the implementation plan with write_plan and then stops.',
+			'Run 1..8 ready tasks from the current task graph in parallel. All selected tasks must be pending and ready; a batch may not contain dependencies within itself. Read and write tasks may run together; the runtime serialises writes to the same file and parallel workers can coordinate through the message tool. A worker that exhausts a native budget is paused, not rejected: use resume to continue its session. After the workers finish, the runtime derives fixed independent reviewer/tester children for review/command criteria. You cannot mark a task accepted; read the board and verdicts, then replan rejected work within its attempt budget.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
 		serial: true,
 		parameters: objectSchema(
 			{
-				tasks: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string' }, description: 'Task ids from the current plan.' },
+				tasks: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string' }, description: 'Task ids from the current task graph.' },
 			},
 			['tasks'],
 		),
@@ -196,9 +157,10 @@ export function orchestrateTools(ctx: Context): void {
 				return await ctx.orchestrator.run(access, async () => {
 					const graph = access.get();
 					if (!graph) {
-						return 'Error: no task plan exists; call task_plan first';
+						return 'Error: no task graph exists; call task_graph first';
 					}
 					const roles = ctx.orchestrator.roles();
+					const rules = rulesOf(ctx, toolCtx);
 					for (const id of tasks) {
 						const node = graph.nodes.find((candidate) => candidate.id === id);
 						if (!node) {
@@ -209,7 +171,7 @@ export function orchestrateTools(ctx: Context): void {
 							return `Error: ${id}: role ${node.role} is not available`;
 						}
 						const caps = effectiveCapabilities(role, node.capabilities);
-						const write = writeRefusal(toolCtx.policy, caps, id);
+						const write = rules.writeRefusal(id, caps);
 						if (write) {
 							return `Error: ${write}`;
 						}
@@ -217,7 +179,7 @@ export function orchestrateTools(ctx: Context): void {
 						if (network && !toolCtx.policy.network) {
 							return `Error: ${id} needs network, but the session has network off`;
 						}
-						const command = commandRefusal(toolCtx.policy, node.acceptance, id);
+						const command = rules.commandRefusal(id, node.acceptance);
 						if (command) {
 							return `Error: ${command}`;
 						}
@@ -335,7 +297,7 @@ export function orchestrateTools(ctx: Context): void {
 		needsNetwork: false,
 		needsWorkspace: false,
 		parameters: objectSchema({
-			tasks: { type: 'array', items: { type: 'string' }, description: 'Only show these task ids; omit for the whole plan.' },
+			tasks: { type: 'array', items: { type: 'string' }, description: 'Only show these task ids; omit for the whole task graph.' },
 		}),
 		async execute(args, toolCtx) {
 			const access = toolCtx.taskGraph;
@@ -344,7 +306,7 @@ export function orchestrateTools(ctx: Context): void {
 			}
 			const graph = access.get();
 			if (!graph) {
-				return 'No task plan exists for this chat.';
+				return 'No task graph exists for this chat.';
 			}
 			const wanted = (args as { tasks?: unknown }).tasks;
 			const ids = Array.isArray(wanted) ? wanted.filter((id): id is string => typeof id === 'string') : [];
@@ -362,14 +324,14 @@ export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
 		name: 'resume',
 		description:
-			'Resume 1..8 paused tasks with a new segment budget. Resuming continues the same child session and transcript; it does not spend an attempt. The default segment budget is the task plan budget; pass a budget to set this segment. Each dimension is still capped by the role and global defaults. A resumed worker returns a new result and derived verifiers. A write task cannot be resumed from a read-only session.',
+			'Resume 1..8 paused tasks with a new segment budget. Resuming continues the same child session and transcript; it does not spend an attempt. The default segment budget is the task graph budget; pass a budget to set this segment. Each dimension is still capped by the role and global defaults. A resumed worker returns a new result and derived verifiers.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
 		serial: true,
 		parameters: objectSchema(
 			{
-				tasks: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string' }, description: 'Paused task ids from the current plan.' },
+				tasks: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string' }, description: 'Paused task ids from the current task graph.' },
 				budget: budgetSchema,
 			},
 			['tasks'],
@@ -390,9 +352,10 @@ export function orchestrateTools(ctx: Context): void {
 				return await ctx.orchestrator.run(access, async () => {
 					const graph = access.get();
 					if (!graph) {
-						return 'Error: no task plan exists; call task_plan first';
+						return 'Error: no task graph exists; call task_graph first';
 					}
 					const roles = ctx.orchestrator.roles();
+					const rules = rulesOf(ctx, toolCtx);
 					const priorWrites = new Map<string, string[]>();
 					for (const id of tasks) {
 						const node = graph.nodes.find((candidate) => candidate.id === id);
@@ -410,14 +373,14 @@ export function orchestrateTools(ctx: Context): void {
 							return `Error: ${id}: role ${node.role} is not available`;
 						}
 						const caps = effectiveCapabilities(role, node.capabilities);
-						const write = writeRefusal(toolCtx.policy, caps, id);
+						const write = rules.writeRefusal(id, caps);
 						if (write) {
 							return `Error: ${write}`;
 						}
 						if ((node.network ?? role.network) && !toolCtx.policy.network) {
 							return `Error: ${id} needs network, but the session has network off`;
 						}
-						const command = commandRefusal(toolCtx.policy, node.acceptance, id);
+						const command = rules.commandRefusal(id, node.acceptance);
 						if (command) {
 							return `Error: ${command}`;
 						}
@@ -607,7 +570,7 @@ function detailsOf(graph: { nodes: TaskNode[] }, ids: readonly string[]): string
 	for (const id of ids) {
 		const node = graph.nodes.find((candidate) => candidate.id === id);
 		if (!node) {
-			lines.push(`- ${id}: (not in the plan)`);
+			lines.push(`- ${id}: (not in the task graph)`);
 			continue;
 		}
 		lines.push(

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { capabilitiesOf, ruleText, type PolicyRule, type RuleSet } from './policy';
+import { capabilitiesOf, intersectCapabilities, ruleText, type PolicyRule, type RuleSet } from './policy';
 import { sandboxReads, sandboxWrites, type SandboxMode } from './sandbox';
 import type { Approval, Capability, SessionPolicy } from './types';
 
@@ -13,7 +13,7 @@ import type { Approval, Capability, SessionPolicy } from './types';
 export const SUBAGENT_CAPABILITIES: readonly Capability[] = ['ro', 'ro_plan', 'shell_ro', 'rw', 'shell_test'];
 export const SUBAGENT_WRITE_CAPABILITIES: readonly Capability[] = ['rw', 'shell_test'];
 
-const CAPABILITY_ORDER: readonly Capability[] = ['ro', 'ro_plan', 'rw', 'rw_plan', 'shell_ro', 'shell_test', 'shell_rw'];
+export { intersectCapabilities } from './policy';
 
 export interface DelegationConstraints {
 	/** Further narrows the parent's capability set; it can never add one. */
@@ -51,12 +51,6 @@ export function meetSandboxMode(left: SandboxMode, right: SandboxMode): SandboxM
 		return 'workspace-read';
 	}
 	return write === 'none' ? 'read-only' : write === 'workspace' ? 'workspace-write' : 'danger-full-access';
-}
-
-/** Capabilities present in every list, in the canonical mode order. */
-export function intersectCapabilities(...lists: readonly (readonly Capability[])[]): Capability[] {
-	const sets = lists.map((list) => new Set(list));
-	return CAPABILITY_ORDER.filter((capability) => sets.every((set) => set.has(capability)));
 }
 
 export function emptyRules(): RuleSet {

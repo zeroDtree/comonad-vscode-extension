@@ -25,10 +25,11 @@ flowchart LR
 `%% soft node: instruct` lets the model choose a target. Only the default graph runs a turn; the other
 named graphs remain available to plugins through `ctx.graphs.get(id)`.
 
-The Orchestrator's `task_plan`, `delegate` and `task_status` are ordinary tools in this loop; task
-orchestration adds no graph nodes. A `delegate` call spawns each child with the same default graph
-in its own hidden session, so the child passes through the same gate, authorization, approval,
-sandbox and trace layers. A task graph is a plan for agents, not a tool-execution graph.
+The Orchestrator's `task_graph`, `delegate`, `task_status` and `resume` are ordinary tools in this
+loop; task orchestration adds no graph nodes. A `delegate` call spawns each child with the same
+default graph in its own hidden session, so the child passes through the same gate, authorization,
+approval, sandbox and trace layers. A task graph is the Orchestrator's execution state, distinct
+from the tool-execution graph and from the separate plan file.
 
 ## Graph, policy and executor
 

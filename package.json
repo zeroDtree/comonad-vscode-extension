@@ -650,10 +650,10 @@
             "ro",
             "sw",
             "aw",
-            "pl"
+            "plan"
           ],
           "default": "sw",
-          "markdownDescription": "Tool capabilities. `chat` no tools at all · `ro` read files, read-only shell · `sw` write files, run tests in a scratch shell · `aw` write files, full shell · `pl` read files, read-only shell, plan files only."
+          "markdownDescription": "Tool capabilities. `chat` no tools at all · `ro` read files, read-only shell · `sw` write files, run tests in a scratch shell · `aw` write files, full shell · `plan` read files, read-only shell, plan files only."
         },
         "comonad.approval": {
           "type": "string",
@@ -1022,7 +1022,7 @@
             },
             "additionalProperties": false
           },
-          "markdownDescription": "Per-agent capability grants for subagents, keyed by agent name. `files` enables the tracked file-write tools; `test` enables the scratch-only test shell. Read-only tools are always available; the plan readers (`list_plans`, `read_plan`) use `ro_plan` and appear only when the parent mode is Plan. Full shell (`run_shell`, `start_shell`) and plan writes (`write_plan`) are never granted to a subagent. The agent's own `tools` list still selects which tools it uses, and the parent mode still has to allow the capability. Built-in `implement` defaults to both; every other agent defaults to read-only. Example: `{ \"implement\": { \"files\": true, \"test\": true } }`."
+          "markdownDescription": "Per-agent capability grants for subagents, keyed by agent name. `files` enables the tracked file-write tools; `test` enables the scratch-only test shell. Read-only tools are always available; the plan readers (`list_plans`, `read_plan`) use `ro_plan` and appear only when the parent's effective capabilities include it. Full shell (`run_shell`, `start_shell`) and plan writes (`write_plan`) are never granted to a subagent. The agent's own `tools` list still selects which tools it uses, and the parent's effective capabilities must include the capability too. Built-in roles keep their role-table grants: `coder`, `tester`, `data-analyst` and `scientist` default to files + test; `technical-writer` to files; `math-researcher` to test. Example: `{ \"coder\": { \"files\": true, \"test\": true } }`."
         },
         "comonad.instructions": {
           "type": "boolean",

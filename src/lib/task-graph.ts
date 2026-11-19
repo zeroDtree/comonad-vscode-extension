@@ -5,7 +5,7 @@ import { normalizeBudget, type BudgetDimension, type BudgetInput, type BudgetRep
 import type { Capability } from './types';
 
 /**
- * The persistent task DAG the Orchestrator plans and the runtime executes. This module is pure:
+ * The persistent task DAG the Orchestrator records and the runtime executes. This module is pure:
  * validation, reconciliation, readiness and acceptance are deterministic; the service only owns
  * persistence, spawning and audit.
  */
@@ -16,13 +16,16 @@ export type AcceptanceCheck = 'evidence' | 'review' | 'command';
 export const TASK_STATUSES: readonly TaskStatus[] = ['pending', 'running', 'verifying', 'accepted', 'rejected', 'paused'];
 export const ACCEPTANCE_CHECKS: readonly AcceptanceCheck[] = ['evidence', 'review', 'command'];
 
+/** The one wording for the write-task acceptance rule; the validator, tool description and prompt share it. */
+export const WRITE_TASK_CRITERION_RULE = 'A write task needs at least one review or command criterion';
+
 export const MAX_TASKS = 32;
 export const MAX_ACCEPTANCE = 8;
 export const MAX_DEPENDENCIES = 16;
 export const MAX_WRITES = 64;
 export const MAX_ATTEMPTS = 3;
 export const MAX_REPLANS = 6;
-/** Per-dimension plan bounds; `0` is unlimited and is the common value. */
+/** Per-dimension task graph bounds; `0` is unlimited and is the common value. */
 export const MAX_BUDGET_VALUE = 1_000_000_000;
 export const DEFAULT_MAX_RESUMES = 3;
 
@@ -88,7 +91,7 @@ export interface TaskGraph {
 	updatedAt: number;
 }
 
-export interface TaskPlanInput {
+export interface TaskGraphInput {
 	objective: string;
 	nodes: TaskNodeInput[];
 }
@@ -188,7 +191,7 @@ export interface TaskBoard {
 	messages?: TaskBoardMessage[];
 }
 
-export interface PlanCheck {
+export interface GraphCheck {
 	errors: string[];
 	warnings: string[];
 }
@@ -296,18 +299,18 @@ function effectiveRisk(node: TaskNodeInput, role: AgentRole): AgentRisk {
 	return roleRisk(effectiveCapabilities(role, node.capabilities));
 }
 
-/** Validates one plan and computes independent-write warnings. */
-export function checkTaskPlan(input: TaskPlanInput, roles: ReadonlyMap<string, AgentRole>): PlanCheck {
+/** Validates one task graph and computes independent-write warnings. */
+export function checkTaskGraph(input: TaskGraphInput, roles: ReadonlyMap<string, AgentRole>): GraphCheck {
 	const errors: string[] = [];
 	const warnings: string[] = [];
 	if (!input || typeof input !== 'object') {
-		return { errors: ['the plan must be an object'], warnings };
+		return { errors: ['the task graph must be an object'], warnings };
 	}
 	if (!clean(input.objective, 4000)) {
-		errors.push('the plan objective is required');
+		errors.push('the task graph objective is required');
 	}
 	if (!Array.isArray(input.nodes) || input.nodes.length === 0 || input.nodes.length > MAX_TASKS) {
-		errors.push(`a plan needs 1..${MAX_TASKS} nodes`);
+		errors.push(`a task graph needs 1..${MAX_TASKS} nodes`);
 		return { errors, warnings };
 	}
 	const ids = new Set<string>();
@@ -387,7 +390,7 @@ export function checkTaskPlan(input: TaskPlanInput, roles: ReadonlyMap<string, A
 				}
 			}
 			if (effectiveRisk(node, role) === 'write' && !acceptance.some((criterion) => criterion?.check === 'review' || criterion?.check === 'command')) {
-				errors.push(`${node.id}: a write task needs at least one review or command criterion`);
+				errors.push(`${node.id}: ${WRITE_TASK_CRITERION_RULE}`);
 			}
 		}
 		const maxAttempts = node.maxAttempts;
@@ -592,23 +595,23 @@ function nodeOf(input: TaskNodeInput, role: AgentRole, now: number, previous?: T
 	return reset;
 }
 
-/** Applies a declarative plan to the existing graph; refused while a node is in flight. */
+/** Applies a declarative task graph to the existing graph; refused while a node is in flight. */
 export function reconcileTaskGraph(
 	existing: TaskGraph | undefined,
-	input: TaskPlanInput,
+	input: TaskGraphInput,
 	roles: ReadonlyMap<string, AgentRole>,
 	turn: number,
 	now = Date.now(),
 ): ReconcileResult {
-	const check = checkTaskPlan(input, roles);
+	const check = checkTaskGraph(input, roles);
 	if (check.errors.length) {
 		return { ok: false, errors: check.errors };
 	}
 	if (existing?.nodes.some((node) => node.status === 'running' || node.status === 'verifying')) {
-		return { ok: false, errors: ['cannot revise the plan while a task is running or being verified'] };
+		return { ok: false, errors: ['cannot revise the task graph while a task is running or being verified'] };
 	}
 	if (existing && existing.replans >= MAX_REPLANS) {
-		return { ok: false, errors: [`the plan has reached its ${MAX_REPLANS}-replan limit`] };
+		return { ok: false, errors: [`the task graph has reached its ${MAX_REPLANS}-replan limit`] };
 	}
 	const previous = new Map((existing?.nodes ?? []).map((node) => [node.id, node]));
 	const nodes: TaskNode[] = [];

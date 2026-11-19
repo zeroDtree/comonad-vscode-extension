@@ -21,7 +21,7 @@ flowchart TB
 
 | Layer | Setting | Values |
 | --- | --- | --- |
-| Work mode | `comonad.mode` | `chat`, `ro`, `sw`, `aw`, `pl` |
+| Work mode | `comonad.mode` | `chat`, `ro`, `sw`, `aw`, `plan` |
 | Network access policy | `comonad.network` | `on`, `off` |
 | User rules | `comonad.permissions` | `deny`, `ask`, `allow` lists |
 | Tool approval policy | `comonad.approval` | `manual`, `whitelist_accept`, `blacklist_reject`, `universal_accept`, `universal_reject` |
@@ -38,9 +38,15 @@ The mode decides which capabilities exist at all.
 | Read-Only (`ro`) | Read files, read-only shell |
 | Semi-Write (`sw`) | + write files, + test shell (workspace read-only, scratch writable) |
 | Full Access (`aw`) | + full shell |
-| Plan (`pl`) | Read files, read-only shell, reads and writes plan files |
+| Plan (`plan`) | Read files, read-only shell, reads and writes plan files |
 
-The mode is remembered per chat; new chats start from `comonad.mode`.
+The mode is a hard ceiling: an explicit capability set can only narrow it. A Plan session with an
+explicit `rw` still cannot write project files. The mode is a setting; each turn merges the current
+setting into the chat's policy.
+
+The mode does not set approval or sandbox. A plan file also needs a sandbox that permits writes and
+an approval policy that runs `rw_plan` (or an allow rule); `/plan` sets the turn's approval and
+network, and otherwise `write_plan` is hidden or refused and the plan stays in the summary.
 
 ## 2. Network access policy
 
@@ -131,16 +137,17 @@ always need an OS sandbox, because their promises cannot be kept without one. Th
 
 ## Orchestrator and subagents
 
-The root turn is the **Orchestrator**: it plans the task DAG, delegates ready nodes and delivers the
-integrated result. The fourteen built-in roles are leaf workers. A child never receives `task_plan`,
-`delegate`, `task_status` or the old `agent` tool, and `spawnAgent` refuses a spawn from a child.
+The root turn is the **Orchestrator**: it records the task graph, delegates ready nodes and delivers
+the integrated result. The fourteen built-in roles are leaf workers. A child never receives
+`task_graph`, `delegate`, `task_status`, `resume` or the old `agent` tool, and `spawnAgent` refuses a
+spawn from a child.
 
 A subagent runs the same six layers with its **own effective policy**, built when the delegation
 starts. It can only narrow the parent:
 
 | Policy | What the child gets |
 | --- | --- |
-| Work mode | parent effective capabilities ∩ the role's capabilities ∩ the task's capability filter ∩ the hard cap (`ro`, `ro_plan`, `shell_ro`, `rw`, `shell_test`) |
+| Capabilities | parent effective capabilities ∩ the role's capabilities ∩ the task's capability filter ∩ the hard cap (`ro`, `ro_plan`, `shell_ro`, `rw`, `shell_test`) |
 | Network | parent switch AND the role's default; a task may turn it off, never on |
 | User rules | all ancestor rules; `deny` > `ask` > `allow` |
 | Tool approval | the parent's approval policy |
@@ -150,9 +157,11 @@ starts. It can only narrow the parent:
 Consequences:
 
 - A parent in `ro` refuses every child write.
-- A parent in Plan mode delegates read-only research only. `task_plan`, `delegate` and `resume`
-  refuse a task whose effective capabilities include `rw` or whose acceptance needs a `command`;
-  record the implementation plan with `write_plan` and build it in a write-capable mode.
+- A parent in Plan mode delegates read-only research only. `task_graph`, `delegate` and `resume`
+  refuse a new or revised task whose effective capabilities include `rw` or whose acceptance needs a
+  `command`; accepted nodes are history and stay. Record the implementation plan with `write_plan`
+  and build it in a write-capable mode. Build archives the research task graph, so the build turn
+  starts with a fresh one and the plan file as its handoff.
 - A parent with network off keeps it off for the child; a researcher task that needs network fails
   before it starts.
 - An ancestor `deny` beats any child `allow`; an ancestor `ask` is denied by the child's fixed
@@ -209,14 +218,14 @@ its fixed prefix. Everything the scanner cannot place under an owned root still 
 
 ## Presets
 
-The layers can be combined into presets: **Ask**, **Plan**, **Auto**, **Read only** and
-**Full access**. Presets live in the mode and approval controls.
+The layers can be combined into presets: **Ask**, **Auto**, **Read only** and **Full access**.
+A preset is a shortcut, not a layer: the five fields stay independently configurable, and Plan mode
+is not a preset. Presets live in the mode and approval controls.
 `comonad.allowFullAccess: false` hides the unrestricted preset.
 
 | Preset | Work mode | Tool approval | Network | Sandbox mode |
 | --- | --- | --- | --- | --- |
 | Ask | `sw` | `manual` | off | `workspace-write` |
-| Plan | `pl` | `whitelist_accept` | off | `workspace-write` |
 | Auto | `aw` | `universal_accept` | off | `workspace-write` |
 | Read only | `ro` | `whitelist_accept` | off | `read-only` |
 | Full access | `aw` | `universal_accept` | on | `danger-full-access` |

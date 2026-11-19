@@ -14,7 +14,7 @@ Every tool declares a **capability**, whether it needs **network**, and whether 
 | Math | `calculate`, `describe_numbers`, `percentile`, `convert_units` |
 | Web | `fetch_url`, `web_search` |
 | VS Code | `find_files`, `find_symbols`, `get_diagnostics`, `edit_ranges`, `git_diff`, `run_task` |
-| Orchestration | `task_plan`, `delegate`, `task_status` (Orchestrator only), `message` |
+| Orchestration | `task_graph`, `delegate`, `task_status`, `resume` (Orchestrator only), `message` |
 | Agent | `ask_user`, `skill`, `memory` |
 | MCP | `server__tool` for every tool the server exposes |
 
@@ -31,21 +31,25 @@ decoding the bytes as UTF-8.
 
 ## Orchestration tools
 
-`task_plan` records or revises the Orchestrator's task DAG. `delegate` runs 1–8 ready tasks in one
+`task_graph` records or revises the Orchestrator's task graph. `delegate` runs 1–8 ready tasks in one
 parallel batch. `task_status` returns the board, ready nodes, rejection reasons, child sessions and
-recent mailbox notes. Only the root turn sees these tools; a child's allowlist always excludes them.
+recent mailbox notes. `resume` continues paused tasks with a new segment budget. Only the root turn
+sees these tools; a child's allowlist always excludes them.
 
-A read-only session delegates read-only tasks only: `task_plan`, `delegate` and `resume` refuse a
-task whose effective capabilities include `rw` or whose acceptance needs a `command` criterion. In
-Plan mode the implementation plan is recorded with `write_plan`, and the turn stops; write
-delegation is available after **Build plan** switches to Semi-Write or Full Access.
+A read-only session runs read-only tasks only: `task_graph`, `delegate` and `resume` refuse a new or
+revised task whose effective capabilities include `rw` or whose acceptance needs a `command`
+criterion; accepted nodes are history and stay. In Plan mode the implementation plan is recorded with
+`write_plan`, and the turn stops; write delegation is available after **Build plan** switches to
+Semi-Write or Full Access. Build archives the research graph, so the build turn starts fresh with the
+plan file as its handoff.
 
 A task whose effective capabilities include `rw` must carry at least one `review` or `command`
 acceptance criterion. After the worker batch finishes, the runtime derives a **pinned built-in**
 `reviewer` or `tester` child for those criteria; a project file with the same name cannot weaken
 acceptance. The worker/verifier final message must be a single JSON envelope; malformed output is an
-`invalid_output` rejection. The same rules live in the tool descriptions because the Orchestration
-prompt block can be switched off. See [Orchestration](/guide/orchestration).
+`invalid_output` rejection. The structural rules live in the tool schema and validation; the current
+phase rules live in the dynamic Tools and Orchestration prompt blocks. See
+[Orchestration](/guide/orchestration).
 
 `message` is shared by the Orchestrator and every child: one append-only JSONL mailbox per chat under
 extension storage. Use it to announce files before parallel writes and to exchange results. Messages
@@ -56,8 +60,8 @@ batch, and the task board links every child. The read-only overlay shows the chi
 and tool results live. The child inherits the parent policy and only narrows it; its approval response
 is always `never`, so a policy that asks denies the call. Write delegation therefore needs the parent
 to run writes without asking (`universal_accept`, `blacklist_reject`, or an allow rule); otherwise do
-the write in the main thread. A child may read this chat's plans when the parent is in Plan mode
-(`ro_plan`); `write_plan` is never granted, so record accepted plans in the root.
+the write in the main thread. A child may read this chat's plans when the parent's effective
+capabilities include `ro_plan`; `write_plan` is never granted, so record accepted plans in the root.
 
 ## Shell tools
 

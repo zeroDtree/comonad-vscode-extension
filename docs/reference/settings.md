@@ -47,7 +47,7 @@ JSON files hold the same names.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `mode` | `sw` | Work mode: `chat`, `ro`, `sw`, `aw` or `pl` |
+| `mode` | `sw` | Work mode: `chat`, `ro`, `sw`, `aw` or `plan`. The mode is a hard ceiling: the effective capability set can only narrow it |
 | `approval` | `manual` | Tool approval policy: `manual`, `whitelist_accept`, `blacklist_reject`, `universal_accept`, `universal_reject` |
 | `approvalResponse` | `ask` | Approval response policy: `ask` sends the request to a surface and fails closed; `never` denies without asking |
 | `network` | `false` | Network access policy: network tools and network inside the shell sandbox; loopback stays available |
@@ -91,9 +91,10 @@ and the role can never disagree:
 
 Read-only tools are always available. `files` and `test` are the only grants; `run_shell`,
 `start_shell`, `run_task` and plan writes are never granted to a child. The plan readers
-(`list_plans`, `read_plan`) use `ro_plan` and are available only when the parent is in Plan mode. A
-custom definition without a `tools` list is read-only; a custom role that reuses a built-in id does
-not inherit the built-in default. The parent mode still has to allow the capability.
+(`list_plans`, `read_plan`) use `ro_plan` and are available only when the parent's effective
+capabilities include it. A custom definition without a `tools` list is read-only; a custom role that
+reuses a built-in id does not inherit the built-in default. The parent's effective capabilities still
+have to include the capability.
 
 A delegation inherits the parent's effective policy and only narrows it. It inherits the parent's
 tool approval policy, and its approval response is fixed `never`: any call it would ask about is

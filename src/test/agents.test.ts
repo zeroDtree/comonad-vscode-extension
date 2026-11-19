@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
 import { buildOrchestratorBody } from '../lib/agent-prompts';
+import { planRules } from '../lib/plan-rules';
+import type { Capability } from '../lib/types';
 import {
 	agentLines,
 	allowedToolsFor,
@@ -42,6 +44,7 @@ suite('Agent roles', () => {
 	test('every role stays inside the subagent hard cap and never lists a forbidden tool', () => {
 		for (const role of BUILTIN_ROLES) {
 			assert.ok(role.builtin, `${role.id} is builtin`);
+			assert.ok(!('workMode' in role), `${role.id} carries only capabilities, no mode label`);
 			assert.ok(role.capabilities.length > 0, `${role.id} has capabilities`);
 			for (const capability of role.capabilities) {
 				assert.ok(SUBAGENT_CAPABILITIES.includes(capability), `${role.id} capability ${capability}`);
@@ -84,23 +87,54 @@ suite('Agent roles', () => {
 		assert.deepStrictEqual(allowedToolsFor({}, available), available);
 	});
 
-	test('the role index is one line per role with its mode, network and budget', () => {
+	test('the role index is one line per role with its capabilities, network and budget', () => {
 		const lines = agentLines(BUILTIN_ROLES);
 		assert.strictEqual(lines.split('\n').length, 14);
 		assert.match(lines, /- researcher \[ro, network; 10 turns, 40 tools\]:/);
-		assert.match(lines, /- coder \[sw; 16 turns, 60 tools\]:/);
+		assert.match(lines, /- coder \[ro, rw, shell_ro, shell_test; 16 turns, 60 tools\]:/);
 	});
 });
 
 suite('Orchestrator prompt', () => {
-	const body = (patch: Partial<Parameters<typeof buildOrchestratorBody>[0]> = {}) =>
-		buildOrchestratorBody({
+	interface BodyPatch {
+		planMode?: boolean;
+		canWrite?: boolean;
+		writePlanVisible?: boolean;
+		canCommand?: boolean;
+	}
+
+	const body = (patch: BodyPatch = {}) => {
+		const planMode = patch.planMode ?? false;
+		const canWrite = patch.canWrite ?? true;
+		const canCommand = patch.canCommand ?? canWrite;
+		const writePlanVisible = patch.writePlanVisible ?? planMode;
+		const capabilities: Capability[] = planMode
+			? ['ro', 'shell_ro', 'ro_plan', ...(writePlanVisible ? (['rw_plan'] as Capability[]) : [])]
+			: canWrite
+				? ['ro', 'rw', 'shell_ro', ...(canCommand ? (['shell_test'] as Capability[]) : [])]
+				: ['ro', 'shell_ro'];
+		const visible = new Set<string>();
+		if (planMode) {
+			visible.add('delegate');
+			visible.add('list_plans');
+			visible.add('read_plan');
+		}
+		if (canWrite) {
+			visible.add('write_file');
+			visible.add('edit_text');
+			visible.add('delegate');
+		}
+		if (canCommand) {
+			visible.add('run_shell_test');
+		}
+		if (writePlanVisible) {
+			visible.add('write_plan');
+		}
+		return buildOrchestratorBody({
 			roles: BUILTIN_ROLES,
-			canWrite: true,
-			planMode: false,
-			writePlanVisible: true,
-			...patch,
+			rules: planRules({ policy: { workMode: planMode ? 'plan' : canWrite ? 'sw' : 'ro', capabilities }, visible }),
 		});
+	};
 
 	test('Plan mode delegates read-only research and stops after write_plan', () => {
 		const text = body({ planMode: true, canWrite: false });
@@ -109,7 +143,7 @@ suite('Orchestrator prompt', () => {
 		assert.match(text, /Record the implementation plan yourself with write_plan/);
 		assert.match(text, /After write_plan, stop and summarize/);
 		assert.ok(!text.includes('Independent tasks, including independent write tasks'), 'the write protocol is replaced');
-		assert.ok(!text.includes('must have at least one review or command criterion'), 'write-task criteria do not apply');
+		assert.ok(!text.includes('needs at least one review or command criterion'), 'write-task criteria do not apply');
 	});
 
 	test('Plan mode without a plan writer delivers the plan in the summary', () => {
@@ -130,7 +164,7 @@ suite('Orchestrator prompt', () => {
 		assert.ok(!text.includes('This session is read-only'));
 		assert.ok(!text.includes('This is Plan mode'));
 		assert.match(text, /Delegate only ready nodes/);
-		assert.match(text, /must have at least one review or command criterion/);
+		assert.match(text, /needs at least one review or command criterion/);
 	});
 
 	test('the planner role is read-only and admissible in Plan mode', () => {

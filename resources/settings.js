@@ -492,7 +492,7 @@
 			const mode = document.createElement('span');
 			mode.className = 'subagent-src';
 			mode.textContent = [
-				agent.workMode || 'ro',
+				(agent.capabilities || []).join(', '),
 				agent.risk === 'write' ? 'write' : 'read',
 				agent.network ? 'network' : '',
 				agent.budget && (agent.budget.turns || agent.budget.tools)
