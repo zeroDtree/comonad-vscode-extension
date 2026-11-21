@@ -104,7 +104,8 @@ suite('Orchestrator prompt', () => {
 	interface BodyPatch {
 		planMode?: boolean;
 		canWrite?: boolean;
-		writePlanVisible?: boolean;
+		createPlan?: boolean;
+		editPlan?: boolean;
 		canCommand?: boolean;
 	}
 
@@ -112,9 +113,10 @@ suite('Orchestrator prompt', () => {
 		const planMode = patch.planMode ?? false;
 		const canWrite = patch.canWrite ?? true;
 		const canCommand = patch.canCommand ?? canWrite;
-		const writePlanVisible = patch.writePlanVisible ?? planMode;
+		const createPlan = patch.createPlan ?? planMode;
+		const editPlan = patch.editPlan ?? planMode;
 		const capabilities: Capability[] = planMode
-			? ['ro', 'shell_ro', 'ro_plan', ...(writePlanVisible ? (['rw_plan'] as Capability[]) : [])]
+			? ['ro', 'shell_ro', 'ro_plan', ...(createPlan || editPlan ? (['rw_plan'] as Capability[]) : [])]
 			: canWrite
 				? ['ro', 'rw', 'shell_ro', ...(canCommand ? (['shell_test'] as Capability[]) : [])]
 				: ['ro', 'shell_ro'];
@@ -132,8 +134,11 @@ suite('Orchestrator prompt', () => {
 		if (canCommand) {
 			visible.add('run_shell_test');
 		}
-		if (writePlanVisible) {
+		if (createPlan) {
 			visible.add('write_plan');
+		}
+		if (editPlan) {
+			visible.add('edit_plan');
 		}
 		return buildOrchestratorBody({
 			roles: BUILTIN_ROLES,
@@ -141,20 +146,36 @@ suite('Orchestrator prompt', () => {
 		});
 	};
 
-	test('Plan mode delegates read-only research and stops after write_plan', () => {
+	test('Plan mode delegates read-only research and stops after a plan write or edit', () => {
 		const text = body({ planMode: true, canWrite: false });
 		assert.match(text, /This is Plan mode: the session is read-only/);
 		assert.match(text, /delegate only read-only research nodes/);
-		assert.match(text, /Record the implementation plan yourself with write_plan/);
-		assert.match(text, /After write_plan, stop and summarize/);
+		assert.match(text, /Record the implementation plan yourself with write_plan, or revise a recorded plan with edit_plan/);
+		assert.match(text, /After write_plan or edit_plan, stop and summarize/);
 		assert.ok(!text.includes('Independent tasks, including independent write tasks'), 'the write protocol is replaced');
 		assert.ok(!text.includes('needs at least one review or command criterion'), 'write-task criteria do not apply');
 	});
 
+	test('Plan mode with only write_plan names only the creator', () => {
+		const text = body({ planMode: true, canWrite: false, editPlan: false });
+		assert.match(text, /Record the implementation plan yourself with write_plan/);
+		assert.match(text, /After write_plan, stop and summarize/);
+		assert.ok(!text.includes('edit_plan'), 'a hidden editor is never named');
+	});
+
+	test('Plan mode with only edit_plan revises an existing plan', () => {
+		const text = body({ planMode: true, canWrite: false, createPlan: false });
+		assert.match(text, /Revise the recorded plan yourself with edit_plan/);
+		assert.match(text, /edit_plan edits only an existing plan/);
+		assert.match(text, /After edit_plan, stop and summarize/);
+		assert.ok(!text.includes('write_plan'), 'a hidden creator is never named');
+	});
+
 	test('Plan mode without a plan writer delivers the plan in the summary', () => {
-		const text = body({ planMode: true, canWrite: false, writePlanVisible: false });
+		const text = body({ planMode: true, canWrite: false, createPlan: false, editPlan: false });
 		assert.match(text, /put the implementation plan in your final summary/);
-		assert.ok(!text.includes('Record the implementation plan yourself with write_plan'));
+		assert.ok(!text.includes('Record the implementation plan yourself'));
+		assert.ok(!text.includes('edit_plan'));
 	});
 
 	test('a read-only session keeps the full protocol and adds the read-only rule', () => {

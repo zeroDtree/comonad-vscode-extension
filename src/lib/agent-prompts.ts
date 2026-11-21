@@ -148,7 +148,11 @@ export function buildOrchestratorBody(input: OrchestratorBodyInput): string {
 		: '';
 	const deliverable =
 		rules.deliverable === 'plan-file'
-			? 'Record the implementation plan yourself with write_plan; the recorded plan is the deliverable. After write_plan, stop and summarize the research and the plan for the user. Do not start implementation or delegate anything after writing the plan: the user starts it from the plan card, which switches modes and sends a new turn.'
+			? rules.canCreatePlan && rules.canEditPlan
+				? 'Record the implementation plan yourself with write_plan, or revise a recorded plan with edit_plan; the recorded plan is the deliverable. After write_plan or edit_plan, stop and summarize the research and the plan for the user. Do not start implementation or delegate anything after writing the plan: the user starts it from the plan card, which switches modes and sends a new turn.'
+				: rules.canCreatePlan
+					? 'Record the implementation plan yourself with write_plan; the recorded plan is the deliverable. After write_plan, stop and summarize the research and the plan for the user. Do not start implementation or delegate anything after writing the plan: the user starts it from the plan card, which switches modes and sends a new turn.'
+					: 'Revise the recorded plan yourself with edit_plan; the plan file is the deliverable. edit_plan edits only an existing plan, so if this chat has no plan file, put the implementation plan in your summary instead. After edit_plan, stop and summarize the research and the plan for the user. Do not start implementation or delegate anything after editing the plan: the user starts it from the plan card, which switches modes and sends a new turn.'
 			: 'This session cannot write plan files: put the implementation plan in your final summary and stop. Do not start implementation or delegate anything; the user can switch to a write-capable mode to implement.';
 	const writeRule = rules.canWrite
 		? ''

@@ -207,9 +207,9 @@ Orchestration block and can be named by a task's `role`.
 The frontmatter **selects** tools. Writes also need a grant in the `subagents` setting (Settings →
 Subagents); `files` enables tracked file tools (`write_file`, `edit_text`, `edit_ranges`) and `test`
 enables `run_shell_test`. Read-only tools need no grant. Plan readers (`list_plans`, `read_plan`) use
-`ro_plan` and are available only when the parent's effective capabilities include it; plan writes (`write_plan`),
-`run_shell`/`start_shell` and the orchestrator tools are never granted to a child. A definition
-without a `tools` list is read-only. A custom role that reuses a built-in id does not inherit the
+`ro_plan` and are available only when the parent's effective capabilities include it; plan writes
+(`write_plan`, `edit_plan`), `run_shell`/`start_shell` and the orchestrator tools are never granted
+to a child. A definition without a `tools` list is read-only. A custom role that reuses a built-in id does not inherit the
 built-in default grant. See [Safety](/guide/safety#orchestrator-and-subagents) and
 [Orchestration](/guide/orchestration).
 

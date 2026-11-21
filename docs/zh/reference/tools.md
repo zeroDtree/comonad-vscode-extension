@@ -9,7 +9,7 @@
 | --- | --- |
 | 文件 | `list_dir`、`read_file`、`grep_files`、`write_file`、`edit_text` |
 | Shell | `run_shell_readonly`、`run_shell_test`、`run_shell`、`start_shell`、`shell_output`、`stop_shell` |
-| 计划 | `list_plans`、`read_plan`（`ro_plan`，仅 Plan 模式）、`write_plan`（`rw_plan`，仅 Plan 模式） |
+| 计划 | `list_plans`、`read_plan`（`ro_plan`，仅 Plan 模式）、`write_plan`、`edit_plan`（`rw_plan`，仅 Plan 模式） |
 | 待办 | `todo_write` |
 | 数学 | `calculate`、`describe_numbers`、`percentile`、`convert_units` |
 | Web | `fetch_url`、`web_search` |
@@ -35,7 +35,7 @@ ready 节点、拒绝原因、子会话和最近邮箱消息；`resume` 用新�
 能看到这些工具，子级白名单永远排除它们。
 
 只读会话只运行只读任务：`task_graph`、`delegate`、`resume` 拒绝新的或修订过的、有效能力含 `rw` 或验收
-需要 `command` 的任务；`accepted` 节点是历史，会保留。Plan 模式下用 `write_plan` 记录实现计划并停止本轮；
+需要 `command` 的任务；`accepted` 节点是历史，会保留。Plan 模式下用 `write_plan` 创建或整体替换实现计划，用 `edit_plan` 增量修订已记录的计划，然后停止本轮；
 **Build plan** 切到 Semi-Write 或 Full Access 后才恢复写委派。Build 会归档研究任务图，因此构建轮次从空
 任务图开始，以计划文件作为交接物。
 
@@ -54,7 +54,8 @@ ready 节点、拒绝原因、子会话和最近邮箱消息；`resume` 用新�
 一次委派创建一个隐藏子会话。单任务批次的工具卡带 **Open session**；任务板链接每个子会话。只读覆盖层
 显示子提示词、步骤和工具结果。子级继承父策略并只能收紧；审批应答固定 `never`，因此需要询问的调用会被
 拒绝。写委派要求父策略自动放行写（`universal_accept`、`blacklist_reject` 或 allow 规则），否则请在主线程
-完成写。父级的有效能力含 `ro_plan` 时，子级可读本聊天计划，但永远拿不到 `write_plan`。详见
+完成写。父级的有效能力含 `ro_plan` 时，子级可读本聊天计划，但永远拿不到 `write_plan` 与 `edit_plan`；
+计划只能在根会话中记录或修订。详见
 [安全](/zh/guide/safety#编排器与子-agent)。
 
 ## Shell 工具

@@ -26,9 +26,10 @@ runtime versions it, derives verifiers, and persists it on the root chat. A late
 declarative: send all nodes you still want. **Build plan** archives the graph and starts the
 implementation turn with no active graph, so a new `task_graph` begins at version 1.
 
-The **plan file** is the durable deliverable. `write_plan` writes it under
-`<planDirectory>/<root chat id>/`; the plan card previews it and **Build plan** hands its content to
-the next turn. The file survives the graph archive and is the source of truth the user builds from.
+The **plan file** is the durable deliverable. `write_plan` creates or replaces it under
+`<planDirectory>/<root chat id>/`; `edit_plan` revises an existing plan in place with exact-text
+replacements. The plan card previews it and **Build plan** hands its content to the next turn. The
+file survives the graph archive and is the source of truth the user builds from.
 
 A Plan session is read-only because its mode grants no `rw`; its capabilities are `ro`, `shell_ro`,
 `ro_plan` and `rw_plan`. The phase may hold read-only research nodes plus the plan file.
@@ -149,11 +150,12 @@ implementation plan in its report, and `explorer`/`reviewer` work the same way.
 acceptance needs a `command` criterion; `delegate` and `resume` repeat the refusal before spawning.
 An accepted node is history: a later mode switch keeps it, and only new or revised work is refused.
 
-Record the final implementation plan with `write_plan`. When the writer is offered, the recorded plan
-is the deliverable: the turn stops and summarizes it, and the plan card's **Build plan** switches to
-Semi-Write or Full Access and sends a new turn. When the sandbox or the Prompts switch hides
-`write_plan`, the same turn asks for the plan in its final summary instead. The current sandbox,
-Prompts switch and approval policy decide whether the writer is offered and whether the call runs.
+Create the implementation plan with `write_plan`, or revise an existing plan with `edit_plan`. When a
+plan writer is offered, the recorded plan is the deliverable: the turn stops and summarizes it, and
+the plan card's **Build plan** switches to Semi-Write or Full Access and sends a new turn. When the
+sandbox or the Prompts switch hides both writers, the same turn asks for the plan in its final
+summary instead. The current sandbox, Prompts switch and approval policy decide whether a writer is
+offered and whether the call runs.
 Select the Plan mode from the mode picker and ask for the plan; Plan mode sets the capability ceiling
 but not approval or network. Build archives the research graph, so the implementation turn starts
 with a fresh task graph and the file as its handoff.
@@ -205,7 +207,7 @@ taking the task over; it no longer says "resume to continue".
 reviewer and tester from the two criteria; `task_status` shows the board before the final answer.
 
 In Plan mode `task_graph` refuses this graph because of the `code` node. Delegate the `explore` node
-alone, record the implementation plan with `write_plan`, and leave the `code` node to the
-write-capable turn started by **Build plan**.
+alone, record or revise the implementation plan with `write_plan` or `edit_plan`, and leave the `code`
+node to the write-capable turn started by **Build plan**.
 
 Custom roles are Markdown files; see [Extending](/guide/extend#subagent-roles).

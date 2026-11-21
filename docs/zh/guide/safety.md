@@ -44,7 +44,7 @@ flowchart TB
 
 模式不设置审批、网络或沙箱。要开始一个计划，选择 Plan 模式（聊天模式 pill、`Comonad: Select Mode`，
 或 Settings → Policies → Work mode）并提出计划请求。计划文件还需要允许写入的沙箱，以及会放行 `rw_plan`
-的审批策略（或 allow 规则）；否则 `write_plan` 会被隐藏或拒绝，计划留在总结中。
+的审批策略（或 allow 规则）；否则 `write_plan` 与 `edit_plan` 会被隐藏或拒绝，计划留在总结中。
 
 ## 2. Network access policy
 
@@ -144,14 +144,14 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
 
 - 父级为 `ro` 时，子级写入被拒绝。
 - 父级处于 Plan 模式时只委派只读研究。`task_graph`、`delegate`、`resume` 拒绝新的或修订过的、有效能力含
-  `rw` 或验收需要 `command` 的任务；`accepted` 节点是历史，会保留。用 `write_plan` 记录实现计划，在写模式中
-  构建。Build 会归档研究任务图，因此实现轮次从空任务图开始，以计划文件作为交接物。
+  `rw` 或验收需要 `command` 的任务；`accepted` 节点是历史，会保留。用 `write_plan` 或 `edit_plan`
+  记录或修订实现计划，在写模式中构建。Build 会归档研究任务图，因此实现轮次从空任务图开始，以计划文件作为交接物。
 - 父级关闭网络时，需要网络的 researcher 任务在启动前失败。
 - 祖先 `deny` 胜过子级 `allow`（规则在审批策略之前执行）；祖先 `ask` 会被子级固定的 `never` 应答直接拒绝。
 - 写委派需要父策略自动放行写（`universal_accept`、`blacklist_reject` 或 allow 规则）。在
   `manual`/`whitelist_accept` 下，请在主线程完成写，让用户可以批准。
 - `files` 只授予可跟踪的文件工具；`test` 授予 `run_shell_test`。角色默认授权来自角色表。计划读工具使用
-  `ro_plan`；`write_plan` 永远不会授予子级。
+  `ro_plan`；`write_plan` 与 `edit_plan` 永远不会授予子级。
 - 子级的文件写入记在**父聊天**的 journal 下，出现在它的 review 和 Git Changes 中。
 
 ### 验收与并行

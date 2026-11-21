@@ -503,14 +503,15 @@ suite('Orchestrator task loop', () => {
 			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
 			const names = kernel.ctx.tools.visible(session.policy).map((tool) => tool.name);
 			assert.ok(names.includes('delegate'), 'read-only delegation stays available');
-			assert.ok(names.includes('write_plan'), 'the plan writer stays available');
+			assert.ok(names.includes('write_plan'), 'the plan creator stays available');
+			assert.ok(names.includes('edit_plan'), 'the plan editor stays available');
 
 			const blocks = await kernel.ctx.agent.promptBlocks(session);
 			const orchestrator = blocks.find((block) => block.id === COMONAD_BLOCK.orchestrator);
 			assert.ok(orchestrator, 'the Orchestration block is still present');
 			assert.match(orchestrator.text, /This is Plan mode: the session is read-only/);
 			assert.match(orchestrator.text, /delegate only read-only research nodes/);
-			assert.match(orchestrator.text, /After write_plan, stop and summarize/);
+			assert.match(orchestrator.text, /After write_plan or edit_plan, stop and summarize/);
 			assert.ok(!orchestrator.text.includes('Independent tasks, including independent write tasks'));
 
 			const tools = blocks.find((block) => block.id === COMONAD_BLOCK.tools);
@@ -544,12 +545,13 @@ suite('Orchestrator task loop', () => {
 			await kernel.ctx.plugin(planTools);
 			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
 			const names = kernel.ctx.tools.visible(session.policy).map((tool) => tool.name);
-			assert.ok(!names.includes('write_plan'), 'a write-refusing sandbox hides the plan writer');
+			assert.ok(!names.includes('write_plan'), 'a write-refusing sandbox hides the plan creator');
+			assert.ok(!names.includes('edit_plan'), 'a write-refusing sandbox hides the plan editor');
 			const blocks = await kernel.ctx.agent.promptBlocks(session);
 			const orchestrator = blocks.find((block) => block.id === COMONAD_BLOCK.orchestrator);
 			assert.ok(orchestrator);
 			assert.match(orchestrator.text, /put the implementation plan in your final summary/);
-			assert.ok(!orchestrator.text.includes('Record the implementation plan yourself with write_plan'));
+			assert.ok(!orchestrator.text.includes('Record the implementation plan yourself'));
 		} finally {
 			await kernel.dispose();
 		}
@@ -592,7 +594,7 @@ suite('Orchestrator task loop', () => {
 			const result = session.transcript.find((message) => message.role === 'tool' && message.toolCallId === 'plan-1');
 			assert.ok(result, 'the model saw the refusal');
 			assert.match(result.content ?? '', /Plan mode delegates only read-only research/);
-			assert.match(result.content ?? '', /write_plan/);
+			assert.match(result.content ?? '', /write_plan or edit_plan/);
 		} finally {
 			await kernel.dispose();
 		}
@@ -664,7 +666,8 @@ suite('Orchestrator task loop', () => {
 			assert.deepStrictEqual([...(child.policy.capabilities ?? [])].sort(), ['ro', 'ro_plan', 'shell_ro']);
 			assert.ok(plannerOffered.includes('list_plans'));
 			assert.ok(plannerOffered.includes('read_plan'));
-			assert.ok(!plannerOffered.includes('write_plan'), 'a child never writes plan files');
+			assert.ok(!plannerOffered.includes('write_plan'), 'a child never creates plan files');
+			assert.ok(!plannerOffered.includes('edit_plan'), 'a child never edits plan files');
 
 			const planPath = join(workspace, '.comonad', 'plans', parent.id, 'plan.md');
 			assert.ok(existsSync(planPath), 'the root recorded the returned plan');
@@ -673,6 +676,62 @@ suite('Orchestrator task loop', () => {
 			assert.ok(result);
 			assert.match(result.content ?? '', /^wrote plan plan\.md/);
 			assert.match(result.content ?? '', /Stop here and summarize it/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('Plan mode records a plan and then revises it in place', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'plan' } });
+		try {
+			const workspace = kernel.host.workspace();
+			kernel.ctx.llm.use({
+				name: 'plan-revision',
+				async chat(request) {
+					const last = rootStep(request);
+					if (!last) {
+						return reply('', [
+							{
+								id: 'write-plan',
+								name: 'write_plan',
+								arguments: JSON.stringify({ name: 'plan.md', content: '# Plan\n\n1. Old\n' }),
+							},
+						]);
+					}
+					if (last === 'write_plan') {
+						return reply('', [
+							{
+								id: 'edit-plan',
+								name: 'edit_plan',
+								arguments: JSON.stringify({
+									name: 'plan.md',
+									edits: [
+										{ old: '1. Old', new: '1. New' },
+										{ old: '1. New\n', new: '1. New\n2. Added\n' },
+									],
+								}),
+							},
+						]);
+					}
+					return reply('Plan updated.');
+				},
+			});
+			await kernel.ctx.plugin(orchestrateTools);
+			await kernel.ctx.plugin(planTools);
+			await kernel.ctx.agent.runTurn({ text: 'plan it', surface: 'test' });
+
+			const session = kernel.ctx.sessions.active()!;
+			const planPath = join(workspace, '.comonad', 'plans', session.id, 'plan.md');
+			assert.ok(existsSync(planPath));
+			assert.strictEqual(readFileSync(planPath, 'utf8'), '# Plan\n\n1. New\n2. Added\n');
+			const written = session.transcript.find((message) => message.role === 'tool' && message.toolCallId === 'write-plan');
+			assert.ok(written);
+			assert.match(written.content ?? '', /^wrote plan plan\.md/);
+			const revised = session.transcript.find((message) => message.role === 'tool' && message.toolCallId === 'edit-plan');
+			assert.ok(revised);
+			assert.match(revised.content ?? '', /^edited plan plan\.md/);
+			assert.match(revised.content ?? '', /2 edits applied/);
+			assert.match(revised.content ?? '', /Stop here and summarize it/);
 		} finally {
 			await kernel.dispose();
 		}

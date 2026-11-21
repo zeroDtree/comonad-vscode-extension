@@ -24,8 +24,9 @@ agent 循环外加四个工具。
 根会话上。修订是声明式的：每次重发仍需要的全部节点。**Build plan** 会归档任务图，并在没有活动任务图的
 情况下开始实现轮次，因此新的 `task_graph` 从版本 1 开始。
 
-**计划文件**是持久的交付物。`write_plan` 把它写到 `<planDirectory>/<根会话 id>/`；计划卡负责预览，
-**Build plan** 把内容交给下一轮。文件在任务图归档后仍然存在，是用户构建时的事实来源。
+**计划文件**是持久的交付物。`write_plan` 创建或整体替换它，写到 `<planDirectory>/<根会话 id>/`；
+`edit_plan` 对已有计划做精确文本增量修订。计划卡负责预览，**Build plan** 把内容交给下一轮。文件在
+任务图归档后仍然存在，是用户构建时的事实来源。
 
 Plan 会话是只读的，因为它的模式不授予 `rw`；其能力为 `ro`、`shell_ro`、`ro_plan`、`rw_plan`。
 该阶段可以包含只读研究节点，并以计划文件作为交付物。
@@ -127,9 +128,10 @@ Plan 模式是带自己产物的只读阶段。模式是能力上限：Plan 会�
 `task_graph` 拒绝新的或修订过的、有效能力含 `rw` 或验收需要 `command` 的节点；`delegate` 与 `resume`
 在 spawn 前重复同样的拒绝。`accepted` 节点是历史：之后切换模式会保留它，只拒绝新的或修订过的工作。
 
-用 `write_plan` 记录最终实现计划。写入器可用时，记录的计划就是交付物：本轮停止并总结，计划卡的
-**Build plan** 切到 Semi-Write 或 Full Access 并发送新一轮。沙箱或 Prompts 开关隐藏 `write_plan` 时，
-同一轮改为要求在最终总结中给出计划。当前沙箱、Prompts 开关和审批策略决定写入器是否提供、调用是否执行。
+用 `write_plan` 创建实现计划，或用 `edit_plan` 修订已有计划。任一写入器可用时，记录的计划就是交付物：
+本轮停止并总结，计划卡的 **Build plan** 切到 Semi-Write 或 Full Access 并发送新一轮。沙箱或 Prompts
+开关隐藏两个写入器时，同一轮改为要求在最终总结中给出计划。当前沙箱、Prompts 开关和审批策略决定写入器
+是否提供、调用是否执行。
 从模式选择器选择 Plan 模式并提出计划请求；Plan 模式只设置能力上限，不设置审批或网络。
 Build 会归档研究任务图，因此实现轮次从空任务图开始，以文件作为交接物。
 
@@ -177,7 +179,7 @@ resume 时，原因会说明这一点，并指向改定义（会重置 resumes�
 先 `task_graph`，再 `delegate(["explore"])`，再 `delegate(["code"])`。第二批会按两条标准派生 reviewer 与
 tester；最终回答前用 `task_status` 检查任务板。
 
-在 Plan 模式下，`task_graph` 会因为 `code` 节点拒绝这张图。只委派 `explore` 节点，用 `write_plan` 记录
-实现计划，把 `code` 节点留给 **Build plan** 启动的写模式轮次。
+在 Plan 模式下，`task_graph` 会因为 `code` 节点拒绝这张图。只委派 `explore` 节点，用 `write_plan` 或
+`edit_plan` 记录或修订实现计划，把 `code` 节点留给 **Build plan** 启动的写模式轮次。
 
 自定义角色是 Markdown 文件；见[扩展](/zh/guide/extend#子-agent-角色)。

@@ -9,7 +9,7 @@ Every tool declares a **capability**, whether it needs **network**, and whether 
 | --- | --- |
 | Files | `list_dir`, `read_file`, `grep_files`, `write_file`, `edit_text` |
 | Shell | `run_shell_readonly`, `run_shell_test`, `run_shell`, `start_shell`, `shell_output`, `stop_shell` |
-| Plans | `list_plans`, `read_plan` (`ro_plan`, Plan mode), `write_plan` (`rw_plan`, Plan mode) |
+| Plans | `list_plans`, `read_plan` (`ro_plan`, Plan mode), `write_plan`, `edit_plan` (`rw_plan`, Plan mode) |
 | Todos | `todo_write` |
 | Math | `calculate`, `describe_numbers`, `percentile`, `convert_units` |
 | Web | `fetch_url`, `web_search` |
@@ -43,10 +43,10 @@ turn sees these tools; a child's allowlist always excludes them.
 
 A read-only session runs read-only tasks only: `task_graph`, `delegate` and `resume` refuse a new or
 revised task whose effective capabilities include `rw` or whose acceptance needs a `command`
-criterion; accepted nodes are history and stay. In Plan mode the implementation plan is recorded with
-`write_plan`, and the turn stops; write delegation is available after **Build plan** switches to
-Semi-Write or Full Access. Build archives the research graph, so the build turn starts fresh with the
-plan file as its handoff.
+criterion; accepted nodes are history and stay. In Plan mode the implementation plan is created or
+replaced with `write_plan`, or revised in place with `edit_plan`, and the turn stops; write delegation
+is available after **Build plan** switches to Semi-Write or Full Access. Build archives the research
+graph, so the build turn starts fresh with the plan file as its handoff.
 
 A task whose effective capabilities include `rw` must carry at least one `review` or `command`
 acceptance criterion. After the worker batch finishes, the runtime derives a **pinned built-in**
@@ -71,7 +71,8 @@ and tool results live. The child inherits the parent policy and only narrows it;
 is always `never`, so a policy that asks denies the call. Write delegation therefore needs the parent
 to run writes without asking (`universal_accept`, `blacklist_reject`, or an allow rule); otherwise do
 the write in the main thread. A child may read this chat's plans when the parent's effective
-capabilities include `ro_plan`; `write_plan` is never granted, so record accepted plans in the root.
+capabilities include `ro_plan`; `write_plan` and `edit_plan` are never granted, so record or revise
+accepted plans in the root.
 
 ## Shell tools
 

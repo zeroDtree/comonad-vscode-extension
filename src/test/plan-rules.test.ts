@@ -35,9 +35,24 @@ suite('Plan rules', () => {
 		);
 	});
 
-	test('deliverables follow the visible tools', () => {
-		assert.strictEqual(rules({ workMode: 'plan' }, 'write_plan').deliverable, 'plan-file');
-		assert.strictEqual(rules({ workMode: 'plan' }, 'list_plans').deliverable, 'plan-summary');
+	test('deliverables follow the visible writers', () => {
+		const create = rules({ workMode: 'plan' }, 'write_plan');
+		assert.strictEqual(create.deliverable, 'plan-file');
+		assert.strictEqual(create.canCreatePlan, true);
+		assert.strictEqual(create.canEditPlan, false);
+		assert.strictEqual(create.planWriterVisible, true);
+		const edit = rules({ workMode: 'plan' }, 'edit_plan');
+		assert.strictEqual(edit.deliverable, 'plan-file');
+		assert.strictEqual(edit.canCreatePlan, false);
+		assert.strictEqual(edit.canEditPlan, true);
+		const both = rules({ workMode: 'plan' }, 'write_plan', 'edit_plan');
+		assert.strictEqual(both.deliverable, 'plan-file');
+		assert.strictEqual(both.planWriterVisible, true);
+		const neither = rules({ workMode: 'plan' }, 'list_plans');
+		assert.strictEqual(neither.deliverable, 'plan-summary');
+		assert.strictEqual(neither.canCreatePlan, false);
+		assert.strictEqual(neither.canEditPlan, false);
+		assert.strictEqual(neither.planWriterVisible, false);
 		assert.strictEqual(rules({ workMode: 'sw' }, 'write_file', 'delegate', 'run_shell_test').deliverable, 'implementation');
 		assert.strictEqual(rules({ workMode: 'ro' }).deliverable, 'research');
 	});
@@ -61,6 +76,15 @@ suite('Plan rules', () => {
 		);
 	});
 
+	test('Plan mode names only the visible plan writers', () => {
+		const both = rules({ workMode: 'plan' }, 'write_plan', 'edit_plan', 'list_plans');
+		assert.match(both.writeRefusal('code', coder) ?? '', /record or revise the implementation plan with write_plan or edit_plan/);
+		const edit = rules({ workMode: 'plan' }, 'edit_plan', 'list_plans');
+		const message = edit.writeRefusal('code', coder) ?? '';
+		assert.match(message, /revise the recorded plan with edit_plan/);
+		assert.ok(!message.includes('write_plan'), 'a hidden writer is never named');
+	});
+
 	test('a hidden writer asks for a summary, never a hidden tool', () => {
 		const plan = rules(
 			{ workMode: 'plan', capabilities: ['ro', 'ro_plan', 'shell_ro', 'rw_plan'] },
@@ -71,6 +95,7 @@ suite('Plan rules', () => {
 		const message = plan.writeRefusal('code', coder) ?? '';
 		assert.match(message, /put the implementation plan in your summary/);
 		assert.ok(!message.includes('write_plan'), 'a hidden writer is never named');
+		assert.ok(!message.includes('edit_plan'), 'a hidden writer is never named');
 	});
 
 	test('a granted rw with the write tools switched off says what to enable', () => {

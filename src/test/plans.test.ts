@@ -7,12 +7,14 @@ import {
 	MAX_BUILD_PLAN_CHARS,
 	asBuildMode,
 	buildPlanPrompt,
-	parsePlanWriteResult,
+	isPlanWriterTool,
+	parsePlanResult,
 	planFileName,
 	planFolder,
 	planPathForRecorded,
 	planTargetFor,
 } from '../lib/plan-files';
+import { applyLiteralEdits } from '../lib/text-edit';
 
 suite('Plan paths', () => {
 	test('the folder follows the setting and the root chat', () => {
@@ -21,7 +23,7 @@ suite('Plan paths', () => {
 		assert.strictEqual(planFolder('notes/plans', 'chat'), join('notes/plans', 'chat'));
 	});
 
-	test('a name is reduced to the basename write_plan writes', () => {
+	test('a name is reduced to the basename the plan tools write', () => {
 		assert.strictEqual(planFileName(' ./x/plan.md '), 'plan.md');
 		assert.strictEqual(planFileName('../plan.md'), 'plan.md');
 		assert.strictEqual(planFileName(''), null);
@@ -77,6 +79,9 @@ suite('Plan paths', () => {
 		assert.match(guest, /mode: planBuildMode\(choice\)/);
 		assert.match(guest, /function planBuildMode\(/);
 		assert.match(guest, /function planBuildModel\(/);
+		assert.match(guest, /Plan updated/);
+		assert.match(guest, /edit_plan: 'Edit plan'/);
+		assert.match(guest, /edit_plan: 'pencil'/);
 		assert.ok(!guest.includes('model: (state && typeof state.model'), 'a card stores only explicit picks');
 		assert.ok(!guest.includes("mode: state && (state.mode === 'sw'"), 'a card does not freeze the session mode');
 		assert.ok(!guest.includes('.dataset.buildMode'), 'the write-only card defaults are gone');
@@ -87,6 +92,7 @@ suite('Plan paths', () => {
 		assert.ok(!panel.includes("mode === undefined ? 'sw'"), 'a missing mode is refused, never narrowed');
 		assert.match(panel, /const buildMode = asBuildMode\(mode\)/);
 		assert.match(panel, /buildPlanPrompt\(target\.relative, content, buildMode\)/);
+		assert.match(panel, /isPlanWriterTool/);
 		assert.match(panel, /ctx\.llm\.keyReady\(modelPick\)/);
 		assert.match(panel, /ctx\.settings\.update\('model', modelPick\)/);
 		assert.match(panel, /applyPolicy\(\{ mode: buildMode \}\)/);
@@ -96,10 +102,10 @@ suite('Plan paths', () => {
 	});
 
 	test('a recorded plan path survives a changed plan directory', () => {
-		const recorded = parsePlanWriteResult(
+		const recorded = parsePlanResult(
 			'wrote plan plan.md\nplan path: notes/plans/chat-1/plan.md\n\nThe plan is recorded. Stop here and summarize it.',
 		);
-		assert.deepStrictEqual(recorded, { name: 'plan.md', relative: 'notes/plans/chat-1/plan.md' });
+		assert.deepStrictEqual(recorded, { name: 'plan.md', relative: 'notes/plans/chat-1/plan.md', edited: false });
 		const target = planPathForRecorded('/repo', 'chat-1', recorded!);
 		assert.ok(target);
 		assert.strictEqual(target.relative, 'notes/plans/chat-1/plan.md');
@@ -117,9 +123,29 @@ suite('Plan paths', () => {
 	});
 
 	test('an older write_plan result falls back to the current setting', () => {
-		assert.deepStrictEqual(parsePlanWriteResult('wrote plan plan.md\n\nThe plan is recorded.'), { name: 'plan.md' });
-		assert.strictEqual(parsePlanWriteResult('wrote something else'), undefined);
+		assert.deepStrictEqual(parsePlanResult('wrote plan plan.md\n\nThe plan is recorded.'), {
+			name: 'plan.md',
+			edited: false,
+		});
+		assert.strictEqual(parsePlanResult('wrote something else'), undefined);
 		assert.strictEqual(planPathForRecorded('/repo', 'chat-1', { name: 'plan.md' }), null);
+	});
+
+	test('an edit result records the plan and marks it as edited', () => {
+		assert.deepStrictEqual(parsePlanResult('edited plan plan.md\nplan path: notes/plans/chat-1/plan.md\n\n1 edit applied.'), {
+			name: 'plan.md',
+			relative: 'notes/plans/chat-1/plan.md',
+			edited: true,
+		});
+		assert.deepStrictEqual(parsePlanResult('edited plan plan.md\n\n2 edits applied.'), { name: 'plan.md', edited: true });
+		assert.strictEqual(parsePlanResult('edited something else'), undefined);
+	});
+
+	test('both plan writers feed the plan card', () => {
+		assert.strictEqual(isPlanWriterTool('write_plan'), true);
+		assert.strictEqual(isPlanWriterTool('edit_plan'), true);
+		assert.strictEqual(isPlanWriterTool('read_plan'), false);
+		assert.strictEqual(isPlanWriterTool(undefined), false);
 	});
 
 	test('the build prompt carries the plan and the shell that may write', () => {
@@ -142,5 +168,57 @@ suite('Plan paths', () => {
 		assert.match(fallback, /Semi-Write/, 'the fallback still names the shell rule');
 
 		assert.match(buildPlanPrompt('a.md', '   ', 'aw'), /Read the plan at `a\.md`/);
+	});
+});
+
+suite('Plan edits', () => {
+	test('applies a batch in order and leaves other text untouched', () => {
+		const text = '# Plan\n\n## Steps\n\n1. Old\n\n## Risks\n\nnone\n';
+		const result = applyLiteralEdits(
+			text,
+			[
+				{ old: '## Steps\n\n1. Old', new: '## Steps\n\n1. New' },
+				{ old: '1. New', new: '1. New\n2. Added' },
+			],
+			'plan "plan.md"',
+		);
+		assert.strictEqual(result, '# Plan\n\n## Steps\n\n1. New\n2. Added\n\n## Risks\n\nnone\n');
+	});
+
+	test('inserts the replacement literally, without $ pattern expansion', () => {
+		assert.strictEqual(
+			applyLiteralEdits('cost: X', [{ old: 'X', new: "$& $1 $' $$" }], 'plan "plan.md"'),
+			"cost: $& $1 $' $$",
+		);
+	});
+
+	test('refuses an empty, missing or ambiguous anchor', () => {
+		assert.throws(
+			() => applyLiteralEdits('abc', [{ old: '', new: 'x' }], 'plan "plan.md"'),
+			/plan "plan\.md", edit 1: old text is empty/,
+		);
+		assert.throws(
+			() =>
+				applyLiteralEdits(
+					'one two',
+					[
+						{ old: 'one', new: 'ONE' },
+						{ old: 'missing', new: 'x' },
+					],
+					'plan "plan.md"',
+				),
+			/edit 2: old text was not found; call read_plan and copy the current text exactly/,
+		);
+		assert.throws(
+			() => applyLiteralEdits('ab ab', [{ old: 'ab', new: 'x' }], 'plan "plan.md"'),
+			/old text occurs 2 times; include more surrounding text/,
+		);
+	});
+
+	test('counts overlapping occurrences as ambiguous', () => {
+		assert.throws(
+			() => applyLiteralEdits('aaa', [{ old: 'aa', new: 'x' }], 'plan "plan.md"'),
+			/old text occurs 2 times/,
+		);
 	});
 });

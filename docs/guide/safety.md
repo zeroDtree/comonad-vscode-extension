@@ -47,7 +47,7 @@ setting into the chat's policy.
 The mode does not set approval, network or sandbox. To start a plan, select the Plan mode (chat mode
 pill, `Comonad: Select Mode`, or Settings → Policies → Work mode) and ask for it. A plan file also
 needs a sandbox that permits writes and an approval policy that runs `rw_plan` (or an allow rule);
-otherwise `write_plan` is hidden or refused and the plan stays in the summary.
+otherwise `write_plan` and `edit_plan` are hidden or refused and the plan stays in the summary.
 
 ## 2. Network access policy
 
@@ -160,9 +160,9 @@ Consequences:
 - A parent in `ro` refuses every child write.
 - A parent in Plan mode delegates read-only research only. `task_graph`, `delegate` and `resume`
   refuse a new or revised task whose effective capabilities include `rw` or whose acceptance needs a
-  `command`; accepted nodes are history and stay. Record the implementation plan with `write_plan`
-  and build it in a write-capable mode. Build archives the research task graph, so the build turn
-  starts with a fresh one and the plan file as its handoff.
+  `command`; accepted nodes are history and stay. Record or revise the implementation plan with
+  `write_plan` or `edit_plan` and build it in a write-capable mode. Build archives the research task
+  graph, so the build turn starts with a fresh one and the plan file as its handoff.
 - A parent with network off keeps it off for the child; a researcher task that needs network fails
   before it starts.
 - An ancestor `deny` beats any child `allow`; an ancestor `ask` is denied by the child's fixed
@@ -171,7 +171,8 @@ Consequences:
   `blacklist_reject`, or an allow rule). Under `manual`/`whitelist_accept`, write the change in the
   main thread where the user can approve it.
 - `files` grants only tracked file tools; `test` grants `run_shell_test`. A role's default grant comes
-  from the role table. Plan reads use `ro_plan`; `write_plan` is never granted to a child.
+  from the role table. Plan reads use `ro_plan`; `write_plan` and `edit_plan` are never granted to a
+  child.
 - A child's file writes are journaled under the **parent chat**, so they appear in its review and
   Git Changes.
 

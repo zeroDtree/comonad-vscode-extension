@@ -195,8 +195,8 @@ maxMilliseconds: 0
 frontmatter **选择**工具；写能力还需要 `subagents` 设置中的授权（Settings → Subagents）：`files` 启用
 可跟踪文件工具（`write_file`、`edit_text`、`edit_ranges`），`test` 启用 `run_shell_test`。只读工具不需要
 授权。计划读工具（`list_plans`、`read_plan`）使用 `ro_plan`，仅在父级有效能力含它时可用；计划写入
-（`write_plan`）、`run_shell`/`start_shell` 和编排工具永远不会授予子级。没有 `tools` 列表的定义视为
-只读。复用内置 id 的自定义角色不继承内置默认授权。见[安全](/zh/guide/safety#编排器与子-agent)与
+（`write_plan`、`edit_plan`）、`run_shell`/`start_shell` 和编排工具永远不会授予子级。
+没有 `tools` 列表的定义视为只读。复用内置 id 的自定义角色不继承内置默认授权。见[安全](/zh/guide/safety#编排器与子-agent)与
 [编排](/zh/guide/orchestration)。
 
 自定义角色可以设置扁平的 `maxTurns`、`maxTools`、`maxTokens`、`maxMilliseconds` 字段。它们是四个

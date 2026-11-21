@@ -80,9 +80,10 @@ its shape.
 - **The task board** sits above the composer while the task graph has nodes: accepted/total, one chip
   per node with its role and status, the recent coordination-note count, and **Open** for every child
   session. It updates from the `orchestrator/changed` event while the turn runs.
-- A `write_plan` call renders a **Plan ready** card with **Preview** and **Build plan**. Build plan
-  switches the chat to Semi-Write or Full Access, archives the research task graph and sends a new
-  implementation turn; the build turn starts with a fresh graph and the plan file as its handoff.
+- A `write_plan` call renders a **Plan ready** card; an `edit_plan` call renders a **Plan updated**
+  card. Both carry **Preview** and **Build plan**. Build plan switches the chat to Semi-Write or Full
+  Access, archives the research task graph and sends a new implementation turn; the build turn starts
+  with a fresh graph and the plan file as its handoff.
 - **A delegation opens its conversation.** A `delegate` card carries **Open session** for a
   single-task batch; a multi-task batch links every child from the task board. The read-only overlay
   shows the child's prompt, steps and tool results and follows the run as it works; **← Back**

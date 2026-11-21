@@ -71,9 +71,9 @@ Network 在 **Policies**（或使用 **Comonad: Toggle Network** 命令）。修
 - **回合页脚** 显示 *Worked for 12s · 3 tools* 或 *Working…* / *Stopped*，以及复制、fork 和重新生成操作。
 - **任务板**在任务图有节点时位于输入框上方：accepted/总数、每个节点的角色与状态、最近协作消息数量，以及
   每个子会话的 **Open**。运行中由 `orchestrator/changed` 事件实时更新。
-- `write_plan` 调用渲染一张 **Plan ready** 卡片，带 **Preview** 与 **Build plan**。Build plan 把聊天切到
-  Semi-Write 或 Full Access，归档研究任务图并发送新的实现轮次；新轮次从空任务图开始，以计划文件作为
-  交接物。
+- `write_plan` 调用渲染一张 **Plan ready** 卡片；`edit_plan` 调用渲染 **Plan updated** 卡片。两者都带
+  **Preview** 与 **Build plan**。Build plan 把聊天切到 Semi-Write 或 Full Access，归档研究任务图并发送
+  新的实现轮次；新轮次从空任务图开始，以计划文件作为交接物。
 - **委派可以打开子会话。** 单任务批次的 `delegate` 工具卡带 **Open session**；多任务批次从任务板打开每个
   子会话。点开后是只读覆盖层，显示子 Agent 的提示词、步骤和工具结果，并随执行过程更新；**← Back** 回到原聊天，
   原聊天不受影响。

@@ -785,6 +785,7 @@
 		list_plans: 'List plans',
 		read_plan: 'Read plan',
 		write_plan: 'Write plan',
+		edit_plan: 'Edit plan',
 		calculate: 'Calculate',
 		describe_numbers: 'Describe numbers',
 		percentile: 'Percentile',
@@ -805,6 +806,7 @@
 		edit_text: 'pencil',
 		edit_ranges: 'pencil',
 		write_plan: 'pencil',
+		edit_plan: 'pencil',
 		grep_files: 'search',
 		find_files: 'search',
 		find_symbols: 'search',
@@ -1360,10 +1362,11 @@
 
 	/** A finished plan: its own card, not a tool row, so the build controls are always visible. */
 	function planCard(step, plan) {
+		const tool = step.name || 'write_plan';
 		const card = document.createElement('div');
 		card.className = 'tool-card plan-card';
 		card.dataset.status = step.status === 'error' ? 'error' : 'ok';
-		card.dataset.tool = 'write_plan';
+		card.dataset.tool = tool;
 		if (step.id) {
 			card.dataset.callId = step.id;
 		}
@@ -1376,14 +1379,14 @@
 		const glyph = document.createElement('span');
 		glyph.className = 'plan-glyph';
 		glyph.setAttribute('aria-hidden', 'true');
-		glyph.innerHTML = toolIcon('write_plan');
+		glyph.innerHTML = toolIcon(tool);
 		const heading = document.createElement('span');
 		heading.className = 'plan-heading';
 		const eyebrow = document.createElement('span');
 		eyebrow.className = 'plan-eyebrow';
 		const dot = document.createElement('span');
 		dot.className = 'plan-dot';
-		eyebrow.append(dot, document.createTextNode('Plan ready'));
+		eyebrow.append(dot, document.createTextNode(plan.edited ? 'Plan updated' : 'Plan ready'));
 		const name = document.createElement('span');
 		name.className = 'plan-name';
 		name.textContent = plan.name;
@@ -1428,7 +1431,7 @@
 			record.textContent = 'Tool record';
 			const meta = document.createElement('span');
 			meta.className = 'plan-trace-meta';
-			meta.textContent = 'write_plan · ' + (card.dataset.status === 'error' ? 'error' : 'ok');
+			meta.textContent = tool + ' · ' + (card.dataset.status === 'error' ? 'error' : 'ok');
 			summary.append(record, meta);
 			const out = document.createElement('pre');
 			out.className = 'plan-trace-out';
@@ -1742,7 +1745,8 @@
 	 * stays visible while the card is folded; the copy menu is a sibling so it can never toggle it.
 	 */
 	function toolCard(step) {
-		const plan = step.name === 'write_plan' && step.plan && typeof step.plan.name === 'string' ? step.plan : null;
+		// The host attaches `plan` only for a plan writer; the payload is the source of truth.
+		const plan = step.plan && typeof step.plan.name === 'string' ? step.plan : null;
 		if (plan) {
 			return planCard(step, plan);
 		}

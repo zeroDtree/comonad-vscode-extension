@@ -29,8 +29,8 @@ export function planFolder(planDirectory: string | undefined, rootSessionId: str
 }
 
 /**
- * `write_plan`'s name rule: the basename it actually writes. A name that is no file — empty, `.`
- * or `..` — is null, so both the writer and a Build click refuse it before touching the disk.
+ * The plan tools' name rule: the basename they actually read or write. A name that is no file —
+ * empty, `.` or `..` — is null, so a plan tool and a Build click refuse it before touching the disk.
  */
 export function planFileName(name: unknown): string | null {
 	const clean = typeof name === 'string' ? basename(name.trim()) : '';
@@ -45,7 +45,7 @@ export interface PlanTarget {
 	path: string;
 }
 
-/** The plan a chat's `write_plan` name resolves to, as the tool would resolve it. */
+/** The plan a chat's plan name resolves to, as the plan tools would resolve it. */
 export function planTargetFor(
 	workspace: string,
 	planDirectory: string | undefined,
@@ -63,23 +63,33 @@ export function planTargetFor(
 	return { name: file, relative: (inside ? rel : path).split(sep).join('/'), path };
 }
 
-/** The name and recorded path a successful `write_plan` result carries. */
-export interface RecordedPlan {
-	name: string;
-	/** The path line `write_plan` recorded; absent for transcripts from older builds. */
-	relative?: string;
+/** Tools whose successful result records a plan file; both feed the plan card. */
+export const PLAN_WRITER_TOOLS = ['write_plan', 'edit_plan'] as const;
+
+export function isPlanWriterTool(name: string | undefined): boolean {
+	return name !== undefined && (PLAN_WRITER_TOOLS as readonly string[]).includes(name);
 }
 
-/** Parses the first two lines of a successful `write_plan` result. */
-export function parsePlanWriteResult(output: string): RecordedPlan | undefined {
+/** The name and recorded path a successful plan write or edit result carries. */
+export interface RecordedPlan {
+	name: string;
+	/** The path line the tool recorded; absent for transcripts from older builds. */
+	relative?: string;
+	/** The result updated an existing plan rather than writing it from scratch. */
+	edited?: boolean;
+}
+
+/** Parses the first two lines of a successful plan write or edit result. */
+export function parsePlanResult(output: string): RecordedPlan | undefined {
 	const [first, second] = output.split('\n');
-	const wrote = first?.match(/^wrote plan (.+)$/);
-	const name = planFileName(wrote?.[1]);
+	const match = first?.match(/^(wrote|edited) plan (.+)$/);
+	const name = planFileName(match?.[2]);
 	if (!name) {
 		return undefined;
 	}
+	const edited = match?.[1] === 'edited';
 	const relative = second?.match(/^plan path: (.+)$/)?.[1]?.trim();
-	return relative ? { name, relative } : { name };
+	return relative ? { name, relative, edited } : { name, edited };
 }
 
 /**

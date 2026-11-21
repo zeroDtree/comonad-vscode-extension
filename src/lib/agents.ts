@@ -46,7 +46,7 @@ export interface AgentRole {
 export const ORCHESTRATOR_TOOLS = ['task_graph', 'delegate', 'task_status', 'resume'] as const;
 
 /**
- * Tools a child must never be offered, in addition to the capability cap. `write_plan` and
+ * Tools a child must never be offered, in addition to the capability cap. Both plan writers and
  * `shell_rw` are already outside `SUBAGENT_CAPABILITIES`; the list is a second line of defence for
  * custom roles and a future capability change.
  */
@@ -54,6 +54,7 @@ export const SUBAGENT_EXCLUDED_TOOLS: readonly string[] = [
 	...ORCHESTRATOR_TOOLS,
 	'agent',
 	'write_plan',
+	'edit_plan',
 	'run_shell',
 	'start_shell',
 	'stop_shell',

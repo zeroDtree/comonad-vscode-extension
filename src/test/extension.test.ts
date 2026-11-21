@@ -9628,7 +9628,7 @@ suite('Per-file checkpoints', () => {
 });
 
 suite('Plan tools', () => {
-	test('the plan readers are ro_plan and the writer stays rw_plan', async () => {
+	test('the plan readers are ro_plan and both writers stay rw_plan', async () => {
 		const kernel = await createTestKernel();
 		try {
 			await kernel.ctx.plugin(planTools);
@@ -9636,6 +9636,8 @@ suite('Plan tools', () => {
 			assert.strictEqual(kernel.ctx.tools.get('read_plan')?.capability, 'ro_plan');
 			assert.strictEqual(kernel.ctx.tools.get('write_plan')?.capability, 'rw_plan');
 			assert.strictEqual(kernel.ctx.tools.get('write_plan')?.trackedWrite, true);
+			assert.strictEqual(kernel.ctx.tools.get('edit_plan')?.capability, 'rw_plan');
+			assert.strictEqual(kernel.ctx.tools.get('edit_plan')?.trackedWrite, true);
 		} finally {
 			await kernel.dispose();
 		}
@@ -9646,7 +9648,7 @@ suite('Plan tools', () => {
 		try {
 			await kernel.ctx.plugin(planTools);
 			const names = (mode: WorkMode) => kernel.ctx.tools.visible(policy({ workMode: mode })).map((tool) => tool.name);
-			const planToolNames = ['list_plans', 'read_plan', 'write_plan'];
+			const planToolNames = ['list_plans', 'read_plan', 'write_plan', 'edit_plan'];
 			for (const name of planToolNames) {
 				assert.ok(names('plan').includes(name), `${name} is offered in plan mode`);
 			}
@@ -9660,7 +9662,7 @@ suite('Plan tools', () => {
 		}
 	});
 
-	test('plan readers survive a write-refusing sandbox while the writer is refused', async () => {
+	test('plan readers survive a write-refusing sandbox while both writers are refused', async () => {
 		const kernel = await createTestKernel();
 		try {
 			await kernel.ctx.plugin(planTools);
@@ -9669,23 +9671,29 @@ suite('Plan tools', () => {
 				assert.ok(names.includes('list_plans'), `list_plans survives ${sandboxMode}`);
 				assert.ok(names.includes('read_plan'), `read_plan survives ${sandboxMode}`);
 				assert.ok(!names.includes('write_plan'), `write_plan is refused under ${sandboxMode}`);
+				assert.ok(!names.includes('edit_plan'), `edit_plan is refused under ${sandboxMode}`);
 			}
 			const lookupPlan = (name: string) => kernel.ctx.tools.get(name);
-			const rejected = gateCalls(
-				[call('write_plan', { name: 'plan.md', content: 'x' })],
-				lookupPlan,
-				policy({ workMode: 'plan', sandboxMode: 'read-only' }),
-				{ allow: [], ask: [], deny: [] },
-				gateEnv(),
-			);
-			assert.strictEqual(rejected.decision, 'reject');
-			assert.match(rejected.reason, /refuses every write/);
+			for (const write of [
+				call('write_plan', { name: 'plan.md', content: 'x' }),
+				call('edit_plan', { name: 'plan.md', edits: [{ old: 'x', new: 'y' }] }),
+			]) {
+				const rejected = gateCalls(
+					[write],
+					lookupPlan,
+					policy({ workMode: 'plan', sandboxMode: 'read-only' }),
+					{ allow: [], ask: [], deny: [] },
+					gateEnv(),
+				);
+				assert.strictEqual(rejected.decision, 'reject');
+				assert.match(rejected.reason, /refuses every write/);
+			}
 		} finally {
 			await kernel.dispose();
 		}
 	});
 
-	test('the blacklist runs plan reads and rejects the plan write', async () => {
+	test('the blacklist runs plan reads and rejects the plan writes', async () => {
 		const kernel = await createTestKernel();
 		try {
 			await kernel.ctx.plugin(planTools);
@@ -9693,12 +9701,15 @@ suite('Plan tools', () => {
 			const empty = { allow: [], ask: [], deny: [] };
 			const decide = (name: string, args: Record<string, unknown>, approval: 'blacklist_reject' | 'whitelist_accept') =>
 				gateCalls([call(name, args)], lookupPlan, policy({ workMode: 'plan', approval }), empty, gateEnv()).decision;
+			const edit = { name: 'plan.md', edits: [{ old: 'x', new: 'y' }] };
 			assert.strictEqual(decide('list_plans', {}, 'blacklist_reject'), 'allow');
 			assert.strictEqual(decide('read_plan', { name: 'plan.md' }, 'blacklist_reject'), 'allow');
 			assert.strictEqual(decide('write_plan', { name: 'plan.md', content: 'x' }, 'blacklist_reject'), 'reject');
+			assert.strictEqual(decide('edit_plan', edit, 'blacklist_reject'), 'reject');
 			assert.strictEqual(decide('list_plans', {}, 'whitelist_accept'), 'allow');
 			assert.strictEqual(decide('read_plan', { name: 'plan.md' }, 'whitelist_accept'), 'allow');
 			assert.strictEqual(decide('write_plan', { name: 'plan.md', content: 'x' }, 'whitelist_accept'), 'allow');
+			assert.strictEqual(decide('edit_plan', edit, 'whitelist_accept'), 'allow');
 		} finally {
 			await kernel.dispose();
 		}
@@ -9730,6 +9741,123 @@ suite('Plan tools', () => {
 			assert.ok(target);
 			assert.strictEqual(target.name, 'draft.md');
 			assert.strictEqual(readFileSync(join(kernel.host.workspace(), target.path), 'utf8'), '# Draft');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('edit_plan patches a plan in one atomic batch through ctx.edit', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'plan', planDirectory: 'notes/plans' } });
+		try {
+			await kernel.ctx.plugin(planTools);
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plan-edit');
+			const base = directToolContext(kernel, ['1']);
+			const writes: string[] = [];
+			const context = {
+				...base,
+				sessionId: session.id,
+				rootSessionId: session.id,
+				policy: { ...kernel.ctx.agent.policyFor(), workMode: 'plan' as const },
+				authorization: issueAuthorization({ sessionId: session.id, batch: base.batch, callIds: ['1'] }),
+				edit: async (path: string, write: () => Promise<void>) => {
+					writes.push(path);
+					await write();
+				},
+			};
+			const target = planTargetFor(kernel.host.workspace(), 'notes/plans', session.id, 'plan.md');
+			assert.ok(target);
+			const file = join(kernel.host.workspace(), target.path);
+			mkdirSync(dirname(file), { recursive: true });
+			writeFileSync(file, '# Plan\n\n## Steps\n\n1. Old\n\n## Risks\n\nnone\n');
+			const outcome = await kernel.ctx.tools.invoke(
+				call('edit_plan', {
+					name: '../plan.md',
+					edits: [
+						{ old: '1. Old', new: '1. New' },
+						{ old: '1. New', new: '1. New\n2. Added' },
+						{ old: 'none', new: "$& $1 $' $$" },
+					],
+				}),
+				context,
+			);
+			assert.strictEqual(outcome.isError, false, outcome.content);
+			assert.match(outcome.content, /^edited plan plan\.md/);
+			assert.match(outcome.content, /plan path: notes\/plans\/plan-edit\/plan\.md/);
+			assert.match(outcome.content, /3 edits applied/);
+			assert.match(outcome.content, /Stop here and summarize it/);
+			assert.deepStrictEqual(writes, [file], 'the read-check-write runs inside ctx.edit');
+			assert.strictEqual(readFileSync(file, 'utf8'), "# Plan\n\n## Steps\n\n1. New\n2. Added\n\n## Risks\n\n$& $1 $' $$\n");
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('edit_plan fails atomically and refuses a missing plan', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'plan', planDirectory: 'notes/plans' } });
+		try {
+			await kernel.ctx.plugin(planTools);
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plan-edit-fail');
+			const base = directToolContext(kernel, ['1']);
+			const context = {
+				...base,
+				sessionId: session.id,
+				rootSessionId: session.id,
+				policy: { ...kernel.ctx.agent.policyFor(), workMode: 'plan' as const },
+				authorization: issueAuthorization({ sessionId: session.id, batch: base.batch, callIds: ['1'] }),
+			};
+			const target = planTargetFor(kernel.host.workspace(), 'notes/plans', session.id, 'plan.md');
+			assert.ok(target);
+			const file = join(kernel.host.workspace(), target.path);
+			mkdirSync(dirname(file), { recursive: true });
+			const original = '# Plan\n\n## Steps\n\n1. Old\n\n## Risks\n\nnone\n';
+			writeFileSync(file, original);
+			const edit = (edits: unknown[]) =>
+				kernel.ctx.tools.invoke(call('edit_plan', { name: 'plan.md', edits }), context);
+
+			const missing = await edit([
+				{ old: '1. Old', new: '1. New' },
+				{ old: 'not there', new: 'x' },
+			]);
+			assert.strictEqual(missing.isError, true);
+			assert.match(missing.content, /edit 2: old text was not found/);
+			assert.strictEqual(readFileSync(file, 'utf8'), original, 'a failed later edit writes nothing');
+
+			writeFileSync(file, 'same same\n');
+			const ambiguous = await edit([{ old: 'same', new: 'x' }]);
+			assert.strictEqual(ambiguous.isError, true);
+			assert.match(ambiguous.content, /old text occurs 2 times/);
+			assert.strictEqual(readFileSync(file, 'utf8'), 'same same\n');
+
+			const empty = await edit([{ old: '', new: 'x' }]);
+			assert.strictEqual(empty.isError, true);
+			assert.match(empty.content, /old text is empty/);
+			assert.strictEqual(readFileSync(file, 'utf8'), 'same same\n');
+
+			const missingPlan = await kernel.ctx.tools.invoke(
+				call('edit_plan', { name: 'missing.md', edits: [{ old: 'x', new: 'y' }] }),
+				context,
+			);
+			assert.strictEqual(missingPlan.isError, true);
+			assert.match(missingPlan.content, /create it with write_plan first/);
+			const missingTarget = planTargetFor(kernel.host.workspace(), 'notes/plans', session.id, 'missing.md');
+			assert.ok(missingTarget);
+			assert.ok(!existsSync(join(kernel.host.workspace(), missingTarget.path)), 'a failed edit creates nothing');
+
+			const nameless = await kernel.ctx.tools.invoke(call('edit_plan', { name: '  ', edits: [] }), context);
+			assert.strictEqual(nameless.isError, true);
+			assert.match(nameless.content, /edit_plan needs a plan name/);
+			const dot = await kernel.ctx.tools.invoke(
+				call('edit_plan', { name: '..', edits: [{ old: 'x', new: 'y' }] }),
+				context,
+			);
+			assert.strictEqual(dot.isError, true);
+			assert.match(dot.content, /invalid plan name/);
+			const malformed = await kernel.ctx.tools.invoke(
+				call('edit_plan', { name: 'plan.md', edits: [{ old: 1, new: 'y' }] }),
+				context,
+			);
+			assert.strictEqual(malformed.isError, true);
+			assert.match(malformed.content, /edit 1 must be an object with string old and new/);
 		} finally {
 			await kernel.dispose();
 		}

@@ -23,7 +23,8 @@ import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/jou
 import {
 	asBuildMode,
 	buildPlanPrompt,
-	parsePlanWriteResult,
+	isPlanWriterTool,
+	parsePlanResult,
 	planFileName,
 	planPathForRecorded,
 	planTargetFor,
@@ -383,6 +384,8 @@ export function chatPanel(ctx: Context): void {
 		name: string;
 		relative: string;
 		sessionId: string;
+		/** The result revised an existing plan, so the card reads "Plan updated". */
+		edited: boolean;
 	}
 
 	/** Plans whose preview already opened this turn: one per file, however often it was rewritten. */
@@ -404,17 +407,19 @@ export function chatPanel(ctx: Context): void {
 		return recorded ?? planTargetFor(workspace, session.policy.planDirectory, rootId, file);
 	};
 
-	/** The plan a successful write_plan recorded; undefined for a failed, stopped or unnamed call. */
+	/** The plan a successful plan write or edit recorded; undefined for a failed, stopped or unnamed call. */
 	const planInfoOf = (session: Session | undefined, output: string | undefined): PlanInfo | undefined => {
 		if (!session || !output) {
 			return undefined;
 		}
-		const recorded = parsePlanWriteResult(output);
+		const recorded = parsePlanResult(output);
 		if (!recorded) {
 			return undefined;
 		}
 		const target = planTargetOf(session, recorded.name, recorded.relative);
-		return target ? { name: target.name, relative: target.relative, sessionId: session.id } : undefined;
+		return target
+			? { name: target.name, relative: target.relative, sessionId: session.id, edited: recorded.edited === true }
+			: undefined;
 	};
 
 	// The transcript is sent as turns: one prompt plus the steps the agent took for it. The webview
@@ -438,7 +443,7 @@ export function chatPanel(ctx: Context): void {
 				? session.subagents[step.id]
 				: undefined,
 		// A recorded plan carries the file it wrote, so a replayed card keeps its Build/Preview buttons.
-		plan: step.kind === 'tool' && step.name === 'write_plan' ? planInfoOf(session, step.result) : undefined,
+		plan: step.kind === 'tool' && isPlanWriterTool(step.name) ? planInfoOf(session, step.result) : undefined,
 		status: step.status,
 		ms: step.ms,
 		at: step.at,
@@ -772,7 +777,7 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'reasoning', text });
 		}
 	});
-	// A new turn may rewrite the same plan: its preview is opened again, once per file.
+	// A new turn may rewrite or revise the same plan: its preview is opened again, once per file.
 	ctx.on('agent/turn-start', (ref) => {
 		if (ref.surface === SURFACE) {
 			previewedPlans.clear();
@@ -797,9 +802,9 @@ export function chatPanel(ctx: Context): void {
 		}
 		// Route by the turn's own session: a switch mid-turn must not target the chat now on screen.
 		const session = ctx.sessions.get(ref.sessionId);
-		const plan = call.name === 'write_plan' ? planInfoOf(session, output) : undefined;
+		const plan = isPlanWriterTool(call.name) ? planInfoOf(session, output) : undefined;
 		post({ type: 'tool-result', id: call.id, output: clip(output, 30_000), images: publicImages(images), plan });
-		// The plan is written; show it beside the chat. A preview already open on it refreshes itself,
+		// The plan is written or edited; show it beside the chat. A preview already open on it refreshes itself,
 		// so one open per file per turn is enough.
 		if (plan && session) {
 			const key = `${plan.sessionId}:${plan.relative || plan.name}`;

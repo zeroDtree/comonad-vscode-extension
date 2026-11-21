@@ -484,9 +484,16 @@
   the whole conversation. The transcript a panel is given is now read after the wait, and one that got
   shorter behind its back (the same fork, or a prompt edit) is handed over again.
 
+- **Plans can be revised in place.** `edit_plan` takes a plan name and an ordered `edits` array of
+  exact `{old, new}` pairs. Every `old` must occur exactly once in the text at the point it is
+  applied (later edits see earlier ones); a missing or ambiguous anchor throws, and because the read,
+  check and single write all happen inside `ToolContext.edit`, the file is left unchanged. A successful result is `edited plan <name>` plus the recorded path and the same stop
+  sentence as `write_plan`; the plan card reads **Plan updated**. Plan mode exposes it under
+  `rw_plan`; subagents never receive either writer.
+
 - **Checkpoints are per file, not per turn.** Every write the agent makes (`write_file`, `edit_text`,
-  `edit_ranges`, `write_plan`) is journaled with the file's content before and after it, through
-  `ToolContext.edit`. A turn that writes nothing takes no snapshot. Nothing is ever pruned, so a
+  `edit_ranges`, `write_plan`, `edit_plan`) is journaled with the file's content before and after it,
+  through `ToolContext.edit`. A turn that writes nothing takes no snapshot. Nothing is ever pruned, so a
   session keeps its full history.
   - **Review** lists only the journaled files, from one `git diff` against a temporary index that holds
     just those paths (no `ls-files`, no process per file). A file the user changed outside the agent is

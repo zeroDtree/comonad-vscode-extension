@@ -3069,11 +3069,21 @@ export class Agent extends Service {
 		}
 		if (rules.planMode && visible.length > 0 && !session.parentId && !session.subagent) {
 			const readers = rules.canReadPlans ? ' list_plans and read_plan show the plans recorded for this chat.' : '';
+			const revise = rules.canReadPlans ? 'read_plan and then revise it with edit_plan' : 'revise it with edit_plan';
+			const readAndRevise = rules.canReadPlans
+				? 'Read the plan with read_plan and revise it with edit_plan'
+				: 'Revise it with edit_plan';
 			toolBody.push(
-				rules.deliverable === 'plan-file'
-					? 'Plan mode: the recorded plan is the deliverable. Record the implementation plan with write_plan, then stop and summarize; the user starts implementation from the plan card. ' +
+				rules.deliverable !== 'plan-file'
+					? 'Plan mode: the implementation plan is the deliverable, but this session cannot write plan files. Put the plan in your final summary and stop; the user can switch to a write-capable mode to implement.'
+					: rules.canCreatePlan && rules.canEditPlan
+						? `Plan mode: the recorded plan is the deliverable. Create it with write_plan, or ${revise} when the user asks for changes, then stop and summarize; the user starts implementation from the plan card. ` +
 							`Do not implement or delegate write work in this turn.${readers}`
-					: 'Plan mode: the implementation plan is the deliverable, but this session cannot write plan files. Put the plan in your final summary and stop; the user can switch to a write-capable mode to implement.',
+						: rules.canCreatePlan
+							? 'Plan mode: the recorded plan is the deliverable. Record the implementation plan with write_plan, then stop and summarize; the user starts implementation from the plan card. ' +
+								`Do not implement or delegate write work in this turn.${readers}`
+							: `Plan mode: the recorded plan is the deliverable. ${readAndRevise} when the user asks for changes, then stop and summarize; the user starts implementation from the plan card. ` +
+								`edit_plan edits only an existing plan: if this chat has no plan file, put the implementation plan in your summary instead. Do not implement or delegate write work in this turn.${readers}`,
 			);
 		}
 		if (!session.policy.workingDirectory) {

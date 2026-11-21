@@ -26,8 +26,12 @@ export interface PlanRules {
 	planMode: boolean;
 	/** The effective capability set; never wider than the mode. */
 	capabilities: ReadonlySet<Capability>;
-	/** `write_plan` is offered, so a plan file can be the deliverable. */
-	writePlanVisible: boolean;
+	/** `write_plan` is offered, so a new plan file can be created. */
+	canCreatePlan: boolean;
+	/** `edit_plan` is offered, so an existing plan file can be revised. */
+	canEditPlan: boolean;
+	/** Either plan writer is offered, so a plan file can be the deliverable. */
+	planWriterVisible: boolean;
 	/** Both plan readers are offered. */
 	canReadPlans: boolean;
 	/** A tracked write tool is offered and the session grants `rw`. */
@@ -50,13 +54,15 @@ export function planRules(input: PlanRulesInput): PlanRules {
 	const { visible } = input;
 	const capabilities = capabilitiesOf(input.policy);
 	const planMode = input.policy.workMode === 'plan';
-	const writePlanVisible = visible.has('write_plan');
+	const canCreatePlan = visible.has('write_plan');
+	const canEditPlan = visible.has('edit_plan');
+	const planWriterVisible = canCreatePlan || canEditPlan;
 	const canReadPlans = visible.has('list_plans') && visible.has('read_plan');
 	const canWrite = capabilities.has('rw') && TRACKED_WRITE_TOOLS.some((name) => visible.has(name));
 	const canDelegateWrites = canWrite && visible.has('delegate');
 	const canCommandCriteria = capabilities.has('shell_test') && visible.has('run_shell_test');
 	const deliverable: PlanDeliverable = planMode
-		? writePlanVisible
+		? planWriterVisible
 			? 'plan-file'
 			: 'plan-summary'
 		: canWrite
@@ -71,9 +77,16 @@ export function planRules(input: PlanRulesInput): PlanRules {
 			return undefined;
 		}
 		if (planMode) {
-			return writePlanVisible
-				? `${id} needs rw, but Plan mode delegates only read-only research; record the implementation plan with write_plan and let the user build it`
-				: `${id} needs rw, but Plan mode delegates only read-only research; put the implementation plan in your summary and let the user switch to a write mode`;
+			if (canCreatePlan && canEditPlan) {
+				return `${id} needs rw, but Plan mode delegates only read-only research; record or revise the implementation plan with write_plan or edit_plan and let the user build it`;
+			}
+			if (canCreatePlan) {
+				return `${id} needs rw, but Plan mode delegates only read-only research; record the implementation plan with write_plan and let the user build it`;
+			}
+			if (canEditPlan) {
+				return `${id} needs rw, but Plan mode delegates only read-only research; revise the recorded plan with edit_plan and let the user build it, or put the implementation plan in your summary if no plan file exists yet`;
+			}
+			return `${id} needs rw, but Plan mode delegates only read-only research; put the implementation plan in your summary and let the user switch to a write mode`;
 		}
 		if (!capabilities.has('rw')) {
 			return `${id} writes, but this session has no rw capability; switch to Semi-Write/Full Access to run it`;
@@ -103,7 +116,9 @@ export function planRules(input: PlanRulesInput): PlanRules {
 	return {
 		planMode,
 		capabilities,
-		writePlanVisible,
+		canCreatePlan,
+		canEditPlan,
+		planWriterVisible,
 		canReadPlans,
 		canWrite,
 		canDelegateWrites,

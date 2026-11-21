@@ -13,13 +13,17 @@ Highlights are below; the full implementation notes are linked at the end. The u
 ### Highlights
 
 - **One plan vocabulary.** The Orchestrator's execution DAG is `task_graph`; the Plan work mode is
-  `plan`; `write_plan` / `read_plan` / `list_plans` are the plan-file tools. The mode is now a hard
-  capability ceiling, Build archives the research task graph and starts a fresh one, and role
-  `workMode` labels are gone. The tool rename has no alias; a stored `workMode: "pl"` still reads as
+  `plan`; `write_plan` / `edit_plan` / `read_plan` / `list_plans` are the plan-file tools. The mode
+  is now a hard capability ceiling, Build archives the research task graph and starts a fresh one,
+  and role `workMode` labels are gone. The tool rename has no alias; a stored `workMode: "pl"` still reads as
   `plan` only so an old Plan chat cannot silently become write-capable. The `plan` policy preset and
   the `/plan` command are removed; the Plan work mode and the plan-file tools are unchanged — select
   Plan mode and ask for the plan. The five policy layers stay independently configurable, and a
   custom `.comonad/commands/plan.md` now runs as an ordinary custom command.
+- **Plans are editable in place.** `edit_plan` patches an existing plan file with a batch of
+  exact-text replacements. Each anchor must occur exactly once; edits apply in order and
+  all-or-nothing, so a missing or ambiguous anchor leaves the file unchanged. The plan card shows
+  **Plan updated** with the same **Preview** and **Build plan** actions.
 - **The root turn is an Orchestrator.** It records a persistent task graph with `task_graph`, runs
   ready nodes with `delegate`, and reads `task_status`; a shared `message` mailbox lets parallel
   children coordinate through one JSONL file. The old `agent` tool and the four generic built-ins
