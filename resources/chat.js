@@ -2465,7 +2465,7 @@
 		}
 	}
 
-	function renderTurns(list, sessionId, summary, page) {
+	function renderTurns(list, sessionId, summary, page, runningHere) {
 		closePlanMenu(false);
 		turns = list || [];
 		summaryInfo = summary || null;
@@ -2506,12 +2506,10 @@
 		pinned = true;
 		scroll(true);
 		// A reload or a resync while a turn runs: the transcript the host persisted ends at the last
-		// settled step, and the rest of the stream continues in this same turn. Without this, every
-		// event after the redraw would be dropped because `live` was cleared above. `runningSession`
-		// is the guest's own record from turn-start, so a state message that was composed before
-		// Send (and still says `running: false`) cannot strand the turn.
-		const runningSessionId = (state && state.running ? state.runningSessionId : null) || runningSession;
-		if (runningSessionId && sessionId && sessionId === runningSessionId) {
+		// settled step, and the rest of the stream continues in this same turn. Whether this page is
+		// the running turn's chat is decided by the host on the message itself, beside the transcript:
+		// a stale snapshot, or a turn that ended while this guest was hidden, must never re-arm one.
+		if (runningHere) {
 			resumeLive(turns[turns.length - 1]);
 		}
 	}
@@ -3636,7 +3634,7 @@
 					}
 				}
 			}
-			renderTurns(turns, state && state.sessionId, summaryInfo, pageInfo);
+			renderTurns(turns, state && state.sessionId, summaryInfo, pageInfo, false);
 		}
 		shownView = currentView();
 		if (!running && !live) {
@@ -3667,9 +3665,9 @@
 		$('status').textContent = detail;
 		renderTasks();
 		renderTodos();
-		if (state.runningSessionId) {
-			runningSession = state.runningSessionId;
-		}
+		// The snapshot is authoritative about what runs: an idle one drops a session id left over from
+		// a turn whose end this guest never saw.
+		runningSession = state.running ? state.runningSessionId || runningSession : null;
 		setRunning(Boolean(state.running));
 	}
 
@@ -3875,11 +3873,17 @@
 				if (message.prepend) {
 					prependTurns(message);
 				} else {
-					renderTurns(message.turns || [], message.sessionId, message.summary, {
-						firstTurnIndex: message.firstTurnIndex,
-						totalTurns: message.totalTurns,
-						hasMore: message.hasMore === true,
-					});
+					renderTurns(
+						message.turns || [],
+						message.sessionId,
+						message.summary,
+						{
+							firstTurnIndex: message.firstTurnIndex,
+							totalTurns: message.totalTurns,
+							hasMore: message.hasMore === true,
+						},
+						message.running === true,
+					);
 				}
 				break;
 			case 'summary':
@@ -4024,7 +4028,9 @@
 				break;
 			case 'turn-end': {
 				// The panel may have switched chats mid-turn; only settle the live turn it belongs to.
-				const mine = !live || !message.sessionId || message.sessionId === live.turn.sessionId;
+				// A live turn drawn from a transcript older than this field has no chat id: it can only
+				// be the one this turn-end settles, so it must not be skipped.
+				const mine = !live || !message.sessionId || !live.turn.sessionId || message.sessionId === live.turn.sessionId;
 				setRunning(false);
 				runningSession = null;
 				// Anything still unanswered in the DOM belongs to the turn that just ended.

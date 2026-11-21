@@ -6,7 +6,7 @@ import { toolset } from '../services/tools';
 export const todoTools = toolset([
 	{
 		name: 'todo_write',
-		description: 'Replace the session todo list. Track multi-step work and keep exactly one item in_progress until the task is done.',
+		description: 'Replace the session todo list. Track multi-step work and keep exactly one item in_progress. Before you finish, call todo_write so no item is left in_progress.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: false,

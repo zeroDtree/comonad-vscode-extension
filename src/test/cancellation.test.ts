@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import { abortable } from '../lib/cancel';
 import { runGraph, type CompiledGraph } from '../lib/graph';
 import { runProcess } from '../lib/sandbox';
-import { objectSchema, type Message, type ToolContext } from '../lib/types';
+import { objectSchema, type Message, type ToolCall, type ToolContext } from '../lib/types';
 import { shellTools } from '../tools/shell';
+import { todoTools } from '../tools/todo';
 import { createTestKernel } from './harness';
 
 /** Waits for a condition, so a test never depends on a fixed sleep. */
@@ -609,5 +610,132 @@ suite('Cancellation', () => {
 		} finally {
 			await kernel.dispose();
 		}
+	});
+});
+
+suite('Turn settlement', () => {
+	const todoCall = (id: string, items: Array<{ text: string; status: string }>): ToolCall => ({
+		id,
+		name: 'todo_write',
+		arguments: JSON.stringify({ items }),
+	});
+
+	const reply = (content: string): { message: Message; toolCalls: ToolCall[]; usage: { input: number; output: number } } => ({
+		message: { role: 'assistant', content },
+		toolCalls: [],
+		usage: { input: 1, output: 1 },
+	});
+
+	test('a turn that finishes with an item in progress asks the model to close the list', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept' } });
+		try {
+			await kernel.ctx.plugin(todoTools);
+			const requests: Message[][] = [];
+			kernel.ctx.llm.use({
+				name: 'todo-reminder',
+				async chat(request) {
+					requests.push(request.messages);
+					if (requests.length === 1) {
+						return {
+							...reply(''),
+							toolCalls: [todoCall('w1', [{ text: 'review the diff', status: 'in_progress' }, { text: 'summarize', status: 'pending' }])],
+						};
+					}
+					if (requests.length === 2) {
+						return reply('Summary.');
+					}
+					if (requests.length === 3) {
+						return {
+							...reply(''),
+							toolCalls: [todoCall('w2', [{ text: 'review the diff', status: 'completed' }, { text: 'summarize', status: 'pending' }])],
+						};
+					}
+					return reply('Done.');
+				},
+			});
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', sessionId: session.id, surface: 'test' });
+			assert.strictEqual(result.stopped, undefined);
+			assert.strictEqual(requests.length, 4, 'a reminder round and the tool round it asks for');
+			assert.ok(
+				requests[2].some((message) => /\(hook\).*todo list still has/i.test(message.content)),
+				'the reminder names the unfinished list',
+			);
+			assert.deepStrictEqual(kernel.ctx.agent.todos(session.id).map((item) => item.status), ['completed', 'pending']);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the reminder is one round, not a loop, and never rewrites the list itself', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept' } });
+		try {
+			await kernel.ctx.plugin(todoTools);
+			let requests = 0;
+			kernel.ctx.llm.use({
+				name: 'todo-reminder-ignored',
+				async chat() {
+					requests += 1;
+					if (requests === 1) {
+						return { ...reply(''), toolCalls: [todoCall('w1', [{ text: 'review the diff', status: 'in_progress' }])] };
+					}
+					return reply('Summary.');
+				},
+			});
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', sessionId: session.id, surface: 'test' });
+			assert.strictEqual(result.stopped, undefined);
+			assert.strictEqual(requests, 3, 'one reminder, then the turn settles even if the model ignores it');
+			assert.deepStrictEqual(kernel.ctx.agent.todos(session.id).map((item) => item.status), ['in_progress'], 'the host does not rewrite statuses');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a list with nothing in progress costs no extra round', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'aw', approval: 'universal_accept' } });
+		try {
+			await kernel.ctx.plugin(todoTools);
+			let requests = 0;
+			kernel.ctx.llm.use({
+				name: 'todo-reminder-quiet',
+				async chat() {
+					requests += 1;
+					if (requests === 1) {
+						return { ...reply(''), toolCalls: [todoCall('w1', [{ text: 'review the diff', status: 'completed' }])] };
+					}
+					return reply('Summary.');
+				},
+			});
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			await kernel.ctx.agent.runTurn({ text: 'go', sessionId: session.id, surface: 'test' });
+			assert.strictEqual(requests, 2);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+});
+
+suite('Idle chat panel', () => {
+	test('a replay re-attaches only when the host says the chat is running', () => {
+		const root = join(__dirname, '..', '..');
+		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		const render = guest.slice(guest.indexOf('function renderTurns('), guest.indexOf('/** Registers a drawn turn'));
+		assert.match(render, /function renderTurns\(list, sessionId, summary, page, runningHere\)/);
+		assert.match(render, /if \(runningHere\) \{\s*resumeLive\(turns\[turns\.length - 1\]\);/);
+		assert.ok(!/\brunningSession\b/.test(render), 'the guest cannot re-arm a drawn turn from stale memory');
+		const turns = guest.slice(guest.indexOf("case 'turns':"), guest.indexOf("case 'summary':"));
+		assert.match(turns, /message\.running === true/);
+		const state = guest.slice(guest.indexOf('function renderState()'), guest.indexOf('/** The pending or reviewed changes'));
+		assert.match(state, /renderTurns\(turns, state && state\.sessionId, summaryInfo, pageInfo, false\)/);
+		assert.match(state, /runningSession = state\.running \? state\.runningSessionId \|\| runningSession : null;/);
+		const end = guest.slice(guest.indexOf("case 'turn-end':"), guest.indexOf("case 'insertReference':"));
+		assert.match(end, /!live\.turn\.sessionId/);
+
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const published = panel.slice(panel.indexOf('const publishTurns ='), panel.indexOf('/** A subagent'));
+		assert.match(published, /running: session !== undefined && running && runningSessionId === session\.id/);
+		const history = panel.slice(panel.indexOf('const history = '), panel.indexOf('/** The turn that just finished'));
+		assert.match(history, /sessionId: session\.id/);
 	});
 });

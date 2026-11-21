@@ -1317,10 +1317,16 @@ export class Agent extends Service {
 			// A Stop that lands as the graph finishes wins over the Stop hook.
 			signal.throwIfAborted();
 			const stop = await this.fireStop(session, state, signal);
-			if (stop.blocked) {
+			const reminder = this.todoReminder(state);
+			if (stop.blocked || reminder) {
+				// One more round for both: the Stop hook's reason and the unfinished todo list.
 				state = {
 					...state,
-					messages: [...state.messages, { role: 'user', content: `(hook) ${stop.reason ?? 'keep working'}` }],
+					messages: [
+						...state.messages,
+						...(stop.blocked ? [{ role: 'user' as const, content: `(hook) ${stop.reason ?? 'keep working'}` }] : []),
+						...(reminder ? [{ role: 'user' as const, content: `(hook) ${reminder}` }] : []),
+					],
 				};
 				const again = await this.runStage(session, state, turn);
 				state = again.state;
@@ -1512,6 +1518,28 @@ export class Agent extends Service {
 		}
 		session.transcript = state.transcript;
 		this.ctx.sessions.save(session);
+	}
+
+	/**
+	 * A turn is about to finish with items still marked in progress: the work it stands for cannot be
+	 * running any more. Ask the model to close the list itself, the way a Stop hook asks it to keep
+	 * working. The list is left exactly as the model wrote it; only the model may change a status, and
+	 * this fires once per turn — the round it triggers is the last chance to do so.
+	 */
+	private todoReminder(state: RunState): string | undefined {
+		if (SILENT_TRIGGERS.has(state.trigger) || state.toolsEnabled === false) {
+			return undefined;
+		}
+		if (!this.ctx.tools.visible(state.policy).some((tool) => tool.name === 'todo_write')) {
+			return undefined;
+		}
+		const open = (this.todoLists.get(state.sessionId) ?? []).filter((item) => item.status === 'in_progress');
+		if (!open.length) {
+			return undefined;
+		}
+		const list = open.map((item) => `"${item.text}"`).join(', ');
+		const one = open.length === 1;
+		return `The todo list still has ${open.length} item${one ? '' : 's'} in progress: ${list}. Call todo_write now: mark ${one ? 'it' : 'them'} completed if the work is done, or pending if it is not, then finish.`;
 	}
 
 	private finish(session: Session, state: RunState, options: { aborted?: boolean } = {}): void {
@@ -3066,7 +3094,8 @@ export class Agent extends Service {
 		}
 		const todos = this.todoLists.get(session.id) ?? [];
 		if (todos.length) {
-			push(COMONAD_BLOCK.todos, formatTodos(todos));
+			// The list travels with the rule that closes it: a turn must not leave work "in progress".
+			push(COMONAD_BLOCK.todos, `${formatTodos(todos)}\n\nBefore you finish, call todo_write: every item must end completed or pending.`);
 		}
 		// The indexes advertise a tool, so they only travel when that tool does.
 		if (config.skills && has('skill')) {

@@ -458,6 +458,9 @@ export function chatPanel(ctx: Context): void {
 		return {
 			turns: all.slice(start, end).map((turn) => ({
 				index: turn.index,
+				// The chat this turn belongs to, so a live turn re-attached from a redraw can match
+				// the `turn-end` that settles it.
+				sessionId: session.id,
 				prompt: turn.prompt,
 				promptAttachments: ctx.attachments.publicAttachments(turn.promptAttachments),
 				greeting: turn.greeting,
@@ -503,7 +506,17 @@ export function chatPanel(ctx: Context): void {
 				published.delete(client);
 			}
 		}
-		post({ type: 'turns', sessionId: session?.id, ...history(session) }, only);
+		post(
+			{
+				type: 'turns',
+				sessionId: session?.id,
+				// Decided here, beside the transcript it describes: a redraw after a hidden view is shown
+				// may only re-attach a live stream to a turn the host is really running in this chat.
+				running: session !== undefined && running && runningSessionId === session.id,
+				...history(session),
+			},
+			only,
+		);
 	};
 
 	/** A subagent's conversation as the overlay draws it; `undefined` when it is gone. */
