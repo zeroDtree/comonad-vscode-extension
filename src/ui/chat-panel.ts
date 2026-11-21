@@ -31,9 +31,9 @@ import {
 } from '../lib/plan-files';
 import { formatReference } from '../lib/references';
 import { guardPath, isInside, sandboxAllowsWrites } from '../lib/sandbox';
-import { countRaw } from '../lib/tokens';
+import { countRaw, formatTokens } from '../lib/tokens';
 import { ChatWebviewAssets, type ChatAssetSpec } from '../services/chat-assets';
-import { inWorkspace, markForRestore, type Session } from '../services/sessions';
+import { inWorkspace, markForRestore, type Session, type SessionUsage } from '../services/sessions';
 import { explainDirty, restoreTo, unsavedPaths } from './journal-actions';
 import { WorkspaceFileCache, mentionResults } from './mentions';
 import { REFERENCE_LIMITS, scopeOf } from '../services/references';
@@ -67,7 +67,7 @@ export function sanitizeQuestionAnswers(
  * provider reported rather than counting the transcript, so it is the same number the budget uses and
  * the same one the endpoint charged for.
  */
-function contextUsage(session: Session | undefined, window: number): string {
+function contextUsage(session: Pick<Session, 'lastInputTokens'> | undefined, window: number): string {
 	if (!session?.lastInputTokens || !window) {
 		return '';
 	}
@@ -75,12 +75,30 @@ function contextUsage(session: Session | undefined, window: number): string {
 	return `context ${share}% · ${formatTokens(session.lastInputTokens)}/${formatTokens(window)}`;
 }
 
-/** A token count the way a window is spoken about: 128K, 1M. */
-function formatTokens(tokens: number): string {
-	if (tokens >= 1_048_576) {
-		return `${Math.round((tokens / 1_048_576) * 10) / 10}M`;
+/** The cumulative cache readout; empty until a provider reports cache statistics. */
+function cacheDetail(usage: SessionUsage | undefined): string {
+	if (!usage?.requests || usage.cachedTokens === undefined || usage.inputTokens <= 0) {
+		return '';
 	}
-	return `${Math.round(tokens / 1024)}K`;
+	const share = Math.min(100, Math.round((usage.cachedTokens / usage.inputTokens) * 100));
+	return `cache ${formatTokens(usage.cachedTokens)} (${share}%)`;
+}
+
+/** The status line's segments. Pure, so `state()` never gains a suspension point. */
+export function statusDetail(
+	session: Pick<Session, 'usage' | 'turnIndex' | 'lastInputTokens'> | undefined,
+	window: number,
+): string {
+	const usage = session?.usage;
+	const total = usage ? usage.inputTokens + usage.outputTokens : 0;
+	return [
+		usage && usage.requests ? `${formatTokens(total)} tokens · $${usage.cost.toFixed(3)}` : '',
+		cacheDetail(usage),
+		session ? `turn ${session.turnIndex}` : '',
+		contextUsage(session, window),
+	]
+		.filter(Boolean)
+		.join('  ·  ');
 }
 
 /** The chat: a webview view in the Secondary Side Bar, plus an optional editor window. */
@@ -273,17 +291,9 @@ export function chatPanel(ctx: Context): void {
 		const session = ctx.sessions.active();
 		const all = ctx.sessions.list().filter(inHistory);
 		const effort = session?.reasoningEffort ?? config.reasoningEffort;
-		const usage = session?.usage;
-		const tokens = usage ? usage.inputTokens + usage.outputTokens : 0;
 		return {
 			type: 'state',
-			detail: [
-				usage && usage.requests ? `${tokens} tokens · $${usage.cost.toFixed(3)}` : '',
-				session ? `turn ${session.turnIndex}` : '',
-				contextUsage(session, session ? ctx.agent.windowFor(session) : 0),
-			]
-				.filter(Boolean)
-				.join('  ·  '),
+			detail: statusDetail(session, session ? ctx.agent.windowFor(session) : 0),
 			suspended: Boolean(session?.cursor),
 			running,
 			runningSessionId,

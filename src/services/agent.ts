@@ -1101,6 +1101,11 @@ export class Agent extends Service {
 			session.usage.inputTokens += completion.usage.input;
 			session.usage.outputTokens += completion.usage.output;
 			session.usage.requests += 1;
+			const cached = completion.usage.cached;
+			if (cached !== undefined && Number.isFinite(cached)) {
+				session.usage.cachedTokens =
+					(session.usage.cachedTokens ?? 0) + Math.min(Math.max(0, cached), completion.usage.input);
+			}
 			session.lastInputTokens = completion.usage.input;
 			this.ctx.usage.add(completion.usage);
 			const cost = this.ctx.llm.costFor(state.policy.model, completion.usage);

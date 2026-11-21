@@ -95,6 +95,7 @@ import {
 	SessionStore,
 	unusedChat,
 	type Mark,
+	type SessionUsage,
 } from '../services/sessions';
 import { deletionTargetsAreOwned } from '../lib/deletions';
 import { creationTargets, directoryTargets, rmInvocations, rmTargets } from '../lib/shell';
@@ -173,7 +174,7 @@ const MATH_PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-mat
 const MATH_RESOURCES = join(MATH_PACKAGE, 'resources');
 import mathEntry from 'comonad-plugin-math';
 import { ChatWebviewAssets } from '../services/chat-assets';
-import { MAX_ANSWER_CHARS, chatDocument, sanitizeQuestionAnswers } from '../ui/chat-panel';
+import { MAX_ANSWER_CHARS, chatDocument, sanitizeQuestionAnswers, statusDetail } from '../ui/chat-panel';
 import tavernEntry from 'comonad-plugin-tavern';
 import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
 import { contentController } from 'comonad-plugin-tavern/panel/controller';
@@ -184,7 +185,7 @@ import { keepHunkAction, undoHunkAction } from '../ui/hunk-actions';
 import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
 import { McpConnection } from '../services/mcp';
-import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, estimateMessages, countRaw, estimateTokens, encodingForModel, guesstimate, setEncoder } from '../lib/tokens';
+import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, estimateMessages, countRaw, estimateTokens, encodingForModel, formatTokens, guesstimate, setEncoder } from '../lib/tokens';
 
 const readTool: ToolSpec = {
 	name: 'read_file',
@@ -255,6 +256,18 @@ suite('Token counting', () => {
 		assert.strictEqual(encodingForModel('gpt-3.5-turbo'), 'cl100k_base');
 		assert.strictEqual(encodingForModel('text-embedding-ada-002'), 'cl100k_base');
 		assert.strictEqual(encodingForModel('text-davinci-003'), 'r50k_base');
+	});
+
+	test('token counts scale to K, M and G without printing 0K', () => {
+		assert.strictEqual(formatTokens(0), '0');
+		assert.strictEqual(formatTokens(512), '512');
+		assert.strictEqual(formatTokens(1_024), '1K');
+		assert.strictEqual(formatTokens(204_800), '200K');
+		assert.strictEqual(formatTokens(262_144), '256K');
+		assert.strictEqual(formatTokens(1_048_575), '1M', 'a rounded-up 1023K carries into M');
+		assert.strictEqual(formatTokens(1_048_576), '1M');
+		assert.strictEqual(formatTokens(16_415_908), '15.7M');
+		assert.strictEqual(formatTokens(1_073_741_824), '1G');
 	});
 
 	test('a count is the encoding plus the message framing SillyTavern adds', async () => {
@@ -1575,6 +1588,31 @@ suite('Comonad domain', () => {
 		}
 	});
 
+	test('legacy session usage is repaired without inventing cache support', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'comonad-usage-'));
+		try {
+			const store = new SessionStore(dir);
+			const session = store.build(policy());
+			// A chat persisted before a counter existed: absent numbers must not become NaN.
+			session.usage = { inputTokens: 12, cost: 0.5 } as SessionUsage;
+			store.save(session);
+			const loaded = store.get(session.id);
+			assert.ok(loaded);
+			assert.deepStrictEqual(loaded.usage, { inputTokens: 12, outputTokens: 0, requests: 0, cost: 0.5 });
+			assert.ok(!('cachedTokens' in loaded.usage), 'absence stays the "not reported" signal');
+
+			// A reported zero is data: it survives the round trip and shows as 0%.
+			loaded.usage.cachedTokens = 0;
+			store.save(loaded);
+			const reported = store.get(session.id);
+			assert.ok(reported);
+			assert.strictEqual(reported.usage.cachedTokens, 0);
+			assert.ok(!('cachedTokens' in store.copy(reported).usage), 'forks start without cache data');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('write_file notes only the files it creates', async () => {
 		const kernel = await createTestKernel();
 		try {
@@ -2074,6 +2112,53 @@ suite('Comonad domain', () => {
 			assert.strictEqual(sent.role, 'assistant');
 			assert.strictEqual(sent.content, 'the answer');
 			assert.strictEqual(sent.reasoning_content, 'thinking hard', 'thinking mode with tools requires it back');
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
+	test('the stream parser keeps an unreported cache field undefined', async () => {
+		const stream = (usage: string): Response => {
+			const sse = [
+				`data: {"choices":[{"delta":{"content":"ok"}}],"usage":${usage}}`,
+				'data: [DONE]',
+				'',
+			].join('\n\n');
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						controller.enqueue(new TextEncoder().encode(sse));
+						controller.close();
+					},
+				}),
+				{ status: 200 },
+			);
+		};
+		const responses = [
+			stream('{"prompt_tokens":100,"completion_tokens":10,"prompt_cache_hit_tokens":60}'),
+			stream('{"prompt_tokens":100,"completion_tokens":10}'),
+			stream('{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":40}}'),
+		];
+		const original = globalThis.fetch;
+		let index = 0;
+		globalThis.fetch = (async () => responses[index++]!) as unknown as typeof fetch;
+		try {
+			const chat = () =>
+				openAiChat({
+					base: 'https://api.example.com/v1',
+					key: 'k',
+					model: 'm',
+					messages: [{ role: 'user', content: 'hi' }],
+					tools: [],
+					signal: new AbortController().signal,
+				});
+			const reported = await chat();
+			assert.strictEqual(reported.usage?.cached, 60);
+			const silent = await chat();
+			assert.strictEqual(silent.usage?.cached, undefined, 'a missing field is not a reported zero');
+			assert.ok(silent.usage && !('cached' in silent.usage));
+			const standard = await chat();
+			assert.strictEqual(standard.usage?.cached, 40, "the standard OpenAI shape is read too");
 		} finally {
 			globalThis.fetch = original;
 		}
@@ -4528,6 +4613,27 @@ suite('Cordis kernel', () => {
 		assert.ok(css.includes('.thought-tokens') && css.includes('#chats-scope') && css.includes('#jump-latest'));
 	});
 
+	test('the status line adds a cumulative cache segment only when reported', () => {
+		const window = 131_072;
+		const usage = { inputTokens: 1_048_576, outputTokens: 0, requests: 2, cost: 0.012, cachedTokens: 524_288 };
+		assert.strictEqual(
+			statusDetail({ usage, turnIndex: 5, lastInputTokens: 65_536 }, window),
+			'1M tokens · $0.012  ·  cache 512K (50%)  ·  turn 5  ·  context 50% · 64K/128K',
+		);
+		const silent = { inputTokens: 100, outputTokens: 20, requests: 1, cost: 0 };
+		assert.strictEqual(statusDetail({ usage: silent, turnIndex: 1 }, window), '120 tokens · $0.000  ·  turn 1');
+		assert.strictEqual(
+			statusDetail({ usage: { ...silent, cachedTokens: 0 }, turnIndex: 1 }, window),
+			'120 tokens · $0.000  ·  cache 0 (0%)  ·  turn 1',
+			'a reported zero is shown, unlike an absent field',
+		);
+		assert.strictEqual(
+			statusDetail({ usage: { ...silent, cachedTokens: 50 }, turnIndex: 1 }, window),
+			'120 tokens · $0.000  ·  cache 50 (50%)  ·  turn 1',
+		);
+		assert.strictEqual(statusDetail(undefined, window), '', 'no chat, no line');
+	});
+
 	test('the webview carries the orchestrator task board and delegation seams', () => {
 		const root = join(__dirname, '..', '..');
 		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
@@ -5574,6 +5680,36 @@ suite('Cordis kernel', () => {
 				['user', 'assistant', 'tool', 'assistant'],
 			);
 			assert.strictEqual(session.usage.requests, 2);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a session sums cache hits only from requests that report them', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const reports: Array<number | undefined> = [60, undefined, 0];
+			let calls = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					const cached = reports[Math.min(calls, reports.length - 1)];
+					calls += 1;
+					const usage =
+						cached === undefined ? { input: 100, output: 10 } : { input: 100, output: 10, cached };
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage };
+				},
+			});
+			const first = await kernel.ctx.agent.runTurn({ text: 'one', surface: 'test' });
+			const session = () => kernel.ctx.sessions.require(first.sessionId);
+			assert.strictEqual(session().usage.cachedTokens, 60);
+			assert.strictEqual(session().usage.inputTokens, 100);
+			await kernel.ctx.agent.runTurn({ text: 'two', surface: 'test', sessionId: first.sessionId });
+			assert.strictEqual(session().usage.cachedTokens, 60, 'an unreported request adds nothing');
+			assert.strictEqual(session().usage.inputTokens, 200);
+			await kernel.ctx.agent.runTurn({ text: 'three', surface: 'test', sessionId: first.sessionId });
+			assert.strictEqual(session().usage.cachedTokens, 60, 'a reported zero adds nothing and keeps the field');
+			assert.strictEqual(session().usage.inputTokens, 300);
 		} finally {
 			await kernel.dispose();
 		}

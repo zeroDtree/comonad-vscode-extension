@@ -27,6 +27,11 @@ export interface SessionUsage {
 	outputTokens: number;
 	requests: number;
 	cost: number;
+	/**
+	 * Input tokens the provider served from its prompt cache, summed over requests that reported
+	 * cache statistics. Absent means no request ever reported them; 0 is a report of zero hits.
+	 */
+	cachedTokens?: number;
 }
 
 /** A restore point: the journal position and the transcript prompt index at one turn. */
@@ -283,7 +288,25 @@ function matchSnippet(session: Session, needle: string): string | undefined {
 }
 
 function emptyUsage(): SessionUsage {
+	// `cachedTokens` is deliberately absent: its presence is the "provider reports cache" signal.
 	return { inputTokens: 0, outputTokens: 0, requests: 0, cost: 0 };
+}
+
+/** Repairs usage loaded from disk; never invents `cachedTokens`, which absence marks as unreported. */
+function normalizeUsage(value: unknown): SessionUsage {
+	const stored = value && typeof value === 'object' ? (value as Partial<SessionUsage>) : {};
+	const count = (number: unknown): number =>
+		typeof number === 'number' && Number.isFinite(number) && number >= 0 ? number : 0;
+	const usage: SessionUsage = {
+		inputTokens: count(stored.inputTokens),
+		outputTokens: count(stored.outputTokens),
+		requests: count(stored.requests),
+		cost: count(stored.cost),
+	};
+	if (typeof stored.cachedTokens === 'number' && Number.isFinite(stored.cachedTokens) && stored.cachedTokens >= 0) {
+		usage.cachedTokens = stored.cachedTokens;
+	}
+	return usage;
 }
 
 export class SessionStore {
@@ -505,7 +528,7 @@ export class SessionStore {
 			subagents: sanitizeSubagentLinks(session.subagents),
 			taskGraph: delegated ? undefined : sanitizeTaskGraph(session.taskGraph),
 			archivedTaskGraphs: delegated ? undefined : sanitizeArchivedTaskGraphs(session.archivedTaskGraphs),
-			usage: session.usage ?? emptyUsage(),
+			usage: normalizeUsage(session.usage),
 			instructions: session.instructions ?? [],
 		};
 	}

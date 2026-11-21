@@ -114,6 +114,23 @@ export function estimateMessages(
 	return total + TOKENS_PADDING;
 }
 
+/** A token count the way a window is spoken about: raw below 1K, whole K, one-decimal M/G. */
+export function formatTokens(tokens: number): string {
+	const count = Number.isFinite(tokens) ? Math.max(0, Math.round(tokens)) : 0;
+	if (count < 1_024) {
+		return `${count}`;
+	}
+	if (count < 1_048_576) {
+		const thousands = Math.round(count / 1_024);
+		return thousands < 1_024 ? `${thousands}K` : '1M';
+	}
+	if (count < 1_073_741_824) {
+		const millions = Math.round((count / 1_048_576) * 10) / 10;
+		return millions < 1_024 ? `${millions}M` : '1G';
+	}
+	return `${Math.round((count / 1_073_741_824) * 10) / 10}G`;
+}
+
 /**
  * Which encoding a model name uses, matching `tiktoken.encoding_for_model` for the families that
  * matter: the `o200k_base` models first, then the `cl100k_base` ones, then the legacy `r50k_base`.

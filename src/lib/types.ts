@@ -370,7 +370,10 @@ export function hasWorkspace(policy: Pick<SessionPolicy, 'workingDirectory'>): b
 export interface CompletionUsage {
 	input: number;
 	output: number;
-	/** Input tokens the provider served from its prompt cache, billed at a lower rate. */
+	/**
+	 * Input tokens the provider served from its prompt cache, billed at a lower rate. Undefined
+	 * means the provider reported no cache statistics; 0 is a report of zero hits.
+	 */
 	cached?: number;
 }
 

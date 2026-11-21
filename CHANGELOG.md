@@ -134,6 +134,11 @@ Highlights are below; the full implementation notes are linked at the end. The u
   attached panel stays pending, blocks the turn, and is replayed when the panel reopens; an optional
   `questionNotification` (default on) shows an **Open Chat** notification.
 
+- **The status line scales its numbers and shows prompt-cache reuse.** Session totals print as
+  K/M/G, and a provider that reports prompt-cache statistics adds a cumulative `cache 8M (51%)`
+  segment — the hits and their share of all input. Providers that report none are left off the
+  line rather than shown as `0 (0%)`.
+
 ### Detailed notes
 
 The full, implementation-level notes for this release are kept at

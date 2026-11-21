@@ -234,10 +234,15 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 					continue;
 				}
 				if (event.usage) {
+					// Absent means the endpoint does not report cache statistics; only a reported
+					// number (including zero) may reach the accumulator, which uses presence as the
+					// "this provider reports cache" signal.
+					const cached =
+						event.usage.prompt_cache_hit_tokens ?? event.usage.prompt_tokens_details?.cached_tokens;
 					usage = {
 						input: event.usage.prompt_tokens ?? 0,
 						output: event.usage.completion_tokens ?? 0,
-						cached: event.usage.prompt_cache_hit_tokens ?? 0,
+						...(typeof cached === 'number' ? { cached } : {}),
 					};
 				}
 				const delta = event.choices?.[0]?.delta;
@@ -467,7 +472,12 @@ interface StreamEvent {
 			}[];
 		};
 	}[];
-	usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number } | null;
+	usage?: {
+		prompt_tokens?: number | null;
+		completion_tokens?: number | null;
+		prompt_cache_hit_tokens?: number | null;
+		prompt_tokens_details?: { cached_tokens?: number | null } | null;
+	} | null;
 }
 
 /** Maps OpenAI's per-index tool-call deltas onto stable call ids. */
