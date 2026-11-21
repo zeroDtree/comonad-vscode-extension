@@ -748,6 +748,20 @@ suite('Comonad domain', () => {
 		assert.strictEqual(long[0]?.length, MAX_ANSWER_CHARS);
 	});
 
+	test('typed answers are accepted beside the offered options', () => {
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['a'], ['a', 'b'], false, 'c'), ['c']);
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['b', 'a'], ['a', 'b'], false, ''), ['b']);
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['a', 'b'], ['a', 'b'], true, 'c'), ['a', 'b', 'c']);
+		assert.deepStrictEqual(sanitizeQuestionAnswers([], ['a', 'b'], true, 'c'), ['c']);
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['a'], ['a'], true, 'a'), ['a'], 'a duplicate is not repeated');
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['a', 'x', 'b'], ['a', 'b'], false, '   '), ['a']);
+		assert.deepStrictEqual(sanitizeQuestionAnswers([], ['a'], false, 42), [], 'a non-string manual is ignored');
+		assert.deepStrictEqual(sanitizeQuestionAnswers(['legacy'], undefined, false, 'typed'), ['typed']);
+		assert.deepStrictEqual(sanitizeQuestionAnswers([], undefined, false, '  typed  '), ['typed']);
+		const long = sanitizeQuestionAnswers([], ['a'], false, 'x'.repeat(MAX_ANSWER_CHARS + 10));
+		assert.strictEqual(long[0]?.length, MAX_ANSWER_CHARS);
+	});
+
 	test('invalid graphs are rejected', () => {
 		assert.throws(() => parseGraphSource('flowchart TD\n  a --> b\n'), /outgoing edge|one of/);
 	});

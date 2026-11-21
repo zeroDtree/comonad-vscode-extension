@@ -491,6 +491,18 @@ suite('Cancellation', () => {
 		assert.match(panel, /postPendingQuestions/);
 	});
 
+	test('the question card accepts a typed answer beside its options', () => {
+		const root = join(__dirname, '..', '..');
+		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		assert.match(guest, /q-manual/);
+		assert.match(guest, /function submitQuestion/);
+		assert.match(guest, /type: 'answer', id: card\.dataset\.id, answers, \.\.\.\(manual \? \{ manual \} : \{\}\)/);
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.match(css, /\.q-manual/);
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(panel, /sanitizeQuestionAnswers\(message\.answers, pending\.options, pending\.multi, message\.manual\)/);
+	});
+
 	test('a state snapshot cannot outlive the turn it describes', () => {
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		assert.match(panel, /const state = \(\): Record<string, unknown> => \{/);

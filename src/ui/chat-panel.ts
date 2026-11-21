@@ -44,22 +44,36 @@ export const MAX_ANSWER_CHARS = 8_000;
 export const MAX_QUESTION_CHARS = 8_000;
 export const MAX_QUESTION_OPTIONS = 100;
 
-/** The webview is not trusted: answers may only name the options the card displayed. */
+/**
+ * The webview is not trusted: option picks may only name the displayed choices, while `manual`
+ * is typed text the card always offers — it may stand alone or accompany picked options.
+ */
 export function sanitizeQuestionAnswers(
 	value: unknown,
 	options: string[] | undefined,
 	multi: boolean,
+	manual?: unknown,
 ): string[] {
 	const answers = Array.isArray(value)
 		? value.filter((answer): answer is string => typeof answer === 'string')
 		: [];
+	const typed = typeof manual === 'string' ? manual.trim().slice(0, MAX_ANSWER_CHARS) : '';
 	if (options?.length) {
 		const allowed = new Set(options);
 		const picked = [...new Set(answers.filter((answer) => allowed.has(answer)))];
-		return multi ? picked : picked.slice(0, 1);
+		if (multi) {
+			// The typed answer joins the checked options; an exact duplicate adds nothing.
+			if (typed && !picked.includes(typed)) {
+				picked.push(typed);
+			}
+			return picked;
+		}
+		return typed ? [typed] : picked.slice(0, 1);
 	}
-	const text = answers[0]?.trim().slice(0, MAX_ANSWER_CHARS) ?? '';
-	return text ? [text] : [];
+	// Messages from before the manual field carried the free text in `answers`; `manual` wins.
+	const legacy = answers[0]?.trim().slice(0, MAX_ANSWER_CHARS) ?? '';
+	const answer = typed || legacy;
+	return answer ? [answer] : [];
 }
 
 /**
@@ -1704,7 +1718,7 @@ export function chatPanel(ctx: Context): void {
 					if (!pending || !Array.isArray(message.answers)) {
 						break;
 					}
-					pending.resolve(sanitizeQuestionAnswers(message.answers, pending.options, pending.multi));
+					pending.resolve(sanitizeQuestionAnswers(message.answers, pending.options, pending.multi, message.manual));
 					// Another panel showing the same card is done with it too.
 					post({ type: 'question-withdraw', ids: [id] });
 					break;

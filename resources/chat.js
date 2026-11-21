@@ -3042,6 +3042,42 @@
 
 	/* ------------------------------------------------------------------ questions */
 
+	/** A one-row question textarea: the free-text answer, grown by the delegated input handler. */
+	function questionInput(placeholder) {
+		const area = document.createElement('textarea');
+		area.className = 'q-input q-manual';
+		area.rows = 1;
+		area.placeholder = placeholder;
+		return area;
+	}
+
+	/** Multi-select Send turns on for a checked option or typed text; other cards keep it enabled. */
+	function syncSend(card) {
+		if (!card.querySelector('input[type="checkbox"]')) {
+			return;
+		}
+		const send = card.querySelector('button[data-q="send"]');
+		if (send) {
+			const checked = card.querySelector('input[type="checkbox"]:checked');
+			const area = card.querySelector('textarea.q-input');
+			send.disabled = !checked && !(area && area.value.trim());
+		}
+	}
+
+	/** Submit the checked options and/or the typed answer; an empty card keeps its focus. */
+	function submitQuestion(card) {
+		const answers = [...card.querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value);
+		const area = card.querySelector('textarea.q-input');
+		const manual = area ? area.value.trim() : '';
+		if (!answers.length && !manual) {
+			if (area) {
+				area.focus();
+			}
+			return;
+		}
+		settleQuestion(card, answers, manual);
+	}
+
 	function question(message) {
 		// A repost after a chat switch or a reload is the same card, not a second question.
 		if (document.querySelector('.question[data-id="' + message.id + '"]')) {
@@ -3079,12 +3115,6 @@
 					label.append(box, span);
 					list.appendChild(label);
 				}
-				const send = document.createElement('button');
-				send.className = 'primary';
-				send.dataset.q = 'send';
-				send.textContent = 'Send';
-				send.disabled = true;
-				actions.appendChild(send);
 			} else {
 				for (const option of options) {
 					const button = document.createElement('button');
@@ -3096,22 +3126,15 @@
 				}
 			}
 			card.appendChild(list);
-		} else {
-			const input = document.createElement('textarea');
-			input.className = 'q-input';
-			input.rows = 1;
-			input.placeholder = 'Type your answer…';
-			input.addEventListener('input', () => {
-				input.style.height = 'auto';
-				input.style.height = Math.min(input.scrollHeight, 200) + 'px';
-			});
-			card.appendChild(input);
-			const send = document.createElement('button');
-			send.className = 'primary';
-			send.dataset.q = 'send';
-			send.textContent = 'Send';
-			actions.appendChild(send);
 		}
+		// The user may always type an answer, whether or not the model offered options.
+		card.appendChild(questionInput(options.length ? 'Or type your own answer…' : 'Type your answer…'));
+		const send = document.createElement('button');
+		send.className = 'primary';
+		send.dataset.q = 'send';
+		send.textContent = 'Send';
+		send.disabled = multi;
+		actions.appendChild(send);
 		const skip = document.createElement('button');
 		skip.className = 'ghost';
 		skip.dataset.q = 'skip';
@@ -3129,7 +3152,7 @@
 		scroll();
 	}
 
-	function settleQuestion(card, answers) {
+	function settleQuestion(card, answers, manual) {
 		if (card.classList.contains('answered') || card.classList.contains('withdrawn')) {
 			return;
 		}
@@ -3137,14 +3160,15 @@
 		for (const control of card.querySelectorAll('button, input, textarea')) {
 			control.disabled = true;
 		}
+		const shown = manual ? [...new Set([...answers, manual])] : answers;
 		const actions = card.querySelector('.actions');
 		if (actions) {
 			const done = document.createElement('span');
 			done.className = 'q-done';
-			done.textContent = answers.length ? answers.join(', ').slice(0, 200) : 'Skipped';
+			done.textContent = shown.length ? shown.join(', ').slice(0, 200) : 'Skipped';
 			actions.replaceChildren(done);
 		}
-		vscode.postMessage({ type: 'answer', id: card.dataset.id, answers });
+		vscode.postMessage({ type: 'answer', id: card.dataset.id, answers, ...(manual ? { manual } : {}) });
 	}
 
 	/** A stopped turn withdraws its question: the card stays as a record, but nothing can be chosen. */
@@ -3326,24 +3350,14 @@
 		}
 		const card = control.closest('.question');
 		const action = control.dataset.q;
-		const area = card.querySelector('textarea.q-input');
-		let answers;
 		if (action === 'option') {
 			control.classList.add('chosen');
-			answers = [control.dataset.value];
-		} else if (action === 'send' && area) {
-			const text = area.value.trim();
-			if (!text) {
-				area.focus();
-				return;
-			}
-			answers = [text];
+			settleQuestion(card, [control.dataset.value]);
 		} else if (action === 'send') {
-			answers = [...card.querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value);
+			submitQuestion(card);
 		} else {
-			answers = [];
+			settleQuestion(card, []);
 		}
-		settleQuestion(card, answers);
 	});
 
 	// Enter and Escape belong to the open question, not to the global Stop shortcut.
@@ -3360,24 +3374,27 @@
 		}
 		if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.target.classList.contains('q-input')) {
 			event.preventDefault();
-			const text = event.target.value.trim();
-			if (text) {
-				settleQuestion(card, [text]);
-			}
+			submitQuestion(card);
 		}
 	});
 
-	// The multi-select Send waits for at least one checked option.
+	// The multi-select Send waits for a checked option or typed text.
 	messagesEl.addEventListener('change', (event) => {
 		const box = event.target.closest('.question input[type="checkbox"]');
-		if (!box) {
+		if (box) {
+			syncSend(box.closest('.question'));
+		}
+	});
+
+	// Typed text grows the box and, on a multi-select card, satisfies Send.
+	messagesEl.addEventListener('input', (event) => {
+		const area = event.target.closest('.question textarea.q-input');
+		if (!area) {
 			return;
 		}
-		const card = box.closest('.question');
-		const send = card.querySelector('button[data-q="send"]');
-		if (send) {
-			send.disabled = !card.querySelector('input[type="checkbox"]:checked');
-		}
+		area.style.height = 'auto';
+		area.style.height = Math.min(area.scrollHeight, 200) + 'px';
+		syncSend(area.closest('.question'));
 	});
 
 	// The task board's Open buttons use the same rich-click handling as a transcript card.

@@ -18,8 +18,9 @@
 | Agent | `ask_user`、`skill`、`memory` |
 | MCP | 每个服务器暴露的 `server__tool` |
 
-`ask_user` 在 Comonad 面板内渲染内嵌问答卡；`@comonad` 参与者和没有面板 surface 的回合改用 VS Code
-的 quick pick 或输入框。面板 surface 的提问在没有已连接面板时会保持等待（turn 阻塞），重新打开面板后
+`ask_user` 在 Comonad 面板内渲染内嵌问答卡：选项以按钮（单选）或复选框（多选）展示，卡片下方
+始终提供文本框，用户可以直接输入答案代替选择，多选时也可以把输入的文字与勾选的选项一起提交。
+`@comonad` 参与者和没有面板 surface 的回合改用 VS Code 的 quick pick 或输入框。面板 surface 的提问在没有已连接面板时会保持等待（turn 阻塞），重新打开面板后
 重放卡片；除非关闭 `questionNotification`，否则会弹一条带 **Open Chat** 按钮的 VS Code 通知。
 
 `read_file` 还可以读取 PNG、JPEG、WebP 和 GIF（单张最多 4 MiB），并作为图像内容交给模型。安装

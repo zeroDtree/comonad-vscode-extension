@@ -1647,6 +1647,10 @@ details.thinking summary::before {
 	outline-offset: -1px;
 }
 
+.q-input.q-manual::placeholder {
+	opacity: 0.7;
+}
+
 .msg.question .actions {
 	display: flex;
 	gap: 8px;

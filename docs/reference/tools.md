@@ -18,8 +18,11 @@ Every tool declares a **capability**, whether it needs **network**, and whether 
 | Agent | `ask_user`, `skill`, `memory` |
 | MCP | `server__tool` for every tool the server exposes |
 
-`ask_user` renders an inline question card in the Comonad panel. The `@comonad` participant and
-turns with no panel surface use VS Code's quick pick or input box instead. A panel-surface question
+`ask_user` renders an inline question card in the Comonad panel. Options render as buttons
+(single-select) or checkboxes (multi-select), and an always-visible free-text field under them lets
+the user type an answer instead of choosing one — or, in multi-select, submit typed text together
+with the checked options. The `@comonad` participant and turns with no panel surface use VS Code's
+quick pick or input box instead. A panel-surface question
 with no attached panel stays pending — the turn waits — and its card is replayed when the panel
 reopens; a VS Code notification with an **Open Chat** action points to it unless
 `questionNotification` is off.

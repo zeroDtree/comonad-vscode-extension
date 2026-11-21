@@ -10,15 +10,24 @@ import { toolset } from '../services/tools';
 export const askTools = toolset([
 	{
 		name: 'ask_user',
-		description: 'Ask the user a question and wait for the answer. Use when a decision is genuinely ambiguous.',
+		description:
+			'Ask the user a question and wait for the answer. Use when a decision is genuinely ambiguous. ' +
+			'In the chat panel the user can always type a custom answer, even when options are offered.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: false,
 		parameters: objectSchema(
 			{
 				question: { type: 'string' },
-				options: { type: 'array', items: { type: 'string' }, description: 'Optional choices.' },
-				multi: { type: 'boolean', description: 'Allow selecting more than one option.' },
+				options: {
+					type: 'array',
+					items: { type: 'string' },
+					description: 'Optional suggested choices; the user may still type a different answer.',
+				},
+				multi: {
+					type: 'boolean',
+					description: 'Allow selecting more than one option; typed text is submitted with them.',
+				},
 			},
 			['question'],
 		),

@@ -128,8 +128,10 @@ Highlights are below; the full implementation notes are linked at the end. The u
   installed, disabled or uninstalled from the settings panel.
 - **Markdown math and syntax highlighting** ship as optional or generated assets, not core weight.
 - **`ask_user` is inline in the chat.** The Comonad panel renders the model's question as a card in
-  the transcript — options as buttons (single-select) or checkboxes (multi-select), or a free-text
-  box — and the answer resumes the tool without a native popup. The `@comonad` participant and
+  the transcript — options as buttons (single-select) or checkboxes (multi-select), plus an
+  always-visible free-text field under them so an answer can be typed instead of chosen, or
+  submitted together with the checked options — and the answer resumes the tool without a native
+  popup. The `@comonad` participant and
   turns with no panel surface keep VS Code's quick pick/input box. A panel-surface question with no
   attached panel stays pending, blocks the turn, and is replayed when the panel reopens; an optional
   `questionNotification` (default on) shows an **Open Chat** notification.
