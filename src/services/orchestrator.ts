@@ -7,6 +7,7 @@ import { KeyedMutex } from '../lib/locks';
 import { labelOf } from '../lib/mailbox';
 import type { PlanRules } from '../lib/plan-rules';
 import {
+	MAX_ATTEMPTS,
 	boardOf,
 	formatBoard,
 	readyNodes,
@@ -161,7 +162,8 @@ export class Orchestrator extends Service {
 				throw new Error(`${id} depends on another task in this batch; run them in separate calls`);
 			}
 			if (node.attempts >= node.maxAttempts) {
-				throw new Error(`${id} has spent its ${node.maxAttempts} attempts; replan with a new definition`);
+				const next = node.attempts >= MAX_ATTEMPTS ? 'add a new node id' : 'raise maxAttempts or add a new node id';
+				throw new Error(`${id} has spent its ${node.maxAttempts} attempts; ${next}`);
 			}
 			const role = roles.get(node.role);
 			if (!role) {
@@ -211,12 +213,21 @@ export class Orchestrator extends Service {
 		const now = Date.now();
 		node.status = 'paused';
 		node.finishedAt = now;
+		const spentResumes = node.resumes >= node.maxResumes;
+		const spentAttempts = node.attempts >= node.maxAttempts;
+		const next = spentResumes
+			? `resume limit spent (${node.resumes}/${node.maxResumes}); ${
+					spentAttempts
+						? 'the attempt budget is also spent: add a new node id or take the task over'
+						: 'replan with a changed definition (which resets resumes) or add a new node id'
+				}`
+			: 'resume to continue';
 		node.rejection = {
 			code: 'budget_exhausted',
-			reason: `${report.stopped ?? 'budget'} budget exhausted${lastTool ? ` after ${lastTool}` : ''}; resume to continue`,
+			reason: `${report.stopped ?? 'budget'} budget exhausted${lastTool ? ` after ${lastTool}` : ''}; ${next}`,
 			budget: report,
 			partial,
-			resumable: true,
+			resumable: !spentResumes,
 			...(writes.length ? { writes } : {}),
 			at: now,
 		};
@@ -255,7 +266,11 @@ export class Orchestrator extends Service {
 				throw new Error(`${id} is ${node.status}, not paused`);
 			}
 			if (node.resumes >= node.maxResumes) {
-				throw new Error(`${id} has spent its ${node.maxResumes} resumes; replan with a new definition`);
+				const next =
+					node.attempts >= node.maxAttempts
+						? 'the attempt budget is also spent: add a new node id or take the task over'
+						: 'replan with a changed definition (which resets resumes) or add a new node id';
+				throw new Error(`${id} has spent its ${node.maxResumes} resumes; ${next}`);
 			}
 			if (!node.subagentSessionId) {
 				throw new Error(`${id} has no child session to resume`);
@@ -375,10 +390,15 @@ export class Orchestrator extends Service {
 							? 'verification_failed'
 							: 'worker_failed';
 			const spent = node.attempts >= node.maxAttempts;
+			const advice = spent
+				? node.attempts >= MAX_ATTEMPTS
+					? ' (attempt budget spent: add a new node id or take the task over)'
+					: ' (attempt budget spent: raise maxAttempts, add a new node id, or take the task over)'
+				: '';
 			node.status = 'rejected';
 			node.rejection = {
 				code,
-				reason: `${verdict.reason ?? 'not accepted'}${spent ? ' (attempt budget spent; replan with a new definition)' : ''}`,
+				reason: `${verdict.reason ?? 'not accepted'}${advice}`,
 				at: now,
 			};
 		}

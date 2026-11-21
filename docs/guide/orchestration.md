@@ -71,14 +71,20 @@ subagent hard cap narrow it further. `shell_test` writes only the test scratch t
 (tool calls), `tokens` (input + output) and `milliseconds` (wall clock). `0` means no limit. By
 default `subagentBudgetMode: inherit` copies the main agent's current four limits to the child;
 `custom` instead uses `subagentBudget` tightened by the role. A task budget can tighten either
-mode. A budget that runs out pauses the task, not rejects it: the child session and transcript
-survive, and `resume` continues them with a new segment budget without spending an attempt.
+mode, but it is only an upper bound: omit it for substantive work and never copy a role's default
+numbers into it, because a budget that is too small pauses the worker before it can report. A budget
+that runs out pauses the task, not rejects it: the child session and transcript survive, and
+`resume` continues them with a new segment budget without spending an attempt. A resume segment
+cannot be smaller than the previous segment; smaller dimensions are raised to the previous limits
+and the adjustment is reported in the tool result.
 
 The graph is declarative: on every revision send all nodes you still want. A running or verifying
 node blocks a revision. An accepted node may be kept unchanged; changing its definition is refused.
-A changed rejected or paused node resets to pending and keeps its attempt count. The graph has at
-most 32 nodes, six replans and two attempts per node by default; a paused node can be resumed up to
-`maxResumes` (three by default).
+A changed rejected or paused node resets to pending and keeps its attempt count, but its `resumes`
+counter goes back to 0: the new definition gets its full resume budget. If the node has also spent
+its attempts, the revision warning says so and `delegate` refuses until `maxAttempts` is raised or a
+new node id is used. The graph has at most 32 nodes, six replans and two attempts per node by
+default; a paused node can be resumed up to `maxResumes` (three by default).
 
 ## Delegating
 
@@ -94,8 +100,20 @@ After the worker batch finishes, the runtime verifies the successful nodes:
    with the scratch-only test shell and reports its exit code.
 
 Review verifiers run in parallel; command verifiers run one at a time. The verifier's final message
-is also a JSON envelope. Its self-declared `verdict` is advisory: acceptance is recomputed from the
-per-criterion `met` values, and a command criterion also needs matching `exitCode: 0` evidence.
+is also a JSON envelope. Each `acceptance` entry must use the task's exact criterion id, one entry
+per criterion; the runtime maps an equal-length list whose ids are all different positionally and
+records the mapping, but partial coverage or a count mismatch is an `invalid_output` rejection
+rather than a silent zero-check result. Its self-declared `verdict` is advisory: acceptance is
+recomputed from the per-criterion `met` values, and a command criterion also needs matching
+`exitCode: 0` evidence for the exact command string.
+
+Command criteria run against a read-only workspace with only the scratch tree writable. Prefer
+commands that pass there (a no-emit typecheck, or a test whose caches go to `$COMONAD_SCRATCH`); for
+a check that must write build artifacts, use a `review` criterion instead. If the exact command fails
+only because the workspace is read-only, the tester may run it in a byte-identical copy under
+`$COMONAD_SCRATCH` and must report the exact criterion command with that run's real exit code plus a
+`mirror: <path>` note. A failed command is never reported as exit 0, and a rejection reason names the
+criterion command and the command/exit code the tester actually observed.
 
 A write task must have at least one `review` or `command` criterion. The model has no tool that can
 mark a task accepted. A rejected node carries a code and reason; revise the graph within the attempt
@@ -150,7 +168,9 @@ thread where the user can approve it, and delegate read-only work plus independe
 Other limits: 32 nodes, 8 tasks per delegate or resume batch, 4 concurrent children, 6 replans, 2
 attempts per node and 3 resumes of a paused node by default. Stop aborts the root and its children;
 an interrupted running node is marked `interrupted` at the next root turn. A paused node is not
-interrupted: it keeps its child session and waits for `resume`.
+interrupted: it keeps its child session and waits for `resume`. When the pause used its last resume,
+the pause reason says so and points at a changed definition (which resets resumes), a new node id, or
+taking the task over; it no longer says "resume to continue".
 
 ## A small task graph
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Context } from 'cordis';
 import { effectiveCapabilities } from '../lib/agents';
-import type { BudgetInput } from '../lib/budget';
+import { clampResumeBudget, type BudgetDimension, type BudgetInput } from '../lib/budget';
 import { buildVerifierPrompt, buildWorkerTaskPrompt } from '../lib/agent-prompts';
 import { parseAgentEnvelope } from '../lib/agent-output';
 import { planRules } from '../lib/plan-rules';
@@ -11,6 +11,7 @@ import {
 	WRITE_TASK_CRITERION_RULE,
 	boardOf,
 	formatBoard,
+	mapReportedCriteria,
 	type TaskGraphAccess,
 	type TaskNode,
 	type TaskNodeInput,
@@ -40,7 +41,8 @@ const budgetSchema = {
 		milliseconds: { type: 'integer', minimum: 0, description: 'Wall-clock milliseconds. 0 = no limit.' },
 	},
 	additionalProperties: false,
-	description: 'Per-task native budget; each dimension can only tighten the role/global default.',
+	description:
+		'Per-task native budget; each dimension can only tighten the role/global default. On resume, a dimension below the previous segment is raised to it.',
 };
 
 const acceptanceSchema = {
@@ -130,7 +132,7 @@ export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
 		name: 'delegate',
 		description:
-			'Run 1..8 ready tasks from the current task graph in parallel. All selected tasks must be pending and ready; a batch may not contain dependencies within itself. Read and write tasks may run together; the runtime serialises writes to the same file and parallel workers can coordinate through the message tool. A worker that exhausts a native budget is paused, not rejected: use resume to continue its session. After the workers finish, the runtime derives fixed independent reviewer/tester children for review/command criteria. You cannot mark a task accepted; read the board and verdicts, then replan rejected work within its attempt budget.',
+			'Run 1..8 ready tasks from the current task graph in parallel. All selected tasks must be pending and ready; a batch may not contain dependencies within itself. Read and write tasks may run together; the runtime serialises writes to the same file and parallel workers can coordinate through the message tool. A worker that exhausts a native budget is paused, not rejected: use resume to continue its session when it has resumes left. After the workers finish, the runtime derives fixed independent reviewer/tester children for review/command criteria. You cannot mark a task accepted; read the board and verifier results, then replan rejected work within its attempt budget.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -324,7 +326,7 @@ export function orchestrateTools(ctx: Context): void {
 	ctx.tools.register({
 		name: 'resume',
 		description:
-			'Resume 1..8 paused tasks with a new segment budget. Resuming continues the same child session and transcript; it does not spend an attempt. The default segment budget is the task graph budget; pass a budget to set this segment. Each dimension is still capped by the role and global defaults. A resumed worker returns a new result and derived verifiers.',
+			'Resume 1..8 paused tasks with a new segment budget. Resuming continues the same child session and transcript; it does not spend an attempt. A segment budget is an upper bound and cannot be smaller than the previous segment: smaller dimensions are raised to its limits and reported in the result. Omit budget to use the node or default budget. If the pause reason says the resume limit is spent, replan instead.',
 		capability: 'ro',
 		needsNetwork: false,
 		needsWorkspace: true,
@@ -357,6 +359,8 @@ export function orchestrateTools(ctx: Context): void {
 					const roles = ctx.orchestrator.roles();
 					const rules = rulesOf(ctx, toolCtx);
 					const priorWrites = new Map<string, string[]>();
+					const budgets = new Map<string, BudgetInput | undefined>();
+					const raised: Array<{ id: string; dimensions: BudgetDimension[]; from: BudgetInput; to: BudgetInput }> = [];
 					for (const id of tasks) {
 						const node = graph.nodes.find((candidate) => candidate.id === id);
 						if (!node) {
@@ -385,6 +389,12 @@ export function orchestrateTools(ctx: Context): void {
 							return `Error: ${command}`;
 						}
 						priorWrites.set(id, [...(node.rejection?.writes ?? [])]);
+						const requested = input.budget ?? node.budget;
+						const adjusted = clampResumeBudget(node.rejection?.budget?.limits, requested);
+						budgets.set(id, adjusted.budget);
+						if (adjusted.clamped.length && adjusted.budget) {
+							raised.push({ id, dimensions: adjusted.clamped, from: requested ?? {}, to: adjusted.budget });
+						}
 					}
 					const runs = ctx.orchestrator.resume(access, tasks);
 					const settled = await Promise.all(
@@ -404,7 +414,7 @@ export function orchestrateTools(ctx: Context): void {
 								contract: 'worker',
 								capabilities: effectiveCapabilities(run.role, node.capabilities),
 								network: node.network ?? run.role.network,
-								budget: input.budget ?? node.budget,
+								budget: budgets.get(node.id),
 								resumeSessionId: node.subagentSessionId,
 								description: node.title,
 								...(tasks.length === 1 && toolCtx.callId ? { callId: toolCtx.callId } : {}),
@@ -481,8 +491,19 @@ export function orchestrateTools(ctx: Context): void {
 							ctx.orchestrator.finish(access, node.id);
 						}
 					}
+					const limitText = (value: number | undefined): string => (value && value > 0 ? String(value) : '∞');
+					const notice = raised.length
+						? `\n\nResume budgets raised (a segment cannot shrink the previous segment):\n${raised
+								.map(
+									({ id, dimensions, from, to }) =>
+										`- ${id}: ${dimensions
+											.map((dimension) => `${dimension} ${limitText(from[dimension])} -> ${limitText(to[dimension])}`)
+											.join(', ')}`,
+								)
+								.join('\n')}`
+						: '';
 					const final = access.get();
-					return final ? `${formatBoard(boardOf(final))}\n\n${detailsOf(final, tasks)}` : 'The task graph disappeared.';
+					return final ? `${formatBoard(boardOf(final))}\n\n${detailsOf(final, tasks)}${notice}` : 'The task graph disappeared.';
 				});
 			} catch (error) {
 				return FAILED(error);
@@ -552,17 +573,30 @@ async function runVerifier(
 		return;
 	}
 	const envelope = parsed.value;
-	const checks: TaskVerificationCheck[] = (envelope.acceptance ?? [])
-		.filter((criterion) => criteria.some((expected) => expected.id === criterion.id))
-		.map((criterion) => ({
-			id: criterion.id,
-			met: criterion.met,
-			...(criterion.note ? { note: criterion.note } : {}),
-			by: roleId,
-			...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
-			...(envelope.evidence.length ? { evidence: envelope.evidence } : {}),
-		}));
-	ctx.orchestrator.recordVerification(access, node.id, checks, envelope.summary, outcome.sessionId ?? '');
+	const match = mapReportedCriteria(criteria, envelope.acceptance ?? []);
+	if (!match.ok) {
+		const summary = envelope.summary.trim();
+		ctx.orchestrator.reject(access, node.id, {
+			code: 'invalid_output',
+			reason: `the ${roleId} acceptance does not cover the criteria: ${match.reason}${
+				summary ? `; verifier summary: ${summary.slice(0, 300)}` : ''
+			}`,
+			at: Date.now(),
+		});
+		return;
+	}
+	const checks: TaskVerificationCheck[] = match.criteria.map((criterion) => ({
+		id: criterion.id,
+		met: criterion.met,
+		...(criterion.note ? { note: criterion.note } : {}),
+		by: roleId,
+		...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
+		...(envelope.evidence.length ? { evidence: envelope.evidence } : {}),
+	}));
+	const summary = [envelope.summary, match.positional ? 'acceptance ids were mapped positionally to the task criteria' : '']
+		.filter(Boolean)
+		.join(' ');
+	ctx.orchestrator.recordVerification(access, node.id, checks, summary, outcome.sessionId ?? '');
 }
 
 function detailsOf(graph: { nodes: TaskNode[] }, ids: readonly string[]): string {
@@ -602,6 +636,9 @@ function detailsOf(graph: { nodes: TaskNode[] }, ids: readonly string[]): string
 			lines.push(
 				`  verified: ${node.verification.checks.map((check) => `${check.id}:${check.met ? 'pass' : 'fail'}`).join(', ')}`,
 			);
+		}
+		if (node.verification?.summary) {
+			lines.push(`  verifier: ${node.verification.summary.replace(/\s+/g, ' ').slice(0, 600)}`);
 		}
 		if (node.subagentSessionId) {
 			lines.push(`  child: ${node.subagentSessionId}`);

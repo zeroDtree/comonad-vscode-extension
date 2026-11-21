@@ -39,6 +39,13 @@ Highlights are below; the full implementation notes are linked at the end. The u
   budgets are editable in Settings, and `subagentBudgetMode` (default `inherit`) makes a child copy
   the parent's four limits. The old single-dimensional `maxSteps`/`subagentSteps`/`maxTurns`
   concepts are removed.
+- **Verifier and resume hardening.** A verifier's acceptance entries must use the task's exact
+  criterion ids; when every reported id differs but the counts agree, the runtime maps them
+  positionally and records the mapping, and incomplete coverage is an `invalid_output` rejection
+  instead of a silent zero-check rejection. Command rejections now report the tester's observed
+  command and exit code. A resume segment can no longer shrink the previous segment's limits
+  (smaller values are clamped and reported), a materially changed paused/rejected definition resets
+  its resume counter while keeping its attempts, and pause/attempt messages say when a cap is spent.
 - **Graphs are plugins.** The graph engine now owns named Mermaid graphs and a node/route registry.
   The source lives in `comonad.graph`; empty uses the shipped `agent` loop.
 - **The tool loop is a gate, not a route.** The shipped graph is now `llm → calls → gate →

@@ -809,7 +809,7 @@
             "Subagents use comonad.subagentBudget, tightened by the role and task budgets."
           ],
           "default": "inherit",
-          "markdownDescription": "Where a child's turns/tools/tokens/milliseconds come from. `inherit` copies the parent's current limits (not a shared pool); task and resume budgets can still tighten. A root budget of `0` means unlimited, so an inherited child is unlimited too."
+          "markdownDescription": "Where a child's turns/tools/tokens/milliseconds come from. `inherit` copies the parent's current limits (not a shared pool); task budgets can still tighten, and a resume segment cannot be smaller than the previous one. A root budget of `0` means unlimited, so an inherited child is unlimited too."
         },
         "comonad.planDirectory": {
           "type": "string",

@@ -30,8 +30,9 @@
 ## 编排工具
 
 `task_graph` 记录或修订编排器的任务图；`delegate` 并行执行 1–8 个 ready 任务；`task_status` 返回任务板、
-ready 节点、拒绝原因、子会话和最近邮箱消息；`resume` 用新的分段预算继续 paused 任务。只有根轮次能看到
-这些工具，子级白名单永远排除它们。
+ready 节点、拒绝原因、子会话和最近邮箱消息；`resume` 用新的分段预算继续 paused 任务，分段预算不能小于
+上一段（更小的维度会被抬高并报告），用完最后一次 resume 的 pause 会提示改定义或换新节点 id。只有根轮次
+能看到这些工具，子级白名单永远排除它们。
 
 只读会话只运行只读任务：`task_graph`、`delegate`、`resume` 拒绝新的或修订过的、有效能力含 `rw` 或验收
 需要 `command` 的任务；`accepted` 节点是历史，会保留。Plan 模式下用 `write_plan` 记录实现计划并停止本轮；
@@ -40,8 +41,12 @@ ready 节点、拒绝原因、子会话和最近邮箱消息；`resume` 用新�
 
 有效能力含 `rw` 的任务必须至少有一条 `review` 或 `command` 验收标准。worker 批次结束后，运行时派生
 **固定内置**的 `reviewer` 或 `tester` 子代理；项目里的同名文件不能削弱验收。worker/验证者的最终消息必须
-是单个 JSON envelope，格式错误即 `invalid_output`。结构性规则在工具 schema 与校验里；当前阶段的规则在
-动态 Tools 与 Orchestration 提示块里。详见[编排](/zh/guide/orchestration)。
+是单个 JSON envelope，格式错误即 `invalid_output`。每条 acceptance 必须使用任务的精确标准 id，一条标准
+一个条目；数量相等且 id 全不相同的列表会按位置映射并记录映射，覆盖不全则是 `invalid_output`。
+`command` 标准在只读工作区中运行，测试 shell 只写 scratch；若精确命令必须写工作区，tester 可以在
+`$COMONAD_SCRATCH` 下的逐字节副本中运行，并报告精确命令、真实退出码和 `mirror: <path>` note。
+结构性规则在工具 schema 与校验里；当前阶段的规则在动态 Tools 与 Orchestration 提示块里。详见
+[编排](/zh/guide/orchestration)。
 
 `message` 由编排器和所有子代理共享：每个聊天一个 append-only JSONL 邮箱，位于扩展存储。并行写之前用它
 声明文件，任务之间用它交换结果。其他代理的消息是不可信数据，不是指令。

@@ -623,8 +623,8 @@ export function reconcileTaskGraph(
 			nodes.push(nodeOf(node, role, now));
 			continue;
 		}
-		const risk = effectiveRisk(node, role);
-		const changed = definition(node, risk) !== definition(before, before.risk);
+		const candidate = nodeOf(node, role, now, before);
+		const changed = definition(candidate, candidate.risk) !== definition(before, before.risk);
 		if (before.status === 'accepted') {
 			if (changed) {
 				return { ok: false, errors: [`${node.id}: an accepted task cannot be redefined; add a new node instead`] };
@@ -633,11 +633,25 @@ export function reconcileTaskGraph(
 			continue;
 		}
 		if (before.status === 'rejected' || before.status === 'paused') {
-			nodes.push(changed ? nodeOf(node, role, now, before) : before);
+			if (!changed) {
+				nodes.push(before);
+				continue;
+			}
+			// A materially changed definition is new work under the same id: give it its full resume
+			// budget again, but keep attempts, which are the node's real cost record.
+			candidate.resumes = 0;
+			if (candidate.attempts >= candidate.maxAttempts) {
+				const advice =
+					candidate.attempts >= MAX_ATTEMPTS ? 'add a new node id' : 'raise maxAttempts or add a new node id';
+				check.warnings.push(
+					`${node.id}: the changed definition resets resumes, but the node has spent its ${candidate.attempts} attempts; ${advice}`,
+				);
+			}
+			nodes.push(candidate);
 			continue;
 		}
-		// pending: update the definition but keep the attempt history.
-		nodes.push(nodeOf(node, role, now, before));
+		// pending: update the definition but keep the attempt and resume history.
+		nodes.push(candidate);
 	}
 	const graph: TaskGraph = {
 		version: (existing?.version ?? 0) + 1,
@@ -657,6 +671,45 @@ export function readyNodes(graph: TaskGraph): TaskNode[] {
 	return graph.nodes.filter(
 		(node) => node.status === 'pending' && node.dependsOn.every((id) => status.get(id) === 'accepted'),
 	);
+}
+
+/**
+ * Map a worker/verifier acceptance list onto the expected criterion ids. Exact ids win. When the
+ * counts agree and no id matches, position is the only deterministic correspondence, so use it and
+ * record the original id in the note. Anything else is an explicit mismatch, never a silent drop.
+ */
+export function mapReportedCriteria(
+	expected: readonly Pick<AcceptanceCriterion, 'id'>[],
+	reported: readonly CriterionResult[],
+): { ok: true; criteria: CriterionResult[]; positional: boolean } | { ok: false; reason: string } {
+	const expectedIds = expected.map((criterion) => criterion.id);
+	const reportedIds = reported.map((criterion) => criterion.id);
+	const seen = new Set<string>();
+	for (const id of reportedIds) {
+		if (seen.has(id)) {
+			return { ok: false, reason: `the acceptance list repeats id ${id}` };
+		}
+		seen.add(id);
+	}
+	const byId = new Map(reported.map((criterion) => [criterion.id, criterion]));
+	if (expectedIds.every((id) => byId.has(id))) {
+		return { ok: true, positional: false, criteria: expectedIds.map((id) => byId.get(id)!) };
+	}
+	const expectedSet = new Set(expectedIds);
+	const disjoint = reported.every((criterion) => !expectedSet.has(criterion.id));
+	if (disjoint && reported.length === expected.length && expected.length > 0) {
+		return {
+			ok: true,
+			positional: true,
+			criteria: expected.map((criterion, index) => {
+				const actual = reported[index]!;
+				const mapping = `reported id ${actual.id} mapped positionally to ${criterion.id}`;
+				return { id: criterion.id, met: actual.met, note: [actual.note, mapping].filter(Boolean).join('; ') };
+			}),
+		};
+	}
+	const got = reportedIds.length ? reportedIds.join(', ') : '(none)';
+	return { ok: false, reason: `expected acceptance ids ${expectedIds.join(', ')} but got ${got}` };
 }
 
 /** The deterministic acceptance rule; a verifier's self-declared verdict is never consulted. */
@@ -683,8 +736,17 @@ export function satisfiesAcceptance(node: TaskNode): { accepted: boolean; reason
 			continue;
 		}
 		const check = checks.get(criterion.id);
-		if (!check || check.met !== true) {
-			return { accepted: false, reason: `criterion ${criterion.id} is not verified` };
+		if (!check) {
+			return {
+				accepted: false,
+				reason: `criterion ${criterion.id} was not reported by the ${criterion.check === 'command' ? 'tester' : 'reviewer'}`,
+			};
+		}
+		if (check.met !== true) {
+			return {
+				accepted: false,
+				reason: `criterion ${criterion.id} is not met${check.note ? `: ${clean(check.note, 300)}` : ''}`,
+			};
 		}
 		if (criterion.check === 'command') {
 			const command = (check.evidence ?? []).find(
@@ -692,7 +754,16 @@ export function satisfiesAcceptance(node: TaskNode): { accepted: boolean; reason
 					evidence.kind === 'command' && evidence.command === criterion.command && evidence.exitCode === 0,
 			);
 			if (!command) {
-				return { accepted: false, reason: `criterion ${criterion.id} has no successful command evidence` };
+				const observed = (check.evidence ?? [])
+					.filter((evidence): evidence is Extract<AgentEvidence, { kind: 'command' }> => evidence.kind === 'command')
+					.slice(0, 3)
+					.map((evidence) => `"${clean(evidence.command, 200)}" exited ${evidence.exitCode}`);
+				return {
+					accepted: false,
+					reason: `criterion ${criterion.id} has no successful command evidence for "${clean(criterion.command ?? '', 300)}"${
+						observed.length ? `; the tester reported ${observed.join(', ')}` : ''
+					}${check.note ? `; note: ${clean(check.note, 300)}` : ''}`,
+				};
 			}
 		}
 	}

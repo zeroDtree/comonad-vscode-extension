@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
-import { buildOrchestratorBody } from '../lib/agent-prompts';
+import {
+	buildOrchestratorBody,
+	buildSubagentSystemPrompt,
+	buildVerifierPrompt,
+	buildWorkerTaskPrompt,
+} from '../lib/agent-prompts';
 import { planRules } from '../lib/plan-rules';
 import type { Capability } from '../lib/types';
 import {
@@ -172,5 +177,63 @@ suite('Orchestrator prompt', () => {
 		assert.deepStrictEqual(planner.capabilities, ['ro', 'ro_plan', 'shell_ro']);
 		assert.ok(!planner.capabilities.includes('rw'));
 		assert.ok(!planner.capabilities.includes('shell_test'));
+	});
+
+	test('the budget and resume protocol refuses shrinking segments and copied role defaults', () => {
+		const text = body();
+		assert.match(text, /A task budget is only an upper bound: omit it for substantive work/);
+		assert.match(text, /Never pass a smaller segment budget than the previous segment/);
+		assert.match(text, /Available roles \(the numbers in brackets are the role's default budget/);
+	});
+
+	test('command criteria are described as scratch-only only when the session can run them', () => {
+		assert.match(body({ canCommand: true }), /A command criterion runs in a read-only workspace/);
+		assert.ok(!body({ canCommand: false }).includes('A command criterion runs in a read-only workspace'));
+	});
+});
+
+suite('Subagent contracts', () => {
+	const role = BUILTIN_ROLE_BY_ID.get('coder')!;
+	const subagent = (contract: 'worker' | 'verifier') =>
+		buildSubagentSystemPrompt({
+			role,
+			contract,
+			network: false,
+			sandbox: 'workspace-write',
+			capabilities: ['ro', 'rw'],
+		});
+
+	test('the contracts no longer teach invented acceptance ids', () => {
+		for (const contract of ['worker', 'verifier'] as const) {
+			const text = subagent(contract);
+			assert.ok(!text.includes('"id":"a1"'), `${contract} must not show a1`);
+			assert.match(text, /Use the exact acceptance ids/);
+			assert.match(text, /never invent ids such as a1/);
+		}
+		const verifier = subagent('verifier');
+		assert.match(verifier, /ignore any acceptance ids quoted in the worker report/);
+		assert.match(verifier, /run_shell_test/);
+		assert.match(verifier, /mirror: <path>/);
+		assert.match(verifier, /Never report exit code 0 for a command that failed/);
+	});
+
+	test('the task prompts restate the real acceptance ids', () => {
+		const acceptance = [
+			{ id: 'check', description: 'typecheck passes', check: 'command' as const, command: 'npx tsc --noEmit' },
+			{ id: 'build', description: 'artifacts exist', check: 'command' as const, command: 'test -f dist/index.js' },
+		];
+		const rule = /Use these exact acceptance ids, one entry per criterion: check, build\./;
+		const worker = buildWorkerTaskPrompt({ taskId: 'code', title: 'Code', objective: 'x', acceptance });
+		assert.match(worker, rule);
+		const verifier = buildVerifierPrompt({
+			taskId: 'code',
+			title: 'Code',
+			role: 'coder',
+			objective: 'x',
+			acceptance,
+			workerReport: 'ok',
+			workerWrites: [],
+		});
+		assert.match(verifier, rule);
 	});
 });

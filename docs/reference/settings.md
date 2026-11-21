@@ -106,12 +106,14 @@ stores the full effective policy, its revision and its parent. See
 Budgets: every run has four independent native limits — `turns` (model round trips), `tools`
 (tool calls), `tokens` (provider input + output) and `milliseconds` (wall clock). `0` means no
 limit. `subagentBudgetMode` defaults to `inherit`: a child copies the main agent's current four
-limits (not its remaining budget) and ignores `subagentBudget` and the role budget, while a task or
-resume budget can still tighten. Under `custom`, the child takes the tightest non-zero value per
-dimension across `subagentBudget`, the role's own budget and the task's `budget`. A run that reaches
-a limit stops at a message boundary, keeps a partial transcript and, for a child, pauses the task.
-`resume` continues the same child session with a new segment budget; it does not count as a new
-attempt. Because the root default is all zeros, `inherit` with the default root settings leaves a
+limits (not its remaining budget) and ignores `subagentBudget` and the role budget, while a task
+budget can still tighten. Under `custom`, the child takes the tightest non-zero value per dimension
+across `subagentBudget`, the role's own budget and the task's `budget`. A task budget is only an upper
+bound: omit it for substantive work rather than copying a role's default. A run that reaches a limit
+stops at a message boundary, keeps a partial transcript and, for a child, pauses the task. `resume`
+continues the same child session with a new segment budget; it does not count as a new attempt, and
+the new segment cannot be smaller than the previous one (smaller dimensions are raised and
+reported). Because the root default is all zeros, `inherit` with the default root settings leaves a
 child unlimited; set a finite root budget if you want a cap.
 
 ## Checkpoints

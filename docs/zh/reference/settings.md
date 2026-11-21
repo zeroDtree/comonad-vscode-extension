@@ -97,10 +97,11 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件。面板�
 预算：每次运行有四个独立原生上限——`turns`（模型往返次数）、`tools`（工具调用次数）、`tokens`
 （输入 + 输出 token）、`milliseconds`（墙钟毫秒）。`0` 表示无限制。`subagentBudgetMode` 默认
 `inherit`：子代理复制主 Agent 当前的四维上限（不是剩余预算），忽略 `subagentBudget` 与角色预算；
-任务或 resume 预算仍可收紧。`custom` 下则按维度取 `subagentBudget`、角色预算、任务 `budget` 中
-最小的非零值。任一维触顶后，运行停在消息边界，保留 partial transcript；子任务进入 `paused`。
-`resume` 用新的分段预算继续同一子会话，不消耗 attempt。因为 root 默认全 0，默认 `inherit` 下子代理
-也不限；需要上限时给 root 设置有限值。见[设置](/zh/reference/settings#编排器与子-agent)。
+任务预算仍可收紧。`custom` 下则按维度取 `subagentBudget`、角色预算、任务 `budget` 中最小的非零值。
+任务预算只是上限：实质性工作应省略它，而不是抄角色默认值。任一维触顶后，运行停在消息边界，保留
+partial transcript；子任务进入 `paused`。`resume` 用新的分段预算继续同一子会话，不消耗 attempt，且
+新分段不能小于上一段（更小的维度会被抬高并报告）。因为 root 默认全 0，默认 `inherit` 下子代理也不限；
+需要上限时给 root 设置有限值。见[设置](/zh/reference/settings#编排器与子-agent)。
 
 ## 检查点
 

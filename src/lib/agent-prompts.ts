@@ -21,12 +21,16 @@ export interface SubagentPromptInput {
 }
 
 const workerContract = `Your final message must be exactly one JSON object, with no prose outside it:
-{"status":"ok|blocked|failed","summary":"...","evidence":[{"kind":"file","path":"..."}],"acceptance":[{"id":"a1","met":true,"note":"..."}],"questions":[]}
+{"status":"ok|blocked|failed","summary":"...","evidence":[{"kind":"file","path":"..."}],"acceptance":[{"id":"<criterion id>","met":true,"note":"..."}],"questions":[]}
 Evidence kinds are file (path, note), search (query, note), command (command, exitCode, output) and note (text).
+Use the exact acceptance ids from the task, one entry per criterion; never invent ids such as a1.
 Base every acceptance claim on evidence you actually produced.`;
 
 const verifierContract = `Your final message must be exactly one JSON object, with no prose outside it:
-{"verdict":"pass|fail","summary":"...","evidence":[{"kind":"file","path":"..."}],"acceptance":[{"id":"a1","met":true,"note":"..."}]}
+{"verdict":"pass|fail","summary":"...","evidence":[{"kind":"file","path":"..."}],"acceptance":[{"id":"<criterion id>","met":true,"note":"..."}]}
+Use the exact acceptance ids from the task's Acceptance criteria, one entry per criterion; never invent ids such as a1, and ignore any acceptance ids quoted in the worker report.
+Evidence kinds are file (path, note), search (query, note), command (command, exitCode, output) and note (text).
+For a command criterion, run the exact command with run_shell_test and report it as command evidence with its exit code. The workspace is read-only except the scratch tree; if the command fails only because it must write the workspace, copy the workspace to a byte-identical tree under $COMONAD_SCRATCH, run the exact command there, and write "mirror: <path>" in your note. Never report exit code 0 for a command that failed.
 Inspect the workspace and diff yourself. Do not modify anything.
 Set "met" per criterion from your own inspection; use "verdict":"pass" only when every criterion is met.`;
 
@@ -73,6 +77,13 @@ function criteriaLines(criteria: readonly AcceptanceCriterion[]): string {
 		.join('\n');
 }
 
+/** Restated beside the criteria themselves, where a model is least likely to copy the generic example. */
+function criterionIdRule(criteria: readonly AcceptanceCriterion[]): string {
+	return criteria.length
+		? `Use these exact acceptance ids, one entry per criterion: ${criteria.map((criterion) => criterion.id).join(', ')}.`
+		: '';
+}
+
 export function buildWorkerTaskPrompt(input: WorkerPromptInput): string {
 	const blocks = [
 		`# Task ${input.taskId}: ${input.title}`,
@@ -80,6 +91,7 @@ export function buildWorkerTaskPrompt(input: WorkerPromptInput): string {
 		input.inputs ? `Inputs: ${input.inputs}` : '',
 		input.outputs ? `Expected outputs: ${input.outputs}` : '',
 		`Acceptance criteria:\n${criteriaLines(input.acceptance)}`,
+		criterionIdRule(input.acceptance),
 		input.peers?.length
 			? `Parallel peers (use the message tool to coordinate overlapping writes):\n${input.peers
 					.map((peer) => `- ${peer.id} (${peer.role})${peer.writes.length ? ` writes ${peer.writes.join(', ')}` : ''}`)
@@ -106,6 +118,7 @@ export function buildVerifierPrompt(input: VerifierPromptInput): string {
 		`Worker role: ${input.role}`,
 		`Objective: ${input.objective}`,
 		`Acceptance criteria:\n${criteriaLines(input.acceptance)}`,
+		criterionIdRule(input.acceptance),
 		`Worker writes: ${input.workerWrites.length ? input.workerWrites.join(', ') : '(none reported)'}`,
 		`Worker report:\n${input.workerReport}`,
 		'Inspect the workspace and the diff independently. Do not modify anything. Return the verifier JSON contract as your final message.',
@@ -148,7 +161,7 @@ export function buildOrchestratorBody(input: OrchestratorBodyInput): string {
 				`This is Plan mode: the session is read-only. Answer directly when a few read-only calls are enough; otherwise delegate only read-only research nodes (roles without rw) with evidence or review acceptance criteria.
 ${limitSentence}
 ${deliverable}
-Before summarizing, check task_status and the verdicts of any research you delegated. A task paused by a budget keeps its child session; resume it rather than replanning.`,
+Before summarizing, check task_status and the verdicts of any research you delegated. A task paused by a budget keeps its child session; resume it rather than replanning unless the pause reason says the resume limit is spent.`,
 			].join('\n')
 		: [
 				agent,
@@ -158,16 +171,19 @@ Before summarizing, check task_status and the verdicts of any research you deleg
 				delegate,
 				limitSentence,
 				writeRule,
-				'You cannot mark a task accepted. Read the verifier verdicts, retry rejected work only through a revised task_graph definition within its attempt budget, and replan or report the blocker when the budget is spent.',
-				'A task node has four independent native budgets: turns (model round trips), tools (tool calls), tokens (input+output) and milliseconds (wall clock). 0 means no limit; a role default and a task budget can only tighten. Give implementation work realistic turns and tools; a budget that is too small pauses the worker before it can report.',
-				'A task paused by a budget is not rejected: its child session and transcript are intact. Use resume with a new segment budget. Resuming does not spend an attempt. Prefer resume over replanning a paused task; only resume when the partial result shows progress, otherwise split the task or take it over.',
+				'You cannot mark a task accepted. Read the verifier results, retry rejected work only through a revised task_graph definition within its attempt budget, and replan or report the blocker when the budget is spent.',
+				'A task node has four independent native budgets: turns (model round trips), tools (tool calls), tokens (input+output) and milliseconds (wall clock). 0 means no limit. A task budget is only an upper bound: omit it for substantive work and never copy a role line\'s numbers into it: a budget that is too small pauses the worker before it can report.',
+				rules.canCommandCriteria
+					? 'A command criterion runs in a read-only workspace with only the scratch tree writable: choose commands that pass there (a no-emit typecheck, or a test whose caches go to $COMONAD_SCRATCH); if the check must write build artifacts, use a review criterion instead.'
+					: '',
+				'A task paused by a budget is not rejected: its child session and transcript are intact. Use resume to continue it; resuming does not spend an attempt. Prefer resume over replanning a paused task, and only resume when the partial result shows progress. Never pass a smaller segment budget than the previous segment: a segment budget is an upper bound, so shrinking only guarantees another pause. If the pause reason says the resume limit is spent, replan with a changed definition (which resets resumes), add a new node id, or take the task over.',
 				'Before delivering, check task_status. The final answer must distinguish what was verified, the files and commands involved, the sources, the assumptions and limitations, and any paused or unfinished task.',
 			]
 				.filter(Boolean)
 				.join('\n');
 	const blocks = [
 		protocol,
-		'Available roles:',
+		'Available roles (the numbers in brackets are the role\'s default budget, used only when subagentBudgetMode is custom):',
 		agentLines(input.roles),
 		input.board ? `Current task graph:\n${input.board}` : '',
 		input.messages?.length ? `Recent coordination messages:\n${input.messages.map((message) => `- ${message}`).join('\n')}` : '',

@@ -5,6 +5,7 @@ import {
 	boardOf,
 	checkTaskGraph,
 	formatBoard,
+	mapReportedCriteria,
 	readyNodes,
 	reconcileTaskGraph,
 	sanitizeTaskGraph,
@@ -158,6 +159,49 @@ suite('Task graph reconciliation', () => {
 		assert.strictEqual(reset.graph.nodes[0]!.rejection, undefined);
 	});
 
+	test('a changed paused or rejected definition resets resumes but keeps attempts', () => {
+		const first = graphOf();
+		const paused: TaskGraph = {
+			...first,
+			nodes: [{ ...first.nodes[0]!, status: 'paused', attempts: 1, resumes: 3, maxResumes: 3, subagentSessionId: 'sub-1' }],
+		};
+		const changed = reconcileTaskGraph(paused, graphInput(node({ objective: 'new work' })), roles, 2, 2);
+		assert.ok(changed.ok, changed.ok ? '' : changed.errors.join('\n'));
+		assert.strictEqual(changed.graph.nodes[0]!.status, 'pending');
+		assert.strictEqual(changed.graph.nodes[0]!.attempts, 1);
+		assert.strictEqual(changed.graph.nodes[0]!.resumes, 0);
+		assert.strictEqual(changed.graph.nodes[0]!.subagentSessionId, undefined);
+
+		const unchanged = reconcileTaskGraph(paused, graphInput(node()), roles, 2, 2);
+		assert.ok(unchanged.ok, unchanged.ok ? '' : unchanged.errors.join('\n'));
+		assert.strictEqual(unchanged.graph.nodes[0]!.status, 'paused');
+		assert.strictEqual(unchanged.graph.nodes[0]!.resumes, 3);
+		assert.strictEqual(unchanged.graph.nodes[0]!.subagentSessionId, 'sub-1');
+	});
+
+	test('changing maxResumes counts as a new definition and a spent attempt count warns', () => {
+		const first = graphOf();
+		const exhausted: TaskGraph = {
+			...first,
+			nodes: [
+				{
+					...first.nodes[0]!,
+					status: 'rejected',
+					attempts: 2,
+					resumes: 3,
+					maxResumes: 3,
+					rejection: { code: 'verification_failed', reason: 'no', at: 1 },
+				},
+			],
+		};
+		const rewritten = reconcileTaskGraph(exhausted, graphInput(node({ maxResumes: 5 })), roles, 2, 2);
+		assert.ok(rewritten.ok, rewritten.ok ? '' : rewritten.errors.join('\n'));
+		assert.strictEqual(rewritten.graph.nodes[0]!.maxResumes, 5);
+		assert.strictEqual(rewritten.graph.nodes[0]!.resumes, 0);
+		assert.strictEqual(rewritten.graph.nodes[0]!.attempts, 2);
+		assert.ok(rewritten.warnings.some((warning) => /resets resumes/.test(warning)));
+	});
+
 	test('running tasks and the replan cap stop a revision', () => {
 		const first = graphOf();
 		const running = { ...first, nodes: [{ ...first.nodes[0]!, status: 'running' as const }] };
@@ -218,6 +262,78 @@ suite('Task acceptance', () => {
 		assert.ok(!satisfiesAcceptance(nodeValue).accepted, 'a failed command is not accepted');
 		nodeValue.verification.checks[0]!.evidence = [{ kind: 'command', command: 'false', exitCode: 0 }];
 		assert.ok(!satisfiesAcceptance(nodeValue).accepted, 'a different command is not accepted');
+	});
+
+	test('a missing or failed check names what the verifier reported', () => {
+		const nodeValue = graphOf(node({ acceptance: [command('check', 'npm test')] })).nodes[0]!;
+		nodeValue.result = { status: 'ok', summary: 'x', evidence: [{ kind: 'note', text: 'x' }], criteria: [], writes: [], at: 1 };
+		nodeValue.verification = { summary: 'nothing', checks: [], at: 2 };
+		assert.match(satisfiesAcceptance(nodeValue).reason ?? '', /was not reported by the tester/);
+
+		nodeValue.verification.checks = [{ id: 'check', met: false, by: 'tester', note: 'EPERM' }];
+		assert.match(satisfiesAcceptance(nodeValue).reason ?? '', /not met: EPERM/);
+
+		nodeValue.verification.checks = [
+			{ id: 'check', met: true, by: 'tester', evidence: [{ kind: 'command', command: 'npm test', exitCode: 1 }], note: 'read-only' },
+		];
+		const reason = satisfiesAcceptance(nodeValue).reason ?? '';
+		assert.match(reason, /no successful command evidence for "npm test"/);
+		assert.match(reason, /"npm test" exited 1/);
+		assert.match(reason, /note: read-only/);
+	});
+});
+
+suite('Acceptance id mapping', () => {
+	const expected = [{ id: 'check' }, { id: 'build' }];
+
+	test('exact ids win regardless of order and extra entries are ignored', () => {
+		const match = mapReportedCriteria(expected, [
+			{ id: 'build', met: true },
+			{ id: 'check', met: false },
+			{ id: 'extra', met: true },
+		]);
+		assert.ok(match.ok);
+		assert.strictEqual(match.positional, false);
+		assert.deepStrictEqual(
+			match.criteria.map((criterion) => [criterion.id, criterion.met]),
+			[
+				['check', false],
+				['build', true],
+			],
+		);
+	});
+
+	test('equal-length all-different ids map positionally and record the mapping', () => {
+		const match = mapReportedCriteria(expected, [
+			{ id: 'a1', met: true, note: 'ran' },
+			{ id: 'a2', met: false },
+		]);
+		assert.ok(match.ok);
+		assert.strictEqual(match.positional, true);
+		assert.deepStrictEqual(
+			match.criteria.map((criterion) => [criterion.id, criterion.met]),
+			[
+				['check', true],
+				['build', false],
+			],
+		);
+		assert.match(match.criteria[0]!.note ?? '', /a1 mapped positionally to check/);
+	});
+
+	test('partial overlap, a count mismatch and duplicate ids are refused', () => {
+		assert.ok(!mapReportedCriteria(expected, [{ id: 'check', met: true }, { id: 'a2', met: true }]).ok);
+		const mismatch = mapReportedCriteria(expected, [
+			{ id: 'a1', met: true },
+			{ id: 'a2', met: true },
+			{ id: 'a3', met: true },
+		]);
+		assert.ok(!mismatch.ok);
+		assert.match(mismatch.reason, /expected acceptance ids check, build but got a1, a2, a3/);
+		const duplicate = mapReportedCriteria(expected, [
+			{ id: 'check', met: true },
+			{ id: 'check', met: false },
+		]);
+		assert.ok(!duplicate.ok);
 	});
 });
 

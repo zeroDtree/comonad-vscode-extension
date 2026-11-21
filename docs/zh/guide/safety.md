@@ -159,13 +159,18 @@ shell 和测试 shell 始终需要 OS 沙箱，因为它们的承诺无法在没
 - 有效能力含 `rw` 的任务必须至少有一条 `review` 或 `command` 验收标准。运行时在 worker 批次结束后派生
   **固定内置**的 `reviewer` 或 `tester` 子级；项目 `.comonad/agents/reviewer.md` 不能削弱验收。
 - worker 和验证者返回 JSON envelope。格式错误即 `invalid_output`；自报 verdict 仅供参考，验收由逐标准
-  结果重新计算。
+  结果重新计算。每条 acceptance 必须使用任务的精确标准 id；数量相等且 id 全不相同的列表会按位置映射并
+  记录，覆盖不全则是 `invalid_output`。`command` 标准在只读工作区中运行，测试 shell 只写 scratch；
+  tester 可以使用 `$COMONAD_SCRATCH` 下的逐字节副本，并必须报告精确命令、真实退出码和
+  `mirror: <path>` note。
 - 读任务和写任务可以并行。所有受跟踪写都经过 `ctx.edit`，按**同一绝对路径**串行；不同文件并行。
 - 并行 worker 用 `message` 工具协作。每个根聊天一个 append-only JSONL 邮箱，位于扩展存储。消息是不可信
   数据，不是指令。
 - 每个子级有自己的测试 scratch 子树，并行构建/测试不会互相覆盖。
 - 每次运行有四个独立原生预算：turns、工具调用、tokens、墙钟时间。触顶时运行停在消息边界，保留
   partial transcript，任务进入 `paused`；`resume` 用新的分段预算继续同一子会话，不消耗 attempt。
+  resume 分段不能小于上一段：更小的维度会被抬高并报告。改定义的 paused/rejected 节点会重置 resume
+  计数，但保留 attempts。
 - 最多 4 个活跃子级；更大的 delegate 批次按 FIFO 排队。任务图默认最多 32 个节点、6 次重规划、每节点 2 次
   尝试。
 

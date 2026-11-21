@@ -241,7 +241,7 @@ export const shellTools = toolset([
 	{
 		name: 'run_shell_test',
 		description:
-			'Run a command with the rest of the workspace read-only and only the scratch directory (inside .comonad/scratch) writable. Use for tests, linters and builds; TMPDIR, HOME, XDG_CACHE_HOME and COMONAD_SCRATCH already point into that directory. Writes elsewhere in the workspace fail. Pass timeout (seconds) for a slow command; the maximum is 300.',
+			'Run a command with the rest of the workspace read-only and only the scratch directory (inside .comonad/scratch) writable. Use for tests, linters and builds; TMPDIR, HOME, XDG_CACHE_HOME and COMONAD_SCRATCH already point into that directory. Writes elsewhere in the workspace fail, so a build that emits next to its config needs a copy of the workspace inside the scratch tree. Pass timeout (seconds) for a slow command; the maximum is 300.',
 		capability: 'shell_test',
 		needsNetwork: false,
 		needsWorkspace: true,

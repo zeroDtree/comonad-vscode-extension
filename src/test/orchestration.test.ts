@@ -5,11 +5,13 @@ import { join } from 'node:path';
 import { createTestKernel } from './harness';
 import { BUILTIN_ROLES } from '../lib/agents';
 import { COMONAD_BLOCK } from '../lib/blocks';
+import { clampResumeBudget } from '../lib/budget';
 import { reconcileTaskGraph } from '../lib/task-graph';
 import { fsTools } from '../tools/fs';
 import { messageTools } from '../tools/message';
 import { orchestrateTools } from '../tools/orchestrate';
 import { planTools } from '../tools/plan';
+import { shellTools } from '../tools/shell';
 import type { ToolCall } from '../lib/types';
 
 const reply = (content: string, toolCalls: ToolCall[] = []) => ({
@@ -149,12 +151,14 @@ suite('Orchestrator task loop', () => {
 		try {
 			const workspace = kernel.host.workspace();
 			let childCalls = 0;
+			const childSystems: string[] = [];
 			kernel.ctx.llm.use({
 				name: 'budget-orchestrator',
 				async chat(request) {
 					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
 					if (system.includes('You are the coder subagent of Comonad')) {
 						childCalls += 1;
+						childSystems.push(system);
 						const last = request.messages[request.messages.length - 1];
 						if (last?.role === 'tool') {
 							return reply(
@@ -232,6 +236,9 @@ suite('Orchestrator task loop', () => {
 			);
 			const resumed = parent.transcript.find((message) => message.role === 'tool' && message.toolCallId === 'resume');
 			assert.ok(resumed, 'the root saw the resume result');
+			assert.match(resumed.content ?? '', /Resume budgets raised/);
+			assert.match(resumed.content ?? '', /turns 4 -> 16/);
+			assert.match(childSystems[1] ?? '', /16 turns, 4 tools/, 'the resumed segment gets the raised turn limit');
 		} finally {
 			await kernel.dispose();
 		}
@@ -723,6 +730,119 @@ suite('Orchestrator task loop', () => {
 			assert.match(result.content ?? '', /Plan mode delegates only read-only research/);
 			assert.strictEqual(session.taskGraph!.nodes[0]!.status, 'pending', 'the task did not start');
 			assert.deepStrictEqual(starts, [], 'no child session was spawned');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+});
+
+suite('Resume budget clamp', () => {
+	test('a resume segment cannot shrink the previous segment', () => {
+		const previous = { turns: 16, tools: 50, tokens: 0, milliseconds: 0 };
+		assert.deepStrictEqual(clampResumeBudget(previous, { turns: 12, tools: 30, tokens: 5 }), {
+			budget: { turns: 16, tools: 50, tokens: 0 },
+			clamped: ['turns', 'tools', 'tokens'],
+		});
+		assert.deepStrictEqual(clampResumeBudget(previous, { turns: 32, tools: 60 }), {
+			budget: { turns: 32, tools: 60 },
+			clamped: [],
+		});
+		assert.deepStrictEqual(clampResumeBudget(undefined, { turns: 1 }), { budget: { turns: 1 }, clamped: [] });
+		assert.deepStrictEqual(clampResumeBudget(previous, undefined), { budget: undefined, clamped: [] });
+	});
+});
+
+suite('Verifier acceptance mapping', () => {
+	async function commandTaskKernel(tester: { acceptance: unknown[]; evidence: unknown[]; verdict?: string }) {
+		const kernel = await createTestKernel();
+		kernel.ctx.llm.use({
+			name: `command-orchestrator-${Math.random()}`,
+			async chat(request) {
+				const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+				if (system.includes('You are the coder subagent of Comonad')) {
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'tool') {
+						return reply(
+							JSON.stringify({
+								status: 'ok',
+								summary: 'wrote made.txt',
+								evidence: [{ kind: 'file', path: 'made.txt' }],
+								acceptance: [],
+							}),
+						);
+					}
+					return reply('', [
+						{ id: 'write-made', name: 'write_file', arguments: JSON.stringify({ path: 'made.txt', content: 'made\n' }) },
+					]);
+				}
+				if (system.includes('You are the tester subagent of Comonad')) {
+					return reply(
+						JSON.stringify({
+							verdict: tester.verdict ?? 'pass',
+							summary: 'ran the command',
+							evidence: tester.evidence,
+							acceptance: tester.acceptance,
+						}),
+					);
+				}
+				const last = rootStep(request);
+				if (!last) {
+					return reply('', [
+						graphCall([
+							{
+								id: 'code',
+								title: 'Write made.txt',
+								role: 'coder',
+								objective: 'Create made.txt.',
+								writes: ['made.txt'],
+								acceptance: [{ id: 'check', description: 'true exits 0', check: 'command', command: 'true' }],
+							},
+						]),
+					]);
+				}
+				if (last === 'task_graph') {
+					return reply('', [delegateCall(['code'])]);
+				}
+				return reply('done');
+			},
+		});
+		await kernel.ctx.plugin(fsTools);
+		await kernel.ctx.plugin(shellTools);
+		await kernel.ctx.plugin(orchestrateTools);
+		return kernel;
+	}
+
+	test('an equal-length all-different id list maps positionally and accepts', async () => {
+		const kernel = await commandTaskKernel({
+			acceptance: [{ id: 'a1', met: true, note: 'ran true' }],
+			evidence: [{ kind: 'command', command: 'true', exitCode: 0 }],
+		});
+		try {
+			await kernel.ctx.agent.runTurn({ text: 'make made.txt', surface: 'test' });
+			const node = kernel.ctx.sessions.active()!.taskGraph!.nodes[0]!;
+			assert.strictEqual(node.status, 'accepted');
+			assert.strictEqual(node.verification?.checks[0]?.id, 'check');
+			assert.match(node.verification?.checks[0]?.note ?? '', /mapped positionally to check/);
+			assert.match(node.verification?.summary ?? '', /mapped positionally/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('incomplete coverage is an invalid_output rejection, not a silent zero-check pass', async () => {
+		const kernel = await commandTaskKernel({
+			acceptance: [
+				{ id: 'a1', met: true },
+				{ id: 'a2', met: true },
+			],
+			evidence: [{ kind: 'command', command: 'true', exitCode: 0 }],
+		});
+		try {
+			await kernel.ctx.agent.runTurn({ text: 'make made.txt', surface: 'test' });
+			const node = kernel.ctx.sessions.active()!.taskGraph!.nodes[0]!;
+			assert.strictEqual(node.status, 'rejected');
+			assert.strictEqual(node.rejection?.code, 'invalid_output');
+			assert.match(node.rejection?.reason ?? '', /expected acceptance ids check but got a1, a2/);
 		} finally {
 			await kernel.dispose();
 		}

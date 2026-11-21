@@ -1182,7 +1182,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
           <option value="inherit">Inherit from parent</option>
           <option value="custom">Custom — the budget below</option>
         </select>
-        <p class="hint">Inherit copies the main agent's four limits (not a shared pool); task and resume budgets can still tighten. If the main agent is unlimited (all 0), children are unlimited too.</p>
+        <p class="hint">Inherit copies the main agent's four limits (not a shared pool); task budgets can still tighten, and a resume segment cannot be smaller than the previous one. If the main agent is unlimited (all 0), children are unlimited too.</p>
       </div>
       <p class="hint" id="subagent-budget-note"></p>
       <p class="hint">Custom four-dimensional budget for a child agent. A role definition and a task plan can only tighten it. 0 means no limit.</p>

@@ -36,8 +36,10 @@ decoding the bytes as UTF-8.
 
 `task_graph` records or revises the Orchestrator's task graph. `delegate` runs 1–8 ready tasks in one
 parallel batch. `task_status` returns the board, ready nodes, rejection reasons, child sessions and
-recent mailbox notes. `resume` continues paused tasks with a new segment budget. Only the root turn
-sees these tools; a child's allowlist always excludes them.
+recent mailbox notes. `resume` continues paused tasks with a new segment budget; a resume segment
+cannot be smaller than the previous one (smaller dimensions are raised and reported), and a pause
+that spent the last resume says to replan with a changed definition or a new node id. Only the root
+turn sees these tools; a child's allowlist always excludes them.
 
 A read-only session runs read-only tasks only: `task_graph`, `delegate` and `resume` refuse a new or
 revised task whose effective capabilities include `rw` or whose acceptance needs a `command`
@@ -50,8 +52,13 @@ A task whose effective capabilities include `rw` must carry at least one `review
 acceptance criterion. After the worker batch finishes, the runtime derives a **pinned built-in**
 `reviewer` or `tester` child for those criteria; a project file with the same name cannot weaken
 acceptance. The worker/verifier final message must be a single JSON envelope; malformed output is an
-`invalid_output` rejection. The structural rules live in the tool schema and validation; the current
-phase rules live in the dynamic Tools and Orchestration prompt blocks. See
+`invalid_output` rejection. Each acceptance entry must use the task's exact criterion id, one entry
+per criterion; an equal-length list whose ids are all different is mapped positionally and the
+mapping is recorded, while partial coverage is `invalid_output`. A `command` criterion runs in a
+read-only workspace with a scratch-only test shell; if the exact command must write the workspace the
+tester may run it in a byte-identical `$COMONAD_SCRATCH` copy and reports the exact command, its real
+exit code and a `mirror: <path>` note. The structural rules live in the tool schema and validation;
+the current phase rules live in the dynamic Tools and Orchestration prompt blocks. See
 [Orchestration](/guide/orchestration).
 
 `message` is shared by the Orchestrator and every child: one append-only JSONL mailbox per chat under

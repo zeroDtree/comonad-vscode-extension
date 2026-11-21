@@ -65,12 +65,16 @@ Plan 会话是只读的，因为它的模式不授予 `rw`；其能力为 `ro`�
 `budget` 是四维对象：`turns`（模型往返）、`tools`（工具调用）、`tokens`（输入 + 输出）、
 `milliseconds`（墙钟）。`0` 表示无限制。默认 `subagentBudgetMode: inherit`：子代理复制主 Agent
 当前的四维上限；`custom` 则使用 `subagentBudget` 并由角色预算收紧。任务预算在两种模式下都能进一步
-收紧。触顶时任务进入 `paused` 而不是 `rejected`：子会话与 transcript 保留，`resume` 用新的分段
-预算继续，不消耗 attempt。
+收紧，但它只是上限：实质性工作应省略 `budget`，不要把角色行的默认数字抄进任务预算——上限过小只会让
+worker 在汇报前就 pause。触顶时任务进入 `paused` 而不是 `rejected`：子会话与 transcript 保留，
+`resume` 用新的分段预算继续，不消耗 attempt。resume 的分段预算不能小于上一段：更小的维度会被抬到
+上一段的上限，并在工具结果中报告。
 
 任务图是声明式的：每次修订都重发仍需要的全部节点。`running` / `verifying` 节点会阻止修订；`accepted`
-节点保持不变，改定义会被拒绝；`rejected` / `paused` 节点改定义后回到 `pending` 并保留尝试次数。图默认
-最多 32 个节点、6 次重规划、每节点 2 次尝试；`paused` 节点默认最多 resume 3 次。
+节点保持不变，改定义会被拒绝；`rejected` / `paused` 节点改定义后回到 `pending` 并保留尝试次数，但
+`resumes` 重置为 0——新定义重新获得完整的 resume 预算。如果尝试次数也已用尽，修订警告会说明，且
+`delegate` 会拒绝，直到提高 `maxAttempts` 或换用新的节点 id。图默认最多 32 个节点、6 次重规划、
+每节点 2 次尝试；`paused` 节点默认最多 resume 3 次。
 
 ## 委派
 
@@ -84,8 +88,16 @@ worker 批次结束后，运行时对成功节点做验收：
 3. `command` 标准派生一个**固定内置 `tester`** 子代理，用只写 scratch 的测试 shell 执行原命令并报告
    退出码。
 
-review 验收可并行，command 验收串行。验证者最终消息也是 JSON envelope；它自报的 `verdict` 仅供参考，
-验收由每条标准的 `met` 重新计算；command 标准还要求匹配的 `exitCode: 0` 证据。
+review 验收可并行，command 验收串行。验证者最终消息也是 JSON envelope；每条 `acceptance` 必须使用任务的
+精确标准 id，一条标准一个条目。运行时会按位置映射“数量相等且 id 全不相同”的列表并记录映射；覆盖不全或
+数量不等会以 `invalid_output` 拒绝，而不是静默记成 0 条检查。验证者自报的 `verdict` 仅供参考，验收由
+每条标准的 `met` 重新计算；command 标准还要求精确命令字符串对应的 `exitCode: 0` 证据。
+
+command 标准在只读工作区中运行，只有 scratch 树可写。优先选择能在该环境中通过的命令（no-emit 类型检查，
+或缓存指向 `$COMONAD_SCRATCH` 的测试）；必须写构建产物的检查改用 `review` 标准。若精确命令仅因工作区
+只读而失败，tester 可以在一份 `$COMONAD_SCRATCH` 下的逐字节副本中运行，并必须报告精确的标准命令、
+该次运行的真实退出码，以及 note 中的 `mirror: <path>`。失败的命令绝不会被报告为 exit 0；拒绝原因会列出
+标准命令以及 tester 实际观察到的命令/退出码。
 
 写任务必须至少有一条 `review` 或 `command` 标准。模型没有任何工具能把任务标成 `accepted`。被拒绝的节点
 带 code 与原因；在尝试预算内修订任务图，或报告阻塞。
@@ -129,7 +141,9 @@ Build 会归档研究任务图，因此实现轮次从空任务图开始，以�
 
 其他上限：32 节点、每批 8 个任务（delegate 或 resume）、4 个并发子代理、6 次重规划、每节点默认 2 次
 尝试、`paused` 节点默认最多 resume 3 次。停止会中止根轮次与子代理；被中断的 `running` 节点会在下一次
-根轮次开始时标为 `interrupted`；`paused` 节点不会被中断，保留子会话等待 `resume`。
+根轮次开始时标为 `interrupted`；`paused` 节点不会被中断，保留子会话等待 `resume`。当 pause 用完最后一次
+resume 时，原因会说明这一点，并指向改定义（会重置 resumes）、换新节点 id 或自己接管，而不再写
+“resume to continue”。
 
 ## 一个小任务图
 

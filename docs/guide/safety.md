@@ -181,7 +181,11 @@ Consequences:
   acceptance criterion. The runtime derives a **pinned built-in** `reviewer` or `tester` child after
   the worker batch; a project `.comonad/agents/reviewer.md` cannot weaken acceptance.
 - The worker and verifier return a JSON envelope. Malformed output is `invalid_output`; a
-  self-declared verdict is advisory and acceptance is recomputed from per-criterion results.
+  self-declared verdict is advisory and acceptance is recomputed from per-criterion results. Each
+  acceptance entry must use the task's exact criterion id; an equal-length all-different list is
+  mapped positionally and recorded, while partial coverage is `invalid_output`. A `command` criterion
+  runs read-only with a scratch-only shell; a tester may use a byte-identical `$COMONAD_SCRATCH` copy
+  and must report the exact command, its real exit code and a `mirror: <path>` note.
 - Read and write tasks may run in parallel. Every tracked write passes through `ctx.edit`, which
   serialises writes to the **same absolute path**; different files proceed concurrently.
 - Parallel workers coordinate through the `message` tool. One append-only JSONL mailbox per root chat
@@ -190,6 +194,8 @@ Consequences:
 - Every run has four independent native budgets: turns, tool calls, tokens and wall-clock time. A
   budget stops the run at a message boundary, keeps the partial transcript and pauses the task;
   `resume` continues the same child session with a new segment budget and does not spend an attempt.
+  A resume segment cannot be smaller than the previous one: smaller dimensions are raised and
+  reported. A changed paused/rejected definition resets its resume counter but keeps its attempts.
 - Concurrency is capped at four active children; a larger delegate batch waits in a FIFO queue.
   A graph has at most 32 nodes, six replans and two attempts per node by default.
 

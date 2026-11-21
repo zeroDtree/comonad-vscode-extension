@@ -110,6 +110,41 @@ export function remainingBudget(limits: BudgetLimits, usage: BudgetUsage, now = 
 	};
 }
 
+export interface ClampedResumeBudget {
+	/** The requested budget with shrinking dimensions raised; `undefined` when none was requested. */
+	budget: BudgetInput | undefined;
+	/** Dimensions raised to the previous segment's limit, in a stable order. */
+	clamped: BudgetDimension[];
+}
+
+/**
+ * A resume segment may replace, not shrink, the previous segment's limits. Only an explicit
+ * positive value can shrink; an omitted dimension falls back to the same stack that capped the
+ * previous segment, so it cannot be smaller by itself. `0` means unlimited and is the highest floor.
+ */
+export function clampResumeBudget(
+	previous: BudgetLimits | undefined,
+	requested: BudgetInput | undefined,
+): ClampedResumeBudget {
+	if (!previous || !requested) {
+		return { budget: requested, clamped: [] };
+	}
+	const budget: BudgetInput = { ...requested };
+	const clamped: BudgetDimension[] = [];
+	for (const dimension of ['turns', 'tools', 'tokens', 'milliseconds'] as const) {
+		const value = budget[dimension];
+		if (typeof value !== 'number' || value <= 0) {
+			continue;
+		}
+		const floor = previous[dimension];
+		if (floor === 0 || value < floor) {
+			budget[dimension] = floor;
+			clamped.push(dimension);
+		}
+	}
+	return { budget, clamped };
+}
+
 const LABELS: Record<BudgetDimension, string> = {
 	turns: 'turn',
 	tools: 'tool',
