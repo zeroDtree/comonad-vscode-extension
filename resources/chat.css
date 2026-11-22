@@ -354,6 +354,15 @@ button.chat.is-active {
 	stroke-linejoin: round;
 }
 
+/* A text action in the icon row: the long-prompt toggle. */
+.msg-actions .act.text {
+	width: auto;
+	padding: 0 7px;
+	font-size: 11px;
+	opacity: 0.65;
+	white-space: nowrap;
+}
+
 .msg.user .bubble {
 	background: var(--vscode-button-background);
 	color: var(--vscode-button-foreground);
@@ -362,6 +371,16 @@ button.chat.is-active {
 	max-width: 86%;
 	white-space: pre-wrap;
 	word-break: break-word;
+}
+
+/* A long prompt (a Build turn inlines the plan) folds to a readable height; the action row holds
+   the toggle. Only the text is clamped, so reference chips and thumbnails stay visible. */
+.msg.user .bubble.collapsed .prompt-body {
+	max-height: 360px;
+	max-height: 18lh;
+	overflow: hidden;
+	-webkit-mask-image: linear-gradient(to bottom, #000 76%, transparent);
+	mask-image: linear-gradient(to bottom, #000 76%, transparent);
 }
 
 .msg.user .refs {
@@ -2507,6 +2526,10 @@ footer {
 
 	.msg.user .bubble {
 		max-width: 92%;
+	}
+
+	.msg.user .bubble.collapsed .prompt-body {
+		max-height: 14lh;
 	}
 
 	#controls .pill {

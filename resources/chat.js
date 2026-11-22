@@ -642,13 +642,17 @@
 	function actionRow(actions) {
 		const row = document.createElement('div');
 		row.className = 'msg-actions';
-		for (const { key, icon, tip, run } of actions) {
+		for (const { key, icon, label, tip, run } of actions) {
 			const button = document.createElement('button');
 			button.type = 'button';
-			button.className = 'act';
+			button.className = label === undefined ? 'act' : 'act text';
 			button.dataset.act = key;
 			button.dataset.tip = tip;
-			button.innerHTML = ICONS[icon];
+			if (label === undefined) {
+				button.innerHTML = ICONS[icon];
+			} else {
+				button.textContent = label;
+			}
 			button.addEventListener('click', () => run(button));
 			row.appendChild(button);
 		}
@@ -695,6 +699,46 @@
 	let draft = false;
 	/** The open prompt editor's restore function, if one is open. */
 	let editing = null;
+
+	/** Long prompts fold by default; this remembers the ones the reader opened, across redraws. */
+	const promptOpen = new Set();
+	const PROMPT_CLAMP_CHARS = 1_200;
+	const PROMPT_CLAMP_LINES = 18;
+
+	/** `sessionId:index` is stable across renderTurns, prependTurns and resyncs that replace turn objects. */
+	function promptStateKey(turn) {
+		return String(turn.sessionId || (state && state.sessionId) || '') + ':' + turn.index;
+	}
+
+	function promptIsLong(turn) {
+		const text = String(turn.prompt || '');
+		return text.length > PROMPT_CLAMP_CHARS || text.split('\n').length > PROMPT_CLAMP_LINES;
+	}
+
+	/** Applies the remembered state to a freshly drawn bubble and its action-row button. */
+	function applyPromptState(turn, button) {
+		const long = promptIsLong(turn);
+		const open = long && promptOpen.has(promptStateKey(turn));
+		if (turn._bubble) {
+			turn._bubble.classList.toggle('collapsed', long && !open);
+		}
+		if (button) {
+			button.hidden = !long;
+			button.textContent = open ? 'Show less' : 'Show more';
+			button.setAttribute('aria-expanded', String(open));
+			button.dataset.tip = open ? 'Collapse this prompt' : 'Show the full prompt';
+		}
+	}
+
+	function togglePrompt(turn, button) {
+		const key = promptStateKey(turn);
+		if (promptOpen.has(key)) {
+			promptOpen.delete(key);
+		} else {
+			promptOpen.add(key);
+		}
+		applyPromptState(turn, button);
+	}
 
 	function currentView() {
 		if (subagentRendering) {
@@ -1990,6 +2034,8 @@
 	}
 
 	function appendStep(turn, step, busy) {
+		// A placeholder drawn before the first streamed step must not sit above the real content.
+		turn._steps.querySelector('.no-reply')?.remove();
 		turn._steps.appendChild(stepEl(step, busy));
 		return step;
 	}
@@ -2024,7 +2070,7 @@
 		}
 		if (!turn._steps.children.length) {
 			const empty = document.createElement('p');
-			empty.className = 'muted';
+			empty.className = 'muted no-reply';
 			empty.textContent = '(no reply text)';
 			turn._steps.appendChild(empty);
 		}
@@ -2115,7 +2161,8 @@
 
 		const prompt = document.createElement('div');
 		prompt.className = 'msg user';
-		prompt.innerHTML = '<div class="bubble">' + renderPromptHtml(turn.prompt) + '</div>';
+		// The text alone is wrapped: reference chips and image thumbnails stay visible when it folds.
+		prompt.innerHTML = '<div class="bubble"><div class="prompt-body">' + renderPromptHtml(turn.prompt) + '</div></div>';
 		turn._bubble = prompt.querySelector('.bubble');
 		const promptThumbs = imageThumbs(turn.promptAttachments);
 		if (promptThumbs) {
@@ -2127,7 +2174,15 @@
 			if (!readOnly && !turn.greeting && turn.prompt) {
 				actions.push({ key: 'edit', icon: 'pencil', tip: 'Edit this prompt and run it again', run: () => beginEdit(turn) });
 			}
-			prompt.appendChild(actionRow(actions));
+			const long = promptIsLong(turn);
+			if (long) {
+				actions.push({ key: 'expand', label: 'Show more', tip: 'Show the full prompt', run: (button) => togglePrompt(turn, button) });
+			}
+			const row = actionRow(actions);
+			prompt.appendChild(row);
+			if (long) {
+				applyPromptState(turn, row.querySelector('.act[data-act="expand"]'));
+			}
 		}
 		if (turn.greeting) {
 			// A character's opening line has no prompt behind it: the bubble would be empty.
@@ -2702,6 +2757,9 @@
 		const from = message.replacesFrom === undefined ? undefined : Number(message.replacesFrom);
 		if (from !== undefined && Number.isFinite(from)) {
 			for (const removed of turns.filter((turn) => turn.index >= from)) {
+				// An edited prompt is a new message: it starts folded rather than inheriting an old
+				// expansion. A regenerate/swipe below keeps its key because the text is the same.
+				promptOpen.delete(promptStateKey(removed));
 				removed._root?.remove();
 			}
 			turns = turns.filter((turn) => turn.index < from);
@@ -4396,15 +4454,110 @@
 		return false;
 	}
 
+	/**
+	 * Ranges of fenced code and inline code spans. Mirrors `codeRanges` in src/lib/references.ts:
+	 * an @ inside them is literal Markdown, not a reference chip.
+	 */
+	function codeRanges(text) {
+		const ranges = [];
+		let fence;
+		let lineStart = 0;
+		for (;;) {
+			const newline = text.indexOf('\n', lineStart);
+			const lineEnd = newline < 0 ? text.length : newline;
+			const line = text.slice(lineStart, lineEnd).replace(/\r$/, '');
+			const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+			let fenceLine = false;
+			if (fence) {
+				if (marker && marker[1][0] === fence.char && marker[1].length >= fence.length && !marker[2].trim()) {
+					ranges.push({ start: fence.start, end: newline < 0 ? text.length : newline + 1 });
+					fence = undefined;
+					fenceLine = true;
+				}
+			} else if (marker && !(marker[1][0] === '`' && marker[2].includes('`'))) {
+				fence = { start: lineStart, char: marker[1][0], length: marker[1].length };
+				fenceLine = true;
+			}
+			if (!fence && !fenceLine) {
+				inlineCodeRanges(text, lineStart, lineEnd, ranges);
+			}
+			if (newline < 0) {
+				break;
+			}
+			lineStart = newline + 1;
+		}
+		if (fence) {
+			ranges.push({ start: fence.start, end: text.length });
+		}
+		return ranges;
+	}
+
+	function inlineCodeRanges(text, from, to, ranges) {
+		const runs = [];
+		for (let index = from; index < to; index += 1) {
+			if (text[index] !== '`') {
+				continue;
+			}
+			const start = index;
+			while (index < to && text[index] === '`') {
+				index += 1;
+			}
+			runs.push({ start, end: index, length: index - start });
+		}
+		if (runs.length < 2) {
+			return;
+		}
+		const next = new Array(runs.length);
+		const seen = new Map();
+		for (let index = runs.length - 1; index >= 0; index -= 1) {
+			const run = runs[index];
+			next[index] = seen.get(run.length);
+			seen.set(run.length, index);
+		}
+		for (let index = 0; index < runs.length; ) {
+			const open = runs[index];
+			// Backslash escapes do not work inside a span, so only an opener is checked.
+			if (isEscaped(text, open.start)) {
+				index += 1;
+				continue;
+			}
+			const close = next[index];
+			if (close === undefined) {
+				index += 1;
+				continue;
+			}
+			ranges.push({ start: open.start, end: runs[close].end });
+			index = close + 1;
+		}
+	}
+
+	/** Whether an odd number of backslashes immediately precedes `index`. */
+	function isEscaped(text, index) {
+		let count = 0;
+		for (let before = index - 1; before >= 0 && text[before] === '\\'; before -= 1) {
+			count += 1;
+		}
+		return count % 2 === 1;
+	}
+
 	/** Escapes a prompt and paints @ references as chips; the textarea itself stays raw. */
 	function renderPromptHtml(text) {
 		const source = String(text ?? '');
+		const code = codeRanges(source);
+		let codeAt = 0;
 		let out = '';
 		let last = 0;
 		const pattern = /(^|[^A-Za-z0-9_.@/\\-])((?:@|＠)(?:symbol:"[^"]*":[^\s@]+|"[^"]*"(?::\d+(?:-\d+)?|\/)?|symbol:[^\s@，。；：！？、,;!?…]+|[^\s@，。；：！？、,;!?…]+))/g;
 		for (const match of source.matchAll(pattern)) {
 			const index = match.index ?? 0;
 			const start = index + match[1].length;
+			// Check the @ itself, not the match prefix: a span may end immediately before it.
+			while (codeAt < code.length && code[codeAt].end <= start) {
+				codeAt += 1;
+			}
+			if (codeAt < code.length && code[codeAt].start <= start) {
+				continue;
+			}
 			out += esc(source.slice(last, start));
 			const token = match[2];
 			const tailPattern = /^(?:@|＠)symbol:/.test(token)

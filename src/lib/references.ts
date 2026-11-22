@@ -73,11 +73,120 @@ function isAtSign(char: string | undefined): boolean {
 	return char === '@' || char === '＠';
 }
 
-/** Every reference occurrence in the text, in order. Never throws; malformed tokens are skipped. */
+interface CodeRange {
+	start: number;
+	end: number;
+}
+
+interface BacktickRun {
+	start: number;
+	end: number;
+	length: number;
+}
+
+/**
+ * Ranges of Markdown code: fenced blocks and inline code spans. An `@` inside them is literal
+ * text, never a reference. Deliberately not a Markdown parser: a span pairs backtick runs of equal
+ * length on one line, a fence runs from its opening line through its closing line, and an
+ * unclosed fence runs to the end (CommonMark's rule). Indented code blocks are out of scope.
+ */
+function codeRanges(text: string): CodeRange[] {
+	const ranges: CodeRange[] = [];
+	let fence: { start: number; char: string; length: number } | undefined;
+	let lineStart = 0;
+	for (;;) {
+		const newline = text.indexOf('\n', lineStart);
+		const lineEnd = newline < 0 ? text.length : newline;
+		const line = text.slice(lineStart, lineEnd).replace(/\r$/, '');
+		const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+		let fenceLine = false;
+		if (fence) {
+			if (marker && marker[1]![0] === fence.char && marker[1]!.length >= fence.length && !marker[2]!.trim()) {
+				ranges.push({ start: fence.start, end: newline < 0 ? text.length : newline + 1 });
+				fence = undefined;
+				fenceLine = true;
+			}
+		} else if (marker && !(marker[1]![0] === '`' && marker[2]!.includes('`'))) {
+			fence = { start: lineStart, char: marker[1]![0]!, length: marker[1]!.length };
+			fenceLine = true;
+		}
+		if (!fence && !fenceLine) {
+			inlineCodeRanges(text, lineStart, lineEnd, ranges);
+		}
+		if (newline < 0) {
+			break;
+		}
+		lineStart = newline + 1;
+	}
+	if (fence) {
+		ranges.push({ start: fence.start, end: text.length });
+	}
+	return ranges;
+}
+
+function inlineCodeRanges(text: string, from: number, to: number, ranges: CodeRange[]): void {
+	const runs: BacktickRun[] = [];
+	for (let index = from; index < to; index += 1) {
+		if (text[index] !== '`') {
+			continue;
+		}
+		const start = index;
+		while (index < to && text[index] === '`') {
+			index += 1;
+		}
+		runs.push({ start, end: index, length: index - start });
+	}
+	if (runs.length < 2) {
+		return;
+	}
+	// The next run of the same length is the only possible closer; precomputing it keeps this
+	// linear even for a pathological line of stray backticks.
+	const next = new Array<number | undefined>(runs.length);
+	const seen = new Map<number, number>();
+	for (let index = runs.length - 1; index >= 0; index -= 1) {
+		const run = runs[index]!;
+		next[index] = seen.get(run.length);
+		seen.set(run.length, index);
+	}
+	for (let index = 0; index < runs.length; ) {
+		const open = runs[index]!;
+		// Backslash escapes do not work inside a span, so only an opener is checked.
+		if (isEscaped(text, open.start)) {
+			index += 1;
+			continue;
+		}
+		const close = next[index];
+		if (close === undefined) {
+			index += 1;
+			continue;
+		}
+		ranges.push({ start: open.start, end: runs[close]!.end });
+		index = close + 1;
+	}
+}
+
+/** Whether an odd number of backslashes immediately precedes `index`. */
+function isEscaped(text: string, index: number): boolean {
+	let count = 0;
+	for (let before = index - 1; before >= 0 && text[before] === '\\'; before -= 1) {
+		count += 1;
+	}
+	return count % 2 === 1;
+}
+
+/** Every reference occurrence in the text, in order. Never throws; malformed tokens and code are skipped. */
 export function parseReferences(text: string): ParsedReference[] {
 	const found: ParsedReference[] = [];
+	const code = codeRanges(text);
+	let codeIndex = 0;
 	for (let index = 0; index < text.length; index += 1) {
 		if (!isAtSign(text[index]) || !canStartReference(index === 0 ? undefined : text[index - 1])) {
+			continue;
+		}
+		while (codeIndex < code.length && code[codeIndex]!.end <= index) {
+			codeIndex += 1;
+		}
+		if (codeIndex < code.length && code[codeIndex]!.start <= index) {
 			continue;
 		}
 		const scanned = scanToken(text, index);
@@ -107,14 +216,18 @@ export function formatReference(reference: Omit<ParsedReference, 'start' | 'end'
 	return `@${path}${slash}${range}`;
 }
 
-/** Whether a failed reference is worth reporting (a decorator or prose mention is not). */
+/** Whether a failed reference is worth reporting (a decorator, prose mention or punctuation fragment is not). */
 export function looksLikePath(reference: ParsedReference): boolean {
-	return (
-		reference.kind !== 'file' ||
-		reference.path.includes('/') ||
-		reference.path.includes('.') ||
-		reference.path.includes(':')
-	);
+	if (reference.kind !== 'file') {
+		return true;
+	}
+	const path = reference.path;
+	// Keep the old shape rule: `.`, `/` or `:` is what made a token look like a path.
+	if (!path.includes('/') && !path.includes('.') && !path.includes(':')) {
+		return false;
+	}
+	// Punctuation-only fragments (`...]`, `...`, `.:`) are Markdown/prose, not missing files.
+	return /[\p{L}\p{N}/\\]/u.test(path);
 }
 
 /**

@@ -74,7 +74,7 @@ import { listEndpointModels, openAiChat } from '../lib/openai';
 import type { ApprovalDecision, ApprovalRequest, ImageAttachment, ImagePart, Message, ModelContext, QuestionRequest, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
-import { findSymbolRange, formatReference, normalizeQuery, parseReferences, pathEntry, rankEntries, rankPaths } from '../lib/references';
+import { findSymbolRange, formatReference, looksLikePath, normalizeQuery, parseReferences, pathEntry, rankEntries, rankPaths } from '../lib/references';
 import { pinyinOfPath, pinyinSupported } from '../lib/pinyin';
 import { mentionItems, WorkspaceFileCache } from '../ui/mentions';
 import { pdfResolver } from 'comonad-plugin-pdf/extract';
@@ -10101,6 +10101,39 @@ suite('Explicit references', () => {
 		}
 	});
 
+	test('a reference inside inline code or a fence stays literal', () => {
+		// The real bug: a plan body says ``不写 `[@...]` 引用`` and the placeholder was stat'ed.
+		assert.deepStrictEqual(parseReferences('write `[@...]` here'), []);
+		const after = parseReferences('`@x` then @src/a.ts');
+		assert.deepStrictEqual(
+			after.map(({ path, start, end }) => ({ path, start, end })),
+			[{ path: 'src/a.ts', start: 10, end: 19 }],
+			'references outside code keep their offsets',
+		);
+		assert.deepStrictEqual(parseReferences('``a ` @x`` @real.ts').map((ref) => ref.path), ['real.ts']);
+		assert.deepStrictEqual(parseReferences('`@a.ts').map((ref) => ref.path), ['a.ts'], 'an unmatched backtick is literal');
+		assert.strictEqual(parseReferences('\\`@a.ts\\`').length, 1, 'escaped backticks are literal, not a span');
+		for (const text of ['```\n@a.ts\n```', '~~~\n@a.ts\n~~~', 'text\n```\n@a.ts']) {
+			assert.deepStrictEqual(parseReferences(text), [], text);
+		}
+		assert.deepStrictEqual(parseReferences('```\n@a.ts\n```\n@b.ts').map((ref) => ref.path), ['b.ts']);
+		assert.deepStrictEqual(parseReferences('````\n```\n@a.ts\n````\n@b.ts').map((ref) => ref.path), ['b.ts']);
+		assert.deepStrictEqual(parseReferences('```\r\n@a.ts\r\n```\r\n@b.ts').map((ref) => ref.path), ['b.ts']);
+	});
+
+	test('a punctuation-only token is not a missing path', () => {
+		const ref = (path: string) => ({ kind: 'file' as const, path, start: 0, end: 0 });
+		assert.strictEqual(looksLikePath(ref('...]`')), false, 'the exact screenshot shape');
+		assert.strictEqual(looksLikePath(ref('...')), false);
+		assert.strictEqual(looksLikePath(ref('..')), false);
+		assert.strictEqual(looksLikePath(ref('.:')), false);
+		assert.strictEqual(looksLikePath(ref('a.ts')), true);
+		assert.strictEqual(looksLikePath(ref('src/a.ts')), true);
+		const one = (text: string) => parseReferences(text)[0]!;
+		assert.strictEqual(looksLikePath(one('@./')), true, 'a relative folder still resolves');
+		assert.strictEqual(looksLikePath(one('@../')), true);
+	});
+
 	test('the formatter writes tokens the parser reads back', () => {
 		const refs = [
 			{ kind: 'file' as const, path: 'src/a.ts' },
@@ -10230,6 +10263,31 @@ suite('Explicit references', () => {
 			const error = result.attachments.find((part) => part.kind === 'text' && part.form === 'error');
 			assert.ok(error, 'the missing file is reported, not thrown');
 			assert.strictEqual(result.errors?.length, 1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			await kernel.dispose();
+		}
+	});
+
+	test('a plan placeholder inside code resolves nothing, while a real reference still does', async () => {
+		const kernel = await createTestKernel();
+		const root = mkdtempSync(join(tmpdir(), 'comonad-code-ref-'));
+		try {
+			writeFileSync(join(root, 'note.md'), 'note\n');
+			const scope = { workingDirectory: root, sandboxMode: 'danger-full-access' as const, denyReadPaths: [] };
+			const citation = await kernel.ctx.references.resolve(
+				'不新增 `bibliography.bib` 条目，不写 `[@...]` 引用。',
+				scope,
+				new AbortController().signal,
+			);
+			assert.strictEqual(citation.errors, undefined);
+			assert.deepStrictEqual(citation.attachments, []);
+			const mixed = await kernel.ctx.references.resolve('`[@...]` and @note.md', scope, new AbortController().signal);
+			assert.strictEqual(mixed.errors, undefined);
+			assert.ok(
+				mixed.attachments.some((part) => part.kind === 'text' && part.source.path === 'note.md'),
+				'a reference outside the code span still resolves',
+			);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 			await kernel.dispose();
@@ -10461,6 +10519,22 @@ suite('Explicit references', () => {
 		assert.ok(js.includes('function halfWidth('), 'a Chinese IME query is folded to half width');
 		assert.ok(js.includes('MENTION_QUERY_END'), 'prose punctuation ends the picker query');
 		assert.ok(js.includes('compositionend'), 'an IME commit refreshes the picker');
+	});
+
+	test('a long prompt folds, keeps its state, and code spans do not paint chips', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.ok(js.includes('const promptOpen = new Set()') && js.includes('function promptStateKey('));
+		assert.ok(js.includes('function promptIsLong(') && js.includes('function togglePrompt('));
+		assert.ok(js.includes('Show more') && js.includes('Show less') && js.includes('aria-expanded'));
+		assert.ok(js.includes("classList.toggle('collapsed'"), 'the bubble carries the folded state');
+		assert.ok(js.includes('prompt-body'), 'only the prompt text is clamped');
+		assert.ok(css.includes('.msg.user .bubble.collapsed .prompt-body') && css.includes('.msg-actions .act.text'));
+		assert.ok(js.includes('function codeRanges(') && js.includes('function inlineCodeRanges('));
+		assert.ok(js.includes('codeRanges(source)'), 'the prompt chip painter skips code');
+		assert.ok(js.includes("className = 'muted no-reply'"), 'the empty reply is marked');
+		assert.ok(js.includes("querySelector('.no-reply')"), 'a real step clears it');
 	});
 
 	test('the chat carries a read-only subagent session overlay', () => {
