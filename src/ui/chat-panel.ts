@@ -2145,6 +2145,7 @@ export function chatPanel(ctx: Context): void {
 		chatUsed = false;
 		focusedClients.clear();
 		pendingReferences = [];
+		mentionFiles.dispose();
 		syncFocus();
 		syncActive();
 	});

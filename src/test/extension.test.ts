@@ -74,7 +74,8 @@ import { listEndpointModels, openAiChat } from '../lib/openai';
 import type { ApprovalDecision, ApprovalRequest, ImageAttachment, ImagePart, Message, ModelContext, QuestionRequest, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
-import { findSymbolRange, formatReference, parseReferences, rankPaths } from '../lib/references';
+import { findSymbolRange, formatReference, normalizeQuery, parseReferences, pathEntry, rankEntries, rankPaths } from '../lib/references';
+import { pinyinOfPath, pinyinSupported } from '../lib/pinyin';
 import { mentionItems, WorkspaceFileCache } from '../ui/mentions';
 import { pdfResolver } from 'comonad-plugin-pdf/extract';
 import { ChangedOutsideError, DirtyEditorError } from '../lib/journal';
@@ -10126,6 +10127,54 @@ suite('Explicit references', () => {
 		assert.deepStrictEqual(rankPaths('nothing', paths), []);
 	});
 
+	test('a full-width at sign and Chinese prose punctuation parse the same as ASCII', () => {
+		const refs = parseReferences('请看＠src/a.ts 和 ＠广义特征值，然后 @文件、接下来');
+		assert.deepStrictEqual(
+			refs.map(({ kind, path }) => ({ kind, path })),
+			[
+				{ kind: 'file', path: 'src/a.ts' },
+				{ kind: 'file', path: '广义特征值' },
+				{ kind: 'file', path: '文件' },
+			],
+		);
+	});
+
+	test('the picker query folds full-width input and stops at prose punctuation', () => {
+		assert.strictEqual(normalizeQuery('ｇｕａｎｇｙｉ'), 'guangyi');
+		assert.strictEqual(normalizeQuery('广义，特征'), '广义');
+		assert.strictEqual(normalizeQuery('广义、'), '广义');
+		assert.strictEqual(normalizeQuery('　'), '');
+		assert.strictEqual(normalizeQuery('src/a.ts:9'), 'src/a.ts:9', 'a range colon survives');
+	});
+
+	test('CJK paths match literally and ignore prose punctuation', () => {
+		const paths = ['content/机器学习/广义特征值.md', 'docs/readme.md'];
+		assert.deepStrictEqual(rankPaths('广义', paths), ['content/机器学习/广义特征值.md']);
+		assert.deepStrictEqual(rankPaths('广义，特征', paths), ['content/机器学习/广义特征值.md']);
+	});
+
+	test('pinyin finds a Chinese name by full reading and initials, after literal matches', () => {
+		if (!pinyinSupported()) {
+			return;
+		}
+		assert.deepStrictEqual(pinyinOfPath('广义特征值.md'), { full: 'guangyitezhengzhi.md', initials: 'gytzz.md' });
+		assert.strictEqual(pinyinOfPath('gym.ts'), undefined);
+		const paths = ['gym.ts', 'src/guangyi.ts', 'content/机器学习/广义特征值.md'];
+		assert.deepStrictEqual(rankPaths('guangyi', paths).slice(0, 2), ['src/guangyi.ts', 'content/机器学习/广义特征值.md']);
+		// `src/guangyi.ts` contains a literal "gy", so it stays above the pinyin initials match.
+		assert.deepStrictEqual(rankPaths('gy', paths), [
+			'gym.ts',
+			'src/guangyi.ts',
+			'content/机器学习/广义特征值.md',
+		]);
+		assert.deepStrictEqual(rankPaths('yite', paths), ['content/机器学习/广义特征值.md']);
+		assert.deepStrictEqual(rankPaths('xuexi', paths), ['content/机器学习/广义特征值.md']);
+		assert.deepStrictEqual(rankPaths('ｇｙ', paths), rankPaths('gy', paths));
+		const entries = paths.map(pathEntry);
+		assert.deepStrictEqual(rankEntries('gytzz', entries).map((entry) => entry.path), ['content/机器学习/广义特征值.md']);
+		assert.deepStrictEqual(rankPaths('g', ['content/机器学习/广义特征值.md']), [], 'one letter is not a pinyin query');
+	});
+
 	test('a dotted symbol picks the smallest matching range', () => {
 		const classRange = { start: { line: 0, character: 0 }, end: { line: 10, character: 0 } };
 		const methodRange = { start: { line: 2, character: 2 }, end: { line: 5, character: 3 } };
@@ -10142,15 +10191,23 @@ suite('Explicit references', () => {
 		assert.strictEqual(mentionItems('folder', 'lib', paths)[0]!.token, '@src/lib/');
 	});
 
-	test('the picker cache lists files under the session root', async () => {
+	test('the picker cache lists files and folders under the session root', async () => {
 		const root = mkdtempSync(join(tmpdir(), 'comonad-cache-'));
+		const cache = new WorkspaceFileCache();
 		try {
 			mkdirSync(join(root, 'src'));
+			mkdirSync(join(root, 'content', '机器学习'), { recursive: true });
 			writeFileSync(join(root, 'src', 'a.ts'), 'a');
-			const cache = new WorkspaceFileCache();
-			const files = await cache.list({ workingDirectory: root, sandboxMode: 'danger-full-access' as const, denyReadPaths: [] });
-			assert.deepStrictEqual(files, ['src/a.ts']);
+			writeFileSync(join(root, 'content', '机器学习', '广义特征值.md'), 'x');
+			const scope = { workingDirectory: root, sandboxMode: 'danger-full-access' as const, denyReadPaths: [] };
+			const index = await cache.index(scope);
+			assert.deepStrictEqual(index.files.map((entry) => entry.path), ['content/机器学习/广义特征值.md', 'src/a.ts']);
+			assert.ok(index.folders.some((entry) => entry.path === 'content/机器学习'), 'the folder is derived once');
+			assert.strictEqual(index.truncated, false);
+			assert.deepStrictEqual(await cache.list(scope), ['content/机器学习/广义特征值.md', 'src/a.ts']);
 		} finally {
+			// The cache owns a file watcher now; release it before the directory goes away.
+			cache.dispose();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -10400,6 +10457,10 @@ suite('Explicit references', () => {
 		assert.ok(js.includes('mentionQuery') && js.includes('mentionResults') && js.includes('compositionstart'));
 		assert.ok(js.includes('function commandRows(') && js.includes("mention.mode === 'command'"), 'the picker completes commands');
 		assert.ok(js.includes("event.data === '/'"), 'a slash opens it at the start of the prompt');
+		assert.ok(js.includes("event.data === '＠'"), 'a full-width at sign opens the picker');
+		assert.ok(js.includes('function halfWidth('), 'a Chinese IME query is folded to half width');
+		assert.ok(js.includes('MENTION_QUERY_END'), 'prose punctuation ends the picker query');
+		assert.ok(js.includes('compositionend'), 'an IME commit refreshes the picker');
 	});
 
 	test('the chat carries a read-only subagent session overlay', () => {

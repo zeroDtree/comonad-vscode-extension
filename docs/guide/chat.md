@@ -124,6 +124,10 @@ selection**. A chosen item becomes a token:
 @symbol:src/auth.ts:AuthService
 ```
 
+Matching ignores case and full-width/half-width differences. A Chinese name also matches by pinyin —
+the full reading (`guangyi`) or its initials (`gy`) — always after literal matches. A full-width `＠`,
+`／` or Chinese punctuation typed by an IME is treated like its ASCII form.
+
 With the chat showing in the window's side bar, select code in an editor and press `Cmd+L` (`Ctrl+L`)
 to append its token to the chat. The chord follows that side bar: switching it to another agent's chat
 releases `Cmd+L`, a collapsed side bar keeps it once Comonad has been used, and an open Comonad chat

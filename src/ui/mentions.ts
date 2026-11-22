@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { relative, sep } from 'node:path';
 import * as vscode from 'vscode';
-import { formatReference, rankPaths } from '../lib/references';
+import { formatReference, pathEntry, rankEntries, type PathEntry } from '../lib/references';
 import { isDeniedRead, isInside } from '../lib/sandbox';
 import { REFERENCE_LIMITS, type ReferenceScope } from '../services/references';
 
@@ -25,17 +25,47 @@ export interface MentionAnswer {
 	hint?: string;
 }
 
-/** The pure part of the picker: rank files or derive/rank folders from relative file paths. */
-export function mentionItems(kind: 'file' | 'folder', query: string, paths: readonly string[]): MentionItem[] {
-	if (kind === 'file') {
-		return rankPaths(query, paths, REFERENCE_LIMITS.mentionItems).map((path) => ({
-			kind: 'file',
-			label: path.split('/').pop() ?? path,
-			description: parentOf(path),
-			token: formatReference({ kind: 'file', path }),
-			badge: badgeOf(path),
-		}));
-	}
+/** The picker's prebuilt list: folded file entries, derived folders, and whether it was capped. */
+export interface MentionIndex {
+	files: PathEntry[];
+	folders: PathEntry[];
+	truncated: boolean;
+}
+
+const EMPTY_INDEX: MentionIndex = { files: [], folders: [], truncated: false };
+
+/** Folders a mention list excludes; the same names filter the watcher, so the two cannot drift. */
+const EXCLUDED_DIRS = ['node_modules', '.git', 'bower_components', '.next', 'dist', 'out', 'build', 'vendor'] as const;
+const EXCLUDED_GLOB = `**/{${EXCLUDED_DIRS.join(',')}}/**`;
+const EXCLUDED_PATH = new RegExp(`(^|/)(?:${EXCLUDED_DIRS.map(escapeRegExp).join('|')})(/|$)`);
+
+/**
+ * The pure part of the picker: rank files, or rank the folders derived from them. A
+ * `MentionIndex` carries the lists prebuilt by the cache; a plain array is the cheap form the
+ * tests and one-off callers use.
+ */
+export function mentionItems(
+	kind: 'file' | 'folder',
+	query: string,
+	source: readonly string[] | MentionIndex,
+): MentionItem[] {
+	const entries = isPathList(source)
+		? (kind === 'file' ? source : foldersOf(source)).map(pathEntry)
+		: kind === 'file'
+			? source.files
+			: source.folders;
+	return rankEntries(query, entries, REFERENCE_LIMITS.mentionItems).map((entry) =>
+		kind === 'file' ? fileItem(entry.path) : folderItem(entry.path),
+	);
+}
+
+/** A plain path list is the legacy form; the index is an object. */
+function isPathList(source: readonly string[] | MentionIndex): source is readonly string[] {
+	return Array.isArray(source);
+}
+
+/** All ancestor folders of a path list, sorted; computed once per index build, not per keystroke. */
+export function foldersOf(paths: readonly string[]): string[] {
 	const folders = new Set<string>();
 	for (const path of paths) {
 		const parts = path.split('/');
@@ -43,12 +73,26 @@ export function mentionItems(kind: 'file' | 'folder', query: string, paths: read
 			folders.add(parts.slice(0, index).join('/'));
 		}
 	}
-	return rankPaths(query, [...folders], REFERENCE_LIMITS.mentionItems).map((path) => ({
+	return [...folders].sort((left, right) => left.localeCompare(right));
+}
+
+function fileItem(path: string): MentionItem {
+	return {
+		kind: 'file',
+		label: path.split('/').pop() ?? path,
+		description: parentOf(path),
+		token: formatReference({ kind: 'file', path }),
+		badge: badgeOf(path),
+	};
+}
+
+function folderItem(path: string): MentionItem {
+	return {
 		kind: 'folder',
 		label: path.split('/').pop() ?? path,
 		description: parentOf(path),
 		token: formatReference({ kind: 'folder', path }),
-	}));
+	};
 }
 
 /** The current editor selection as a range token, when it belongs to this workspace. */
@@ -149,31 +193,58 @@ export async function mentionResults(
 		}
 	}
 	try {
-		return { items: mentionItems(kind, needle, await files.list(scope)) };
+		const index = await files.index(scope);
+		const items = mentionItems(kind, needle, index);
+		const hint =
+			!items.length && index.truncated
+				? `Only the first ${REFERENCE_LIMITS.indexFiles.toLocaleString()} files are indexed — add a path segment to narrow it.`
+				: undefined;
+		return { items, hint };
 	} catch {
 		return { items: [], hint: 'Could not list workspace files.' };
 	}
 }
 
-/** A per-working-directory file list for the picker, with a short TTL and one load in flight. */
-export class WorkspaceFileCache {
-	private cached: { root: string; at: number; files: string[] } | undefined;
-	private loading: { root: string; promise: Promise<string[]> } | undefined;
+/**
+ * A per-working-directory file list for the picker, with a short TTL, one load in flight, and a
+ * watcher that drops the list when a file appears or disappears. Rebuilt lists carry folded
+ * entries and pinyin, so a keystroke only ranks.
+ */
+export class WorkspaceFileCache implements vscode.Disposable {
+	private cached: { root: string; at: number; index: MentionIndex } | undefined;
+	private loading: { root: string; generation: number; promise: Promise<MentionIndex> } | undefined;
+	/** Bumped by `clear()`; a load that started under an older value never writes the cache. */
+	private generation = 0;
+	private watcher: vscode.FileSystemWatcher | undefined;
+	private watcherRoot: string | undefined;
+	private timer: NodeJS.Timeout | undefined;
+	private disposed = false;
 
-	async list(scope: ReferenceScope): Promise<string[]> {
+	async index(scope: ReferenceScope): Promise<MentionIndex> {
 		const root = scope.workingDirectory;
-		if (!root) {
-			return [];
+		if (!root || this.disposed) {
+			return EMPTY_INDEX;
 		}
 		const now = Date.now();
 		if (this.cached?.root === root && now - this.cached.at < 30_000) {
-			return this.cached.files;
+			return this.cached.index;
 		}
-		if (this.loading?.root === root) {
+		const generation = this.generation;
+		if (this.loading?.root === root && this.loading.generation === generation) {
 			return this.loading.promise;
 		}
-		const promise = this.load(root, scope);
-		this.loading = { root, promise };
+		const promise = this.load(root, scope).then((index) => {
+			if (!this.disposed && this.generation === generation) {
+				this.cached = { root, at: Date.now(), index };
+				try {
+					this.watch(root);
+				} catch {
+					// A watcher is best-effort; the 30 s TTL still refreshes a root it cannot watch.
+				}
+			}
+			return index;
+		});
+		this.loading = { root, generation, promise };
 		void promise
 			.finally(() => {
 				if (this.loading?.promise === promise) {
@@ -184,24 +255,88 @@ export class WorkspaceFileCache {
 		return promise;
 	}
 
+	/** The path list on its own, for callers that do not need the folded form or pinyin. */
+	async list(scope: ReferenceScope): Promise<string[]> {
+		return (await this.index(scope)).files.map((entry) => entry.path);
+	}
+
 	clear(): void {
+		this.generation += 1;
 		this.cached = undefined;
 	}
 
-	private async load(root: string, scope: ReferenceScope): Promise<string[]> {
+	dispose(): void {
+		this.disposed = true;
+		this.clear();
+		clearTimeout(this.timer);
+		this.timer = undefined;
+		this.watcher?.dispose();
+		this.watcher = undefined;
+		this.watcherRoot = undefined;
+	}
+
+	private async load(root: string, scope: ReferenceScope): Promise<MentionIndex> {
+		const cap = REFERENCE_LIMITS.indexFiles;
 		const pattern = new vscode.RelativePattern(vscode.Uri.file(root), '**/*');
-		const uris = await vscode.workspace.findFiles(
-			pattern,
-			'**/{node_modules,.git,bower_components,.next,dist,out,build,vendor}/**',
-			5_000,
+		// One past the cap tells a full list from a truncated one without counting twice.
+		const uris = await vscode.workspace.findFiles(pattern, EXCLUDED_GLOB, cap + 1);
+		const truncated = uris.length > cap;
+		const seen = new Set<string>();
+		const files: string[] = [];
+		const add = (uri: vscode.Uri): void => {
+			if (uri.scheme !== 'file' || !isInside(root, uri.fsPath) || isDeniedRead(root, uri.fsPath, scope.denyReadPaths)) {
+				return;
+			}
+			const path = relativePath(root, uri.fsPath);
+			if (path && !seen.has(path)) {
+				seen.add(path);
+				files.push(path);
+			}
+		};
+		// An open editor is always referenceable, even when the index hit its cap or the file is
+		// younger than the next watcher event.
+		for (const document of vscode.workspace.textDocuments) {
+			add(document.uri);
+		}
+		for (const uri of truncated ? uris.slice(0, cap) : uris) {
+			add(uri);
+		}
+		files.sort((left, right) => left.localeCompare(right));
+		return {
+			files: files.map((path) => pathEntry(path)),
+			folders: foldersOf(files).map((path) => pathEntry(path)),
+			truncated,
+		};
+	}
+
+	/** Watch the folders the index covers; a name change makes the next query rebuild it. */
+	private watch(root: string): void {
+		if (this.disposed || this.watcherRoot === root) {
+			return;
+		}
+		this.watcher?.dispose();
+		clearTimeout(this.timer);
+		this.timer = undefined;
+		this.watcherRoot = root;
+		const watcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(vscode.Uri.file(root), '**/*'),
+			false,
+			true,
+			false,
 		);
-		const files = uris
-			.filter((uri) => uri.scheme === 'file' && isInside(root, uri.fsPath) && !isDeniedRead(root, uri.fsPath, scope.denyReadPaths))
-			.map((uri) => relativePath(root, uri.fsPath))
-			.filter((path): path is string => Boolean(path))
-			.sort((left, right) => left.localeCompare(right));
-		this.cached = { root, at: Date.now(), files };
-		return files;
+		const changed = (uri: vscode.Uri): void => {
+			const path = relativePath(root, uri.fsPath);
+			if (!path || EXCLUDED_PATH.test(path)) {
+				return;
+			}
+			clearTimeout(this.timer);
+			this.timer = setTimeout(() => {
+				this.clear();
+			}, 1_000);
+		};
+		watcher.onDidCreate(changed);
+		watcher.onDidDelete(changed);
+		this.watcher = watcher;
 	}
 }
 
@@ -239,4 +374,8 @@ function relativePath(root: string, file: string): string | undefined {
 function parentOf(path: string): string {
 	const slash = path.lastIndexOf('/');
 	return slash < 0 ? 'workspace root' : path.slice(0, slash);
+}
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

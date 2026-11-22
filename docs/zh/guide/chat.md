@@ -112,6 +112,9 @@ Network 在 **Policies**（或使用 **Comonad: Toggle Network** 命令）。修
 @symbol:src/auth.ts:AuthService
 ```
 
+匹配不区分大小写和全角/半角。中文名还支持拼音匹配——全拼（`guangyi`）或首字母（`gy`）——但始终排在
+字面匹配之后；输入法打出的全角 `＠`、`／` 和中文标点与对应的半角形式等效。
+
 聊天侧边栏显示 Comonad 时，在编辑器中选中代码后按 `Cmd+L`（`Ctrl+L`）即可把选区 token 追加到聊天。
 该快捷键跟随这条侧边栏：切换到其他 Agent 的聊天时交还 `Cmd+L`；收起侧边栏后仍保留（只要用过
 Comonad）；Comonad 的聊天面板打开时也保留。引用在回合运行时解析，带行号，并受读取隔离和 deny

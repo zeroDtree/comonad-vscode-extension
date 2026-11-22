@@ -4120,6 +4120,18 @@
 		return previous === undefined || !/[A-Za-z0-9_.@/\\-]/.test(previous);
 	}
 
+	/** The full-width ASCII a Chinese IME can produce, folded to what the host matches. */
+	function halfWidth(text) {
+		return String(text ?? '')
+			.replace(/[！-～]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
+			.replace(/　/g, ' ');
+	}
+
+	/** A prose mark ends the query; brackets stay, since a path can contain them. */
+	const MENTION_QUERY_END = /[，。；：！？、,;!?…]/;
+	/** A following punctuation mark needs no space before it when the token is inserted. */
+	const MENTION_SUFFIX_PUNCT = /^[.,;:!?，。；：！？、…)\]}）】》」』]/;
+
 	function closeMention() {
 		if (!mention) {
 			return;
@@ -4228,12 +4240,18 @@
 			closeMention();
 			return;
 		}
-		const raw = input.value.slice(mention.start + 1, caret);
-		if (/\s/.test(raw)) {
+		const original = input.value.slice(mention.start + 1, caret);
+		if (/\s/.test(original)) {
 			closeMention();
 			return;
 		}
+		// Cut at the first prose mark before folding: folding would turn `：` into `:` and lose the
+		// difference between a Chinese comma after a note name and a real range/symbol colon.
+		const cut = original.search(MENTION_QUERY_END);
+		const end = cut < 0 ? caret : mention.start + 1 + cut;
+		const raw = halfWidth(cut < 0 ? original : original.slice(0, cut));
 		mention.caret = caret;
+		mention.end = end;
 		if (mention.mode === 'command') {
 			// Commands are in `state`: filter here, and never ask the host for a row it already sent.
 			const changed = raw !== mention.query;
@@ -4301,6 +4319,7 @@
 			query: '',
 			start,
 			caret,
+			end: caret,
 			items: mode === 'command' ? commandRows('') : [],
 			hint: '',
 			active: 0,
@@ -4328,9 +4347,11 @@
 			requestMention(true);
 			return;
 		}
-		const after = input.value.slice(mention.caret);
-		const suffix = /^\s/.test(after) ? '' : ' ';
-		input.setRangeText(item.token + suffix, mention.start, mention.caret, 'end');
+		// The query may have been cut before a prose mark (`@广义，`): replace only up to that mark
+		// and keep the user's punctuation. A punctuation that follows needs no space before it.
+		const after = input.value.slice(mention.end);
+		const suffix = /^\s/.test(after) || MENTION_SUFFIX_PUNCT.test(after) ? '' : ' ';
+		input.setRangeText(item.token + suffix, mention.start, mention.end, 'end');
 		resizeInput();
 		closeMention();
 		input.focus();
@@ -4380,15 +4401,15 @@
 		const source = String(text ?? '');
 		let out = '';
 		let last = 0;
-		const pattern = /(^|[^A-Za-z0-9_.@/\\-])(@(?:symbol:"[^"]*":[^\s@]+|"[^"]*"(?::\d+(?:-\d+)?|\/)?|symbol:[^\s@]+|[^\s@]+))/g;
+		const pattern = /(^|[^A-Za-z0-9_.@/\\-])((?:@|＠)(?:symbol:"[^"]*":[^\s@]+|"[^"]*"(?::\d+(?:-\d+)?|\/)?|symbol:[^\s@，。；：！？、,;!?…]+|[^\s@，。；：！？、,;!?…]+))/g;
 		for (const match of source.matchAll(pattern)) {
 			const index = match.index ?? 0;
 			const start = index + match[1].length;
 			out += esc(source.slice(last, start));
 			const token = match[2];
-			const tailPattern = token.startsWith('@symbol:')
-				? /[.,;:!?，。；：！？]+$/
-				: /[.,;:!?，。；：！？)\]}）】》」』]+$/;
+			const tailPattern = /^(?:@|＠)symbol:/.test(token)
+				? /[.,;:!?，。；：！？、…]+$/
+				: /[.,;:!?，。；：！？、…)\]}）】》」』]+$/;
 			const tail = tailPattern.exec(token);
 			const tailText = tail ? tail[0] : '';
 			const body = tailText ? token.slice(0, -tailText.length) : token;
@@ -4820,24 +4841,31 @@
 			updateMention();
 			return;
 		}
-		if (event.isComposing || event.inputType !== 'insertText') {
+		// An IME can commit its text as `insertCompositionText` with no further composition event.
+		if (event.isComposing || (event.inputType !== 'insertText' && event.inputType !== 'insertCompositionText')) {
 			return;
 		}
 		const caret = input.selectionStart;
 		const at = caret - 1;
-		if (event.data === '@') {
+		if (event.data === '@' || event.data === '＠') {
 			if (
 				at >= 0 &&
-				input.value[at] === '@' &&
+				(input.value[at] === '@' || input.value[at] === '＠') &&
 				mentionBoundary(at === 0 ? undefined : input.value[at - 1]) &&
-				input.value[at + 1] !== '"'
+				input.value[at + 1] !== '"' &&
+				input.value[at + 1] !== '＂'
 			) {
 				openMention('categories', at, caret);
 			}
 			return;
 		}
 		// A slash starts a command only at the start of the prompt, where `slashName()` looks for it.
-		if (event.data === '/' && at >= 0 && input.value[at] === '/' && !input.value.slice(0, at).trim()) {
+		if (
+			(event.data === '/' || event.data === '／') &&
+			at >= 0 &&
+			(input.value[at] === '/' || input.value[at] === '／') &&
+			!input.value.slice(0, at).trim()
+		) {
 			openMention('command', at, caret);
 		}
 	});
@@ -4850,10 +4878,24 @@
 		if (mention) {
 			mention.composing = false;
 			updateMention();
+			// Committing the raw pinyin the IME had already put in the field leaves the query
+			// unchanged, so `changed` is false and no request would ever be sent otherwise.
+			requestMention(false);
+			return;
+		}
+		// Some IMEs commit a full-width ＠ as composition text rather than as insertText.
+		const caret = input.selectionStart;
+		const at = caret - 1;
+		if (at >= 0 && input.value[at] === '＠' && mentionBoundary(at === 0 ? undefined : input.value[at - 1])) {
+			openMention('categories', at, caret);
 		}
 	});
 	document.addEventListener('keydown', (event) => {
 		if (event.key !== 'Escape') {
+			return;
+		}
+		// Escape belongs to the IME while a candidate is being composed; it must not close the picker.
+		if (event.isComposing || event.keyCode === 229) {
 			return;
 		}
 		if (mention) {

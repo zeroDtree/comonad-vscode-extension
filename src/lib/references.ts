@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { pinyinOfPath, type PinyinMatch } from './pinyin';
+
 /**
  * Explicit @ references: the token grammar, its canonical formatter, and the ordering the mention
  * picker uses. Pure — no `vscode`, no `cordis`. Resolution lives in `services/references`, which
@@ -10,6 +12,7 @@
  *   @path/                    folder
  *   @symbol:path:Name         code symbol (the last colon outside quotes splits path/name)
  *   @"path with spaces"       quoted paths, CJK included
+ *   ＠path                    a Chinese IME's full-width at sign is the same reference
  *   \@literal                 escaped, not a reference
  */
 
@@ -52,8 +55,12 @@ export interface SymbolLike {
 }
 
 const WORD_BEFORE = /[A-Za-z0-9_.@/\\-]/;
-const SYMBOL_TAIL = /[.,;:!?，。；：！？]+$/;
-const OTHER_TAIL = /[.,;:!?，。；：！？)\]}）】》」』]+$/;
+const SYMBOL_TAIL = /[.,;:!?，。；：！？、…]+$/;
+const OTHER_TAIL = /[.,;:!?，。；：！？、…)\]}）】》」』]+$/;
+/** The first prose mark ends a picker query; brackets are not included so paths keep them. */
+const QUERY_END = /[，。；：！？、,;!?…]/;
+/** A CJK mark also ends an unquoted token in running prose; ASCII marks stay in the path. */
+const TOKEN_END = /[，。；：！？、…]/;
 const MAX_LIMIT = 200;
 
 /** Whether a reference may start after this character. Emails, URLs and `\@` stay literal. */
@@ -61,11 +68,16 @@ export function canStartReference(previous: string | undefined): boolean {
 	return previous === undefined || !WORD_BEFORE.test(previous);
 }
 
+/** A full-width `＠` is what several Chinese IMEs insert; it opens the same reference. */
+function isAtSign(char: string | undefined): boolean {
+	return char === '@' || char === '＠';
+}
+
 /** Every reference occurrence in the text, in order. Never throws; malformed tokens are skipped. */
 export function parseReferences(text: string): ParsedReference[] {
 	const found: ParsedReference[] = [];
 	for (let index = 0; index < text.length; index += 1) {
-		if (text[index] !== '@' || !canStartReference(index === 0 ? undefined : text[index - 1])) {
+		if (!isAtSign(text[index]) || !canStartReference(index === 0 ? undefined : text[index - 1])) {
 			continue;
 		}
 		const scanned = scanToken(text, index);
@@ -106,15 +118,67 @@ export function looksLikePath(reference: ParsedReference): boolean {
 }
 
 /**
- * Query-ranked paths for the mention picker. Case-insensitive; a basename prefix beats a path
- * substring, which beats a subsequence. Empty queries stay in a stable path order.
+ * NFC plus the width folding a Chinese IME forces on a user: `＠`, `／`, full-width Latin and
+ * digits become their ASCII forms, and one ideographic space becomes a normal space. Lowercased.
  */
-export function rankPaths(query: string, paths: readonly string[], limit = 25): string[] {
-	const needle = query.trim().toLowerCase();
-	const scored: { path: string; score: number[] }[] = [];
-	for (const path of paths) {
-		const lower = path.toLowerCase();
-		const base = lower.split('/').pop() ?? lower;
+export function fold(text: string): string {
+	return text
+		.normalize('NFC')
+		.replace(/[！-～]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
+		.replace(/　/g, ' ')
+		.toLowerCase();
+}
+
+/**
+ * The picker's query: trimmed, cut at the first prose mark, then folded. The cut comes first
+ * because folding turns `：` into `:`, after which it could no longer be told apart from a real
+ * line-range or `symbol:` colon.
+ */
+export function normalizeQuery(text: string): string {
+	const trimmed = text.trim();
+	const cut = trimmed.search(QUERY_END);
+	return fold(cut < 0 ? trimmed : trimmed.slice(0, cut)).trim();
+}
+
+/** One picker candidate, pre-folded (and with pinyin when its name has Han) for repeated queries. */
+export interface PathEntry {
+	/** The path exactly as it is written into the composer. */
+	path: string;
+	/** Folded path, used for literal matching. */
+	lower: string;
+	/** Folded basename, used for the stronger literal tiers. */
+	base: string;
+	/** Pinyin haystacks; `undefined` when the path has no Han character. */
+	pinyin?: PinyinMatch;
+}
+
+/** Build the reusable form of one path. */
+export function pathEntry(path: string): PathEntry {
+	const lower = fold(path);
+	return {
+		path,
+		lower,
+		base: lower.slice(lower.lastIndexOf('/') + 1),
+		pinyin: pinyinOfPath(path),
+	};
+}
+
+/**
+ * Query-ranked entries for the mention picker. Literal matches always outrank pinyin ones: exact
+ * basename, basename prefix, path substring, then pinyin (exact/full prefix, basename initials,
+ * initials at a path-segment boundary, full substring), and the character subsequence last.
+ * Initials sit above a full substring because short ASCII queries otherwise hit syllable
+ * boundaries inside unrelated names (`gy` inside `yongyou`). Empty queries stay in path order.
+ */
+export function rankEntries(query: string, entries: readonly PathEntry[], limit = 25): PathEntry[] {
+	const needle = normalizeQuery(query);
+	// A pinyin haystack is ASCII, so only a pure ASCII query with a letter can use one, and a
+	// single letter is too noisy to be worth it.
+	const withPinyin = needle.length >= 2 && /^[a-z0-9]+$/.test(needle) && /[a-z]/.test(needle);
+	const scored: { entry: PathEntry; score: number[] }[] = [];
+	for (const entry of entries) {
+		const lower = entry.lower;
+		const base = entry.base;
 		let score: number[] | null = null;
 		if (!needle) {
 			score = [lower.split('/').length, lower.length];
@@ -127,22 +191,27 @@ export function rankPaths(query: string, paths: readonly string[], limit = 25): 
 			if (at >= 0) {
 				score = [2, at, lower.length];
 			} else {
-				let matched = 0;
-				let gaps = 0;
-				for (let index = 0; index < lower.length && matched < needle.length; index += 1) {
-					if (lower[index] === needle[matched]) {
-						matched += 1;
-					} else {
-						gaps += 1;
-					}
+				if (withPinyin && entry.pinyin) {
+					score = rankPinyin(needle, entry);
 				}
-				if (matched === needle.length) {
-					score = [3, gaps, lower.length];
+				if (!score) {
+					let matched = 0;
+					let gaps = 0;
+					for (let index = 0; index < lower.length && matched < needle.length; index += 1) {
+						if (lower[index] === needle[matched]) {
+							matched += 1;
+						} else {
+							gaps += 1;
+						}
+					}
+					if (matched === needle.length) {
+						score = [8, gaps, lower.length];
+					}
 				}
 			}
 		}
 		if (score) {
-			scored.push({ path, score });
+			scored.push({ entry, score });
 		}
 	}
 	scored.sort((left, right) => {
@@ -152,9 +221,42 @@ export function rankPaths(query: string, paths: readonly string[], limit = 25): 
 				return left.score[index]! - right.score[index]!;
 			}
 		}
-		return left.path.localeCompare(right.path);
+		return left.entry.path.localeCompare(right.entry.path);
 	});
-	return scored.slice(0, Math.max(1, Math.min(limit, MAX_LIMIT))).map((entry) => entry.path);
+	return scored.slice(0, Math.max(1, Math.min(limit, MAX_LIMIT))).map((entry) => entry.entry);
+}
+
+/** The pinyin tiers for one entry, or `null` when its haystacks do not contain the query. */
+function rankPinyin(needle: string, entry: PathEntry): number[] | null {
+	const pinyin = entry.pinyin;
+	if (!pinyin) {
+		return null;
+	}
+	const baseFull = pinyin.full.slice(pinyin.full.lastIndexOf('/') + 1);
+	const baseInitials = pinyin.initials.slice(pinyin.initials.lastIndexOf('/') + 1);
+	if (baseFull === needle) {
+		return [3, pinyin.full.length];
+	}
+	if (baseFull.startsWith(needle)) {
+		return [4, baseFull.length, entry.lower.length];
+	}
+	if (baseInitials.startsWith(needle)) {
+		return [5, baseInitials.length, entry.lower.length];
+	}
+	const segment = pinyin.initials.split('/').find((part) => part.startsWith(needle));
+	if (segment !== undefined) {
+		return [6, pinyin.initials.indexOf(segment), entry.lower.length];
+	}
+	const at = pinyin.full.indexOf(needle);
+	return at < 0 ? null : [7, at, entry.lower.length];
+}
+
+/**
+ * Query-ranked paths for the mention picker; the path-string form of {@link rankEntries}. The
+ * picker itself ranks pre-built entries so a keystroke does not refold every path.
+ */
+export function rankPaths(query: string, paths: readonly string[], limit = 25): string[] {
+	return rankEntries(query, paths.map(pathEntry), limit).map((entry) => entry.path);
 }
 
 /**
@@ -221,13 +323,16 @@ function tokenEnd(text: string, from: number): number {
 			return from;
 		}
 		let index = read.end;
-		while (index < text.length && !/\s/.test(text[index]!)) {
+		while (index < text.length && !/\s/.test(text[index]!) && !TOKEN_END.test(text[index]!)) {
 			index += 1;
 		}
 		return index;
 	}
+	// Chinese prose puts "，接下来" right after a name with no space, so an unquoted token also
+	// ends at a CJK prose mark. ASCII marks keep their old tail-only rule (a quoted name can carry
+	// any of them), and `:` / `.` stay inside the path for ranges and extensions.
 	let index = from;
-	while (index < text.length && !/\s/.test(text[index]!)) {
+	while (index < text.length && !/\s/.test(text[index]!) && !TOKEN_END.test(text[index]!)) {
 		index += 1;
 	}
 	return index;

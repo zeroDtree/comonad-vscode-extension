@@ -55,6 +55,8 @@ export interface ReferenceLimits {
 	references: number;
 	folderEntries: number;
 	mentionItems: number;
+	/** Files the picker indexes before it starts truncating a very large workspace. */
+	indexFiles: number;
 	queryChars: number;
 	maxReadBytes: number;
 	maxImageBytes: number;
@@ -73,6 +75,7 @@ export const REFERENCE_LIMITS: ReferenceLimits = {
 	references: 20,
 	folderEntries: 200,
 	mentionItems: 25,
+	indexFiles: 50_000,
 	queryChars: 256,
 	maxReadBytes: 2_000_000,
 	maxImageBytes: MAX_IMAGE_BYTES,
