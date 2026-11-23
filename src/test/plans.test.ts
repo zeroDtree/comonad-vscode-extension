@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
+import * as vscode from 'vscode';
 import { readFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import {
@@ -15,6 +16,7 @@ import {
 	planTargetFor,
 } from '../lib/plan-files';
 import { applyLiteralEdits } from '../lib/text-edit';
+import { rightmostEditorColumn } from '../ui/chat-panel';
 
 suite('Plan paths', () => {
 	test('the folder follows the setting and the root chat', () => {
@@ -88,7 +90,11 @@ suite('Plan paths', () => {
 		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		assert.match(panel, /case 'previewPlan'/);
 		assert.match(panel, /case 'buildPlan'/);
-		assert.match(panel, /markdown\.showPreviewToSide/);
+		assert.match(panel, /const MARKDOWN_PREVIEW_VIEW_TYPE = 'vscode\.markdown\.preview\.editor'/);
+		assert.match(panel, /executeCommand\('vscode\.openWith', uri, MARKDOWN_PREVIEW_VIEW_TYPE/);
+		assert.match(panel, /rightmostEditorColumn\(vscode\.window\.tabGroups\.all\.map/);
+		assert.match(panel, /preserveFocus: quiet/);
+		assert.ok(!panel.includes('markdown.showPreviewToSide'), 'a preview joins an existing column instead of splitting one off');
 		assert.ok(!panel.includes("mode === undefined ? 'sw'"), 'a missing mode is refused, never narrowed');
 		assert.match(panel, /const buildMode = asBuildMode\(mode\)/);
 		assert.match(panel, /buildPlanPrompt\(target\.relative, content, buildMode\)/);
@@ -99,6 +105,15 @@ suite('Plan paths', () => {
 		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.css'), 'utf8');
 		assert.match(css, /\.plan-card/);
 		assert.match(css, /\.plan-menu\s*\{[\s\S]*?position:\s*fixed/);
+	});
+
+	test('a plan preview joins the rightmost editor column', () => {
+		assert.strictEqual(rightmostEditorColumn([]), vscode.ViewColumn.Active, 'no group to join: the active one');
+		assert.strictEqual(rightmostEditorColumn([vscode.ViewColumn.One]), vscode.ViewColumn.One);
+		assert.strictEqual(
+			rightmostEditorColumn([vscode.ViewColumn.Three, vscode.ViewColumn.One, vscode.ViewColumn.Two]),
+			vscode.ViewColumn.Three,
+		);
 	});
 
 	test('a recorded plan path survives a changed plan directory', () => {

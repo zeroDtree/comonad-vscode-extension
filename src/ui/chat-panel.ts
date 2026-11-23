@@ -119,6 +119,17 @@ export function statusDetail(
 		.join('  ·  ');
 }
 
+/** The built-in Markdown preview custom editor; `vscode.openWith` needs its view id. */
+const MARKDOWN_PREVIEW_VIEW_TYPE = 'vscode.markdown.preview.editor';
+
+/**
+ * The rightmost open editor column. A plan preview joins an existing group instead of splitting one
+ * off; with no group to join, the active one is the only safe target.
+ */
+export function rightmostEditorColumn(columns: readonly vscode.ViewColumn[]): vscode.ViewColumn {
+	return columns.length ? (Math.max(...columns) as vscode.ViewColumn) : vscode.ViewColumn.Active;
+}
+
 /** The chat: a webview view in the Secondary Side Bar, plus an optional editor window. */
 
 const SURFACE = 'panel';
@@ -846,8 +857,8 @@ export function chatPanel(ctx: Context): void {
 		const session = ctx.sessions.get(ref.sessionId);
 		const plan = isPlanWriterTool(call.name) ? planInfoOf(session, output) : undefined;
 		post({ type: 'tool-result', id: call.id, output: clip(output, 30_000), images: publicImages(images), plan });
-		// The plan is written or edited; show it beside the chat. A preview already open on it refreshes itself,
-		// so one open per file per turn is enough.
+		// The plan is written or edited; open its preview once per file and turn. The preview joins the
+		// rightmost editor column and refreshes itself when the plan is rewritten again.
 		if (plan && session) {
 			const key = `${plan.sessionId}:${plan.relative || plan.name}`;
 			if (!previewedPlans.has(key)) {
@@ -1564,7 +1575,10 @@ export function chatPanel(ctx: Context): void {
 		}
 	};
 
-	/** Opens a plan: the built-in Markdown preview, or a text editor for a non-Markdown name. */
+	/**
+	 * Opens a plan in the rightmost editor column: the built-in Markdown preview, or a text editor
+	 * for a non-Markdown name.
+	 */
 	const openPlanPreview = async (
 		session: Session,
 		name: unknown,
@@ -1593,15 +1607,21 @@ export function chatPanel(ctx: Context): void {
 				return;
 			}
 			const uri = vscode.Uri.file(absolute);
+			// A side preview resolves to "active column + 1" on every call, so a second preview drifts
+			// one column right. Join the rightmost open column instead.
+			const column = rightmostEditorColumn(vscode.window.tabGroups.all.map((group) => group.viewColumn));
 			if (/\.(?:md|markdown)$/i.test(target.name)) {
 				try {
-					await vscode.commands.executeCommand('markdown.showPreviewToSide', uri);
+					await vscode.commands.executeCommand('vscode.openWith', uri, MARKDOWN_PREVIEW_VIEW_TYPE, {
+						viewColumn: column,
+						preserveFocus: quiet,
+					});
 				} catch {
 					// No built-in Markdown extension is active: show the source rather than nothing.
-					await vscode.window.showTextDocument(uri, { preview: true });
+					await vscode.window.showTextDocument(uri, { preview: true, viewColumn: column, preserveFocus: quiet });
 				}
 			} else {
-				await vscode.window.showTextDocument(uri, { preview: true });
+				await vscode.window.showTextDocument(uri, { preview: true, viewColumn: column, preserveFocus: quiet });
 			}
 		} catch (error) {
 			ctx.log.message(`plan preview failed: ${describe(error)}`);
