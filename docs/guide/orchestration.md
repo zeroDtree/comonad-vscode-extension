@@ -26,10 +26,13 @@ runtime versions it, derives verifiers, and persists it on the root chat. A late
 declarative: send all nodes you still want. **Build plan** archives the graph and starts the
 implementation turn with no active graph, so a new `task_graph` begins at version 1.
 
-The **plan file** is the durable deliverable. `write_plan` creates or replaces it under
-`<planDirectory>/<root chat id>/`; `edit_plan` revises an existing plan in place with exact-text
-replacements. The plan card previews it and **Build plan** hands its content to the next turn. The
-file survives the graph archive and is the source of truth the user builds from.
+The **plan file** is the durable Markdown deliverable. `write_plan` creates or replaces it under
+`<planDirectory>/<root chat id>/`, appending `.md` to a name that has no Markdown extension;
+`edit_plan` revises an existing plan in place with exact-text replacements and keeps the recorded
+name exact, so older plans without an extension stay readable and editable. The plan card previews
+it — a Preview click renders even a legacy extensionless name as Markdown — and **Build plan** hands
+its content to the next turn. The file survives the graph archive and is the source of truth the
+user builds from.
 
 A Plan session is read-only because its mode grants no `rw`; its capabilities are `ro`, `shell_ro`,
 `ro_plan` and `rw_plan`. The phase may hold read-only research nodes plus the plan file.

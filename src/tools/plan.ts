@@ -2,7 +2,7 @@
 import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { missingAncestor } from '../lib/created';
-import { planFileName, planFolder, planTargetFor } from '../lib/plan-files';
+import { planFileName, planFolder, planTargetFor, planWriteFileName } from '../lib/plan-files';
 import { guardPath, PathEscapeError } from '../lib/sandbox';
 import { applyLiteralEdits, type LiteralEdit } from '../lib/text-edit';
 import { objectSchema, type ToolContext } from '../lib/types';
@@ -78,15 +78,25 @@ export const planTools = toolset([
 	{
 		name: 'write_plan',
 		description:
-			'Create or replace a plan file for this chat by name. The file is the durable deliverable the user can build; use edit_plan to revise an existing plan instead of rewriting it. When plan writes are unavailable, return the plan in your summary instead.',
+			'Create or replace a plan file for this chat by name. A name without a Markdown extension gets ".md" appended, and the result reports the file name that was written. The file is the durable deliverable the user can build; use edit_plan to revise an existing plan instead of rewriting it. When plan writes are unavailable, return the plan in your summary instead.',
 		capability: 'rw_plan',
 		trackedWrite: true,
 		needsNetwork: false,
 		needsWorkspace: true,
-		parameters: objectSchema({ name: { type: 'string' }, content: { type: 'string' } }, ['name', 'content']),
+		parameters: objectSchema(
+			{
+				name: { type: 'string', description: 'The plan file name; a missing Markdown extension gets ".md".' },
+				content: { type: 'string' },
+			},
+			['name', 'content'],
+		),
 		async execute(args, ctx) {
 			const { name, content } = args as { name: string; content: string };
-			const target = await planPath(ctx, name, 'write');
+			const file = planWriteFileName(name);
+			if (!file) {
+				throw new PathEscapeError(`invalid plan name: ${name}`);
+			}
+			const target = await planPath(ctx, file, 'write');
 			let existed = true;
 			try {
 				await lstat(target);
@@ -109,7 +119,6 @@ export const planTools = toolset([
 			if (!existed) {
 				ctx.noteCreated?.(target);
 			}
-			const file = planFileName(name) ?? name;
 			return `wrote plan ${file}\nplan path: ${recordedPlanPath(ctx, file)}\n\nThe plan is recorded. Stop here and summarize it; do not call more tools. Implementation starts when the user builds the plan.`;
 		},
 	},
@@ -123,7 +132,7 @@ export const planTools = toolset([
 		needsWorkspace: true,
 		parameters: objectSchema(
 			{
-				name: { type: 'string', description: 'The plan file name recorded by write_plan.' },
+				name: { type: 'string', description: 'The exact plan file name reported by write_plan.' },
 				edits: {
 					type: 'array',
 					description: 'Ordered exact-text replacements; each old must occur exactly once at that point.',

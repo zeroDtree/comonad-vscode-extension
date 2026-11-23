@@ -8,12 +8,14 @@ import {
 	MAX_BUILD_PLAN_CHARS,
 	asBuildMode,
 	buildPlanPrompt,
+	isMarkdownPlanName,
 	isPlanWriterTool,
 	parsePlanResult,
 	planFileName,
 	planFolder,
 	planPathForRecorded,
 	planTargetFor,
+	planWriteFileName,
 } from '../lib/plan-files';
 import { applyLiteralEdits } from '../lib/text-edit';
 import { rightmostEditorColumn } from '../ui/chat-panel';
@@ -33,6 +35,25 @@ suite('Plan paths', () => {
 		assert.strictEqual(planFileName('.'), null);
 		assert.strictEqual(planFileName('..'), null);
 		assert.strictEqual(planFileName(42), null);
+	});
+
+	test('write_plan gives a plan a Markdown name without renaming recorded plans', () => {
+		assert.strictEqual(planWriteFileName('nekoai-js-2.0-update'), 'nekoai-js-2.0-update.md');
+		assert.strictEqual(planWriteFileName(' ./x/plan.md '), 'plan.md');
+		assert.strictEqual(planWriteFileName('plan.markdown'), 'plan.markdown');
+		assert.strictEqual(planWriteFileName('PLAN.MD'), 'PLAN.MD');
+		assert.strictEqual(planWriteFileName('plan.txt'), 'plan.txt.md');
+		for (const rejected of ['', '   ', '.', '..', 42]) {
+			assert.strictEqual(planWriteFileName(rejected), null);
+		}
+		assert.strictEqual(isMarkdownPlanName('plan.md'), true);
+		assert.strictEqual(isMarkdownPlanName('plan.MD'), true);
+		assert.strictEqual(isMarkdownPlanName('plan.markdown'), true);
+		assert.strictEqual(isMarkdownPlanName('plan'), false);
+		assert.strictEqual(isMarkdownPlanName('plan.txt'), false);
+		assert.strictEqual(isMarkdownPlanName('plan.md.txt'), false);
+		// The exact rule is unchanged: recorded and legacy names keep resolving the file they name.
+		assert.strictEqual(planFileName('nekoai-js-2.0-update'), 'nekoai-js-2.0-update');
 	});
 
 	test('a target names the file inside the workspace', () => {
@@ -94,6 +115,8 @@ suite('Plan paths', () => {
 		assert.match(panel, /executeCommand\('vscode\.openWith', uri, MARKDOWN_PREVIEW_VIEW_TYPE/);
 		assert.match(panel, /rightmostEditorColumn\(vscode\.window\.tabGroups\.all\.map/);
 		assert.match(panel, /preserveFocus: quiet/);
+		assert.match(panel, /isMarkdownPlanName\(target\.name\)/);
+		assert.match(panel, /executeCommand\('markdown\.showPreview', uri\)/);
 		assert.ok(!panel.includes('markdown.showPreviewToSide'), 'a preview joins an existing column instead of splitting one off');
 		assert.ok(!panel.includes("mode === undefined ? 'sw'"), 'a missing mode is refused, never narrowed');
 		assert.match(panel, /const buildMode = asBuildMode\(mode\)/);

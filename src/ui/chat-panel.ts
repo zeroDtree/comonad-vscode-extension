@@ -23,6 +23,7 @@ import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/jou
 import {
 	asBuildMode,
 	buildPlanPrompt,
+	isMarkdownPlanName,
 	isPlanWriterTool,
 	parsePlanResult,
 	planFileName,
@@ -1577,7 +1578,8 @@ export function chatPanel(ctx: Context): void {
 
 	/**
 	 * Opens a plan in the rightmost editor column: the built-in Markdown preview, or a text editor
-	 * for a non-Markdown name.
+	 * for a non-Markdown name. An explicit click still renders a legacy extensionless plan through
+	 * the Markdown command; a quiet auto-open shows its source and keeps the chat focused.
 	 */
 	const openPlanPreview = async (
 		session: Session,
@@ -1610,7 +1612,9 @@ export function chatPanel(ctx: Context): void {
 			// A side preview resolves to "active column + 1" on every call, so a second preview drifts
 			// one column right. Join the rightmost open column instead.
 			const column = rightmostEditorColumn(vscode.window.tabGroups.all.map((group) => group.viewColumn));
-			if (/\.(?:md|markdown)$/i.test(target.name)) {
+			const showSource = () =>
+				vscode.window.showTextDocument(uri, { preview: true, viewColumn: column, preserveFocus: quiet });
+			if (isMarkdownPlanName(target.name)) {
 				try {
 					await vscode.commands.executeCommand('vscode.openWith', uri, MARKDOWN_PREVIEW_VIEW_TYPE, {
 						viewColumn: column,
@@ -1618,10 +1622,19 @@ export function chatPanel(ctx: Context): void {
 					});
 				} catch {
 					// No built-in Markdown extension is active: show the source rather than nothing.
-					await vscode.window.showTextDocument(uri, { preview: true, viewColumn: column, preserveFocus: quiet });
+					await showSource();
 				}
+			} else if (quiet) {
+				// The preview command has no preserveFocus: a background open keeps the source visible.
+				await showSource();
 			} else {
-				await vscode.window.showTextDocument(uri, { preview: true, viewColumn: column, preserveFocus: quiet });
+				// The preview editor only matches Markdown names, but the command renders any resource.
+				// It opens in the active editor column and takes focus, which is what an explicit click asks for.
+				try {
+					await vscode.commands.executeCommand('markdown.showPreview', uri);
+				} catch {
+					await showSource();
+				}
 			}
 		} catch (error) {
 			ctx.log.message(`plan preview failed: ${describe(error)}`);

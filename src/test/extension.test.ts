@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { issueAuthorization } from '../lib/authorization';
-import { planTargetFor } from '../lib/plan-files';
+import { parsePlanResult, planPathForRecorded, planTargetFor } from '../lib/plan-files';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
 import { DEFAULT_GRAPH_SOURCE, parseGraphSource } from '../lib/mermaid';
 import { limitEffort } from '../lib/effort';
@@ -9860,6 +9860,73 @@ suite('Plan tools', () => {
 			assert.ok(target);
 			assert.strictEqual(target.name, 'draft.md');
 			assert.strictEqual(readFileSync(join(kernel.host.workspace(), target.path), 'utf8'), '# Draft');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('write_plan appends .md to a plan name without one', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'plan', planDirectory: 'notes/plans' } });
+		try {
+			await kernel.ctx.plugin(planTools);
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plan-name');
+			const base = directToolContext(kernel, ['1']);
+			const context = {
+				...base,
+				sessionId: session.id,
+				rootSessionId: session.id,
+				policy: { ...kernel.ctx.agent.policyFor(), workMode: 'plan' as const },
+				authorization: issueAuthorization({ sessionId: session.id, batch: base.batch, callIds: ['1'] }),
+			};
+			const outcome = await kernel.ctx.tools.invoke(
+				call('write_plan', { name: 'nekoai-js-2.0-update', content: '# Plan' }),
+				context,
+			);
+			assert.strictEqual(outcome.isError, false, outcome.content);
+			assert.match(outcome.content, /^wrote plan nekoai-js-2\.0-update\.md\n/);
+			assert.match(outcome.content, /plan path: notes\/plans\/plan-name\/nekoai-js-2\.0-update\.md\n/);
+			const target = planTargetFor(kernel.host.workspace(), 'notes/plans', session.id, 'nekoai-js-2.0-update.md');
+			assert.ok(target);
+			assert.strictEqual(readFileSync(join(kernel.host.workspace(), target.path), 'utf8'), '# Plan');
+			assert.ok(
+				!existsSync(join(kernel.host.workspace(), 'notes', 'plans', 'plan-name', 'nekoai-js-2.0-update')),
+				'no extensionless file is written',
+			);
+			const recorded = parsePlanResult(outcome.content);
+			assert.deepStrictEqual(recorded, {
+				name: 'nekoai-js-2.0-update.md',
+				relative: 'notes/plans/plan-name/nekoai-js-2.0-update.md',
+				edited: false,
+			});
+			assert.ok(planPathForRecorded(kernel.host.workspace(), session.id, recorded!), 'the card resolves the recorded file');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('edit_plan still reaches an older plan that has no extension', async () => {
+		const kernel = await createTestKernel({ config: { mode: 'plan', planDirectory: 'notes/plans' } });
+		try {
+			await kernel.ctx.plugin(planTools);
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'plan-legacy');
+			const base = directToolContext(kernel, ['1']);
+			const context = {
+				...base,
+				sessionId: session.id,
+				rootSessionId: session.id,
+				policy: { ...kernel.ctx.agent.policyFor(), workMode: 'plan' as const },
+				authorization: issueAuthorization({ sessionId: session.id, batch: base.batch, callIds: ['1'] }),
+			};
+			const legacy = join(kernel.host.workspace(), 'notes', 'plans', 'plan-legacy', 'legacy-plan');
+			mkdirSync(dirname(legacy), { recursive: true });
+			writeFileSync(legacy, '# Old\n');
+			const outcome = await kernel.ctx.tools.invoke(
+				call('edit_plan', { name: 'legacy-plan', edits: [{ old: '# Old', new: '# New' }] }),
+				context,
+			);
+			assert.strictEqual(outcome.isError, false, outcome.content);
+			assert.match(outcome.content, /^edited plan legacy-plan\n/);
+			assert.strictEqual(readFileSync(legacy, 'utf8'), '# New\n');
 		} finally {
 			await kernel.dispose();
 		}

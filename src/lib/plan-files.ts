@@ -37,6 +37,24 @@ export function planFileName(name: unknown): string | null {
 	return !clean || clean === '.' || clean === '..' ? null : clean;
 }
 
+/** Whether a plan file name already carries the extension the built-in preview renders. */
+export function isMarkdownPlanName(name: string): boolean {
+	return /\.(?:md|markdown)$/i.test(name);
+}
+
+/**
+ * The name `write_plan` writes: a plan is a Markdown document, so a name without a Markdown
+ * extension gets `.md` appended. The result reports this name, and `edit_plan`, `read_plan` and
+ * recorded legacy names keep the exact rule, so older plans without an extension still resolve.
+ */
+export function planWriteFileName(name: unknown): string | null {
+	const file = planFileName(name);
+	if (!file) {
+		return null;
+	}
+	return isMarkdownPlanName(file) ? file : `${file}.md`;
+}
+
 export interface PlanTarget {
 	name: string;
 	/** Workspace-relative when inside it; the configured path otherwise. Forward slashes. */
