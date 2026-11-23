@@ -127,68 +127,20 @@ import { pluginNodeStatus, pluginTree, type PluginNode } from '../lib/plugins';
 import { slashCommands } from '../ui/slash';
 import { harnessAliases, harnessCompat } from '../plugins/harness';
 import { pluginHost, readRows, writeRow } from '../services/plugins';
-import { blankPng, cardTextFromPng, characterToCard, greetingsOf, loadCard, normaliseCard, parseCard, readPngText, writePngText } from 'comonad-plugin-tavern/lib/card';
-import { adoptBook, adoptCharacter, adoptPersona, adoptPreset, blankBook, blankCharacter, blankPersona, blankPreset, entryToJson } from 'comonad-plugin-tavern/lib/authoring';
-import { readBookFile, turnPrompts } from 'comonad-plugin-tavern/services/tavern';
-import { convertCharacterToPersona } from 'comonad-plugin-tavern/lib/personas';
-import { parseExamples, substituteMacros } from 'comonad-plugin-tavern/lib/macro';
-import { parsePreset, presetSamplers, presetToJson } from 'comonad-plugin-tavern/lib/preset';
-import { builtInBlocks, librarySeed, parsePromptLibrary, promptLibraryJson, sanitisePromptLibrary } from 'comonad-plugin-tavern/lib/library';
-import { PRESET_TEMPLATES } from 'comonad-plugin-tavern/lib/templates/presets';
-import { PROMPT_BLOCKS } from 'comonad-plugin-tavern/lib/templates/blocks';
-import { COMONAD_PROMPTS, CONTEXT_PROMPT, DEFAULT_ORDER, DEFAULT_PROMPTS, IDENTITY_PROMPT, ST_PROMPTS, TOOLS_PROMPT, completeOrder, movePrompt, promptCollection, setEnabled, shippedPrompt, triggersGeneration } from 'comonad-plugin-tavern/lib/prompts';
-import { COMONAD_BLOCK, type PromptBlock } from '../lib/blocks';
-import { applyPromptLayout, defaultPromptLayout, mergePromptPrefixes, mergeToolLayout, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
-import { activateLore, toWorldBook, type LoreBook, type LoreInput } from 'comonad-plugin-tavern/lib/lore';
-import type { TavernPreset } from 'comonad-plugin-tavern/lib/types';
-import { assemble, exampleMessages, injectAtDepth } from 'comonad-plugin-tavern/lib/assemble';
-import { applyRegex, makeScript } from 'comonad-plugin-tavern/lib/regex';
-import { ruleOf, searchEntries, visibleEntries } from 'comonad-plugin-tavern/lib/search';
-import {
-	ANTI_TROLL_MAX_TAGS,
-	TAG_IMPORT,
-	addTags,
-	applyTagImport,
-	byId,
-	deleteTag,
-	emptyStore,
-	ensureTag,
-	mergeStores,
-	planTagImport,
-	pruneTags,
-	readStore,
-	renameTag,
-	storeJson,
-	tagIdsOf,
-	tagsOf,
-} from 'comonad-plugin-tavern/lib/tags';
-import { WI_LOGIC, WI_POSITION, WI_ROLE, WI_STRATEGY, worldEntry } from 'comonad-plugin-tavern/lib/lore';
-import { REGEX_PLACEMENT } from 'comonad-plugin-tavern/lib/regex';
-import { INJECTION_POSITION } from 'comonad-plugin-tavern/lib/prompts';
-import { PROMPT_LIBRARY_KEY } from 'comonad-plugin-tavern/lib/preset';
-import { tavernSettings, TAVERN_SETTING_KEYS, WI_SETTINGS_DEFAULTS } from 'comonad-plugin-tavern/lib/settings';
+import { COMONAD_BLOCK, COMONAD_BLOCKS, type PromptBlock } from '../lib/blocks';
+import { applyPromptLayout, defaultPromptLayout, mergeToolLayout, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
 import { GRAPH_SETTING_KEYS } from '../services/graph';
-import { embedTexts } from 'comonad-plugin-tavern/lib/vectors';
 import { webPlan } from '../services/web-tokenizers';
-import type { GenerationTrigger, WorldEntry } from 'comonad-plugin-tavern/lib/types';
-/** The tavern plugin is a package beside the host: its files are read from there, not from `src/`. */
-const PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-tavern');
-const PACKAGE_SRC = join(PACKAGE, 'src');
-const PACKAGE_RESOURCES = join(PACKAGE, 'resources');
 /** The math plugin, built by `npm run compile` beside the host. */
 const MATH_PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-math');
 const MATH_RESOURCES = join(MATH_PACKAGE, 'resources');
 import mathEntry from 'comonad-plugin-math';
 import { ChatWebviewAssets } from '../services/chat-assets';
 import { MAX_ANSWER_CHARS, chatDocument, sanitizeQuestionAnswers, statusDetail } from '../ui/chat-panel';
-import tavernEntry from 'comonad-plugin-tavern';
-import { tavernPane } from 'comonad-plugin-tavern/panel/pane';
-import { contentController } from 'comonad-plugin-tavern/panel/controller';
 import { settingsDocument, settingsPanel } from '../ui/settings-panel';
 import { applyFileReviewChanges, fileReviewDocument } from '../ui/file-review-editor';
 import { reviewDocument } from '../ui/review-panel';
 import { keepHunkAction, undoHunkAction } from '../ui/hunk-actions';
-import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
 import { McpConnection } from '../services/mcp';
 import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, estimateMessages, messageTokens, countRaw, estimateTokens, encodingForModel, formatTokens, guesstimate, setEncoder } from '../lib/tokens';
@@ -240,7 +192,7 @@ const call = (name: string, args: Record<string, unknown>): ToolCall => ({ id: '
 
 suite('Token counting', () => {
 	test('a model name picks the same tokenizer SillyTavern picks', () => {
-		// The SillyTavern collection is the tavern layer's provider: it claims the models its files cover.
+		// The SillyTavern-Tokenizers collection is the kernel's own provider: it claims the models its files cover.
 		assert.deepStrictEqual(webPlan('deepseek-chat'), { file: 'deepseek.json.gz', download: true });
 		assert.deepStrictEqual(webPlan('deepseek-reasoner'), { file: 'deepseek.json.gz', download: true });
 		assert.deepStrictEqual(webPlan('gemini-2.5-flash'), { file: 'gemma.model', download: false });
@@ -2595,38 +2547,6 @@ suite('Comonad domain', () => {
 		assert.ok(estimateMessages(squeezed.messages) < estimateMessages(long));
 	});
 
-	test('an embedding response that is missing a vector is refused', async () => {
-		const original = globalThis.fetch;
-		const respond = (data: unknown): void => {
-			globalThis.fetch = (async () =>
-				new Response(JSON.stringify({ data }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
-		};
-		try {
-			// Two texts, one vector: the answer is useless and the caller has to hear about it rather than
-			// pair a vector with the wrong text.
-			respond([{ index: 0, embedding: [1, 0] }]);
-			await assert.rejects(
-				() => embedTexts({ base: 'https://example.invalid/v1', key: 'k', model: 'm', input: ['a', 'b'] }),
-				/came back without a vector/,
-			);
-			// A row whose index names nothing is one too: it takes the place of the row it cannot be, and the
-			// text it left behind is reported as missing rather than quietly paired with another vector.
-			respond([{ index: 5, embedding: [1, 0] }]);
-			await assert.rejects(
-				() => embedTexts({ base: 'https://example.invalid/v1', key: 'k', model: 'm', input: ['a', 'b'] }),
-				/came back without a vector/,
-			);
-			// Out of order is fine: the index puts every vector back where it belongs.
-			respond([{ index: 1, embedding: [0, 1] }, { index: 0, embedding: [1, 0] }]);
-			assert.deepStrictEqual(await embedTexts({ base: 'https://example.invalid/v1', key: 'k', model: 'm', input: ['a', 'b'] }), [
-				[1, 0],
-				[0, 1],
-			]);
-		} finally {
-			globalThis.fetch = original;
-		}
-	});
-
 	test('an MCP server that answers with a string id is understood', async () => {
 		const original = globalThis.fetch;
 		globalThis.fetch = (async (_url: string, init: { body: string }) => {
@@ -2690,71 +2610,20 @@ suite('Comonad domain', () => {
 		assert.match(css, /#bar\[hidden\]/, 'and the stylesheet knows how to hide it');
 	});
 
-	test('the persona page takes the personas kind over, and the item list steps aside', () => {
-		const dir = PACKAGE_RESOURCES;
-		// The persona page is a guest module of its own, like the world-book page: it saves as it is
-		// edited, so it owns the tile list and the connection editor while the kind is showing.
-		const pane = readFileSync(join(dir, 'persona.js'), 'utf8');
-		assert.match(pane, /window\.comonadPersonas/, 'the page is its own guest module');
-		for (const verb of ['personaAvatar', 'personaClearAvatar', 'personaConnect', 'personaDisconnect', 'personaBackup', 'personaRestore', 'personaFromCharacter', 'personaDuplicate', 'personaDelete', 'personaSetting']) {
-			assert.ok(pane.includes(verb), `the persona page sends ${verb}`);
-		}
-		// Upstream offers *None (disabled)* first, and it is the only way to say "send no description".
-		assert.match(pane, /\[\s*9,\s*'None \(disabled\)'\s*\]/, 'the position list carries NONE');
-		assert.match(pane, /In-chat @ Depth/, 'and upstream’s own words for the other four');
-
-		const css = readFileSync(join(dir, 'persona.css'), 'utf8');
-		assert.match(css, /#pf-panel\s*\{[^}]*display:\s*none/, 'the page is hidden until its kind shows');
-		assert.match(css, /#st-pane\[data-kind='personas'\]\s*#pf-panel\s*\{[^}]*display:\s*flex/, 'and shown for personas');
-		assert.match(css, /#st-pane\[data-kind='personas'\]\s*#st-split/, 'the item list steps aside for it');
-		assert.match(css, /#st-pane\[data-view='settings'\]\s*#pf-panel/, 'and the settings view still hides it');
-
-		const host = readFileSync(join(dir, 'content.js'), 'utf8');
-		assert.match(host, /window\.comonadPersonas/, 'the content pane loads it');
-		assert.match(host, /kind === 'personas' && personaPane/, 'and hands the kind over');
-	});
-
-	test('the prompt pane saves before it inserts, and keeps both libraries straight', () => {
-		const dir = PACKAGE_RESOURCES;
-		const pane = readFileSync(join(dir, 'content.js'), 'utf8');
-		// A new entry is *saved* first: the two entry boxes carry *+ New*, and only their *Insert* puts a
-		// saved one into the list, after the leading Comonad blocks.
-		assert.match(pane, /'Built-in'/, 'the built-in library is a labelled entry box');
-		assert.match(pane, /'Custom'/, 'and this preset’s custom library is one too');
-		assert.match(pane, /addToPresetLibrary/, 'the custom box’s *+ New* saves rather than inserts');
-		assert.match(pane, /insertFromLibrary/, 'inserting copies a library entry into the list');
-		assert.match(pane, /promptLibrarySave/, 'a system-library change is written straight through');
-		assert.match(pane, /editingLibrary/, 'each library entry has an editor of its own');
-		assert.match(pane, /builtInPrompts/, 'the built-in library comes from the top-level host slice, whatever kind is showing');
-		const serviceSource = readFileSync(join(PACKAGE_SRC, 'services', 'tavern.ts'), 'utf8');
-		assert.doesNotMatch(serviceSource, /withoutIdentityBlock/, 'the identity block is now part of the preset order, not stripped on save');
-		assert.match(pane, /slice\.comonad/, 'Comonad’s generated blocks are rows like any other');
-		assert.match(pane, /slice\.toolsPrompt/, 'and the one Tools entry has a note of its own');
-		assert.match(pane, /is-managed/, 'their content is read-only while their place and switch are editable');
-		assert.match(pane, /block\.draggable = true/, 'a prompt card can be dragged to reorder the list');
-		assert.match(pane, /moveTo\(from, index\)/, 'a drop moves the card to its new index');
-		assert.match(readFileSync(join(dir, 'content.css'), 'utf8'), /is-drop-target/, 'the drop target is shown while dragging');
-		const host = readFileSync(join(PACKAGE_SRC, 'panel', 'controller.ts'), 'utf8');
-		assert.match(host, /builtInPrompts:\s*ctx\.tavern\.promptLibrary/, 'the host sends it at the top level, not inside the presets-only slice');
-		assert.doesNotMatch(host, /systemPrompts/, 'the old kind-gated field is gone');
-		assert.match(pane, /uniqueId\(/, 'an inserted identifier is made unique');
-		// The item the pane is editing has to survive a push: the shared library saves while the preset
-		// may still be dirty, and the panel answers every content message with a fresh state.
-		assert.match(pane, /item = dirty && same \? item : incoming;/, 'a dirty form keeps the item it is editing');
-
-		const css = readFileSync(join(dir, 'content.css'), 'utf8');
-		assert.match(css, /\.library-head\s*\{/, 'the library section has a header of its own');
-		// One entry box holds both libraries: a picker, *+ New* and *Insert*, with the picked entry edited
-		// in the space right below it — there is no separate list to keep in step.
-		assert.match(css, /\.library-box\s*\{/, 'the entry box is styled');
-		assert.match(css, /\.library-scope\s*\{/, 'and its small button switches which library it shows');
-		assert.match(css, /\.library-edit\s*\{/, 'and the picked entry gets a framed editor of its own');
-		assert.match(pane, /libraryScope/, 'the box remembers the library it is showing');
-	});
-
 	test('the agent’s system prompt is named blocks, joined exactly as the model receives it', async () => {
 		const kernel = await createTestKernel();
 		try {
+			// A turn with no tools uses the no-tools sentence instead of the tools guidance; this test is
+			// about the named blocks, so one plain read-only tool stands in for the tool set.
+			kernel.ctx.tools.register({
+				name: 'probe_tool',
+				description: 'A tool the test watches.',
+				capability: 'ro',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: objectSchema({}),
+				execute: async () => '',
+			});
 			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
 			const blocks = await kernel.ctx.agent.promptBlocks(session);
 			assert.ok(blocks.length >= 2, 'there is always at least the identity and the tools block');
@@ -2795,7 +2664,6 @@ suite('Comonad domain', () => {
 		assert.match(panel, /case 'prompts'/, 'the host answers the prompt list’s request on demand');
 		assert.match(panel, /case 'savePrompts'/, 'and writes the edited layout back');
 		assert.match(panel, /ctx\.agent\.promptBlocks/, 'with the agent’s own named blocks');
-		assert.match(panel, /tavern\(\)\?\.promptsFor/, 'mirroring the active preset’s order when ST takes over');
 		assert.match(panel, /ctx\.tools\.layout/, 'and every tool in the user’s order');
 		assert.match(panel, /parameters: tool\.parameters/, 'with each tool’s definition, schema included');
 
@@ -2807,7 +2675,6 @@ suite('Comonad domain', () => {
 		assert.match(guest, /function renderPrompts/, 'renders the prompt layout');
 		assert.match(guest, /case 'prompts':/, 'and handles the reply');
 		assert.ok(guest.includes("'Comonad'") && guest.includes("'Tools'"), 'the list has the two groups');
-		assert.ok(!guest.includes('SillyTavern'), 'the SillyTavern collection is not in this tab');
 		assert.match(guest, /function openPromptDialog/, 'a row opens its own sheet');
 		assert.match(guest, /pr-prefix/, 'where a Comonad row edits its static prefix');
 		assert.ok(!/function renderPromptPreview/.test(guest), 'the old side-column preview is gone');
@@ -2951,11 +2818,9 @@ suite('Comonad domain', () => {
 		assert.strictEqual(manifest.capabilities?.virtualWorkspaces, false, 'node:fs needs a real file system');
 		assert.strictEqual(manifest.capabilities?.untrustedWorkspaces?.supported, 'limited', 'project plugins and hooks need trust');
 		const declared = new Set(Object.keys(manifest.contributes.configuration.properties).map((key) => key.replace(/^comonad\./, '')));
-		// The kernel reads its own keys; the tavern layer's keys are its own list, in its own package.
-		const read = new Set<string>([...CONFIG_KEYS, ...TAVERN_SETTING_KEYS, ...GRAPH_SETTING_KEYS]);
+		const read = new Set<string>([...CONFIG_KEYS, ...GRAPH_SETTING_KEYS]);
 		// A setting the manifest declares but no code reads is a setting the user cannot change: the
-		// panel writes it and nothing comes back. Every `comonad.tavern*` and `comonad.wi*` setting was
-		// in exactly that state.
+		// panel writes it and nothing comes back.
 		assert.deepStrictEqual(
 			[...declared].filter((key) => !read.has(key)).sort(),
 			[],
@@ -3075,10 +2940,9 @@ suite('Cordis kernel', () => {
 				]),
 			);
 			const names = (patch: Partial<SessionPolicy>) => kernel.ctx.tools.visible(policy(patch)).map((tool) => tool.name);
-			// `lore_lookup` rides along: the kernel mounts it read-only for every chat.
 			assert.deepStrictEqual(names({ workMode: 'chat', network: true }), [], 'chat only exposes no tool');
-			assert.deepStrictEqual(names({ workMode: 'ro', network: false }), ['a_ro', 'lore_lookup']);
-			assert.deepStrictEqual(names({ workMode: 'sw', network: true }), ['a_ro', 'b_rw', 'c_net', 'lore_lookup']);
+			assert.deepStrictEqual(names({ workMode: 'ro', network: false }), ['a_ro']);
+			assert.deepStrictEqual(names({ workMode: 'sw', network: true }), ['a_ro', 'b_rw', 'c_net']);
 		} finally {
 			await kernel.dispose();
 		}
@@ -3488,25 +3352,25 @@ suite('Cordis kernel', () => {
 
 	test('the dependency tree says what a row stands on, and the whole chain that stops with it', () => {
 		const nodes: PluginNode[] = [
-			{ id: 'tavern', status: 'off', provides: ['tavern'], requires: [], usedBy: ['ui-tavern-commands'] },
+			{ id: 'content', status: 'off', provides: ['content'], requires: [], usedBy: ['ui-content-commands'] },
 			{
-				id: 'ui-tavern-commands',
+				id: 'ui-content-commands',
 				status: 'waiting',
 				provides: [],
-				requires: [{ name: 'tavern', provider: 'tavern' }, { name: 'sessions', provider: 'sessions' }, { name: 'bookkeeping', provider: 'ledger' }],
+				requires: [{ name: 'content', provider: 'content' }, { name: 'sessions', provider: 'sessions' }, { name: 'bookkeeping', provider: 'ledger' }],
 				usedBy: [],
 			},
-			{ id: 'sessions', status: 'loaded', provides: ['sessions'], requires: [], usedBy: ['ui-tavern-commands'] },
-			{ id: 'ledger', status: 'loaded', provides: ['ledger'], requires: [], usedBy: ['ui-tavern-commands'] },
+			{ id: 'sessions', status: 'loaded', provides: ['sessions'], requires: [], usedBy: ['ui-content-commands'] },
+			{ id: 'ledger', status: 'loaded', provides: ['ledger'], requires: [], usedBy: ['ui-content-commands'] },
 			{ id: 'mine', status: 'failed', provides: [], requires: [{ name: 'nobody-makes-this' }], usedBy: [] },
 		];
 
-		const tree = pluginTree(nodes, 'tavern');
-		assert.match(tree, /^tavern — off — provides tavern/, 'the tree starts with the row itself');
-		assert.match(tree, /needed by\n  └─ ui-tavern-commands/, 'then what stands on it');
+		const tree = pluginTree(nodes, 'content');
+		assert.match(tree, /^content — off — provides content/, 'the tree starts with the row itself');
+		assert.match(tree, /needed by\n  └─ ui-content-commands/, 'then what stands on it');
 		assert.match(
-			pluginTree(nodes, 'ui-tavern-commands'),
-			/tavern ← tavern \(off\)/,
+			pluginTree(nodes, 'ui-content-commands'),
+			/content ← content \(off\)/,
 			'a require names the service, the row that provides it, and its state',
 		);
 		assert.match(pluginTree(nodes, 'mine'), /waits for nobody-makes-this — nobody provides it/, 'and a service nothing provides is named as such');
@@ -3536,7 +3400,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel();
 		try {
 			const log: string[] = [];
-			// A service of a plugin's own, the way the tavern layer is one: rows that want it declare it.
+			// A service of a plugin's own: rows that want it declare it.
 			class Ledger extends Service {
 				constructor(ctx: Context) {
 					super(ctx, 'ledger');
@@ -4047,46 +3911,8 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('the tavern feature is a plugin: without it a turn is plain and the commands are gone', async () => {
-		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
-		try {
-			assert.strictEqual(kernel.ctx.get('tavern'), undefined, 'the row is off, so nothing provides the library');
-			// The agent composes a request without the layer: a system prompt and the history, nothing else.
-			let asked: Message[] = [];
-			kernel.ctx.llm.use({
-				name: 'plain',
-				async chat(request) {
-					asked = request.messages;
-					return { message: { role: 'assistant', content: 'hello', toolCalls: [] }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			const turn = await kernel.ctx.agent.runTurn({ text: 'hello', surface: 'test' });
-			assert.deepStrictEqual(asked.map((message) => message.role), ['system', 'user'], 'a plain request, in one system prompt and the user’s turn');
-			assert.match(kernel.ctx.sessions.require(turn.sessionId).transcript[1]?.content ?? '', /hello/, 'and the turn still ran');
-
-			// A continue still has words of its own, because the fallback is not the preset's to provide.
-			asked = [];
-			await kernel.ctx.agent.runTurn({ text: '', trigger: 'continue', surface: 'test' });
-			assert.strictEqual(asked[asked.length - 1]?.role, 'user', 'a request never ends on the model’s own turn');
-
-			// What the plugin adds is missing, and what Comonad ships is not.
-			await kernel.ctx.plugin(slashCommands);
-			const slash = kernel.ctx.commands.list().map((command) => command.name);
-			assert.ok(slash.includes('help'), 'the slash commands loaded without the tavern plugin');
-			for (const name of ['status', 'continue']) {
-				assert.ok(slash.includes(name), `/${name} is still there`);
-			}
-			assert.ok(!slash.includes('rewind'), '/rewind was removed with the rewind feature');
-			for (const name of ['char', 'persona', 'lore', 'preset']) {
-				assert.ok(!slash.includes(name), `/${name} came with the tavern plugin, so it is gone`);
-			}
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
 	test('a custom role mode is only an input that narrows its capabilities', async () => {
-		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
+		const kernel = await createTestKernel();
 		try {
 			const dir = join(kernel.host.workspace(), '.comonad', 'agents');
 			mkdirSync(dir, { recursive: true });
@@ -4102,7 +3928,7 @@ suite('Cordis kernel', () => {
 	});
 
 	test('the command menu merges registered and custom commands, the registered one owning a shared name', async () => {
-		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
+		const kernel = await createTestKernel();
 		try {
 			await kernel.ctx.plugin(slashCommands);
 			assert.ok(
@@ -4137,70 +3963,11 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('the tavern is an installable plugin: the shipped tree has no row for it, and mounting one brings it back', async () => {
-		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
-		try {
-			// Not built in: nothing in the shipped tree names it, so a fresh window has no library, no
-			// tool and no ST tab — and nothing to turn off, either.
-			assert.ok(!ROWS.some((row) => row.id === 'tavern'), 'the shipped rows mount no tavern');
-			assert.strictEqual(PLUGINS.tavern, undefined, 'and no built-in plugin to name');
-			assert.strictEqual(kernel.ctx.get('tavern'), undefined, 'so a tree without the row has no library');
-			assert.ok(!kernel.ctx.tools.all().some((tool) => tool.name === 'lore_lookup'), 'and no lore tool');
-
-			// A row of one's own, mounted the way a `cordis.yml` mounts it: the plugin package's entry.
-			await kernel.ctx.plugin(panesPlugin);
-			assert.ok(kernel.ctx.panes, 'the panel’s pane list is its own service, and it is mounted first');
-			await kernel.ctx.plugin(tavernEntry);
-			assert.ok(kernel.ctx.tavern, 'the row provides the library');
-			assert.ok(kernel.ctx.tools.all().some((tool) => tool.name === 'lore_lookup'), 'and its tool');
-
-			const pane = kernel.ctx.panes.list().find((spec) => spec.id === 'st');
-			assert.ok(pane, 'the row draws the ST tab');
-			assert.strictEqual(pane?.label, 'ST');
-			assert.strictEqual(pane?.command, 'comonad.openContent', 'with the command that reveals it');
-			// The client files travel beside the package's build: a separately installed plugin is one
-			// folder, and `__dirname` inside its own bundle is what finds them.
-			assert.deepStrictEqual(
-				(pane?.scripts ?? []).map((file) => basename(file)),
-				['worldinfo.js', 'persona.js', 'content.js', 'st.js'],
-				'the pane loads its guest pages first, and registers itself last',
-			);
-			assert.deepStrictEqual((pane?.styles ?? []).map((file) => basename(file)), ['content.css', 'worldinfo.css', 'persona.css']);
-			for (const file of [...(pane?.scripts ?? []), ...(pane?.styles ?? [])]) {
-				assert.ok(existsSync(join(PACKAGE_RESOURCES, basename(file))), `${basename(file)} ships with the plugin`);
-			}
-			assert.match(pane?.markup ?? '', /id="st-pane"/, 'the markup the panel writes verbatim is the package’s');
-
-			// The pane owns its settings keys: it validates what the webview sent and claims nothing else.
-			const host = { uri: () => '', refresh: () => undefined };
-			const controller = pane?.controller?.(host);
-			assert.ok(controller, 'the pane brings an editor');
-			const owned = controller?.patch?.({
-				tavernCharacter: '  kestrel ',
-				tavernLorebooks: 'one\ntwo, three',
-				tavernNoteDepth: '4',
-				wiRecursive: true,
-				mode: 'full',
-			}) ?? {};
-			assert.strictEqual(owned.tavernCharacter, 'kestrel', 'text is trimmed');
-			assert.deepStrictEqual(owned.tavernLorebooks, ['one', 'two', 'three'], 'a book list takes lines and commas');
-			assert.strictEqual(owned.tavernNoteDepth, 4, 'a count is read as a number');
-			assert.strictEqual(owned.wiRecursive, true, 'a checkbox is a boolean');
-			assert.ok(!('mode' in owned), 'the panel’s own keys are left to the panel');
-			const slice = controller?.state?.() ?? {};
-			assert.deepStrictEqual(Object.keys(slice).sort(), ['catalog', 'content', 'tavern'], 'the slices it pushes');
-			assert.ok('wi' in (slice.tavern as Record<string, unknown>), 'the catalog and the settings travel together');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
 	test('the change journal is a row of the shipped tree: on by default, one row to turn it off', async () => {
 		// The safety net is in the tree itself: no install step stands between a fresh window and a
 		// journaled write — and one row is still all it takes to opt out.
 		assert.ok(ROWS.some((row) => row.id === 'checkpoints' && row.group === 'kernel'), 'the shipped tree names it');
 		assert.strictEqual(PLUGINS.checkpoints, checkpointsPlugin, 'one row mounts the journal and its review');
-		assert.ok(!PLUGINS.tavern, 'the content layer is still something you install');
 		const kernel = await createTestKernel({ skip: ['checkpoints'], config: { checkpoints: true } });
 		try {
 			// The row, mounted the way the tree mounts it.
@@ -4246,36 +4013,7 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('the plugin that ships with Comonad installs from its own folder and loads', async () => {
-		// The real thing, end to end: the package as it is packaged (its `dist` bundle, built by
-		// `npm run compile`), copied into the library the way the panel's Install… does it, and loaded by
-		// the host from there — so the bundle's own `require('cordis')` and `require('vscode')` are the
-		// modules Comonad lends it, and its resources are found beside its build.
-		const extension = vscode.extensions.getExtension('comonad.comonad');
-		assert.ok(extension, 'the extension is installed in the test host');
-		const source = join(extension!.extensionUri.fsPath, 'packages', 'comonad-plugin-tavern');
-		assert.ok(existsSync(join(source, 'dist', 'index.js')), 'the plugin bundle is built beside the extension');
-
-		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
-		try {
-			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
-			await kernel.ctx.plugin(panesPlugin);
-			const state = await kernel.ctx.plugins.install(source);
-			const row = state.find((entry) => entry.id === 'comonad-plugin-tavern');
-			assert.strictEqual(row?.loaded, true, `the shipped plugin loads from the library (${row?.error ?? ''})`);
-			assert.ok(kernel.ctx.get('tavern'), 'and it brought the content library with it');
-			const pane = kernel.ctx.panes.list().find((spec) => spec.id === 'st');
-			assert.ok(pane, 'and its ST tab');
-			for (const file of [...(pane?.scripts ?? []), ...(pane?.styles ?? [])]) {
-				assert.ok(existsSync(file), `${basename(file)} is found beside the installed build`);
-			}
-			assert.ok(kernel.ctx.tools.all().some((tool) => tool.name === 'lore_lookup'), 'and the lore tool');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('the settings document is built from the panes the tree registered', async () => {
+	test('the settings document is built from the core tabs and the scope selector', async () => {
 		const kernel = await createTestKernel();
 		const root = join(__dirname, '..', '..');
 		const panel = vscode.window.createWebviewPanel('comonad.test.settings', 'settings', vscode.ViewColumn.Active, {
@@ -4283,7 +4021,6 @@ suite('Cordis kernel', () => {
 			localResourceRoots: [vscode.Uri.file(root)],
 		});
 		try {
-			const pane = tavernPane(kernel.ctx);
 			const scope = {
 				defaultScope: 'workspace' as const,
 				folderOpen: true,
@@ -4291,12 +4028,7 @@ suite('Cordis kernel', () => {
 				userFile: '~/.comonad/settings.json',
 				workspaceFile: '/ws/.comonad/settings.json',
 			};
-			// Nothing but a plain pane in the host's document: its tab, its markup, its styles and its
-			// scripts, with the host's client loaded first because it is what hands a pane its channel.
-			const document = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [pane], scope);
-			assert.match(document, /<button class="tab" type="button" role="tab" data-tab="st" title="ST —/, 'the pane is a tab');
-			assert.match(document, /<section data-pane="st" hidden>/, 'and a section of its own');
-			assert.match(document, /id="st-pane"/, 'holding the markup it brought');
+			const document = settingsDocument(panel.webview, vscode.Uri.file(root), scope);
 			assert.match(document, /id="side-resizer"/, 'the sidebar has a resize sash');
 			assert.match(document, /id="scope-bar"/, 'the scope selector is common to every tab');
 			assert.match(document, /Setting Scope:/, 'and names itself');
@@ -4318,7 +4050,7 @@ suite('Cordis kernel', () => {
 			);
 			assert.match(document, /class="tab-icon"/, 'and every tab carries an icon');
 			const scripts = [...document.matchAll(/<script nonce="[^"]*" src="([^"]+)"/g)].map((match) => basename(decodeURIComponent(match[1])));
-			assert.deepStrictEqual(scripts, ['settings.js', 'worldinfo.js', 'persona.js', 'content.js', 'st.js'], 'the host’s client comes first, and the pane’s last');
+			assert.deepStrictEqual(scripts, ['settings.js'], 'the host’s client is the only guest script');
 			assert.match(document, /id="plugins-install"/, 'and the host’s own tabs are still there');
 			assert.match(document, /id="timeout-override"[^>]*data-key="commandTimeoutOverride"/, 'including the timeout override');
 			assert.match(document, /id="approval-response"[^>]*data-key="approvalResponse"/, 'the approval response policy control');
@@ -4360,7 +4092,7 @@ suite('Cordis kernel', () => {
 			assert.match(hostScript, /type: 'openConfig'/, 'and the path asks the host to open the file');
 
 			// Without a trusted folder the same document starts on the user's file.
-			const untrusted = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [pane], {
+			const untrusted = settingsDocument(panel.webview, vscode.Uri.file(root), {
 				...scope,
 				defaultScope: 'user',
 				folderOpen: false,
@@ -4374,16 +4106,8 @@ suite('Cordis kernel', () => {
 			assert.match(panelSource, /case 'openConfig'/, 'the host opens the file the path names');
 			assert.match(panelSource, /settingsFiles/, 'and the state names both files');
 			const renderSites = panelSource.split('\n').filter((line) => line.includes('settingsDocument(panel.webview'));
-			assert.strictEqual(renderSites.length, 2, 'both render sites carry the scope');
-			for (const line of renderSites) {
-				assert.match(line, /scopeState\(\)/, 'the document and the state agree');
-			}
-
-			// A tab and its markup are the pane's own strings, so they are escaped rather than trusted.
-			const hostile = { ...pane, id: 'x"><script>alert(1)</script>', label: '<b>no</b>', title: '" onload="alert(1)' };
-			const escaped = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [hostile], scope);
-			assert.ok(!escaped.includes('<script>alert(1)</script>'), 'a pane cannot close the attribute and open a script');
-			assert.match(escaped, /&lt;b&gt;no&lt;\/b&gt;/, 'and its label is text, not markup');
+			assert.strictEqual(renderSites.length, 1, 'the document is rendered in one place');
+			assert.match(renderSites[0]!, /scopeState\(\)/, 'the document and the state agree');
 		} finally {
 			panel.dispose();
 			await kernel.dispose();
@@ -4987,9 +4711,7 @@ suite('Cordis kernel', () => {
 	});
 
 	test('a growing turn is summarized before its tool output is elided', async () => {
-		// A composed (tavern) request is not a slice of the chat, so the agent may not fold it; this
-		// test is about the agent's own request shape.
-		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000, tavernEnabled: false } });
+		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000 } });
 		try {
 			const notices: string[] = [];
 			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
@@ -5476,9 +5198,7 @@ suite('Cordis kernel', () => {
 	});
 
 	test('a fold during a continue moves the reply it extends, and never orphans a tool call', async () => {
-		// The mid-turn fold belongs to the agent's own request shape; a composed ST request is not
-		// folded in place. Switch the layer off so this tests the path that still folds.
-		const kernel = await createTestKernel({ config: { tavernEnabled: false } });
+		const kernel = await createTestKernel();
 		try {
 			// A tool whose output alone overruns the window, so the turn's own step is what forces the
 			// fold after the request was built.
@@ -5640,9 +5360,7 @@ suite('Cordis kernel', () => {
 	});
 
 	test('an endpoint that refuses the prompt as too long is retried once, shrunk', async () => {
-		// Emergency folding belongs to the agent's own request shape; a composed ST request can only
-		// elide tool output. Test the retry through the path that still folds.
-		const kernel = await createTestKernel({ config: { tavernEnabled: false } });
+		const kernel = await createTestKernel();
 		try {
 			let attempts = 0;
 			let second: Message[] = [];
@@ -6525,403 +6243,34 @@ flowchart TD
 	});
 });
 
-/* ------------------------------------------------------------------ the SillyTavern port */
-
-// Every fixture here is authored for this test file: the extension never ships SillyTavern's own
-// content, and its own card/book/preset shapes are only ever read from the user's installation.
-
-const CARD_V2 = {
-	spec: 'chara_card_v2',
-	spec_version: '2.0',
-	name: 'Kestrel',
-	description: 'A cartographer of dead cities.',
-	personality: 'Terse, watchful.',
-	scenario: 'The salt flats, at dusk.',
-	first_mes: '{{char}} looks up. "You are late."',
-	mes_example: '<START>\n{{user}}: hello\n{{char}}: hm.',
-	system_prompt: 'Stay in character.',
-	post_history_instructions: 'Never break the fourth wall.',
-	alternate_greetings: ['A second opening.', 'A third.'],
-	tags: ['fantasy'],
-	creator: 'us',
-	character_version: '1.0',
-	extensions: { depth_prompt: { depth: 2, prompt: 'Remember the map.', role: 'system' }, unknown_extension: 42 },
-	character_book: {
-		name: 'Salt Flats',
-		entries: [
-			{
-				id: 0,
-				keys: ['salt', 'flats'],
-				content: 'The flats drink sound.',
-				comment: 'salt',
-				insertion_order: 20,
-				position: 'after_char',
-				enabled: true,
-				extensions: { probability: 100, depth: 4, group: '', group_weight: 100, selectiveLogic: 0 },
-			},
-		],
-	},
-	unknown_field: { keep: true },
-};
-
-/** A chunk with a zero CRC: enough for a reader that never validates one. */
-function rawChunk(type: string, data: Buffer): Buffer {
-	const head = Buffer.alloc(8);
-	head.writeUInt32BE(data.length, 0);
-	head.write(type, 4, 'latin1');
-	return Buffer.concat([head, data, Buffer.alloc(4)]);
-}
-
-function barePng(): Buffer {
-	return Buffer.concat([
-		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-		rawChunk('IHDR', Buffer.alloc(13)),
-		rawChunk('IDAT', Buffer.from([1, 2, 3])),
-		rawChunk('IEND', Buffer.alloc(0)),
-	]);
-}
-
-const base64 = (text: string): string => Buffer.from(text, 'utf8').toString('base64');
-
-function loreBookOf(entries: Array<Partial<WorldEntry> & { uid: number; content: string }>, kind: LoreBook['kind'] = 'character'): LoreBook {
-	return {
-		name: 'Book',
-		kind,
-		book: {
-			name: 'Book',
-			entries: Object.fromEntries(entries.map((entry, index) => [String(entry.uid ?? index), worldEntry(entry)])),
-		},
-	};
-}
-
-const lore = (patch: Partial<LoreInput> = {}): LoreInput => ({
-	books: [],
-	messages: [{ speaker: 'You', text: 'Tell me about the salt flats' }],
-	settings: { ...WI_SETTINGS_DEFAULTS },
-	contextSize: 8192,
-	turn: 0,
-	random: () => 0,
-	...patch,
-});
-
-suite('Tavern content', () => {
-	test('a card is read from a PNG, V3 ahead of V2', () => {
-		const v3 = JSON.stringify({ ...CARD_V2, spec: 'chara_card_v3', spec_version: '3.0' });
-		const png = writePngText(barePng(), [
-			{ keyword: 'chara', text: base64(JSON.stringify(CARD_V2)) },
-			{ keyword: 'ccv3', text: base64(v3) },
-		]);
-		assert.deepStrictEqual(readPngText(png).map((chunk) => chunk.keyword), ['chara', 'ccv3']);
-		assert.strictEqual((JSON.parse(cardTextFromPng(png)) as { spec: string }).spec, 'chara_card_v3');
-		// Writing again replaces the card chunks instead of stacking copies of them.
-		const rewritten = writePngText(png, [{ keyword: 'chara', text: base64(JSON.stringify(CARD_V2)) }]);
-		assert.deepStrictEqual(readPngText(rewritten).map((chunk) => chunk.keyword), ['chara']);
-	});
-
-	test('a card normalises V1 and V2 without losing a field', () => {
-		const v1 = JSON.stringify({ name: 'Old', description: 'd', first_mes: 'hi', creatorcomment: 'notes', tags: ['t'] });
-		const old = normaliseCard(parseCard(v1), 'old', 'memory');
-		assert.strictEqual(old.name, 'Old');
-		assert.strictEqual(old.greeting, 'hi');
-		assert.strictEqual(old.creatorNotes, 'notes');
-		assert.deepStrictEqual(old.tags, ['t']);
-		assert.deepStrictEqual(old.alternateGreetings, []);
-
-		const kestrel = normaliseCard(parseCard(JSON.stringify(CARD_V2)), 'kestrel', 'memory');
-		assert.strictEqual(kestrel.name, 'Kestrel');
-		assert.deepStrictEqual(kestrel.alternateGreetings, ['A second opening.', 'A third.']);
-		assert.deepStrictEqual(kestrel.depthPrompt, { depth: 2, prompt: 'Remember the map.', role: 'system' });
-		assert.strictEqual(kestrel.systemPrompt, 'Stay in character.');
-		assert.strictEqual(kestrel.postHistoryInstructions, 'Never break the fourth wall.');
-		assert.ok(kestrel.book, 'the card carries its own world book');
-
-		// Round trip: fields we do not model, at the root and inside `extensions`, survive.
-		const back = characterToCard(kestrel) as unknown as Record<string, unknown>;
-		assert.strictEqual(back.spec, 'chara_card_v2');
-		assert.deepStrictEqual(back.unknown_field, { keep: true });
-		const extensions = (back.data as { extensions: Record<string, unknown> }).extensions;
-		assert.strictEqual(extensions.unknown_extension, 42);
-		assert.deepStrictEqual(extensions.regex_scripts, undefined);
-	});
-
-	test('macros fill what they know and leave the rest alone', () => {
-		const ctx = { char: 'Kestrel', user: 'You', persona: 'A reader.', description: 'tall' };
-		assert.strictEqual(substituteMacros('{{char}} meets {{user}}: {{persona}}', ctx), 'Kestrel meets You: A reader.');
-		assert.strictEqual(substituteMacros('{{ description }}', ctx), 'tall');
-		assert.strictEqual(substituteMacros('{{charPrompt}}', ctx), '{{charPrompt}}');
-		assert.strictEqual(substituteMacros('{{words}} and {{unknown}}', ctx), '{{words}} and {{unknown}}');
-		assert.strictEqual(substituteMacros('a\n\n{{trim}}', ctx), 'a');
-		assert.strictEqual(substituteMacros('{{//note}}kept', ctx), 'kept');
-		assert.strictEqual(substituteMacros('x{{noop}}y{{newline}}z', ctx), 'xy\nz');
-		assert.strictEqual(substituteMacros('{{random:a,b,c}}', ctx, { random: () => 0.99 }), 'c');
-		assert.strictEqual(substituteMacros('{{roll:2d2+1}}', ctx, { random: () => 0 }), '3');
-
-		// `{{pick}}` is stable within one pass, so a preset cannot disagree with itself.
-		let calls = 0;
-		const flip = (): number => {
-			calls += 1;
-			return calls === 1 ? 0 : 0.99;
-		};
-		assert.strictEqual(substituteMacros('{{pick:a,b}} then {{pick:a,b}}', ctx, { random: flip }), 'a then a');
-		assert.strictEqual(calls, 1);
-
-		assert.deepStrictEqual(parseExamples('<START>\none\n<START>\ntwo'), ['one', 'two']);
-		assert.deepStrictEqual(parseExamples('   '), []);
-	});
-
-	test('a preset keeps its samplers, its prompts and its order', () => {
-		const preset = parsePreset(
-			JSON.stringify({
-				temperature: 1.1,
-				top_p: 0.9,
-				openai_max_context: 8192,
-				openai_max_tokens: 512,
-				wi_format: 'Lore: {0}',
-				prompts: [
-					{ identifier: 'main', name: 'Main Prompt', system_prompt: true, role: 'system', content: 'Speak as {{char}}.' },
-					{ identifier: 'authorsNote', name: 'Note', role: 'system', content: 'Be brief.' },
-				],
-				prompt_order: [
-					{
-						character_id: 100000,
-						order: [
-							{ identifier: 'main', enabled: true },
-							{ identifier: 'chatHistory', enabled: true },
-							{ identifier: 'authorsNote', enabled: false },
-						],
-					},
-					// One block for a character of our own, and one SillyTavern index we cannot map.
-					{ character_id: 'Kestrel', order: [{ identifier: 'chatHistory', enabled: true }, { identifier: 'main', enabled: true }] },
-					{ character_id: 7, order: [{ identifier: 'main', enabled: false }] },
-				],
-				unknown_key: 'kept',
-				new_chat_prompt: '[Start a new Chat]',
-				continue_nudge_prompt: '[Carry on from {{lastChatMessage}}.]',
-				send_if_empty: '[Say something.]',
-				seed: 42,
-				frequency_penalty: 0.3,
-				bias_preset_selected: 'Tidy',
-				logit_bias: [{ id: 'b1', name: 'Tidy', value: { '1234': -100 } }, { id: 'b2', name: 'Loose', value: {} }],
-				stream_openai: false,
-				max_context_unlocked: true,
-				use_sysprompt: true,
-			}),
-			'Test preset',
-			'test',
-		);
-		assert.strictEqual(preset.temperature, 1.1);
-		assert.strictEqual(preset.maxContext, 8192);
-		assert.strictEqual(preset.wi_format, 'Lore: {0}');
-		assert.strictEqual(preset.new_chat_prompt, '[Start a new Chat]');
-		assert.strictEqual(preset.continue_nudge_prompt, '[Carry on from {{lastChatMessage}}.]');
-		assert.strictEqual(preset.stream, false);
-		assert.strictEqual(preset.maxContextUnlocked, true);
-		assert.strictEqual(preset.useSysprompt, true);
-		assert.deepStrictEqual(Object.keys(preset.promptOrders ?? {}), ['Kestrel'], 'only a character we know gets its own order');
-		assert.deepStrictEqual(presetSamplers(preset), {
-			temperature: 1.1,
-			topP: 0.9,
-			maxTokens: 512,
-			frequencyPenalty: 0.3,
-			seed: 42,
-			logitBias: { '1234': -100 },
-		}, 'only an endpoint-compatible sampler is sent, and the selected bias set comes along');
-
-		const messages = promptCollection(preset);
-		const generated = COMONAD_PROMPTS.map((prompt) => prompt.identifier);
-		assert.deepStrictEqual(messages.slice(0, generated.length).map((item) => item.identifier), generated, 'Comonad’s blocks lead, injected into an order that did not know them');
-		assert.deepStrictEqual(messages.slice(generated.length, generated.length + 3).map((item) => item.identifier), ['main', 'chatHistory', 'authorsNote']);
-		assert.deepStrictEqual(messages.filter((item) => item.identifier === 'authorsNote').map((item) => item.enabled), [false]);
-		assert.ok(messages.some((item) => item.identifier === 'jailbreak'), 'the shipped blocks still ride along');
-		// A character with an order of its own uses it instead of the preset's default block.
-		assert.deepStrictEqual(
-			promptCollection(preset, 'Kestrel').slice(generated.length, generated.length + 2).map((item) => item.identifier),
-			['chatHistory', 'main'],
-			'a character’s own order is used for that character',
-		);
-		// A preset is written back with its blocks kept: ours first, the one we cannot map last.
-		const written = JSON.parse(presetToJson(preset)) as { prompt_order: { character_id: unknown }[]; unknown_key: string };
-		assert.deepStrictEqual(written.prompt_order.map((block) => block.character_id), [100000, 'Kestrel', 7]);
-		assert.strictEqual(written.unknown_key, 'kept', 'and the keys we do not model are kept');
-		// The preset's own text replaced the shipped block of the same identifier.
-		assert.strictEqual(messages.find((item) => item.identifier === 'main')?.content, 'Speak as {{char}}.');
-
-		const saved = JSON.parse(presetToJson(preset)) as Record<string, unknown>;
-		assert.strictEqual(saved.unknown_key, 'kept');
-		assert.strictEqual((saved.prompt_order as Array<{ order: unknown[] }>)[0].order.length, 3);
-	});
-
-	test('a preset keeps its own prompt library, and Comonad’s shared library is seeded', async () => {
-		// The key is Comonad's own: SillyTavern never writes it, so a save keeps every ST field beside it.
-		const preset = parsePreset(
-			JSON.stringify({
-				temperature: 0.8,
-				prompts: [{ identifier: 'main', content: 'hi' }],
-				[PROMPT_LIBRARY_KEY]: [
-					{ identifier: 'loreVoice', name: 'Lore voice', role: 'system', content: 'Keep the lore factual.' },
-					{ nope: true },
-				],
-				unknown_key: 'kept',
-			}),
-			'Saved',
-			'saved',
-		);
-		assert.deepStrictEqual(preset.promptLibrary?.map((entry) => entry.identifier), ['loreVoice'], 'an entry with no identifier is not a prompt');
-		const written = JSON.parse(presetToJson(preset)) as Record<string, unknown>;
-		assert.strictEqual(written.unknown_key, 'kept', 'the keys we do not model are kept');
-		assert.deepStrictEqual((written[PROMPT_LIBRARY_KEY] as Array<{ identifier: string }>).map((entry) => entry.identifier), ['loreVoice']);
-		// A preset that never used a library does not grow the key.
-		const bare = parsePreset(JSON.stringify({ prompts: [{ identifier: 'main', content: 'hi' }] }), 'Bare', 'bare');
-		assert.strictEqual(bare.promptLibrary, undefined);
-		assert.ok(!(PROMPT_LIBRARY_KEY in (JSON.parse(presetToJson(bare)) as Record<string, unknown>)), 'an unused library is not written');
-
-		// A preset whose order knows nothing of Comonad's blocks — an imported SillyTavern file, say.
-		// completeOrder injects them once, in front; a save keeps only their place and switch, never a
-		// generated definition.
-		const stale = { id: 'stale', name: 'Stale', raw: {}, prompts: [{ identifier: 'main', role: 'system' as const, content: 'hi' }], promptOrder: [{ identifier: 'main', enabled: true }] } as unknown as TavernPreset;
-		const injected = COMONAD_PROMPTS.map((prompt) => prompt.identifier);
-		const collection = promptCollection(stale);
-		assert.deepStrictEqual(collection.slice(0, injected.length).map((prompt) => prompt.identifier), injected, 'the generated blocks lead an imported order');
-		assert.strictEqual(collection.filter((prompt) => prompt.identifier === IDENTITY_PROMPT).length, 1, 'and each appears once');
-		assert.deepStrictEqual(completeOrder(stale.promptOrder ?? []).slice(0, injected.length).map((entry) => entry.identifier), injected);
-		const adopted = adoptPreset({ ...stale, prompts: collection });
-		assert.ok(!(adopted.prompts ?? []).some((prompt) => injected.includes(prompt.identifier)), 'a save never writes a generated definition');
-		assert.deepStrictEqual(adopted.promptOrder?.slice(0, injected.length).map((entry) => entry.identifier), injected, 'only their place and switch are stored');
-
-		// A pane is untrusted input: what it sends back is filtered before it can be written.
-		assert.deepStrictEqual(sanitisePromptLibrary([{ identifier: 'ok', content: 'x' }, { content: 'no id' }, null]).map((entry) => entry.identifier), ['ok']);
-
-		// The built-in library is the blocks the templates carry beyond the defaults, and its file round-trips them.
-		const seed = librarySeed();
-		assert.deepStrictEqual(seed.map((entry) => entry.identifier), PROMPT_BLOCKS.map((block) => block.id));
-		assert.ok(seed.every((entry) => !DEFAULT_PROMPTS.some((prompt) => prompt.identifier === entry.identifier)), 'the shipped defaults are not in the library');
-		assert.ok(seed.every((entry) => entry.description && entry.content), 'every seeded block explains itself and says something');
-		assert.deepStrictEqual(parsePromptLibrary(promptLibraryJson(seed)).map((entry) => entry.identifier), seed.map((entry) => entry.identifier));
-		assert.deepStrictEqual(parsePromptLibrary('[]'), [], 'a bare array is tolerated');
-
-		const kernel = await createTestKernel();
-		try {
-			// The service reads its library as it is constructed. A window that never sees a `.comonad`
-			// change must still find the shared library seeded — without this the ST pane opened on an
-			// empty system library and the seed file was never written.
-			await kernel.ctx.tavern.ready;
-			const file = kernel.ctx.tavern.promptLibraryFile();
-			assert.ok(existsSync(file), 'the shared library is seeded as the service loads, so the file exists to be edited');
-			assert.deepStrictEqual(kernel.ctx.tavern.promptLibrary.map((entry) => entry.identifier), PROMPT_BLOCKS.map((block) => block.id));
-
-			// The built-in library can be edited but not grown: an added entry is dropped on save, and an
-			// edit to a built-in one is kept across a reload.
-			const first = kernel.ctx.tavern.promptLibrary[0]!;
-			const writtenFile = await kernel.ctx.tavern.savePromptLibrary([
-				{ ...first, content: 'Edited text.' },
-				{ identifier: 'mine', name: 'Mine', role: 'system', content: 'Keep it short.' },
-			]);
-			assert.strictEqual(writtenFile, file);
-			assert.ok(!kernel.ctx.tavern.promptLibrary.some((entry) => entry.identifier === 'mine'), 'a new entry cannot be added to the built-in library');
-			await kernel.ctx.tavern.reload();
-			assert.strictEqual(kernel.ctx.tavern.promptLibrary.find((entry) => entry.identifier === first.identifier)?.content, 'Edited text.', 'an edit to a built-in entry survives a reload');
-			assert.deepStrictEqual(kernel.ctx.tavern.promptLibrary.map((entry) => entry.identifier), builtInBlocks().map((entry) => entry.identifier), 'the set stays the same');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a reload waits for the read before it instead of racing it', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			writeFileSync(
-				join(library, 'characters', 'late.json'),
-				JSON.stringify({ spec: 'chara_card_v2', spec_version: '2.0', data: { name: 'Late', description: 'Late is here.' } }),
-			);
-			// The service's own first read started before that card existed. This reload has to settle after
-			// it, not beside it: two reads in flight can finish in either order, and the older one — the one
-			// that saw an empty library — would then be the state every pane reads until something else
-			// happens to reload it.
-			await Promise.all([kernel.ctx.tavern.reload(), kernel.ctx.tavern.ready]);
-			assert.ok(kernel.ctx.tavern.character('late'), 'the card is there once both reads are done');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('the prompt collection can be switched and reordered, Comonad’s blocks included', () => {
-		const collection = promptCollection();
-		assert.deepStrictEqual(
-			collection.map((item) => item.identifier),
-			DEFAULT_ORDER.map((entry) => entry.identifier),
-			'the shipped order is the collection',
-		);
-		const off = setEnabled(collection, 'charPersonality', false);
-		assert.strictEqual(off.find((item) => item.identifier === 'charPersonality')?.enabled, false);
-		const moved = movePrompt(collection, 'jailbreak', -2);
-		const index = moved.findIndex((item) => item.identifier === 'jailbreak');
-		assert.strictEqual(index, DEFAULT_ORDER.length - 3, 'jailbreak moved two places earlier');
-		assert.strictEqual(moved[index + 1].identifier, 'dialogueExamples');
-		assert.strictEqual(moved[index - 1].identifier, 'worldInfoAfter');
-		const identityMoved = movePrompt(collection, IDENTITY_PROMPT, 3);
-		assert.strictEqual(identityMoved[3].identifier, IDENTITY_PROMPT, 'the identity block can move like any other');
-		assert.strictEqual(identityMoved[0].identifier, TOOLS_PROMPT);
-	});
-
-	test('a preset places and switches Comonad’s generated blocks like any other row', () => {
-		const preset = {
-			id: 'ordered',
-			name: 'Ordered',
-			raw: {},
-			prompts: [],
-			promptOrder: [
-				{ identifier: CONTEXT_PROMPT, enabled: true },
-				{ identifier: IDENTITY_PROMPT, enabled: false },
-				{ identifier: TOOLS_PROMPT, enabled: true },
-				{ identifier: COMONAD_BLOCK.memory, enabled: false },
-				{ identifier: 'chatHistory', enabled: true },
-			],
-		} as unknown as TavernPreset;
-		const collection = promptCollection(preset);
-		assert.strictEqual(collection[0].identifier, CONTEXT_PROMPT, 'an explicit place wins');
-		assert.strictEqual(collection.find((prompt) => prompt.identifier === IDENTITY_PROMPT)?.enabled, false);
-		assert.strictEqual(collection.find((prompt) => prompt.identifier === COMONAD_BLOCK.memory)?.enabled, false);
-		const messages = assemble(
-			collection,
-			{
-				comonad: {
-					[COMONAD_BLOCK.identity]: 'identity',
-					[COMONAD_BLOCK.context]: 'context',
-					[COMONAD_BLOCK.memory]: 'memory',
-				},
-			},
-			[{ role: 'user', content: 'hi' }],
-		);
-		assert.strictEqual(messages[0].content, 'context', 'the context block moves to where the preset put it');
-		assert.ok(!messages.some((message) => message.content === 'identity'), 'a switched-off generated block is not sent');
-		assert.ok(!messages.some((message) => message.content === 'memory'));
-	});
-
+suite('Generations and prompt layout', () => {
 	test('a prompt layout keeps its order, switches and prefixes, and a tool layout its own order', () => {
 		const defaults = defaultPromptLayout();
-		assert.deepStrictEqual(defaults.map((entry) => entry.id), COMONAD_PROMPTS.map((prompt) => prompt.identifier));
+		assert.deepStrictEqual(defaults.map((entry) => entry.id), COMONAD_BLOCKS.map((block) => block.id));
 		assert.ok(defaults.every((entry) => entry.enabled && entry.prefix), 'the canonical layout is on, with default prefixes');
 		const parsed = parsePromptLayout([
-			{ id: CONTEXT_PROMPT, enabled: true, prefix: 'Context:' },
-			{ id: IDENTITY_PROMPT, enabled: false, prefix: '' },
+			{ id: COMONAD_BLOCK.context, enabled: true, prefix: 'Context:' },
+			{ id: COMONAD_BLOCK.identity, enabled: false, prefix: '' },
 			{ id: 'nope', enabled: false },
-			{ id: CONTEXT_PROMPT, enabled: false, prefix: 'duplicate' },
+			{ id: COMONAD_BLOCK.context, enabled: false, prefix: 'duplicate' },
 		]);
-		assert.strictEqual(parsed[0]?.id, CONTEXT_PROMPT, 'the saved order wins');
+		assert.strictEqual(parsed[0]?.id, COMONAD_BLOCK.context, 'the saved order wins');
 		assert.strictEqual(parsed[0]?.enabled, true);
 		assert.strictEqual(parsed[0]?.prefix, 'Context:');
-		assert.strictEqual(parsed.find((entry) => entry.id === IDENTITY_PROMPT)?.enabled, false);
-		assert.strictEqual(parsed.find((entry) => entry.id === IDENTITY_PROMPT)?.prefix, '', 'an empty prefix is deliberate');
-		assert.strictEqual(parsed.filter((entry) => entry.id === CONTEXT_PROMPT).length, 1, 'a duplicate is dropped');
-		assert.strictEqual(parsed.length, COMONAD_PROMPTS.length, 'every missing block is appended');
+		assert.strictEqual(parsed.find((entry) => entry.id === COMONAD_BLOCK.identity)?.enabled, false);
+		assert.strictEqual(parsed.find((entry) => entry.id === COMONAD_BLOCK.identity)?.prefix, '', 'an empty prefix is deliberate');
+		assert.strictEqual(parsed.filter((entry) => entry.id === COMONAD_BLOCK.context).length, 1, 'a duplicate is dropped');
+		assert.strictEqual(parsed.length, COMONAD_BLOCKS.length, 'every missing block is appended');
 
 		const blocks: PromptBlock[] = [
 			{ id: COMONAD_BLOCK.identity, name: 'Identity', prefix: 'I', body: 'body', text: 'I\nbody' },
 			{ id: COMONAD_BLOCK.context, name: 'Context', prefix: 'C', body: 'ctx', text: 'C\nctx' },
 		];
-		assert.deepStrictEqual(applyPromptLayout(blocks, parsed).map((block) => block.id), [COMONAD_BLOCK.context], 'disabled and empty blocks are left out, in layout order');
+		assert.deepStrictEqual(
+			applyPromptLayout(blocks, parsed).map((block) => block.id),
+			[COMONAD_BLOCK.context],
+			'disabled and empty blocks are left out, in layout order',
+		);
 
 		const merged = mergeToolLayout(
 			[{ name: 'a' }, { name: 'b' }, { name: 'c' }],
@@ -6945,593 +6294,11 @@ suite('Tavern content', () => {
 			[{ name: 'a', enabled: false }],
 			'a duplicate or nameless tool is dropped',
 		);
-
-		const kept = mergePromptPrefixes(
-			[
-				{ id: IDENTITY_PROMPT, enabled: false, prefix: 'old identity' },
-				{ id: CONTEXT_PROMPT, enabled: true, prefix: 'old context' },
-			],
-			[
-				{ id: CONTEXT_PROMPT, enabled: false, prefix: 'new context' },
-				{ id: IDENTITY_PROMPT, enabled: true, prefix: 'new identity' },
-			],
-		);
-		assert.deepStrictEqual(
-			kept,
-			[
-				{ id: IDENTITY_PROMPT, enabled: false, prefix: 'new identity' },
-				{ id: CONTEXT_PROMPT, enabled: true, prefix: 'new context' },
-			],
-			'the ST mirror keeps its order/switches; only prefixes move into the core layout',
-		);
 	});
 
-	test('an entry activates by key, by constant, by decorator — never after @@dont_activate', () => {
-		const keyed = lore({ books: [loreBookOf([{ uid: 0, key: ['salt'], content: 'The flats drink sound.' }])] });
-		const hit = activateLore(keyed);
-		assert.deepStrictEqual(hit.before, ['The flats drink sound.']);
-		assert.strictEqual(hit.activated.length, 1);
-		assert.strictEqual(hit.activated[0].reason, 'key');
-		assert.strictEqual(hit.activated[0].book, 'Book');
-
-		const missed = activateLore(lore({ books: [loreBookOf([{ uid: 0, key: ['volcano'], content: 'nope' }])] }));
-		assert.deepStrictEqual(missed.before, []);
-
-		const constant = activateLore(lore({ books: [loreBookOf([{ uid: 1, key: [], content: 'Always here.', constant: true }])] }));
-		assert.deepStrictEqual(constant.before, ['Always here.']);
-		assert.strictEqual(constant.activated[0].reason, 'constant');
-
-		const forced = activateLore(lore({ books: [loreBookOf([{ uid: 2, key: ['nothing'], content: '@@activate Forced.' }])] }));
-		assert.deepStrictEqual(forced.before, ['Forced.']);
-		assert.strictEqual(forced.activated[0].reason, '@@activate');
-
-		const refused = activateLore(lore({ books: [loreBookOf([{ uid: 3, key: [], content: '@@dont_activate Never.', constant: true }])] }));
-		assert.deepStrictEqual(refused.before, []);
-	});
-
-	test('the four secondary-key logics decide together with the primary match', () => {
-		const run = (logic: number, secondary: string[]): string[] =>
-			activateLore(
-				lore({
-					books: [loreBookOf([{ uid: 0, key: ['salt'], keysecondary: secondary, selectiveLogic: logic, content: 'Hit.' }])],
-				}),
-			).before;
-
-		assert.deepStrictEqual(run(WI_LOGIC.andAny, ['flats']), ['Hit.']);
-		assert.deepStrictEqual(run(WI_LOGIC.andAny, ['volcano']), []);
-		assert.deepStrictEqual(run(WI_LOGIC.notAll, ['volcano']), ['Hit.']);
-		assert.deepStrictEqual(run(WI_LOGIC.notAll, ['flats']), []);
-		assert.deepStrictEqual(run(WI_LOGIC.notAny, ['volcano']), ['Hit.']);
-		assert.deepStrictEqual(run(WI_LOGIC.notAny, ['flats']), []);
-		assert.deepStrictEqual(run(WI_LOGIC.andAll, ['salt', 'flats']), ['Hit.']);
-		assert.deepStrictEqual(run(WI_LOGIC.andAll, ['salt', 'volcano']), []);
-		// `selective: false` drops the secondary requirement altogether.
-		const loose = activateLore(
-			lore({ books: [loreBookOf([{ uid: 0, key: ['salt'], keysecondary: ['volcano'], selective: false, content: 'Hit.' }])] }),
-		);
-		assert.deepStrictEqual(loose.before, ['Hit.']);
-	});
-
-	test('keys match as patterns, as whole words, and case-sensitively when asked', () => {
-		const withKey = (patch: Partial<WorldEntry>, text = 'Tell me about the salt flats'): string[] =>
-			activateLore(lore({ books: [loreBookOf([{ uid: 0, content: 'Hit.', ...patch }])], messages: [{ text }] })).before;
-
-		assert.deepStrictEqual(withKey({ key: ['/flat(s)?/i'] }), ['Hit.']);
-		assert.deepStrictEqual(withKey({ key: ['/^salt/'] }), [], 'anchored patterns see the whole scan text');
-		assert.deepStrictEqual(withKey({ key: ['salt'] }, 'salty'), ['Hit.']);
-		assert.deepStrictEqual(withKey({ key: ['salt'], matchWholeWords: true }, 'salty'), []);
-		assert.deepStrictEqual(withKey({ key: ['salty'], matchWholeWords: true }, 'salty'), ['Hit.']);
-		assert.deepStrictEqual(withKey({ key: ['SALT'], caseSensitive: true }), []);
-		assert.deepStrictEqual(withKey({ key: ['SALT'], caseSensitive: false }), ['Hit.']);
-		// A pattern that does not compile is a plain substring, never an exception.
-		assert.deepStrictEqual(withKey({ key: ['/[/'] }), []);
-		// Keys are substituted before matching, so a macro key sees the real name.
-		assert.deepStrictEqual(
-			activateLore(
-				lore({
-					books: [loreBookOf([{ uid: 0, key: ['{{char}}'], content: 'Hit.' }])],
-					messages: [{ text: 'Kestrel, hello' }],
-					substitute: (text) => text.replace('{{char}}', 'Kestrel'),
-				}),
-			).before,
-			['Hit.'],
-		);
-	});
-
-	test('the scan depth, sticky, cooldown, delay and recursion gate activation', () => {
-		const entry = (patch: Partial<WorldEntry>): LoreBook => loreBookOf([{ uid: 0, key: ['salt'], content: 'Hit.', ...patch }]);
-		// Newest first, as the scan is handed them: the keyword is one message back.
-		const twoBack = [{ text: 'nothing' }, { text: 'salt' }];
-
-		// Only `scanDepth` messages back are read; the shipped default is two.
-		assert.deepStrictEqual(activateLore(lore({ books: [entry({})], messages: twoBack })).before, ['Hit.']);
-		assert.deepStrictEqual(
-			activateLore(lore({ books: [entry({})], messages: twoBack, settings: { ...WI_SETTINGS_DEFAULTS, scanDepth: 1 } })).before,
-			[],
-		);
-
-		// Sticky keeps it alive once the words are gone; cooldown holds it back while they remain.
-		const first = activateLore(lore({ books: [entry({ sticky: 2 })], turn: 0 }));
-		assert.deepStrictEqual(first.before, ['Hit.']);
-		const later = activateLore(lore({ books: [entry({ sticky: 2 })], messages: [{ text: 'nothing' }], turn: 1, effects: first.effects }));
-		assert.deepStrictEqual(later.before, ['Hit.'], 'sticky outlives the message that triggered it');
-		assert.strictEqual(later.activated[0].reason, 'sticky');
-
-		const cooled = activateLore(lore({ books: [entry({ cooldown: 2 })], turn: 0 }));
-		const again = activateLore(lore({ books: [entry({ cooldown: 2 })], turn: 1, effects: cooled.effects }));
-		assert.deepStrictEqual(again.before, [], 'cooldown suppresses a repeat');
-
-		const delayed = activateLore(lore({ books: [entry({ delay: 2 })], turn: 0 }));
-		const suppressed = activateLore(lore({ books: [entry({ delay: 2 })], turn: 1, effects: delayed.effects }));
-		assert.deepStrictEqual(suppressed.before, [], 'delay holds the entry back for that many messages');
-		const released = activateLore(lore({ books: [entry({ delay: 2 })], turn: 2, effects: delayed.effects }));
-		assert.deepStrictEqual(released.before, ['Hit.'], 'the delay expires on its own');
-
-		// Recursion: only after something activated may the recursive scan use its text.
-		const chain: LoreBook = {
-			name: 'Chain',
-			kind: 'character',
-			book: {
-				name: 'Chain',
-				entries: {
-					a: worldEntry({ uid: 0, key: ['salt'], content: 'The tide is out.' }),
-					b: worldEntry({ uid: 1, key: ['tide'], content: 'Tide lore.' }),
-				},
-			},
-		};
-		assert.deepStrictEqual(activateLore(lore({ books: [chain] })).before, ['The tide is out.']);
-		const recursive = activateLore(lore({ books: [chain], settings: { ...WI_SETTINGS_DEFAULTS, recursive: true } }));
-		assert.deepStrictEqual(recursive.before, ['The tide is out.', 'Tide lore.']);
-		// `delayUntilRecursion` keeps an entry out of the first pass entirely.
-		const delayedChain: LoreBook = {
-			name: 'Chain',
-			kind: 'character',
-			book: {
-				name: 'Chain',
-				entries: {
-					a: worldEntry({ uid: 0, key: ['salt'], content: 'The tide is out.' }),
-					b: worldEntry({ uid: 1, key: ['tide'], content: 'Tide lore.', delayUntilRecursion: 1 }),
-				},
-			},
-		};
-		assert.deepStrictEqual(activateLore(lore({ books: [delayedChain] })).before, ['The tide is out.']);
-		assert.deepStrictEqual(
-			activateLore(lore({ books: [delayedChain], settings: { ...WI_SETTINGS_DEFAULTS, recursive: true } })).before,
-			['The tide is out.', 'Tide lore.'],
-		);
-	});
-
-	test('probability, the token budget and minimum activations decide what survives', () => {
-		const long = (uid: number, order: number): Partial<WorldEntry> & { uid: number; content: string } => ({
-			uid,
-			key: ['salt'],
-			order,
-			content: `Entry ${uid} ${'x'.repeat(39)}`,
-		});
-
-		// Probability: `random() * 100 > probability` is a miss, and a miss is not retried.
-		const miss = activateLore(
-			lore({
-				books: [loreBookOf([{ uid: 0, key: ['salt'], content: 'Hit.', probability: 50 }])],
-				random: () => 0.99,
-			}),
-		);
-		assert.deepStrictEqual(miss.before, []);
-		assert.strictEqual(miss.activated.length, 0);
-
-		// Budget: 1% of 100 tokens. The first entry is always let through, the second is not.
-		const tight = activateLore(
-			lore({
-				books: [loreBookOf([long(0, 150), long(1, 100)])],
-				contextSize: 100,
-				settings: { ...WI_SETTINGS_DEFAULTS, budget: 1 },
-			}),
-		);
-		assert.strictEqual(tight.activated.length, 1);
-		assert.strictEqual(tight.overflowed, true);
-		// `ignoreBudget` is exempt from the gate.
-		const exempt = activateLore(
-			lore({
-				books: [loreBookOf([{ ...long(0, 150) }, { ...long(1, 100), ignoreBudget: true }])],
-				contextSize: 100,
-				settings: { ...WI_SETTINGS_DEFAULTS, budget: 1 },
-			}),
-		);
-		assert.strictEqual(exempt.activated.length, 2);
-
-		// Minimum activations: the scan reaches deeper until enough entries fired.
-		const deep: LoreInput = lore({
-			books: [loreBookOf([{ uid: 0, key: ['ancient'], content: 'Deep lore.' }])],
-			messages: [{ text: 'nothing here' }, { text: 'ancient history' }],
-			settings: { ...WI_SETTINGS_DEFAULTS, scanDepth: 1, minActivations: 1, maxActivationsDepth: 2 },
-		});
-		assert.deepStrictEqual(deep.messages.length, 2);
-		assert.deepStrictEqual(activateLore(deep).before, ['Deep lore.']);
-	});
-
-	test('groups keep only their strongest member', () => {
-		const byWeight = activateLore(
-			lore({
-				books: [
-					loreBookOf([
-						{ uid: 0, key: ['salt'], content: 'Weak.', group: 'g', groupWeight: 100 },
-						{ uid: 1, key: ['salt'], content: 'Strong.', group: 'g', groupWeight: 200 },
-					]),
-				],
-			}),
-		);
-		assert.deepStrictEqual(byWeight.before, ['Strong.']);
-
-		const override = activateLore(
-			lore({
-				books: [
-					loreBookOf([
-						{ uid: 0, key: ['salt'], content: 'Weak.', group: 'g', groupWeight: 100, groupOverride: true },
-						{ uid: 1, key: ['salt'], content: 'Strong.', group: 'g', groupWeight: 200 },
-					]),
-				],
-			}),
-		);
-		assert.deepStrictEqual(override.before, ['Weak.']);
-
-		// Scoring by matched keys needs both the entry and the settings to opt in.
-		const byScore = activateLore(
-			lore({
-				books: [
-					loreBookOf([
-						{ uid: 0, key: ['salt'], content: 'One key.', group: 'g', groupWeight: 200, useGroupScoring: true },
-						{ uid: 1, key: ['salt', 'flats'], content: 'Two keys.', group: 'g', groupWeight: 100, useGroupScoring: true },
-					]),
-				],
-			}),
-		);
-		assert.deepStrictEqual(byScore.before, ['Two keys.']);
-	});
-
-	test('positions bucket the activated entries, lowest order first', () => {
-		const books = [
-			loreBookOf([
-				{ uid: 0, key: ['salt'], content: 'Second.', order: 150, position: WI_POSITION.before },
-				{ uid: 1, key: ['salt'], content: 'First.', order: 50, position: WI_POSITION.before },
-				{ uid: 2, key: ['salt'], content: 'After.', position: WI_POSITION.after },
-				{ uid: 3, key: ['salt'], content: 'Note top.', position: WI_POSITION.anTop },
-				{ uid: 4, key: ['salt'], content: 'Note bottom.', position: WI_POSITION.anBottom },
-				{ uid: 5, key: ['salt'], content: 'Example top.', position: WI_POSITION.emTop },
-				{ uid: 6, key: ['salt'], content: 'Example bottom.', position: WI_POSITION.emBottom },
-				{ uid: 7, key: ['salt'], content: 'Deep.', position: WI_POSITION.atDepth, depth: 2, role: WI_ROLE.user },
-				{ uid: 8, key: ['salt'], content: 'Shallow.', position: WI_POSITION.atDepth, depth: 1 },
-				{ uid: 9, key: ['salt'], content: 'Out.', position: WI_POSITION.outlet, outletName: 'sign' },
-			]),
-		];
-		const result = activateLore(lore({ books }));
-		assert.deepStrictEqual(result.before, ['First.', 'Second.']);
-		assert.deepStrictEqual(result.after, ['After.']);
-		assert.deepStrictEqual(result.anTop, ['Note top.']);
-		assert.deepStrictEqual(result.anBottom, ['Note bottom.']);
-		assert.deepStrictEqual(result.examplesBefore, ['Example top.']);
-		assert.deepStrictEqual(result.examplesAfter, ['Example bottom.']);
-		assert.deepStrictEqual(result.outlets, { sign: ['Out.'] });
-		assert.deepStrictEqual(result.atDepth.map((injection) => [injection.depth, injection.content]), [
-			[2, 'Deep.'],
-			[1, 'Shallow.'],
-		]);
-		assert.strictEqual(result.atDepth[0].role, WI_ROLE.user);
-	});
-
-	test('books are scanned chat first, then persona, then character before global', () => {
-		const make = (kind: LoreBook['kind'], content: string, order: number): LoreBook => ({
-			name: kind,
-			kind,
-			book: { name: kind, entries: { a: worldEntry({ uid: 0, key: ['salt'], content, order }) } },
-		});
-		const result = activateLore(
-			lore({
-				books: [make('global', 'Global.', 100), make('chat', 'Chat.', 1), make('persona', 'Persona.', 100), make('character', 'Character.', 100)],
-			}),
-		);
-		assert.deepStrictEqual(result.before, ['Chat.', 'Persona.', 'Character.', 'Global.']);
-
-		const globalFirst = activateLore(
-			lore({
-				books: [make('global', 'Global.', 100), make('character', 'Character.', 100)],
-				settings: { ...WI_SETTINGS_DEFAULTS, characterStrategy: WI_STRATEGY.globalFirst },
-			}),
-		);
-		assert.deepStrictEqual(globalFirst.before, ['Global.', 'Character.']);
-	});
-
-	test('a card’s own book becomes a scannable world book', () => {
-		const card = normaliseCard(parseCard(JSON.stringify(CARD_V2)), 'kestrel', 'memory');
-		const book = toWorldBook(card.book, 'Kestrel');
-		assert.strictEqual(book.name, 'Salt Flats');
-		const entry = book.entries['0'];
-		assert.deepStrictEqual(entry.key, ['salt', 'flats']);
-		assert.strictEqual(entry.order, 20);
-		assert.strictEqual(entry.position, WI_POSITION.after);
-		assert.strictEqual(entry.disable, false);
-		const result = activateLore(lore({ books: [{ name: 'Kestrel', kind: 'character', book }] }));
-		assert.deepStrictEqual(result.after, ['The flats drink sound.']);
-	});
-
-	test('the assembler orders the blocks, the history and the in-chat injections', () => {
-		const messages = assemble(
-			promptCollection(),
-			{
-				comonad: { [COMONAD_BLOCK.identity]: 'You are Comonad.' },
-				charDescription: 'A cartographer.',
-				charPersonality: 'Terse.',
-				scenario: 'Dusk.',
-				personaDescription: 'A reader.',
-				worldInfoBefore: 'Lore: the flats.',
-				examples: '<START>\nYou: hi\nKestrel: hm.',
-				atDepth: [{ depth: 0, role: WI_ROLE.system, content: 'Deep note.' }],
-			},
-			[
-				{ role: 'user', content: 'hello' },
-				{ role: 'assistant', content: 'hm' },
-			],
-			{ wiFormat: '{0}' },
-		);
-		const texts = messages.map((message) => message.content);
-		const at = (needle: string): number => texts.findIndex((text) => text.startsWith(needle));
-		assert.strictEqual(texts[0], 'You are Comonad.', 'the agent identity leads');
-		assert.ok(at('Lore: the flats.') > 0 && at('Lore: the flats.') < at('A reader.'));
-		assert.ok(at('A reader.') < at('A cartographer.'));
-		assert.ok(at('A cartographer.') < at('Terse.'));
-		assert.ok(at('Terse.') < at('Dusk.'));
-		assert.ok(at('<START>') < at('hello'), 'examples come before the history');
-		assert.strictEqual(texts[texts.length - 1], 'Deep note.', 'a depth-0 injection follows the last message');
-		assert.deepStrictEqual(messages.filter((message) => message.content === 'hm').map((message) => message.role), ['assistant']);
-
-		// Switching a block off removes it, and an empty block is never sent.
-		const trimmed = assemble(setEnabled(promptCollection(), 'charPersonality', false), { comonad: { [COMONAD_BLOCK.identity]: 'You are Comonad.' }, charPersonality: 'Terse.' }, []);
-		assert.ok(!trimmed.some((message) => message.content === 'Terse.'));
-		assert.strictEqual(trimmed[0].content, 'You are Comonad.');
-		assert.ok(trimmed.length <= 2, 'only the identity and the main prompt have text of their own');
-
-		// `wi_format` wraps the world-info blocks.
-		const wrapped = assemble(promptCollection(), { comonad: { [COMONAD_BLOCK.identity]: 'i' }, worldInfoBefore: 'the flats' }, [], { wiFormat: 'Lore: {0}' });
-		assert.ok(wrapped.some((message) => message.content === 'Lore: the flats'));
-
-		// A collection that never mentions the history still gets the conversation.
-		const noHistory = promptCollection().filter((prompt) => prompt.identifier !== 'chatHistory');
-		const withHistory = assemble(noHistory, { comonad: { [COMONAD_BLOCK.identity]: 'i' } }, [{ role: 'user', content: 'kept' }]);
-		assert.ok(withHistory.some((message) => message.content === 'kept'));
-
-		// And it gets the in-chat injections too: a block in chat only ever travels inside the history, so
-		// splicing the history without them would drop the author's note on the floor.
-		const note = {
-			...promptCollection().find((prompt) => prompt.identifier === 'jailbreak')!,
-			content: 'Keep it short.',
-			injection_position: INJECTION_POSITION.absolute,
-			injection_depth: 0,
-		};
-		const withNote = assemble([...noHistory, note], { comonad: { [COMONAD_BLOCK.identity]: 'i' } }, [{ role: 'user', content: 'kept' }]);
-		assert.deepStrictEqual(
-			withNote.filter((message) => message.content === 'kept' || message.content === 'Keep it short.').map((message) => message.content),
-			['kept', 'Keep it short.'],
-			'an in-chat block is spliced at its depth inside the history',
-		);
-
-		assert.deepStrictEqual(
-			injectAtDepth(
-				[
-					{ role: 'user', content: 'a' },
-					{ role: 'assistant', content: 'b' },
-					{ role: 'user', content: 'c' },
-				],
-				[{ depth: 1, role: WI_ROLE.user, content: 'X' }],
-			).map((message) => message.content),
-			['a', 'b', 'X', 'c'],
-		);
-		// At one depth upstream reads: `order` low first, and within an order assistant, user, system.
-		assert.deepStrictEqual(
-			injectAtDepth(
-				[
-					{ role: 'user', content: 'a' },
-					{ role: 'assistant', content: 'b' },
-					{ role: 'user', content: 'c' },
-				],
-				[
-					{ depth: 1, role: WI_ROLE.system, content: 'late-system', order: 200 },
-					{ depth: 1, role: WI_ROLE.system, content: 'early-system', order: 10 },
-					{ depth: 1, role: WI_ROLE.user, content: 'early-user', order: 10 },
-					{ depth: 1, role: WI_ROLE.assistant, content: 'early-assistant', order: 10 },
-				],
-			).map((message) => message.content),
-			['a', 'b', 'early-assistant', 'early-user', 'early-system', 'late-system', 'c'],
-		);
-		// Two depths: the deeper one ends up further up, and depth 0 sits after the last message.
-		assert.deepStrictEqual(
-			injectAtDepth(
-				[
-					{ role: 'user', content: 'a' },
-					{ role: 'assistant', content: 'b' },
-				],
-				[
-					{ depth: 0, role: WI_ROLE.system, content: 'after' },
-					{ depth: 1, role: WI_ROLE.system, content: 'before-last' },
-				],
-			).map((message) => message.content),
-			['a', 'before-last', 'b', 'after'],
-		);
-		assert.deepStrictEqual(exampleMessages('<START>\none').map((message) => message.content), ['<START>\none\n']);
-	});
-
-	test('regex scripts honour placement, depth, markdown/prompt gates and trim strings', () => {
-		const script = makeScript({ scriptName: 's', findRegex: '/\\bfoo\\b/g', replaceString: 'bar', placement: [REGEX_PLACEMENT.aiOutput] });
-		assert.strictEqual(applyRegex([script], 'foo foo', { placement: REGEX_PLACEMENT.aiOutput }), 'bar bar');
-		assert.strictEqual(applyRegex([script], 'foo', { placement: REGEX_PLACEMENT.userInput }), 'foo');
-		assert.strictEqual(applyRegex([{ ...script, disabled: true }], 'foo', { placement: REGEX_PLACEMENT.aiOutput }), 'foo');
-
-		const deep = makeScript({ ...script, minDepth: 3 });
-		assert.strictEqual(applyRegex([deep], 'foo', { placement: REGEX_PLACEMENT.aiOutput, depth: 1 }), 'foo');
-		assert.strictEqual(applyRegex([deep], 'foo', { placement: REGEX_PLACEMENT.aiOutput, depth: 4 }), 'bar');
-		const shallow = makeScript({ ...script, maxDepth: 1 });
-		assert.strictEqual(applyRegex([shallow], 'foo', { placement: REGEX_PLACEMENT.aiOutput, depth: 2 }), 'foo');
-
-		const markdown = makeScript({ ...script, markdownOnly: true });
-		assert.strictEqual(applyRegex([markdown], 'foo', { placement: REGEX_PLACEMENT.aiOutput, isPrompt: true }), 'foo');
-		assert.strictEqual(applyRegex([markdown], 'foo', { placement: REGEX_PLACEMENT.aiOutput, isMarkdown: true }), 'bar');
-
-		// Editing only runs the scripts that opt in.
-		assert.strictEqual(applyRegex([script], 'foo', { placement: REGEX_PLACEMENT.userInput, isEdit: true }), 'foo');
-		const onEdit = makeScript({ ...script, placement: [REGEX_PLACEMENT.userInput], runOnEdit: true });
-		assert.strictEqual(applyRegex([onEdit], 'foo', { placement: REGEX_PLACEMENT.userInput, isEdit: true }), 'bar');
-
-		// {{match}} is the whole match, `$1` and `$<name>` are capture groups, trimStrings are removed.
-		assert.strictEqual(
-			applyRegex([makeScript({ findRegex: 'a(b)c', replaceString: '[{{match}}|$1]' })], 'abc', { placement: REGEX_PLACEMENT.aiOutput }),
-			'[abc|b]',
-		);
-		assert.strictEqual(applyRegex([makeScript({ findRegex: '/o+/g', replaceString: '0', trimStrings: ['x'] })], 'xoxo', { placement: REGEX_PLACEMENT.aiOutput }), '00');
-		// A plain pattern carries no flags, so only its first match is replaced — as upstream.
-		assert.strictEqual(applyRegex([makeScript({ findRegex: 'foo', replaceString: 'bar' })], 'foo foo', { placement: REGEX_PLACEMENT.aiOutput }), 'bar foo');
-	});
-
-	test('with the ST layer on every turn is composed; only an absent or disabled layer falls back', async () => {
-		const kernel = await createTestKernel();
-		try {
-			let seen: Message[] = [];
-			kernel.ctx.llm.use({
-				name: 'test',
-				async chat(request) {
-					seen = request.messages;
-					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			await kernel.ctx.agent.runTurn({ text: 'hi', sessionId: 'plain' });
-			// The layer owns every turn even with nothing selected: the built-in Default is the collection.
-			assert.ok(seen.length >= 3, `expected the default collection and the prompt, got ${JSON.stringify(seen)}`);
-			assert.strictEqual(seen[0].role, 'system');
-			assert.ok(seen[0].content.startsWith('You are Comonad'), 'the identity block still leads');
-			assert.ok(seen.some((message) => message.content.includes('Inspect the workspace with the provided tools')), 'the Tools block is a message of its own');
-			assert.ok(!seen.some((message) => message.content.includes("Write {{char}}'s next reply")), 'and no roleplay main without a character or preset');
-			assert.ok(!seen.some((message) => message.content.includes('lore_lookup')), 'and never advertises a tool with no books behind it');
-			assert.strictEqual(seen[seen.length - 1].role, 'user');
-			assert.strictEqual(seen[seen.length - 1].content, 'hi');
-
-			const composed = await kernel.ctx.tavern.compose({
-				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
-				history: [{ role: 'user', content: 'hi' }],
-				binding: {},
-				scan: [{ role: 'user', text: 'hi' }],
-				turn: 1,
-			});
-			assert.strictEqual(composed.takeover, true);
-			assert.strictEqual(composed.toolsEnabled, true);
-			assert.deepStrictEqual(composed.activated, []);
-			assert.deepStrictEqual(composed.messages.map((message) => message.content), ['identity', 'hi']);
-		} finally {
-			await kernel.dispose();
-		}
-
-		// Switched off: the agent's own shape is sent, exactly as before the layer existed.
-		const off = await createTestKernel({ config: { tavernEnabled: false } });
-		try {
-			let seen: Message[] = [];
-			off.ctx.llm.use({
-				name: 'test',
-				async chat(request) {
-					seen = request.messages;
-					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			await off.ctx.agent.runTurn({ text: 'hi', sessionId: 'plain' });
-			assert.strictEqual(seen.length, 2, `expected the identity and the prompt, got ${JSON.stringify(seen)}`);
-			assert.strictEqual(seen[0].role, 'system');
-			assert.ok(seen[0].content.startsWith('You are Comonad'));
-			assert.strictEqual(seen[1].role, 'user');
-			assert.strictEqual(seen[1].content, 'hi');
-			const inert = await off.ctx.tavern.compose({
-				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
-				history: [{ role: 'user', content: 'hi' }],
-				binding: {},
-				scan: [{ role: 'user', text: 'hi' }],
-				turn: 1,
-			});
-			assert.strictEqual(inert.takeover, false);
-		} finally {
-			await off.dispose();
-		}
-	});
-
-	test('the preset’s Tools entry switches the whole tool set, and a call is refused before it runs', async () => {
-		const kernel = await createTestKernel();
-		try {
-			let ran = 0;
-			kernel.ctx.tools.register({
-				name: 'probe_tool',
-				description: 'A tool the test watches.',
-				capability: 'ro',
-				needsNetwork: false,
-				needsWorkspace: false,
-				parameters: objectSchema({}),
-				execute: async () => {
-					ran += 1;
-					return 'ran';
-				},
-			});
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'presets'), { recursive: true });
-			writeFileSync(
-				join(library, 'presets', 'NoTools.json'),
-				JSON.stringify({
-					prompts: [],
-					prompt_order: [{ character_id: 100000, order: [{ identifier: TOOLS_PROMPT, enabled: false }] }],
-				}),
-			);
-			await kernel.ctx.tavern.reload();
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'no-tools');
-			session.preset = 'NoTools';
-			kernel.ctx.sessions.save(session);
-
-			const requests: { tools: string[]; messages: Message[] }[] = [];
-			let attempts = 0;
-			kernel.ctx.llm.use({
-				name: 'test',
-				async chat(request) {
-					attempts += 1;
-					requests.push({ tools: request.tools.map((tool) => tool.name), messages: request.messages });
-					if (attempts === 1) {
-						const call: ToolCall = { id: 'probe-1', name: 'probe_tool', arguments: '{}' };
-						return { message: { role: 'assistant', content: '', toolCalls: [call] }, toolCalls: [call], usage: { input: 1, output: 1 } };
-					}
-					return { message: { role: 'assistant', content: 'answered without a tool' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-
-			const result = await kernel.ctx.agent.runTurn({ text: 'use a tool', sessionId: 'no-tools' });
-			assert.strictEqual(result.text, 'answered without a tool');
-			assert.strictEqual(attempts, 2, 'the rejection went back to the model once');
-			assert.deepStrictEqual(requests[0]!.tools, [], 'the request carries no tools at all');
-			assert.strictEqual(ran, 0, 'and the call never reached the tool');
-			assert.ok(
-				requests[1]!.messages.some((message) => message.role === 'tool' && /Tools entry is off/.test(message.content)),
-				'the model was told why',
-			);
-
-			// The editor preview applies the same switch: a block that advertises a tool is blank when
-			// the request would carry none.
-			const preset = kernel.ctx.tavern.preset('NoTools')!;
-			const preview = kernel.ctx.tavern.previewPrompts(preset, [
-				{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' },
-				{ id: COMONAD_BLOCK.skills, name: 'Skills', text: 'skills' },
-				{ id: COMONAD_BLOCK.orchestrator, name: 'Orchestration', text: 'orchestrate' },
-				{ id: COMONAD_BLOCK.lore, name: 'Lore index', text: 'lore' },
-			]);
-			assert.strictEqual(preview[COMONAD_BLOCK.identity], 'identity');
-			assert.strictEqual(preview[COMONAD_BLOCK.skills], undefined);
-			assert.strictEqual(preview[COMONAD_BLOCK.orchestrator], undefined);
-			assert.strictEqual(preview[COMONAD_BLOCK.lore], undefined);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('with ST off, the core Tools block is the request’s tool switch', async () => {
+	test('the core Tools block is the request’s tool switch', async () => {
 		const layout = defaultPromptLayout().map((entry) => (entry.id === COMONAD_BLOCK.tools ? { ...entry, enabled: false } : entry));
-		const kernel = await createTestKernel({ config: { tavernEnabled: false, prompts: layout } });
+		const kernel = await createTestKernel({ config: { prompts: layout } });
 		try {
 			let ran = 0;
 			kernel.ctx.tools.register({
@@ -7632,7 +6399,7 @@ suite('Tavern content', () => {
 		}
 	});
 
-	test('the Prompts layout drives the fallback, while ST keeps its own order and still uses the prefixes', async () => {
+	test('the Prompts layout drives the system prompt', async () => {
 		const layout = defaultPromptLayout().map((entry) => ({ ...entry }));
 		const context = layout.find((entry) => entry.id === COMONAD_BLOCK.context)!;
 		layout.splice(layout.indexOf(context), 1);
@@ -7640,1528 +6407,27 @@ suite('Tavern content', () => {
 		layout.find((entry) => entry.id === COMONAD_BLOCK.identity)!.prefix = 'Custom identity.';
 		layout.find((entry) => entry.id === COMONAD_BLOCK.instructions)!.enabled = false;
 
-		const off = await createTestKernel({ config: { tavernEnabled: false, instructions: true, prompts: layout } });
+		const kernel = await createTestKernel({ config: { instructions: true, prompts: layout } });
 		try {
-			writeFileSync(join(off.root, 'ws', 'COMONAD.md'), 'Project rules.');
+			writeFileSync(join(kernel.root, 'ws', 'COMONAD.md'), 'Project rules.');
 			let seen: Message[] = [];
-			off.ctx.llm.use({
+			kernel.ctx.llm.use({
 				name: 'test',
 				async chat(request) {
 					seen = request.messages;
 					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
 				},
 			});
-			off.ctx.sessions.create(off.ctx.agent.policyFor(), 'layout');
-			off.ctx.agent.pushContext('layout', 'CTX');
-			await off.ctx.agent.runTurn({ text: 'hi', sessionId: 'layout' });
+			kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'layout');
+			kernel.ctx.agent.pushContext('layout', 'CTX');
+			await kernel.ctx.agent.runTurn({ text: 'hi', sessionId: 'layout' });
 			const system = seen[0]!.content;
 			assert.ok(system.startsWith('Context:\nCTX'), 'the context block moved to the front');
 			assert.ok(system.includes('Custom identity.'), 'the edited prefix is used');
-			assert.ok(!system.includes('Project instructions:'), 'the disabled Instructions block is left out of the fallback');
-		} finally {
-			await off.dispose();
-		}
-
-		const on = await createTestKernel({ config: { tavernEnabled: true, instructions: true, prompts: layout } });
-		try {
-			writeFileSync(join(on.root, 'ws', 'COMONAD.md'), 'Project rules.');
-			let seen: Message[] = [];
-			on.ctx.llm.use({
-				name: 'test',
-				async chat(request) {
-					seen = request.messages;
-					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			on.ctx.sessions.create(on.ctx.agent.policyFor(), 'layout');
-			on.ctx.agent.pushContext('layout', 'CTX');
-			await on.ctx.agent.runTurn({ text: 'hi', sessionId: 'layout' });
-			const texts = seen.map((message) => message.content);
-			const identityAt = texts.findIndex((text) => text.startsWith('Custom identity.'));
-			const contextAt = texts.findIndex((text) => text.includes('CTX'));
-			assert.ok(identityAt === 0, 'ST uses the edited prefix on the identity block');
-			assert.ok(contextAt > identityAt, 'and keeps its own order: identity first, context later');
-			assert.ok(texts.some((text) => text.includes('Project instructions:')), 'and its preset enables Instructions even though the core layout disabled it');
-		} finally {
-			await on.dispose();
-		}
-	});
-
-	test('a greeting is a turn of its own: no prompt, no regenerate, never trimmed away', async () => {
-		// A leading assistant message used to be dropped as traffic with nothing to attach it to.
-		const turns = turnsOf([
-			{ role: 'assistant', content: 'Kestrel looks up.', greeting: true, at: 1, startedAt: 0 },
-			{ role: 'user', content: 'hello', at: 2 },
-			{ role: 'assistant', content: 'hm', at: 3 },
-		]);
-		assert.strictEqual(turns.length, 2);
-		assert.strictEqual(turns[0].greeting, true);
-		assert.strictEqual(turns[0].prompt, '');
-		assert.deepStrictEqual(turns[0].steps.map((step) => step.text), ['Kestrel looks up.']);
-		assert.strictEqual(turns[1].prompt, 'hello');
-
-		// A compaction folds the opening line into the summary rather than dropping it, and the cut still
-		// lands on a turn boundary: the premise is what the summary is told to keep.
-		const long = [
-			{ role: 'assistant', content: 'Kestrel looks up.', greeting: true } as Message,
-			...Array.from({ length: 6 }, (_, index) => ({ role: 'user', content: `turn ${index} ${'x'.repeat(400)}` }) as Message),
-		];
-		const folded = planCompaction(long, 200);
-		assert.strictEqual(folded.older[0]?.greeting, true, 'the greeting is the first thing the summary covers');
-		assert.strictEqual(folded.recent[0]?.role, 'user', 'and the cut is a turn boundary');
-		assert.strictEqual(folded.older.length + folded.recent.length, long.length, 'nothing is dropped outright');
-
-		const kernel = await createTestKernel();
-		try {
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'greet');
-			assert.strictEqual(kernel.ctx.sessions.greet('greet', 'Kestrel looks up.', 1), true);
-			assert.strictEqual(kernel.ctx.sessions.greeted('greet'), 1);
-			assert.strictEqual(kernel.ctx.sessions.require('greet').transcript.length, 1);
-			// The opening line is content: the chat is filed, so a reload finds it again.
-			assert.strictEqual(unusedChat(kernel.ctx.sessions.require('greet')), false);
-			assert.deepStrictEqual(kernel.ctx.sessions.list().map((entry) => entry.id), ['greet']);
-			assert.strictEqual(kernel.ctx.sessions.replayLast('greet').text, '', 'there is no prompt to run again');
-
-			// A chat that already said something is never rewritten.
-			session.transcript.push({ role: 'user', content: 'hello', at: 2 });
-			kernel.ctx.sessions.save(session);
-			assert.strictEqual(kernel.ctx.sessions.greet('greet', 'A second opening.'), false);
-			assert.strictEqual(kernel.ctx.sessions.require('greet').transcript[0].content, 'Kestrel looks up.');
+			assert.ok(!system.includes('Project instructions:'), 'the disabled Instructions block is left out');
 		} finally {
 			await kernel.dispose();
 		}
-	});
-
-	test('lore_lookup searches the active books and never changes what gets injected', async () => {
-		const kernel = await createTestKernel({ config: { tavernLorebooks: ['Salt'], tavernCharacter: 'kestrel' } });
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			mkdirSync(join(library, 'lorebooks'), { recursive: true });
-			writeFileSync(
-				join(library, 'characters', 'kestrel.json'),
-				JSON.stringify({
-					spec: 'chara_card_v2',
-					spec_version: '2.0',
-					data: {
-						name: 'Kestrel',
-						description: 'A cartographer.',
-						first_mes: 'Kestrel looks up.',
-						character_book: {
-							name: 'Kestrel notes',
-							entries: [{ keys: ['atlas'], comment: 'Her atlas', content: 'Her atlas is water-stained.' }],
-						},
-					},
-				}),
-			);
-			writeFileSync(
-				join(library, 'lorebooks', 'Salt.json'),
-				JSON.stringify({
-					name: 'Salt',
-					entries: {
-						'0': { uid: 0, key: ['salt'], comment: 'The flats', content: 'The flats drink sound.' },
-						'1': { uid: 1, key: ['/shadowfang(s)?/i'], comment: 'Beasts', content: 'They came from the east.', disable: true },
-						'2': { uid: 2, key: ['glade'], comment: 'The glade', content: 'A sanctuary of peace.' },
-					},
-				}),
-			);
-			await kernel.ctx.tavern.reload();
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'lore');
-			kernel.ctx.sessions.save(session);
-
-			const tool = kernel.ctx.tools.get('lore_lookup');
-			assert.ok(tool, 'the tool is registered');
-			const context = {
-				sessionId: 'lore',
-				batch: 0,
-				workspace: '',
-				policy: policy(),
-				signal: new AbortController().signal,
-				log: () => undefined,
-				ask: async () => [],
-				todos: () => [],
-				tasks: {
-					start: async () => ({ id: 't', command: '', cwd: '', startedAt: 0, output: '', exitCode: null }),
-					read: () => '',
-					stop: () => false,
-					list: () => [],
-				},
-				spawnAgent: async () => ({ ok: true, report: '', writes: [] }),
-			};
-			const text = (value: string | { content: string }): string => (typeof value === 'string' ? value : value.content);
-			const hit = text(await tool.execute({ query: 'salt' }, context));
-			assert.ok(hit.includes('The flats drink sound.'), hit);
-			assert.ok(hit.includes('### The flats — Salt (matched key)'), hit);
-			assert.ok(hit.includes('keys: salt'), hit);
-			// The card's own book is searchable too, beside the library book the chat selected.
-			const card = text(await tool.execute({ query: 'atlas' }, context));
-			assert.ok(card.includes('### Her atlas — Kestrel (card)'), card);
-			assert.ok(card.includes('Her atlas is water-stained.'), card);
-			assert.ok(!text(await tool.execute({ query: 'east' }, context)).includes('They came from the east.'), 'a disabled entry is not returned');
-			assert.ok(text(await tool.execute({ query: 'zzz' }, context)).startsWith('No entry in'), 'a miss says so');
-			assert.ok(text(await tool.execute({ query: 'x', book: 'Nope' }, context)).startsWith('Error: no world book named'), 'an unknown book is an error');
-			assert.strictEqual(await tool.execute({}, context), 'Error: lore_lookup needs a query.');
-			// It is a read-only capability: offered in the read modes, never in a tool-less chat.
-			assert.ok(kernel.ctx.tools.visible(policy({ workMode: 'ro' })).some((spec) => spec.name === 'lore_lookup'));
-			assert.ok(!kernel.ctx.tools.visible(policy({ workMode: 'chat' })).some((spec) => spec.name === 'lore_lookup'));
-			assert.ok(kernel.ctx.tools.visible(policy({ workingDirectory: '' })).some((spec) => spec.name === 'lore_lookup'), 'no workspace needed');
-
-			// A lookup writes nothing: what the chat's last scan activated must survive it untouched.
-			const stored = kernel.ctx.sessions.require('lore');
-			stored.tavernActivated = [{ book: 'Salt', comment: 'The glade', reason: 'key' }];
-			kernel.ctx.sessions.save(stored);
-			const before = kernel.ctx.tavern.booksFor('lore').map((book) => book.name).sort();
-			await tool.execute({ query: 'glade' }, context);
-			assert.deepStrictEqual(kernel.ctx.tavern.booksFor('lore').map((book) => book.name).sort(), before);
-			assert.deepStrictEqual(kernel.ctx.sessions.require('lore').tavernActivated, [{ book: 'Salt', comment: 'The glade', reason: 'key' }]);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('the catalog answers by name, and binding a character opens the chat with its greeting', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			mkdirSync(join(library, 'lorebooks'), { recursive: true });
-			mkdirSync(join(library, 'personas'), { recursive: true });
-			writeFileSync(
-				join(library, 'characters', 'kestrel.json'),
-				JSON.stringify({ name: 'Kestrel', first_mes: 'Kestrel looks up.', alternate_greetings: ['Kestrel is asleep.'] }),
-			);
-			writeFileSync(join(library, 'lorebooks', 'Salt.json'), JSON.stringify({ name: 'Salt', entries: {} }));
-			writeFileSync(join(library, 'personas', 'Narrator.json'), JSON.stringify({ name: 'Narrator', title: 'The Narrator', description: 'Second person.' }));
-			await kernel.ctx.tavern.reload();
-
-			// A slash command is typed by hand, so every lookup is case-insensitive and accepts an id.
-			assert.strictEqual(kernel.ctx.tavern.findCharacter('kestrel')?.name, 'Kestrel');
-			assert.strictEqual(kernel.ctx.tavern.findCharacter('KESTREL')?.id, 'kestrel');
-			assert.strictEqual(kernel.ctx.tavern.findCharacter('nobody'), undefined);
-			assert.strictEqual(kernel.ctx.tavern.findPersona('the narrator')?.id, 'Narrator');
-			assert.deepStrictEqual(kernel.ctx.tavern.resolveBooks(['salt', ' Missing ']), { found: ['Salt'], missing: ['Missing'] });
-
-			// The greeting list is the card's own line first, then the alternates — and the index is recorded.
-			const character = kernel.ctx.tavern.findCharacter('kestrel')!;
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'bound');
-			const greetings = greetingsOf(character);
-			assert.deepStrictEqual(greetings, ['Kestrel looks up.', 'Kestrel is asleep.']);
-			session.character = character.id;
-			kernel.ctx.sessions.save(session);
-			assert.strictEqual(kernel.ctx.sessions.greet(session.id, greetings[1]!, 1), true);
-			assert.strictEqual(kernel.ctx.sessions.require('bound').character, 'kestrel');
-			assert.strictEqual(kernel.ctx.sessions.require('bound').transcript[0].content, 'Kestrel is asleep.');
-			assert.strictEqual(kernel.ctx.sessions.greeted('bound'), 1);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a prompt collection saves as a preset in the native store and reads back', async () => {
-		const kernel = await createTestKernel({ config: { tavernPreset: 'Test' } });
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'presets'), { recursive: true });
-			writeFileSync(join(library, 'presets', 'Test.json'), JSON.stringify({ temperature: 0.5, prompts: [], prompt_order: [] }));
-			await kernel.ctx.tavern.reload();
-
-			const collection = kernel.ctx.tavern.promptsFor();
-			assert.deepStrictEqual(
-				collection.slice(0, 3).map((prompt) => prompt.identifier),
-				[IDENTITY_PROMPT, TOOLS_PROMPT, COMONAD_BLOCK.instructions],
-				'the generated blocks lead the shipped collection',
-			);
-
-			// Rearrange and switch blocks off, the way the Prompts table does — Comonad's generated rows
-			// included, whose switch lives in the same order.
-			const moved = collection.map((prompt) =>
-				prompt.identifier === 'nsfw' || prompt.identifier === COMONAD_BLOCK.memory ? { ...prompt, enabled: false } : prompt,
-			);
-			const main = moved.splice(moved.findIndex((prompt) => prompt.identifier === 'main'), 1)[0]!;
-			moved.splice(1, 0, main);
-			const edited = moved.map((prompt) =>
-				prompt.identifier === 'dialogueExamples' ? { ...prompt, injection_position: 1, injection_depth: 2 } : prompt,
-			);
-			const base = kernel.ctx.tavern.preset('Test');
-			await kernel.ctx.tavern.savePresetValue(adoptPreset({ ...base, id: 'Edited', name: 'Edited', prompts: edited, raw: base?.raw ?? {} }));
-
-			const saved = kernel.ctx.tavern.preset('Edited');
-			assert.ok(saved, 'the preset is in the catalog after the save');
-			assert.strictEqual(saved?.temperature, 0.5, 'the samplers of the base preset survive');
-			const written = JSON.parse(readFileSync(join(library, 'presets', 'Edited.json'), 'utf8')) as {
-				prompts: { identifier: string }[];
-				prompt_order: { character_id: unknown; order: { identifier: string; enabled: boolean }[] }[];
-			};
-			assert.ok(!written.prompts.some((prompt) => prompt.identifier.startsWith('comonad')), 'generated definitions are never written');
-			const order = written.prompt_order.find((block) => block.character_id === 100_000)?.order ?? [];
-			assert.deepStrictEqual(order.slice(0, 2).map((entry) => entry.identifier), [IDENTITY_PROMPT, 'main'], 'the edited order is stored');
-			assert.ok(order.some((entry) => entry.identifier === COMONAD_BLOCK.memory && entry.enabled === false), 'a generated block’s switch lives in the order');
-			// A chat that selects the new preset reads the edited collection back.
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor());
-			session.preset = 'Edited';
-			kernel.ctx.sessions.save(session);
-			const reread = kernel.ctx.tavern.promptsFor(session.id);
-			assert.strictEqual(reread[0]?.identifier, IDENTITY_PROMPT, 'the identity block still leads');
-			assert.strictEqual(reread[1]?.identifier, 'main', 'the move is what the file stores');
-			assert.strictEqual(reread.find((prompt) => prompt.identifier === 'nsfw')?.enabled, false);
-			assert.strictEqual(reread.find((prompt) => prompt.identifier === COMONAD_BLOCK.memory)?.enabled, false, 'and a generated block’s switch survives the reload');
-			assert.strictEqual(reread.find((prompt) => prompt.identifier === 'dialogueExamples')?.injection_depth, 2);
-			// The file is Comonad's own: a name with spaces becomes a safe file name.
-			assert.ok(existsSync(join(library, 'presets', 'Edited.json')));
-			await kernel.ctx.tavern.savePresetValue(adoptPreset({ ...base, id: 'My-Preset', name: 'My Preset!', prompts: edited, raw: base?.raw ?? {} }));
-			assert.ok(kernel.ctx.tavern.preset('My-Preset'), 'a name with spaces becomes a safe file name');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('content is created, edited and deleted in Comonad’s own library', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			// The library folders are Comonad's own: nothing here is a SillyTavern directory.
-			assert.deepStrictEqual(kernel.ctx.tavern.roots(), [library, join(kernel.ctx.settings.home(), '.comonad')]);
-
-			// A new character: a V2 JSON card in `.comonad/characters`.
-			const character = blankCharacter('Kestrel', 'Kestrel');
-			character.description = 'A cartographer.';
-			character.greeting = 'Kestrel looks up.';
-			const cardFile = await kernel.ctx.tavern.saveCharacter(character);
-			assert.strictEqual(cardFile, join(library, 'characters', 'Kestrel.json'));
-			const cardJson = JSON.parse(readFileSync(cardFile, 'utf8')) as { spec: string; data: { first_mes: string } };
-			assert.strictEqual(cardJson.spec, 'chara_card_v2', 'a card is written in the V2 shape SillyTavern reads');
-			assert.strictEqual(cardJson.data.first_mes, 'Kestrel looks up.');
-			assert.strictEqual(kernel.ctx.tavern.character('Kestrel')?.description, 'A cartographer.', 'and comes back in the catalog');
-
-			// Editing writes the same file back, with the fields the editor changed.
-			const edited = kernel.ctx.tavern.character('Kestrel')!;
-			edited.description = 'A cartographer of dead cities.';
-			await kernel.ctx.tavern.saveCharacter(edited);
-			assert.strictEqual(kernel.ctx.tavern.character('Kestrel')?.description, 'A cartographer of dead cities.');
-
-			// Books, personas and presets work the same way, in their own folders.
-			const book = blankBook('Salt');
-			book.entries['0'] = worldEntry({ uid: 0, key: ['salt'], content: 'The flats drink sound.', position: 1, depth: 2 });
-			const bookFile = await kernel.ctx.tavern.saveBook('Salt', book);
-			assert.strictEqual(bookFile, join(library, 'lorebooks', 'Salt.json'));
-			assert.ok(kernel.ctx.tavern.book('Salt'));
-			const personaFile = await kernel.ctx.tavern.savePersona(blankPersona('Narrator', 'Narrator'));
-			assert.strictEqual(personaFile, join(library, 'personas', 'Narrator.json'));
-			assert.ok(kernel.ctx.tavern.persona('Narrator'));
-			const promptFile = await kernel.ctx.tavern.savePresetValue(blankPreset('Test', 'Test'));
-			assert.strictEqual(promptFile, join(library, 'presets', 'Test.json'));
-			assert.ok(kernel.ctx.tavern.preset('Test'));
-
-			// Deleting removes the file, and only ever inside our own library.
-			assert.strictEqual(await kernel.ctx.tavern.deleteCharacter('Kestrel'), true);
-			assert.strictEqual(existsSync(cardFile), false);
-			assert.strictEqual(kernel.ctx.tavern.character('Kestrel'), undefined);
-			assert.strictEqual(await kernel.ctx.tavern.deleteBook('Salt'), true);
-			assert.strictEqual(await kernel.ctx.tavern.deletePersona('Narrator'), true);
-			assert.strictEqual(await kernel.ctx.tavern.deletePreset('Test'), true);
-			assert.deepStrictEqual(kernel.ctx.tavern.characters, []);
-			assert.deepStrictEqual(kernel.ctx.tavern.books, []);
-			assert.deepStrictEqual(kernel.ctx.tavern.personas, []);
-			assert.deepStrictEqual(kernel.ctx.tavern.presets, []);
-
-			// A card the user keeps outside `.comonad` is read but never written or deleted.
-			const outside = join(kernel.root, 'elsewhere');
-			mkdirSync(outside, { recursive: true });
-			const stray = join(outside, 'Stray.json');
-			writeFileSync(stray, JSON.stringify({ name: 'Stray', description: 'Read only.' }));
-			await kernel.ctx.tavern.reload();
-			assert.strictEqual(kernel.ctx.tavern.characters.length, 0, 'the library reads its own folders only');
-			const loaded = await loadCard(stray);
-			assert.strictEqual(await kernel.ctx.tavern.saveCharacter(loaded), join(library, 'characters', 'Stray.json'));
-			assert.strictEqual(existsSync(stray), true, 'the original file is left where it was');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('the content pane opens a kind on its first item, and heals after a delete', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const salt = blankBook('Salt');
-			salt.entries['0'] = worldEntry({ uid: 0, key: ['salt'], content: 'The flats drink sound.' });
-			await kernel.ctx.tavern.saveBook('Salt', salt);
-			await kernel.ctx.tavern.saveBook('Sand', blankBook('Sand'));
-			const controller = contentController(kernel.ctx, {});
-
-			// Switching a kind sends no item: the pane asked for the kind, and must open on its first
-			// entry rather than on an empty page beside a full list.
-			await controller.action({ kind: 'lorebooks', action: 'select', id: '' });
-			const state = controller.state() as { item?: { name?: string }; book?: { name?: string } };
-			assert.strictEqual(state.item?.name, 'Salt', 'the kind opens on its first book');
-			assert.strictEqual(state.book?.name, 'Salt', 'and the world-book slice is that book');
-
-			// A selection that another window (or a delete) took away heals to what is left.
-			await kernel.ctx.tavern.deleteBook('Salt');
-			const after = controller.state() as { item?: { name?: string } };
-			assert.strictEqual(after.item?.name, 'Sand');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a new preset draft already shows Comonad’s generated rows in the editor', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const controller = contentController(kernel.ctx, {});
-			await controller.action({ kind: 'presets', action: 'new' });
-			const state = controller.state() as {
-				item?: { prompts?: { identifier: string }[] };
-				preset?: { comonad?: string[]; toolsPrompt?: string };
-			};
-			const generated = COMONAD_PROMPTS.map((prompt) => prompt.identifier);
-			assert.deepStrictEqual(state.item?.prompts?.slice(0, generated.length).map((prompt) => prompt.identifier), generated, 'the draft carries the generated rows');
-			assert.deepStrictEqual(state.preset?.comonad, generated, 'and the pane knows which rows are read-only');
-			assert.strictEqual(state.preset?.toolsPrompt, TOOLS_PROMPT);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a world book round-trips through SillyTavern’s own file shape', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const file = join(kernel.root, 'ws', '.comonad', 'lorebooks', 'Full.json');
-			const book = blankBook('Full');
-			book.entries['0'] = worldEntry({
-					uid: 0,
-					key: ['salt'],
-					keysecondary: ['flat'],
-					comment: 'The flats',
-					content: 'The flats drink sound.',
-					constant: true,
-					selectiveLogic: 3,
-					order: 42,
-					position: 4,
-					depth: 2,
-					role: 1,
-					probability: 80,
-					group: 'geography',
-					groupWeight: 120,
-					sticky: 3,
-					cooldown: 2,
-					delay: 1,
-					scanDepth: 6,
-					caseSensitive: true,
-					triggers: ['normal'],
-			});
-			await kernel.ctx.tavern.saveBook('Full', book);
-
-			// The file uses SillyTavern's names, mirrored the way it mirrors them.
-			const json = JSON.parse(readFileSync(file, 'utf8')) as { entries: Record<string, Record<string, unknown>> };
-			const entry = json.entries['0']!;
-			assert.strictEqual(entry.position, 4);
-			assert.strictEqual(entry.sticky, 3);
-			assert.deepStrictEqual(entry.key, ['salt']);
-			assert.deepStrictEqual(entry.keysecondary, ['flat']);
-			assert.strictEqual(entry.order, 42);
-			assert.deepStrictEqual(entry.triggers, ['normal']);
-			const extensions = entry.extensions as Record<string, unknown>;
-			assert.strictEqual(extensions.position, 4, 'and mirrored under extensions, as SillyTavern writes it');
-			assert.strictEqual(extensions.sticky, 3);
-			assert.strictEqual(extensions.role, 1);
-			assert.strictEqual(extensions.scan_depth, 6);
-			assert.strictEqual(extensions.selectiveLogic, 3);
-			assert.strictEqual(extensions.ignore_budget, false);
-
-			// Reading it back gives every field the writer was given.
-			const reread = await readBookFile(file);
-			assert.ok(reread);
-			const back = worldEntry(reread.entries['0']!);
-			for (const field of ['constant', 'selectiveLogic', 'order', 'position', 'depth', 'role', 'probability', 'group', 'groupWeight', 'sticky', 'cooldown', 'delay', 'scanDepth', 'caseSensitive'] as const) {
-				assert.deepStrictEqual(back[field], book.entries['0']![field], `${field} survives the round trip`);
-			}
-			assert.deepStrictEqual(back.keysecondary, ['flat']);
-			assert.deepStrictEqual(back.triggers, ['normal']);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a card’s bound book and depth prompt reach the request', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			mkdirSync(join(library, 'lorebooks'), { recursive: true });
-			writeFileSync(
-				join(library, 'lorebooks', 'Salt.json'),
-				JSON.stringify({ name: 'Salt', entries: { '0': { uid: 0, key: ['salt'], content: 'The flats drink sound.' } } }),
-			);
-			writeFileSync(
-				join(library, 'characters', 'kestrel.json'),
-				JSON.stringify({
-					spec: 'chara_card_v2',
-					spec_version: '2.0',
-					data: {
-						name: 'Kestrel',
-						description: 'A cartographer.',
-						first_mes: 'Kestrel looks up.',
-						extensions: { world: 'Salt', depth_prompt: { prompt: 'Remember the map.', depth: 1, role: 'user' } },
-					},
-				}),
-			);
-			await kernel.ctx.tavern.reload();
-			assert.strictEqual(kernel.ctx.tavern.character('kestrel')?.world, 'Salt', 'the card binds a world book');
-			// The bound book is scanned for a chat that speaks as the card, without being listed.
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'salt-chat');
-			session.character = 'kestrel';
-			kernel.ctx.sessions.save(session);
-			assert.deepStrictEqual(kernel.ctx.tavern.booksFor(session.id).map((book) => book.name), ['Salt']);
-
-			const composed = await kernel.ctx.tavern.compose({
-				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
-				history: [
-					{ role: 'user', content: 'About the salt?' },
-					{ role: 'assistant', content: 'hm.' },
-				],
-				binding: { character: 'kestrel' },
-				scan: [{ role: 'user', text: 'What do you know about the salt?' }],
-				turn: 3,
-			});
-			const texts = composed.messages.map((message) => message.content);
-			assert.ok(texts.some((text) => text.includes('The flats drink sound.')), 'the bound book activated');
-			// A depth prompt is a character-specific author's note: spliced in at its own depth and role.
-			const at = texts.findIndex((text) => text.includes('Remember the map.'));
-			assert.ok(at >= 0, 'the depth prompt is in the request');
-			assert.strictEqual(texts[at + 1], 'hm.', 'spliced in one message from the end of the history');
-			assert.strictEqual(composed.messages[at]?.role, 'user', 'with the role the card asked for');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a persona bound to a character is used without being picked', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'personas'), { recursive: true });
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			writeFileSync(
-				join(library, 'personas', 'Cartographer.json'),
-				JSON.stringify({ name: 'Ada', title: 'The apprentice', description: 'You are Ada, holding the lamp.', connections: ['Kestrel'] }),
-			);
-			writeFileSync(join(library, 'characters', 'kestrel.json'), JSON.stringify({ name: 'Kestrel', description: 'A cartographer.' }));
-			await kernel.ctx.tavern.reload();
-
-			const character = kernel.ctx.tavern.character('kestrel')!;
-			const persona = kernel.ctx.tavern.personaFor(undefined, character);
-			assert.strictEqual(persona?.id, 'Cartographer', 'the connection binds it to the card');
-			assert.strictEqual(kernel.ctx.tavern.personaFor(undefined, undefined), undefined, 'and it is not used elsewhere');
-			assert.strictEqual(kernel.ctx.tavern.personaFor('Ada', character)?.id, 'Cartographer', 'a pick by name still wins');
-			// A stale pick falls back to the link: losing a persona because a file was renamed is worse.
-			assert.strictEqual(kernel.ctx.tavern.personaFor('nobody', character)?.id, 'Cartographer');
-
-			const composed = await kernel.ctx.tavern.compose({
-				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
-				history: [{ role: 'user', content: '{{user}} here.' }],
-				binding: { character: 'kestrel' },
-				scan: [{ role: 'user', text: 'hi' }],
-				turn: 1,
-			});
-			assert.ok(
-				composed.messages.some((message) => message.content.includes('You are Ada, holding the lamp.')),
-				'the persona description is a block in the request',
-			);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a persona at NONE names the user and sends no description', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'personas'), { recursive: true });
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			writeFileSync(
-				join(library, 'personas', 'Ada.json'),
-				JSON.stringify({ name: 'Ada', description: 'You are Ada, holding the lamp.', position: 9 }),
-			);
-			writeFileSync(join(library, 'characters', 'kestrel.json'), JSON.stringify({ name: 'Kestrel', description: 'A cartographer.' }));
-			await kernel.ctx.tavern.reload();
-			assert.strictEqual(kernel.ctx.tavern.persona('Ada')?.position, 9, 'upstream’s NONE position survives the read');
-
-			const composed = await kernel.ctx.tavern.compose({
-				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
-				history: [{ role: 'user', content: 'Here.' }],
-				binding: { character: 'kestrel', persona: 'Ada' },
-				scan: [{ role: 'user', text: 'hi' }],
-				turn: 1,
-			});
-			const texts = composed.messages.map((message) => message.content).join('\n');
-			assert.ok(!texts.includes('holding the lamp'), 'the description is left out of the request');
-			assert.ok(texts.includes('Ada'), 'but the name still resolves wherever the persona supplies {{user}}');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a persona is written in SillyTavern’s own shape, picture and all', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			const picture = join(kernel.root, 'ada.png');
-			writeFileSync(picture, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-			const persona = blankPersona('Ada', 'Ada');
-			persona.description = 'You are Ada.';
-			persona.connections = [{ type: 'character', id: 'Kestrel' }];
-			const file = await kernel.ctx.tavern.savePersona(persona);
-			assert.strictEqual(file, join(library, 'personas', 'Ada.json'));
-			const written = JSON.parse(readFileSync(file, 'utf8')) as { connections: unknown; depth: number };
-			assert.deepStrictEqual(written.connections, [{ type: 'character', id: 'Kestrel' }], 'the file holds upstream’s connection objects');
-			assert.strictEqual(written.depth, 2);
-
-			const avatar = await kernel.ctx.tavern.setPersonaAvatar('Ada', picture);
-			assert.strictEqual(avatar, join(library, 'personas', 'Ada.png'), 'the picture is a file beside the persona');
-			assert.strictEqual(kernel.ctx.tavern.persona('Ada')?.avatar, avatar, 'and the catalog finds it by the persona’s id');
-			assert.strictEqual(await kernel.ctx.tavern.clearPersonaAvatar('Ada'), true);
-			assert.strictEqual(kernel.ctx.tavern.persona('Ada')?.avatar, undefined);
-			// Deleting a persona takes its picture: no file is left naming a persona that is gone.
-			await kernel.ctx.tavern.setPersonaAvatar('Ada', picture);
-			assert.strictEqual(await kernel.ctx.tavern.deletePersona('Ada'), true);
-			assert.strictEqual(existsSync(join(library, 'personas', 'Ada.png')), false);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('every persona backs up into upstream’s document, and restores from one', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			const ada = blankPersona('Ada', 'Ada');
-			ada.description = 'You are Ada.';
-			ada.connections = [{ type: 'group', id: 'The Crew' }];
-			await kernel.ctx.tavern.savePersona(ada);
-			await kernel.ctx.settings.update('tavernPersona', 'Ada');
-
-			const backup = kernel.ctx.tavern.exportPersonas();
-			assert.deepStrictEqual(Object.keys(backup.personas), ['Ada'], 'the names are keyed by persona id');
-			assert.strictEqual(backup.personas['Ada'], 'Ada');
-			assert.strictEqual(backup.persona_descriptions['Ada']?.description, 'You are Ada.');
-			assert.deepStrictEqual(backup.persona_descriptions['Ada']?.connections, [{ type: 'group', id: 'The Crew' }]);
-			assert.strictEqual(backup.default_persona, 'Ada');
-
-			// Restoring is a merge: what is already here is left exactly as it is.
-			const again = await kernel.ctx.tavern.importPersonas(backup);
-			assert.deepStrictEqual(again.personas, []);
-			assert.ok(again.skipped.some((line) => line.includes('already exists')), 'and it says what it skipped');
-
-			const restore = await kernel.ctx.tavern.importPersonas({
-				personas: { 'The Narrator': 'Narrator', 'Odd (Persona)': 'Odd' },
-				persona_descriptions: {
-					'The Narrator': { description: 'You narrate.', position: 4, depth: 3, role: 2, connections: [{ type: 'character', id: 'Kestrel' }] },
-					'Odd (Persona)': { description: 'You are odd.' },
-					Orphan: { description: 'there is no persona for this one' },
-				},
-				default_persona: 'The Narrator',
-			});
-			assert.deepStrictEqual(
-				restore.personas.map((persona) => persona.id),
-				['The-Narrator', 'Odd-Persona'],
-				'an id that is not file-safe is renamed along with its file',
-			);
-			assert.strictEqual(restore.defaultPersona, 'The-Narrator', 'and the document’s default follows the rename');
-			assert.ok(restore.skipped.some((line) => line.includes('Orphan')), 'a description without a persona is skipped, as upstream does');
-			assert.ok(existsSync(join(library, 'personas', 'The-Narrator.json')));
-			assert.strictEqual(kernel.ctx.tavern.persona('The-Narrator')?.position, 4);
-			assert.strictEqual(kernel.ctx.tavern.persona('The-Narrator')?.connections[0]?.id, 'Kestrel');
-			assert.strictEqual(tavernSettings(kernel.ctx).tavernPersona, 'The-Narrator', 'the document’s own default is adopted with it');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a character converts into a persona, macros and all', () => {
-		const character = blankCharacter('Kestrel', 'Kestrel');
-		character.description = '{{char}} is a cartographer. {{user}} holds the lamp.';
-		const kept = convertCharacterToPersona(character, 'Kestrel-Persona', '', false);
-		assert.strictEqual(kept.name, 'Kestrel');
-		assert.strictEqual(kept.description, character.description, 'the description comes across untouched when the macros are kept');
-		const swapped = convertCharacterToPersona(character, 'Kestrel-Persona', '', true);
-		assert.strictEqual(swapped.description, '{{user}} is a cartographer. {{char}} holds the lamp.', 'a swap trades the two macros');
-		assert.strictEqual(swapped.depth, 2);
-		assert.deepStrictEqual(swapped.connections, [], 'upstream binds nothing on conversion either');
-	});
-
-	test('edited items are sanitised before they are written', async () => {
-		// What a webview sends is untrusted: a bad value here becomes a corrupt file on disk.
-		const character = adoptCharacter({
-			name: 'Kestrel',
-			description: 42,
-			tags: ['one', '', 'two'],
-			alternateGreetings: ['A', '   '],
-			depthPrompt: { prompt: '   ', depth: 'deep', role: 'narrator' },
-			book: { name: 'inner', entries: [] },
-			raw: { spec: 'chara_card_v2', keep_me: true },
-		});
-		assert.strictEqual(character.id, 'Kestrel', 'the id falls back to the slugged name');
-		assert.strictEqual(character.description, '', 'a non-string is not written as a string');
-		assert.deepStrictEqual(character.tags, ['one', 'two']);
-		assert.deepStrictEqual(character.alternateGreetings, ['A']);
-		assert.strictEqual(character.depthPrompt, null, 'an empty depth prompt is no depth prompt');
-		assert.deepStrictEqual(character.book, { name: 'inner', entries: [] }, 'the card’s own book is carried through');
-		assert.deepStrictEqual(character.raw, { spec: 'chara_card_v2', keep_me: true }, 'and the document is never dropped');
-
-		const depth = adoptCharacter({ name: 'K', depthPrompt: { prompt: 'Remember.', depth: 2, role: 'user' } });
-		assert.deepStrictEqual(depth.depthPrompt, { prompt: 'Remember.', depth: 2, role: 'user' });
-
-		const book = adoptBook({
-			name: 'Salt',
-			source: '/tmp/Salt.json',
-			entries: {
-				'0': {
-					uid: 0,
-					key: 'salt, flat',
-					content: 'The flats drink sound.',
-					position: 'after',
-					depth: '2',
-					sticky: null,
-					cooldown: 5,
-					caseSensitive: true,
-					selective: false,
-					useProbability: false,
-					unknown_field: 'kept',
-				},
-			},
-		});
-		const entry = book.entries['0']!;
-		assert.deepStrictEqual(entry.key, ['salt', 'flat'], 'a list sent as text is split');
-		assert.strictEqual(entry.position, WI_POSITION.before, 'a wrong type keeps the default');
-		assert.strictEqual(entry.depth, 4);
-		assert.strictEqual(entry.sticky, null, 'an empty turn count stays empty rather than becoming 0');
-		assert.strictEqual(entry.cooldown, 5);
-		assert.strictEqual(entry.caseSensitive, true);
-		assert.strictEqual(entry.selective, false);
-		assert.strictEqual(entry.useProbability, false);
-		assert.strictEqual((entry as unknown as Record<string, unknown>).unknown_field, 'kept', 'unknown keys survive an edit');
-		assert.strictEqual(book.source, '/tmp/Salt.json');
-
-		const persona = adoptPersona({
-			name: 'Ada',
-			connections: ['Kestrel', '', { type: 'character', id: 'Kestrel' }, { type: 'group', id: 'The Crew' }, { id: 'Astra' }, { nope: true }],
-			position: 4,
-			depth: 2,
-			role: 1,
-		});
-		assert.deepStrictEqual(
-			persona.connections,
-			[
-				{ type: 'character', id: 'Kestrel' },
-				{ type: 'group', id: 'The Crew' },
-				{ type: 'character', id: 'Astra' },
-			],
-			'a bare name reads as a character connection, upstream’s objects keep their type, and a repeat is dropped',
-		);
-		assert.strictEqual(persona.title, '', 'a missing title stays empty');
-		assert.strictEqual(persona.position, 4);
-		assert.strictEqual(adoptPersona({ name: 'Bare' }).depth, 2, 'a fresh persona is at SillyTavern’s own default depth');
-		assert.strictEqual(blankPersona('Ada', 'Ada').depth, 2);
-		assert.strictEqual(blankPersona('Ada', 'Ada').title, '', 'the picker shows the name until a title is given');
-
-		const preset = adoptPreset({
-			name: 'Edited',
-			prompts: [{ identifier: 'main', content: 'hi' }, { nope: true }],
-			promptLibrary: [{ identifier: 'saved', name: 'Saved', role: 'system', content: 'Keep it short.' }, { content: 'no identifier' }],
-			temperature: 0.5,
-			top_p: 'high',
-			maxTokens: 800,
-		});
-		assert.strictEqual(preset.id, 'Edited');
-		assert.deepStrictEqual(preset.prompts?.map((prompt) => prompt.identifier), ['main'], 'a prompt without an identifier is dropped');
-		assert.deepStrictEqual(preset.promptLibrary?.map((entry) => entry.identifier), ['saved'], 'a library entry is sanitised like a prompt');
-		assert.deepStrictEqual(preset.promptOrder, [{ identifier: 'main', enabled: true }]);
-		assert.strictEqual(preset.temperature, 0.5);
-		assert.strictEqual(preset.top_p, undefined, 'a sampler with the wrong type is not written');
-		assert.strictEqual(preset.maxTokens, 800);
-	});
-
-	test('a card keeps upstream’s own fields, and the card verbs move what they say they move', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			// A V1 card: `fav` and `talkativeness` live at the root there, and `create_date` always does.
-			writeFileSync(
-				join(library, 'characters', 'kestrel.json'),
-				JSON.stringify({
-					name: 'Kestrel',
-					description: 'A cartographer.',
-					fav: true,
-					talkativeness: 0.9,
-					create_date: '2024-01-02T03:04:05.000Z',
-					data: { extensions: { source_url: 'https://example.invalid/kestrel' } },
-				}),
-			);
-			// A card that carries a book of its own, which is what upstream's *Import Card Lore* reads.
-			writeFileSync(
-				join(library, 'characters', 'city.json'),
-				JSON.stringify({
-					name: 'City',
-					data: {
-						name: 'City',
-						character_book: { name: 'City Lore', entries: [{ id: 0, keys: ['salt'], content: 'The flats drink sound.' }] },
-					},
-				}),
-			);
-			writeFileSync(join(library, 'characters', 'plain.json'), JSON.stringify({ name: 'Plain', data: { name: 'Plain' } }));
-			await kernel.ctx.tavern.reload();
-
-			const card = kernel.ctx.tavern.character('kestrel')!;
-			assert.strictEqual(card.favourite, true, '`fav` at the root of a V1 card is the favourite');
-			assert.strictEqual(card.talkativeness, 0.9);
-			assert.strictEqual(card.createdAt, '2024-01-02T03:04:05.000Z');
-			assert.strictEqual(card.sourceLink, 'https://example.invalid/kestrel');
-			assert.strictEqual(kernel.ctx.tavern.character('plain')?.talkativeness, 0.5, 'a card without one speaks at upstream’s default');
-
-			// The new fields are written where upstream writes them: `extensions` in V2, the root in V1.
-			const written = JSON.parse(await (async () => {
-				await kernel.ctx.tavern.saveCharacter({ ...kernel.ctx.tavern.character('plain')!, favourite: true, talkativeness: 0.2 });
-				return readFileSync(join(library, 'characters', 'plain.json'), 'utf8');
-			})()) as { fav?: boolean; talkativeness?: number; data: { extensions: { fav?: boolean; talkativeness?: number } } };
-			assert.strictEqual(written.fav, true, 'a V1 reader sees the root flag');
-			assert.strictEqual(written.talkativeness, 0.2);
-			assert.strictEqual(written.data.extensions.fav, true, 'and a V2 reader sees the extension');
-			assert.strictEqual(written.data.extensions.talkativeness, 0.2);
-
-			// A picture becomes the card: the JSON goes, the PNG carries the same document.
-			const picture = join(kernel.root, 'kestrel.png');
-			writeFileSync(picture, blankPng(8, 8));
-			const file = await kernel.ctx.tavern.setCharacterAvatar('kestrel', picture);
-			assert.strictEqual(file, join(library, 'characters', 'kestrel.png'));
-			assert.strictEqual(existsSync(join(library, 'characters', 'kestrel.json')), false, 'the JSON card is gone');
-			const reread = kernel.ctx.tavern.character('kestrel')!;
-			assert.strictEqual(reread.name, 'Kestrel', 'the document came along into the PNG');
-			assert.strictEqual(reread.favourite, true);
-			assert.strictEqual(reread.description, 'A cartographer.');
-
-			// Import Card Lore: the embedded book becomes a library book, and the card links to it.
-			const imported = await kernel.ctx.tavern.importCardLore('city');
-			assert.deepStrictEqual(imported, { name: 'City Lore', entries: 1 });
-			assert.ok(existsSync(join(library, 'lorebooks', 'City-Lore.json')), 'the book is a file of its own, named after it');
-			assert.strictEqual(kernel.ctx.tavern.character('city')?.world, 'City Lore', 'and the card is linked to it');
-			assert.strictEqual(kernel.ctx.tavern.book('City Lore')?.book.entries['0']?.content, 'The flats drink sound.');
-			// The same book is not scanned twice: the embedded copy is the world that is now linked.
-			const books = kernel.ctx.tavern.booksFor('no-chat').map((book) => book.name);
-			assert.deepStrictEqual(books, [], 'a chat with nothing selected scans nothing');
-
-			// Rename: the file, the tag key and a persona's connection all move with the character.
-			const store = kernel.ctx.tavern.tags;
-			addTags(store, 'plain', [ensureTag(store, 'Scenery')!]);
-			await kernel.ctx.tavern.saveTags();
-			const persona = blankPersona('Ada', 'Ada');
-			persona.connections = [{ type: 'character', id: 'plain' }];
-			await kernel.ctx.tavern.savePersona(persona);
-			assert.strictEqual(await kernel.ctx.tavern.renameCharacter('plain', 'Plain Sight'), 'Plain-Sight');
-			assert.ok(existsSync(join(library, 'characters', 'Plain-Sight.json')));
-			assert.strictEqual(existsSync(join(library, 'characters', 'plain.json')), false, 'the old file is renamed, not copied');
-			assert.strictEqual(kernel.ctx.tavern.character('Plain Sight')?.name, 'Plain Sight');
-			assert.deepStrictEqual(kernel.ctx.tavern.tagIdsFor('Plain-Sight').length, 1, 'the tags followed the file');
-			assert.deepStrictEqual(kernel.ctx.tavern.persona('Ada')?.connections, [{ type: 'character', id: 'Plain-Sight' }]);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('Comonad’s own preset templates are presets, and each one is written like any other', async () => {
-		const kernel = await createTestKernel();
-		try {
-			assert.ok(PRESET_TEMPLATES.length >= 5, 'there are templates to start from');
-			// The built-in Default is not a file until the user asks for a copy.
-			assert.strictEqual(kernel.ctx.tavern.preset('default'), undefined, 'loading the plugin writes no default preset');
-			const generated = COMONAD_PROMPTS.map((prompt) => prompt.identifier);
-			for (const template of PRESET_TEMPLATES) {
-				assert.ok(template.preset.prompts?.length, `${template.name} ships the prompt list`);
-				assert.ok(template.preset.promptOrder?.length, `${template.name} ships its order`);
-				assert.deepStrictEqual(template.preset.promptOrder?.slice(0, generated.length).map((entry) => entry.identifier), generated, `${template.name} orders Comonad’s blocks`);
-				if (template.id !== 'default') {
-					assert.ok(template.preset.new_chat_prompt, `${template.name} marks a new chat`);
-				}
-				const file = await kernel.ctx.tavern.savePresetValue({ ...template.preset, source: '' });
-				const back = kernel.ctx.tavern.preset(template.id);
-				assert.ok(back, `${template.name} lands in the library as ${template.id}`);
-				assert.strictEqual(existsSync(file), true);
-				assert.deepStrictEqual(presetSamplers(back), presetSamplers(template.preset), 'and reads back with its samplers');
-				assert.strictEqual(back.new_chat_prompt, template.preset.new_chat_prompt, 'and with its nudges');
-			}
-			// Default is exactly the implicit collection: the shipped definitions, Comonad's order, and
-			// nothing of a roleplay sampler or nudge set that an unselected chat does not use.
-			const fallback = PRESET_TEMPLATES.find((template) => template.id === 'default');
-			assert.ok(fallback, 'Default is one of the templates');
-			assert.deepStrictEqual(fallback!.preset.prompts?.map((prompt) => prompt.identifier), ST_PROMPTS.map((prompt) => prompt.identifier), 'its file holds SillyTavern’s definitions only');
-			assert.deepStrictEqual(presetSamplers(fallback!.preset), {}, 'and no sampler overrides');
-			assert.strictEqual(fallback!.preset.new_chat_prompt, undefined, 'and no nudge an unselected chat would not send');
-			assert.strictEqual(
-				turnPrompts(fallback!.preset, undefined).find((prompt) => prompt.identifier === 'main')?.content,
-				'',
-				'the Default copy behaves like an unselected chat: no roleplay main without a character',
-			);
-			assert.ok(
-				(turnPrompts(PRESET_TEMPLATES.find((template) => template.id === 'balanced')!.preset, undefined).find(
-					(prompt) => prompt.identifier === 'main',
-				)?.content ?? '').length > 0,
-				'a roleplay template keeps its main prompt',
-			);
-			// A block's identifier is its own, so inserting one never collides with a shipped block.
-			const shipped = new Set(['main', 'nsfw', 'chatHistory', 'jailbreak', 'worldInfoBefore', 'worldInfoAfter', 'dialogueExamples']);
-			for (const block of PROMPT_BLOCKS) {
-				assert.ok(!shipped.has(block.id), `${block.name} uses an identifier of its own`);
-				assert.ok(block.content.trim().length > 40, `${block.name} says something`);
-			}
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a preset heads the history, fills an empty turn, and nudges a continue', async () => {
-		const kernel = await createTestKernel();
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'presets'), { recursive: true });
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			writeFileSync(join(library, 'characters', 'kestrel.json'), JSON.stringify({ name: 'Kestrel', description: 'A cartographer.' }));
-			writeFileSync(
-				join(library, 'presets', 'Nudges.json'),
-				JSON.stringify({
-					new_chat_prompt: '[A new chat begins.]',
-					send_if_empty: '[Say something.]',
-					continue_nudge_prompt: '[Carry on from {{lastChatMessage}}.]',
-					// The shipped main prompt is written with `{{charIfNotGroup}}`, which a solo chat reads
-					// as the character's name.
-					prompts: [{ identifier: 'main', name: 'Main Prompt', role: 'system', system_prompt: true, content: 'Write for {{charIfNotGroup}} and {{user}}.' }],
-					prompt_order: [
-						{
-							character_id: 100000,
-							order: [
-								{ identifier: 'main', enabled: true },
-								{ identifier: 'chatHistory', enabled: true },
-							],
-						},
-					],
-				}),
-			);
-			await kernel.ctx.tavern.reload();
-			assert.ok(presetSamplers(kernel.ctx.tavern.preset('Nudges')) !== undefined);
-
-			const composed = await kernel.ctx.tavern.compose({
-				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
-				history: [
-					{ role: 'user', content: 'hi' },
-					{ role: 'assistant', content: 'hm.' },
-				],
-				binding: { character: 'kestrel', preset: 'Nudges' },
-				scan: [],
-				turn: 2,
-				trigger: 'continue',
-			});
-			const texts = composed.messages.map((message) => message.content);
-			assert.strictEqual(texts[0], 'identity', 'the agent identity still leads');
-			assert.ok(texts.some((text) => text.includes('Write for Kestrel and')), '{{charIfNotGroup}} is the character in a solo chat');
-			assert.ok(texts.includes('[A new chat begins.]'), 'the new-chat marker heads the history');
-			assert.ok(texts.some((text) => text.includes('Carry on from hm.')), 'the continue nudge carries the last message');
-			assert.ok(
-				composed.messages.findIndex((message) => message.content.includes('Carry on from')) >
-					composed.messages.findIndex((message) => message.content === 'hm.'),
-				'and it is said after the message it carries on from',
-			);
-			// Upstream checks the *history* for `send_if_empty`, and a continue's history also ends on a
-			// reply, so both are said — the nudge and the filled turn. That is upstream's own behaviour.
-			assert.ok(texts.includes('[Say something.]'), 'the empty turn is filled when the history ends on a reply');
-			assert.ok(
-				composed.messages.findIndex((message) => message.content.includes('Carry on from')) <
-					composed.messages.findIndex((message) => message.content === '[Say something.]'),
-				'and the nudge comes before it, as upstream adds it',
-			);
-
-			// `send_if_empty` fills a turn the history would otherwise end on.
-			const filled = await kernel.ctx.tavern.compose({
-				blocks: [{ id: COMONAD_BLOCK.identity, name: 'Identity', text: 'identity' }],
-				history: [{ role: 'assistant', content: 'hm.' }],
-				binding: { character: 'kestrel', preset: 'Nudges' },
-				scan: [],
-				turn: 2,
-			});
-			assert.ok(
-				filled.messages.some((message) => message.role === 'user' && message.content === '[Say something.]'),
-				'the empty turn is filled as the user',
-			);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('an edited prompt keeps its triggers, its depth and its order, and Reset has the shipped one', () => {
-		// Upstream's `shouldTrigger`: a list of generation types, and nothing in the list means all of them.
-		assert.ok(triggersGeneration({}, 'continue'), 'no trigger list means every generation type');
-		assert.ok(triggersGeneration({ injection_trigger: [] }, 'continue'), 'and so does an empty one');
-		assert.ok(!triggersGeneration({ injection_trigger: ['normal'] }, 'continue'));
-
-		const preset = parsePreset(
-			JSON.stringify({
-				prompts: [
-					// A block limited to some generation types is left out of the others.
-					{ identifier: 'main', name: 'Main Prompt', content: 'Main.', injection_trigger: ['normal', 'telepathy'] },
-					// An in-chat block: its own text is spliced into the history at its depth and its order.
-					{ identifier: 'assistantPrefill', name: 'Prefill', role: 'assistant', content: 'A prefill.', injection_position: 1, injection_depth: 0, injection_order: 50 },
-					{ identifier: 'quiet', name: 'Quiet', role: 'system', content: '', injection_position: 1, injection_depth: 1, injection_order: 10 },
-				],
-			}),
-			'Prompts',
-			'prompts',
-		);
-		assert.deepStrictEqual(preset.prompts?.[0].injection_trigger, ['normal'], 'a generation type upstream does not have is dropped as it is read');
-		assert.ok(promptCollection(preset, '', 'normal').some((prompt) => prompt.identifier === 'main'), 'the block is sent for the type it names');
-		assert.ok(!promptCollection(preset, '', 'continue').some((prompt) => prompt.identifier === 'main'), 'and left out of the ones it does not');
-		assert.strictEqual(promptCollection(preset, '', 'continue')[0].identifier, IDENTITY_PROMPT, 'the identity block is never filtered away');
-
-		const history = [
-			{ role: 'user' as const, content: 'one' },
-			{ role: 'assistant' as const, content: 'two' },
-			{ role: 'user' as const, content: 'three' },
-		];
-		const messages = assemble(promptCollection(preset), { comonad: { [COMONAD_BLOCK.identity]: 'identity' } }, history);
-		assert.strictEqual(messages.find((message) => message.content === 'A prefill.')?.role, 'assistant', 'an in-chat block keeps the role it was given');
-		assert.deepStrictEqual(
-			messages.filter((message) => ['one', 'two', 'three', 'A prefill.'].includes(message.content)).map((message) => message.content),
-			['one', 'two', 'three', 'A prefill.'],
-			'it lands at depth 0, after the last message, and the block that was emptied sends nothing at all',
-		);
-
-		// *Reset* in the pane reads the shipped block, and a block of your own has nothing to go back to.
-		const shipped = shippedPrompt('main');
-		assert.deepStrictEqual(shipped, DEFAULT_PROMPTS.find((prompt) => prompt.identifier === 'main'), 'the shipped block is the one upstream ships');
-		assert.strictEqual(shippedPrompt('my-own-block'), undefined);
-	});
-
-	test('the prompt preview fills a marker from the same values the assembler uses', async () => {
-		const card = {
-			spec: 'chara_card_v2',
-			spec_version: '2.0',
-			data: {
-				name: 'Kestrel',
-				description: 'A cartographer of dead cities.',
-				personality: 'Terse, watchful.',
-				scenario: 'The salt flats, at dusk.',
-				first_mes: 'Kestrel looks up.',
-				mes_example: '<START>\nYou: hi\nKestrel: hm.',
-			},
-		};
-		const kernel = await createTestKernel({ config: { tavernCharacter: 'kestrel' } });
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			writeFileSync(join(library, 'characters', 'kestrel.json'), JSON.stringify(card));
-			await kernel.ctx.tavern.reload();
-
-			let seen: Message[] = [];
-			kernel.ctx.llm.use({
-				name: 'test',
-				async chat(request) {
-					seen = request.messages;
-					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'preview');
-			const blocks = await kernel.ctx.agent.promptBlocks(session);
-			const shown = kernel.ctx.tavern.displayPrompts(session.id, blocks);
-
-			// Each generated block is previewed from the same block the request is built from.
-			assert.strictEqual(shown[IDENTITY_PROMPT], blocks[0]?.text);
-			assert.ok((shown[IDENTITY_PROMPT] ?? '').length > 0, 'and it is not empty');
-			assert.match(shown[TOOLS_PROMPT] ?? '', /provided tools/, 'the Tools block is previewed too');
-			// The card's own fields are resolved, formats and all.
-			assert.strictEqual(shown.charDescription, 'A cartographer of dead cities.');
-			assert.strictEqual(shown.charPersonality, 'Terse, watchful.');
-			assert.strictEqual(shown.scenario, 'The salt flats, at dusk.');
-			assert.match(shown.dialogueExamples ?? '', /Kestrel: hm\./);
-			// Filled from the turn, not from the chat: neither has a value until a turn is built, and
-			// inventing one is exactly what the panel must not do.
-			assert.strictEqual(shown.worldInfoBefore, undefined);
-			assert.strictEqual(shown.worldInfoAfter, undefined);
-			assert.strictEqual(shown.chatHistory, undefined);
-
-			// What the preview promises is what the request carries — the two share one resolver.
-			await kernel.ctx.agent.runTurn({ text: 'hello', sessionId: 'preview' });
-			const sent = seen.map((message) => message.content).join('\n');
-			assert.ok(sent.includes(blocks[0]!.text), 'the identity the preview showed is in the request');
-			assert.ok(sent.includes('A cartographer of dead cities.'));
-			assert.ok(sent.includes('Terse, watchful.'));
-			assert.ok(sent.includes('The salt flats, at dusk.'));
-			assert.ok(sent.includes('Kestrel: hm.'), 'and the examples arrive, parsed, as the preview showed');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a character, its book and a preset shape the request without displacing the agent', async () => {
-		const card = {
-			spec: 'chara_card_v2',
-			spec_version: '2.0',
-			data: {
-				name: 'Kestrel',
-				description: 'A cartographer of dead cities.',
-				personality: 'Terse, watchful.',
-				scenario: 'The salt flats, at dusk.',
-				first_mes: 'Kestrel looks up.',
-				system_prompt: 'Stay in character.',
-				post_history_instructions: 'Never break the fourth wall.',
-				mes_example: '<START>\nYou: hi\nKestrel: hm.',
-				character_book: {
-					name: 'Card book',
-					entries: [{ id: 0, keys: ['kestrel'], content: 'The atlas is incomplete.', position: 'before_char', insertion_order: 100 }],
-				},
-			},
-		};
-		const kernel = await createTestKernel({
-			config: { tavernCharacter: 'kestrel', tavernLorebooks: ['Salt'], tavernPreset: 'Test' },
-		});
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			mkdirSync(join(library, 'lorebooks'), { recursive: true });
-			mkdirSync(join(library, 'presets'), { recursive: true });
-			writeFileSync(join(library, 'characters', 'kestrel.json'), JSON.stringify(card));
-			writeFileSync(
-				join(library, 'lorebooks', 'Salt.json'),
-				JSON.stringify({ name: 'Salt', entries: { '0': { uid: 0, key: ['salt'], content: 'The flats drink sound.', position: 1 } } }),
-			);
-			writeFileSync(join(library, 'presets', 'Test.json'), JSON.stringify({ temperature: 0.5, top_p: 0.8 }));
-			await kernel.ctx.tavern.reload();
-			assert.deepStrictEqual(kernel.ctx.tavern.characters.map((character) => character.name), ['Kestrel']);
-			assert.strictEqual(kernel.ctx.tavern.character('kestrel')?.greeting, 'Kestrel looks up.');
-
-			let seen: Message[] = [];
-			let temperature: number | undefined;
-			let topP: number | undefined;
-			kernel.ctx.llm.use({
-				name: 'test',
-				async chat(request) {
-					seen = request.messages;
-					temperature = request.temperature;
-					topP = request.topP;
-					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'kestrel-chat');
-			session.transcript.push({ role: 'assistant', content: 'Kestrel looks up.', at: 1 });
-			kernel.ctx.sessions.save(session);
-			await kernel.ctx.agent.runTurn({ text: 'What do you know about the salt?', sessionId: 'kestrel-chat' });
-
-			const texts = seen.map((message) => message.content);
-			const at = (needle: string): number => texts.findIndex((text) => text.includes(needle));
-			assert.ok(texts[0].startsWith('You are Comonad'), 'the agent identity still leads');
-			const loreAt = texts.findIndex((text) => text.includes('lore_lookup'));
-			assert.ok(loreAt > 0, 'a Lore index block says the books can be looked up');
-			assert.ok(texts[loreAt].includes('- Salt: salt'), 'and names the entries it may ask about');
-			assert.ok(at('A cartographer of dead cities.') > 0, 'the card description is in the prompt');
-			assert.ok(at('Terse, watchful.') > 0, 'the card personality is in the prompt');
-			assert.ok(at('The salt flats, at dusk.') > 0, 'the scenario is in the prompt');
-			assert.ok(at('Stay in character.') > 0, "the card's own system prompt is a block");
-			assert.ok(at('The flats drink sound.') > 0, 'the world book entry the message triggered is injected');
-			assert.ok(at('The atlas is incomplete.') > 0, "the card's own book is scanned too");
-			assert.ok(at('Kestrel looks up.') > 0, 'the transcript keeps the greeting');
-			assert.ok(at('Never break the fourth wall.') > at('Kestrel looks up.'), 'post-history instructions land after the history');
-			assert.strictEqual(temperature, 0.5, 'the preset sets the temperature');
-			assert.strictEqual(topP, 0.8, 'the preset sets top_p');
-			// The turn mutates the stored session, which is the object the next turn reads again.
-			const stored = kernel.ctx.sessions.require('kestrel-chat');
-			assert.strictEqual(stored.tavernActivated?.length, 2, 'the readout lists what activated');
-			assert.deepStrictEqual(
-				stored.tavernActivated?.map((hit) => hit.reason),
-				['key', 'key'],
-			);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('an entry that names a character or a tag is left out of every other chat', () => {
-		const books = [
-			loreBookOf([
-				{ uid: 0, key: ['salt'], content: 'Only for Kestrel.', comment: 'only', characterFilter: { names: ['kestrel'] } },
-				{ uid: 1, key: ['salt'], content: 'For everyone else.', comment: 'except', characterFilter: { names: ['kestrel'], isExclude: true } },
-				{ uid: 2, key: ['salt'], content: 'For a tagged character.', comment: 'tagged', characterFilter: { tags: ['wilderness'] } },
-			]),
-		];
-		const activated = (patch: Partial<LoreInput>): string[] =>
-			activateLore(lore({ books, ...patch })).activated.map((hit) => hit.entry.comment ?? '');
-		assert.deepStrictEqual(
-			activated({ character: { name: 'kestrel', tags: ['wilderness'] } }),
-			['only', 'tagged'],
-			'the named card gets its own entry, and the tagged one gets the tag entry',
-		);
-		assert.deepStrictEqual(activated({ character: { name: 'other', tags: ['city'] } }), ['except'], 'the name check turns around, the tags miss');
-		assert.deepStrictEqual(activated({ character: { name: 'other', tags: ['wilderness'] } }), ['except', 'tagged'], 'a matching tag lets the third entry through');
-		assert.deepStrictEqual(activated({ character: { name: 'other' } }), ['except'], 'a character with no tags carries none of them, so the tag filter still applies');
-		assert.deepStrictEqual(activated({}), ['except', 'tagged'], 'with no card at all only the exclusion keeps its meaning');
-	});
-
-	test('an outlet entry is not injected where it sits: {{outlet::Name}} is how it lands', () => {
-		const books = [
-			loreBookOf([
-				{ uid: 0, key: ['salt'], content: 'Sign: the flats.', position: WI_POSITION.outlet, outletName: 'sign' },
-				{ uid: 1, key: ['salt'], content: 'In the prompt.', position: WI_POSITION.before },
-			]),
-		];
-		const result = activateLore(lore({ books }));
-		assert.deepStrictEqual(result.outlets, { sign: ['Sign: the flats.'] }, 'the scan collects outlets instead of injecting them');
-		assert.deepStrictEqual(result.before, ['In the prompt.'], 'the outlet entry is not in the before bucket');
-		assert.deepStrictEqual(result.after, []);
-		assert.deepStrictEqual(result.atDepth, []);
-		const macro = { char: 'Kestrel', user: 'You', outlets: result.outlets };
-		assert.strictEqual(substituteMacros('a {{outlet::sign}} b', macro), 'a Sign: the flats. b');
-		assert.strictEqual(substituteMacros('a {{outlet:sign}} b', macro), 'a Sign: the flats. b', 'the single-colon form is read too');
-		assert.strictEqual(substituteMacros('a {{outlet::nobody}} b', macro), 'a  b', 'an unknown outlet is empty, not left as a macro');
-	});
-
-	test('the budget says which entries it dropped, and the alert is said once per chat', async () => {
-		const kernel = await createTestKernel({
-			config: { tavernLorebooks: ['Big'], contextWindow: 400, wiBudget: 2, wiOverflowAlert: true },
-		});
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'lorebooks'), { recursive: true });
-			const entry = (uid: number): Record<string, unknown> => ({ uid, key: ['salt'], content: `${uid} `.repeat(120), position: 0 });
-			writeFileSync(join(library, 'lorebooks', 'Big.json'), JSON.stringify({ name: 'Big', entries: { '0': entry(0), '1': entry(1) } }));
-			await kernel.ctx.tavern.reload();
-			kernel.ctx.llm.use({
-				name: 'test',
-				async chat() {
-					return { message: { role: 'assistant' as const, content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			const notices: string[] = [];
-			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'big');
-			session.transcript.push({ role: 'user', content: 'salt', at: 1 });
-			kernel.ctx.sessions.save(session);
-			await kernel.ctx.agent.runTurn({ text: 'tell me about the salt', sessionId: 'big' });
-			assert.strictEqual(kernel.ctx.sessions.require('big').tavernOverflow, true, 'the scan reports that it ran out');
-			assert.strictEqual(notices.filter((text) => text.includes('budget')).length, 1, 'the alert is said once');
-			await kernel.ctx.agent.runTurn({ text: 'and again about the salt', sessionId: 'big' });
-			assert.strictEqual(notices.filter((text) => text.includes('budget')).length, 1, 'and not again on the next turn');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a book keeps its display order and the fields the editor does not show', () => {
-		const entry = worldEntry({
-			uid: 3,
-			key: ['salt'],
-			content: 'x',
-			displayIndex: 7,
-			vectorized: true,
-			automationId: 'qr-1',
-			triggers: ['continue'],
-			addMemo: true,
-			characterFilter: { names: ['kestrel'], tags: [], isExclude: false },
-		});
-		const json = entryToJson(entry);
-		assert.strictEqual(json.displayIndex, 7, 'the display order is written where upstream keeps it');
-		assert.strictEqual(json.vectorized, true);
-		assert.strictEqual(json.automationId, 'qr-1');
-		assert.deepStrictEqual(json.triggers, ['continue']);
-		assert.strictEqual(json.addMemo, true);
-		assert.deepStrictEqual(json.character_filter, { isExclude: false, names: ['kestrel'], tags: [] }, 'the filter keeps SillyTavern’s own key and shape');
-		assert.ok(!('characterFilterNames' in json), 'and the flat keys an early file carried are gone');
-		assert.strictEqual((json.extensions as Record<string, unknown>).display_index, 7, 'and the mirror stays in step');
-	});
-
-	test('the entry list searches and sorts the way the panel offers', () => {
-		const book = [
-			worldEntry({ uid: 1, key: ['eldoria'], content: 'nothing here', comment: 'The forest', order: 100 }),
-			worldEntry({ uid: 2, key: [], content: 'the eldoria road', comment: '', order: 300 }),
-			worldEntry({ uid: 3, key: ['salt'], content: 'x', comment: '', order: 200, constant: true }),
-			worldEntry({ uid: 4, key: ['salt'], content: 'x', comment: '', order: 400, disable: true }),
-			worldEntry({ uid: 5, key: ['glade'], content: 'the forest floor', comment: '', order: 400 }),
-		];
-		const hits = (query: string) => [...searchEntries(book, query).keys()].sort((left, right) => left - right);
-		// The query goes through Fuse with upstream's own keys and weights: a key beats a body match…
-		assert.deepStrictEqual(hits('eldoria'), [1, 2]);
-		assert.ok(
-			(searchEntries(book, 'eldoria').get(1) ?? 1) < (searchEntries(book, 'eldoria').get(2) ?? 1),
-			'a key match outranks a body match, which is what the weights are for',
-		);
-		assert.deepStrictEqual(hits('forest'), [1, 5]);
-		assert.deepStrictEqual(hits('salt'), [3, 4], 'a group of entries shares a key');
-		// …and the fields that are not prose are searchable too, as upstream allows.
-		assert.deepStrictEqual(hits('5'), [5], 'the uid is a field');
-		assert.deepStrictEqual(hits('nothing'), [1], 'a match in the body alone is still a hit');
-		// Extended search is on upstream's list of options, so `'exact` and `!not` are understood.
-		assert.deepStrictEqual(hits("'the forest"), [1, 5]);
-		assert.deepStrictEqual(hits('!forest'), [], 'a negated term is not a hit by itself');
-		assert.deepStrictEqual(hits('zzzz'), [], 'a query nothing matches returns nothing');
-		// No query: the rule decides, and every rule falls back to order descending, then uid.
-		assert.deepStrictEqual(
-			visibleEntries(book, '', 'priority').map((entry) => entry.uid),
-			[3, 5, 2, 1, 4],
-			'constant first, then ordinary, then disabled',
-		);
-		assert.deepStrictEqual(
-			visibleEntries(book, '', 'uid-asc').map((entry) => entry.uid),
-			[1, 2, 3, 4, 5],
-			'a field sort orders by that field',
-		);
-		assert.deepStrictEqual(
-			visibleEntries(book, '', 'depth-asc').map((entry) => entry.uid),
-			[4, 5, 2, 3, 1],
-			'a field every entry ties on falls back to order descending, then uid',
-		);
-		assert.deepStrictEqual(
-			visibleEntries(book, '', 'custom').map((entry) => entry.uid),
-			[1, 2, 3, 4, 5],
-			'custom follows the display index, which defaults to the uid',
-		);
-		// A query filters and switches the order to the scores, whatever the select says.
-		assert.deepStrictEqual(
-			visibleEntries(book, 'forest', 'uid-asc').map((entry) => entry.uid),
-			[1, 5],
-			'only the hits, best first',
-		);
-		assert.strictEqual(ruleOf('nonsense').value, 'priority', 'an unknown rule is the default');
-	});
-
-	test('the tag registry is a list of ids with a map from entity to tags', () => {
-		const store = emptyStore();
-		const first = ensureTag(store, 'Fantasy')!;
-		assert.strictEqual(store.tags.length, 1);
-		assert.strictEqual(ensureTag(store, 'fantasy')!.id, first.id, 'a name matches in any case, so nothing is duplicated');
-		const second = ensureTag(store, 'Other')!;
-		assert.ok((second.sort_order ?? 0) > (first.sort_order ?? 0), 'the sort key lands after the tags that exist');
-		assert.strictEqual(addTags(store, 'kestrel', [first, second]), 2);
-		assert.strictEqual(addTags(store, 'kestrel', [first]), 0, 'assigning a tag twice adds nothing');
-		assert.deepStrictEqual(tagsOf(store, 'kestrel').map((tag) => tag.name), ['Fantasy', 'Other'], 'in the registry order');
-		// A rename keeps the id, which is why every reference survives it.
-		assert.strictEqual(renameTag(store, first.id, 'High fantasy'), true);
-		assert.deepStrictEqual(tagIdsOf(store, 'kestrel'), [first.id, second.id], 'the ids are untouched');
-		// Delete with a merge hands over everything that carried it.
-		assert.strictEqual(deleteTag(store, second.id, first.id), true);
-		assert.deepStrictEqual(tagIdsOf(store, 'kestrel'), [first.id], 'the carrier moved to the tag it was merged into');
-		assert.ok(!byId(store, second.id), 'and the deleted tag is gone');
-		assert.deepStrictEqual(readStore(JSON.parse(storeJson(store)) as unknown), store, 'the file round-trips');
-		// A registry copied out of SillyTavern keys the map by the avatar's file name.
-		const theirs = readStore({ tags: [{ id: 'a', name: 'A' }], tag_map: { 'kestrel.png': ['a'] } });
-		assert.deepStrictEqual(tagIdsOf(theirs, 'kestrel'), ['a'], 'the file name is found by its stem');
-	});
-
-	test("a card's own tags are imported exactly the way the setting says", () => {
-		const store = readStore({ tags: [{ id: 'a', name: 'Fantasy' }], tag_map: {} });
-		const card = ['Fantasy', 'TAVERN', 'Adventure', '', 'adventure'];
-		assert.deepStrictEqual(planTagImport(store, 'kestrel', card, TAG_IMPORT.NONE), { names: [], existing: [], fresh: [] });
-		const only = planTagImport(store, 'kestrel', card, TAG_IMPORT.ONLY_EXISTING);
-		assert.deepStrictEqual(only.names, ['Fantasy'], 'only the tag that is already in the registry');
-		assert.deepStrictEqual(applyTagImport(store, 'kestrel', only), ['Fantasy']);
-		assert.deepStrictEqual(store.tags.map((tag) => tag.name), ['Fantasy'], 'and nothing was created');
-		const all = planTagImport(store, 'kestrel', card, TAG_IMPORT.ALL);
-		assert.deepStrictEqual(all.names, ['Adventure'], 'the generator tag and the assigned tag are both left out');
-		assert.deepStrictEqual(all.fresh, ['Adventure'], 'a second spelling of a name is not a second tag');
-		assert.deepStrictEqual(applyTagImport(store, 'kestrel', all), ['Adventure']);
-		assert.deepStrictEqual(tagsOf(store, 'kestrel').map((tag) => tag.name), ['Fantasy', 'Adventure']);
-		assert.deepStrictEqual(planTagImport(store, 'kestrel', card, TAG_IMPORT.ALL).names, [], 'importing again has nothing left to do');
-		// A card may carry hundreds of junk tags, which is why upstream caps the import.
-		const many = Array.from({ length: 80 }, (_, index) => `tag ${index}`);
-		assert.strictEqual(planTagImport(emptyStore(), 'kestrel', many, TAG_IMPORT.ALL).names.length, ANTI_TROLL_MAX_TAGS);
-		// Pruning is the cleanup for a library that had tags imported into it and then emptied.
-		const busy = readStore({ tags: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }], tag_map: { kestrel: ['a'] } });
-		assert.strictEqual(pruneTags(busy), 1);
-		assert.deepStrictEqual(busy.tags.map((tag) => tag.name), ['A']);
-	});
-
-	test('the project registry overlays the user one instead of replacing it', () => {
-		const project = readStore({ tags: [{ id: 'a', name: 'Shared', color: '#123' }], tag_map: { kestrel: ['a'] } });
-		const user = readStore({ tags: [{ id: 'a', name: 'Shared (user)' }, { id: 'b', name: 'Theirs' }], tag_map: { kestrel: ['b'], other: ['b'] } });
-		const merged = mergeStores(project, user);
-		assert.strictEqual(merged.tags.length, 2, 'one tag per id');
-		assert.strictEqual(byId(merged, 'a')!.name, 'Shared', 'the project root wins');
-		assert.strictEqual(byId(merged, 'a')!.color, '#123', 'including the fields of the tag');
-		assert.deepStrictEqual(merged.tag_map.kestrel, ['a', 'b'], 'an entity keeps what both files gave it');
-		assert.deepStrictEqual(merged.tag_map.other, ['b']);
-	});
-
-	test('an entry filtered to a tag reaches only the characters that carry it', async () => {
-		const kernel = await createTestKernel({ config: { tavernCharacter: 'kestrel', tavernLorebooks: ['Salt'] } });
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'characters'), { recursive: true });
-			mkdirSync(join(library, 'lorebooks'), { recursive: true });
-			const card = (name: string): string => JSON.stringify({ spec: 'chara_card_v2', spec_version: '2.0', data: { name, description: `${name} is here.` } });
-			writeFileSync(join(library, 'characters', 'kestrel.json'), card('Kestrel'));
-			writeFileSync(join(library, 'characters', 'other.json'), card('Other'));
-			// The registry first, because the entry below filters on a tag id and the id has to exist.
-			writeFileSync(join(library, 'tags.json'), JSON.stringify({ tags: [{ id: 'wild', name: 'Wilderness' }], tag_map: { kestrel: ['wild'] } }));
-			writeFileSync(
-				join(library, 'lorebooks', 'Salt.json'),
-				JSON.stringify({
-					name: 'Salt',
-					entries: { '0': { uid: 0, key: ['salt'], content: 'Only the wild ones know.', character_filter: { names: [], tags: ['wild'], isExclude: false } } },
-				}),
-			);
-			await kernel.ctx.tavern.reload();
-			assert.deepStrictEqual(kernel.ctx.tavern.tagIdsFor('kestrel'), ['wild'], 'the registry is read from the library');
-			assert.deepStrictEqual(kernel.ctx.tavern.tagIdsFor('other'), [], 'a card without tags carries none');
-			assert.strictEqual(kernel.ctx.tavern.tagFile(), join(library, 'tags.json'), 'the registry is written into the library');
-
-			let seen: Message[] = [];
-			kernel.ctx.llm.use({
-				name: 'test',
-				async chat(request) {
-					seen = request.messages;
-					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'tagged');
-			kernel.ctx.sessions.save(session);
-			await kernel.ctx.agent.runTurn({ text: 'tell me about the salt', sessionId: 'tagged' });
-			const said = (): boolean => seen.some((message) => message.content.includes('Only the wild ones know.'));
-			assert.strictEqual(said(), true, 'the tagged card gets the entry');
-
-			const stored = kernel.ctx.sessions.require('tagged');
-			stored.character = 'other';
-			kernel.ctx.sessions.save(stored);
-			await kernel.ctx.agent.runTurn({ text: 'and again about the salt', sessionId: 'tagged' });
-			assert.strictEqual(said(), false, 'the untagged card does not, even though the key matches');
-
-			// The pane's write path: a tag assigned to the other card lands in the file and comes back.
-			const store = kernel.ctx.tavern.tags;
-			addTags(store, 'other', [byId(store, 'wild')!]);
-			await kernel.ctx.tavern.saveTags();
-			const written = JSON.parse(readFileSync(join(library, 'tags.json'), 'utf8')) as { tag_map: Record<string, string[]> };
-			assert.deepStrictEqual(written.tag_map.other, ['wild'], 'a tag assigned in the pane is written to tags.json');
-			assert.deepStrictEqual(kernel.ctx.tavern.tagIdsFor('other'), ['wild'], 'and read back from it');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('an entry automation fires the hook and runs the command it names', async () => {
-		// `/cost` is registered by the extension, so it is exactly what a book can automate by name.
-		const kernel = await createTestKernel({ config: { tavernLorebooks: ['Auto'], wiAutomation: true } });
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'lorebooks'), { recursive: true });
-			writeFileSync(
-				join(library, 'lorebooks', 'Auto.json'),
-				JSON.stringify({
-					name: 'Auto',
-					entries: {
-						'0': { uid: 0, key: ['salt'], content: 'Pickled.', automationId: 'test-automation' },
-						'1': { uid: 1, key: ['salt'], content: 'Also pickled.', automationId: 'test-automation' },
-						'2': { uid: 2, key: ['salt'], content: 'Nothing to run here.', automationId: 'no-such-automation' },
-					},
-				}),
-			);
-			await kernel.ctx.tavern.reload();
-			// A book can automate any command by name: this one is the test's own stand-in for a QR.
-			let ran = 0;
-			kernel.ctx.commands.register({
-				name: 'test-automation',
-				description: '',
-				run: () => {
-					ran += 1;
-					return { done: true, result: 'the automation ran' };
-				},
-			});
-			kernel.ctx.llm.use({
-				name: 'test',
-				async chat() {
-					return { message: { role: 'assistant' as const, content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			const notices: string[] = [];
-			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'auto');
-			kernel.ctx.sessions.save(session);
-			await kernel.ctx.agent.runTurn({ text: 'tell me about the salt', sessionId: 'auto' });
-			// The automation runs in the background of the turn, so give it a tick to finish.
-			await new Promise((resolve) => setTimeout(resolve, 20));
-			assert.strictEqual(ran, 1, 'two entries naming one automation share a single run for the batch');
-			assert.strictEqual(notices.filter((text) => text.includes('the automation ran')).length, 1, 'and its output is said once');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a vectorized entry is found by the chat’s meaning, not by its keys', async () => {
-		const kernel = await createTestKernel({ config: { tavernLorebooks: ['Salt'], wiVectorEnabled: true, wiVectorThreshold: 0.5, wiVectorMaxEntries: 1 } });
-		try {
-			const library = join(kernel.root, 'ws', '.comonad');
-			mkdirSync(join(library, 'lorebooks'), { recursive: true });
-			writeFileSync(
-				join(library, 'lorebooks', 'Salt.json'),
-				JSON.stringify({
-					name: 'Salt',
-					entries: {
-						// Three entries, two of them vectorized: the search may bring back one (max entries 1).
-						'0': { uid: 0, key: [], content: 'The flats drink sound.', vectorized: true },
-						'1': { uid: 1, key: [], content: 'A caravan went north.', vectorized: true },
-						'2': { uid: 2, key: ['salt'], content: 'Keys still work.', vectorized: false },
-					},
-				}),
-			);
-			await kernel.ctx.tavern.reload();
-			// A stand-in endpoint: the vector of a text is its length, which is enough to rank two texts.
-			const asked: string[][] = [];
-			let seen: Message[] = [];
-			kernel.ctx.vectors.use({
-				name: 'http::text-embedding-3-small',
-				embed: async (texts) => {
-					asked.push([...texts]);
-					return texts.map((text) => [text.length, 1]);
-				},
-			});
-			kernel.ctx.llm.use({
-				name: 'test',
-				async chat(request) {
-					seen = request.messages;
-					return { message: { role: 'assistant' as const, content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
-				},
-			});
-			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'vectors');
-			kernel.ctx.sessions.save(session);
-			await kernel.ctx.agent.runTurn({ text: 'the salt flats are quiet today, they say', sessionId: 'vectors' });
-			const hits = kernel.ctx.sessions.require('vectors').tavernActivated ?? [];
-			assert.deepStrictEqual(
-				hits.map((hit) => hit.reason).sort(),
-				['key', 'vector'],
-				'the keyed entry matched and the closest vectorized one was injected',
-			);
-			const said = seen.map((message) => message.content).join('\n');
-			assert.ok(said.includes('The flats drink sound.'), 'the entry the search picked reached the prompt');
-			assert.ok(!said.includes('A caravan went north.'), 'the one it did not pick is not there: one book contributes one entry');
-			assert.ok(asked.length >= 1, 'the endpoint was asked for the query and the missing vectors');
-			assert.strictEqual(asked[0]?.length, 3, 'the query and the two unindexed entries went in one call');
-			// The second turn asks only for the query: the index is on disk now.
-			asked.length = 0;
-			await kernel.ctx.agent.runTurn({ text: 'and the caravan?', sessionId: 'vectors' });
-			assert.strictEqual(asked[0]?.length, 1, 'the entries are embedded once, then read from the index');
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a world-info entry fires only for the generation types it names', () => {
-		const books = [
-			loreBookOf([
-				{ uid: 0, key: ['salt'], content: 'Always.', triggers: [] },
-				{ uid: 1, key: ['salt'], content: 'On a swipe.', triggers: ['swipe'] },
-				{ uid: 2, key: ['salt'], content: 'On a continue.', triggers: ['continue'] },
-			]),
-		];
-		const activated = (trigger?: GenerationTrigger): string[] =>
-			activateLore(lore({ books, trigger })).activated.map((hit) => hit.entry.content ?? '');
-		// `normal` is what an ordinary prompt is, so an entry tied to another type stays out of it.
-		assert.deepStrictEqual(activated(), ['Always.'], 'a plain turn is upstream’s normal generation');
-		assert.deepStrictEqual(activated('normal'), ['Always.']);
-		assert.deepStrictEqual(activated('swipe'), ['Always.', 'On a swipe.']);
-		assert.deepStrictEqual(activated('continue'), ['Always.', 'On a continue.']);
-		assert.deepStrictEqual(activated('regenerate'), ['Always.']);
-		assert.deepStrictEqual(activated('quiet'), ['Always.']);
 	});
 
 	test('a continue extends one message, while a quiet turn and an impersonation write none', async () => {
@@ -9196,8 +6462,7 @@ suite('Tavern content', () => {
 			assert.strictEqual(quiet.text, 'yours.', 'a quiet generation still answers');
 			assert.deepStrictEqual(kernel.ctx.sessions.require('types').transcript, before, 'and leaves no trace');
 
-			// Impersonate: upstream streams your next message into the composer, so the chat keeps
-			// exactly what it had and the text comes back to the caller to edit and send.
+			// Impersonate: the text streams back to the caller, so the chat keeps exactly what it had.
 			const beforeImpersonation = kernel.ctx.sessions.require('types').transcript;
 			const impersonated = await kernel.ctx.agent.runTurn({ text: '', trigger: 'impersonate', sessionId: 'types' });
 			assert.strictEqual(impersonated.text, 'unwritten.', 'the text the model wrote for you comes back to the caller');
@@ -9230,8 +6495,7 @@ suite('Tavern content', () => {
 			await kernel.ctx.agent.runTurn({ text: '', trigger: 'continue', sessionId: 'cut' });
 			assert.deepStrictEqual(written('cut'), ['user:the first thing', 'assistant:', 'assistant:still here.'], 'the answer is a turn of its own');
 
-			// A chat that has said nothing has nothing to carry on: a reply with no prompt to hang on
-			// is a reply no view can draw.
+			// A chat that has said nothing has nothing to carry on.
 			const empty = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'empty');
 			kernel.ctx.sessions.save(empty);
 			const refused = await kernel.ctx.agent.runTurn({ text: '', trigger: 'continue', sessionId: 'empty' });
@@ -9294,7 +6558,7 @@ suite('Tavern content', () => {
 			assert.deepStrictEqual(reply('swipes').swipes, ['one.', 'two.'], 'a swipe grows the list instead of replacing it');
 			assert.strictEqual(reply('swipes').swipeId, 1);
 			assert.strictEqual(reply('swipes').content, 'two.', 'and the version it generated is the one showing');
-			assert.strictEqual(reply('swipes').swipeInfo?.length, 2, 'upstream keeps one record per version');
+			assert.strictEqual(reply('swipes').swipeInfo?.length, 2, 'one record per version');
 			assert.strictEqual(
 				kernel.ctx.sessions.require('swipes').transcript.filter((message) => message.role === 'user').length,
 				1,
@@ -9314,7 +6578,6 @@ suite('Tavern content', () => {
 			assert.deepStrictEqual(reply('swipes').swipes, ['one.', 'two.', 'three.'], 'a regenerate on a reply with versions adds one');
 			assert.strictEqual(kernel.ctx.sessions.require('swipes').transcript.filter((message) => message.role === 'user').length, 1);
 
-			// The very first regenerate has nothing to keep, so it replaces the reply it was given.
 			const fresh = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'fresh');
 			kernel.ctx.sessions.save(fresh);
 			await kernel.ctx.agent.runTurn({ text: 'hello again', sessionId: 'fresh' });
@@ -9326,6 +6589,7 @@ suite('Tavern content', () => {
 		}
 	});
 });
+
 /**
  * The per-file journal against a real shadow repository on a temporary disk. These tests cover
  * what the review relies on: nothing outside the journal is touched, unsaved text and outside
@@ -10349,17 +7613,16 @@ suite('Plan tools', () => {
 
 	test('a turn names the user message that opened it', () => {
 		const transcript: Message[] = [
-			{ role: 'assistant', content: 'hello', greeting: true },
+			{ role: 'assistant', content: 'traffic before any prompt' },
 			{ role: 'user', content: 'one' },
 			{ role: 'assistant', content: 'first' },
 			{ role: 'user', content: 'two' },
 			{ role: 'assistant', content: 'second' },
 		];
 		const turns = turnsOf(transcript);
-		assert.strictEqual(turns[0]!.greeting, true);
-		assert.strictEqual(turns[0]!.promptAt, undefined, 'a greeting has no prompt to edit');
-		assert.strictEqual(turns[1]!.promptAt, 1);
-		assert.strictEqual(turns[2]!.promptAt, 3);
+		assert.strictEqual(turns.length, 2);
+		assert.strictEqual(turns[0]!.promptAt, 1);
+		assert.strictEqual(turns[1]!.promptAt, 3);
 	});
 
 	test('the restore point for a prompt is the first turn at or after it that wrote', () => {
@@ -11317,7 +8580,7 @@ suite('Markdown math plugin', () => {
 		const source = join(extension!.extensionUri.fsPath, 'packages', 'comonad-plugin-math');
 		assert.ok(existsSync(join(source, 'dist', 'index.js')), 'the plugin bundle is built beside the extension');
 		assert.ok(existsSync(join(source, 'resources', 'math.js')), 'and its browser bundle is built');
-		const kernel = await createTestKernel({ skip: ['tavern', 'lore'] });
+		const kernel = await createTestKernel();
 		try {
 			await kernel.ctx.plugin(pluginHost, { rows: [], plugins: {} });
 			await kernel.ctx.plugin(ChatWebviewAssets);
@@ -11488,7 +8751,24 @@ suite('Chat markdown renderer', () => {
 
 /* ------------------------------------------------------------------ images */
 
+/** A chunk with a zero CRC: enough for a reader that never validates one. */
+function rawChunk(type: string, data: Buffer): Buffer {
+	const head = Buffer.alloc(8);
+	head.writeUInt32BE(data.length, 0);
+	head.write(type, 4, 'latin1');
+	return Buffer.concat([head, data, Buffer.alloc(4)]);
+}
+
 /** A PNG whose IHDR carries real dimensions; `barePng` writes the signature and chunks only. */
+function barePng(): Buffer {
+	return Buffer.concat([
+		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+		rawChunk('IHDR', Buffer.alloc(13)),
+		rawChunk('IDAT', Buffer.from([1, 2, 3])),
+		rawChunk('IEND', Buffer.alloc(0)),
+	]);
+}
+
 function pngOf(width: number, height: number): Buffer {
 	const png = barePng();
 	png.writeUInt32BE(width, 16);

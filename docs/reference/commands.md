@@ -33,20 +33,6 @@ a command — elsewhere it is ordinary text.
 | `/export` | Export the session as Markdown |
 | `/resume` | Resume a suspended (waiting for approval) turn |
 
-## Content layer commands
-
-Available when the SillyTavern content layer is installed:
-
-| Command | Purpose |
-| --- | --- |
-| `/char [name]` | Pick the character this chat speaks as |
-| `/persona [name]` | Pick who you are in this chat |
-| `/lore [names]` | Pick the world books this chat scans (`/lore none` clears) |
-| `/preset [name]` | Pick the prompt and sampler preset |
-| `/note [text]` | Set or clear the chat's standing author's note |
-
-See [Content layer](/guide/content).
-
 ## Custom commands
 
 A custom command is a Markdown file under `.comonad/commands/*.md`. Optional frontmatter:

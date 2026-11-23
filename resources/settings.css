@@ -10,9 +10,8 @@
 
 /* ------------------------------------------------------------------ the design tokens
 
-   Every pane of this document — the content editor, the world-book page, the persona page — is
-   loaded into this one file, so the scale lives here and they all inherit it: a button in one
-   sub-tab is then the same button in the next. Sizes follow VS Code's own controls (26px high, 4px
+   Every page of this document is loaded into this one file, so the scale lives here and they all
+   inherit it: a button in one sub-tab is then the same button in the next. Sizes follow VS Code's own controls (26px high, 4px
    radii, 11.5px labels); every colour is a theme variable with a neutral fallback, so the panel is
    at home in a light theme and a dark one alike. */
 
@@ -61,8 +60,7 @@ body {
 button.secondary,
 button.primary,
 select.control,
-input.control,
-#st-pane .link {
+input.control {
 	height: var(--st-row);
 }
 
@@ -229,9 +227,6 @@ body.resizing {
 	overflow-y: auto;
 	padding: 22px 36px 48px;
 	box-sizing: border-box;
-	/* Panes lay out against the content width, not the window: Settings is often a narrow editor
-	   column. This is the container `@container` rules in pane styles resolve against. */
-	container-type: inline-size;
 }
 
 /* The top of the content column, common to every tab: where a save lands. It scrolls with the
@@ -418,7 +413,7 @@ body.resizing {
 	padding: 2px 0 4px;
 }
 
-/* A switch, Cursor-style — scoped to the host's own rows so guest panes keep their checkboxes. */
+/* A switch, Cursor-style. */
 .group .check input[type='checkbox'] {
 	appearance: none;
 	-webkit-appearance: none;
@@ -461,9 +456,7 @@ body.resizing {
 	outline-offset: 1px;
 }
 
-/* The Inspect tab's own sub-tabs: the tool policy flow and the prompt list. The same `.subtab` look
-   is used by panes that draw their own tab strip (the ST pane), so it lives in the document's own
-   stylesheet rather than in a pane's — a disabled plugin must not take the core UI's styling with it. */
+/* The Inspect tab's own sub-tabs: the tool policy flow and the plugin dependency view. */
 #inspect-tabs {
 	display: flex;
 	gap: 2px;
@@ -747,8 +740,7 @@ button.icon.danger:hover {
 	color: var(--st-danger);
 }
 
-/* An on/off switch, drawn here because the panes have no icon font: the prompt list's *On* and the
-   three persona locks all read the same way. */
+/* An on/off switch for the prompt list. */
 .switch {
 	position: relative;
 	display: inline-block;

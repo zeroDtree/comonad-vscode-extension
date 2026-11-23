@@ -8,18 +8,19 @@
 	const post = (message) => vscode.postMessage(message);
 
 	let state = null;
-	let dirty = false;
 	let ready = false;
-	let mcpSeen = '';
-	// The ST tab's sub-tab, remembered with the main tab. `data-tab` on the script tag is the tab the
-	// extension asked for (`Comonad: Manage Content` opens straight into ST).
-	const askedTab = document.querySelector('script[data-tab]');
-	let activeTab = (vscode.getState() || {}).tab || (askedTab && askedTab.dataset.tab) || 'agent';
-	// The Inspect tab's own sub-tab: the tool policy flow, or the prompt list.
+	let activeTab = (vscode.getState() || {}).tab || 'agent';
+	// The Inspect tab's own sub-tab: the tool policy flow, or the plugin dependency view.
 	let activeInspect = (vscode.getState() || {}).inspect || 'flow';
 	let dirs = { path: '', parent: '', entries: [], error: '' };
 	let dirFilter = '';
 	let dirsTimer = 0;
+
+	/** The small per-document preference bag: the remembered tab, scope and sidebar width. */
+	const store = {
+		get: () => vscode.getState() || {},
+		set: (patch) => vscode.setState({ ...(vscode.getState() || {}), ...patch }),
+	};
 
 	const status = (text, isError) => {
 		const node = $('status');
@@ -35,9 +36,9 @@
 		user: 'User — global defaults for every workspace',
 		workspace: 'Workspace — this workspace only',
 	};
-	// The extension's first-paint answers, carried beside `data-tab`: a fresh panel starts where the
-	// extension says, while a live webview's remembered pick still wins. The paths let the first
-	// paint name the right file before the state push arrives.
+	// The extension's first-paint answers: a fresh panel starts where the extension says, while a live
+	// webview's remembered pick still wins. The paths let the first paint name the right file before
+	// the state push arrives.
 	const askedScope = document.querySelector('script[data-scope]');
 	const askedFiles = {
 		user: (askedScope && askedScope.dataset.userFile) || '',
@@ -53,65 +54,6 @@
 		const files = (state && state.settingsFiles) || askedFiles;
 		return scope === 'user' ? files.user || '~/.comonad/settings.json' : files.workspace || '';
 	};
-
-	// Save owns the draft tabs only (Graph, ST): the Agent and UI tabs save themselves, and Prompts
-	// and MCP have their own buttons. With nothing pending it stays disabled.
-	const syncSave = () => {
-		const save = $('save');
-		save.disabled = !dirty;
-		save.classList.toggle('is-dirty', dirty);
-		save.title = 'Save — write the draft pane tabs to the selected scope';
-	};
-	const markDirty = () => {
-		dirty = true;
-		syncSave();
-	};
-	const clearDirty = () => {
-		dirty = false;
-		syncSave();
-	};
-	clearDirty();
-
-	// A pane is a tab a plugin added: its markup and its client files are part of this document, so this
-	// client owns the message channel for all of them. A pane's script registers here, is fed its own
-	// slice of every state push, and what it collects at save time is merged into the patch.
-	// `store` is the small per-document preference bag the guests share, kept apart from the tab.
-	const store = {
-		get: () => vscode.getState() || {},
-		set: (patch) => vscode.setState({ ...(vscode.getState() || {}), ...patch }),
-	};
-	const panes = new Map();
-	let paneSlices = {};
-	const lastNote = new Map();
-	/** What a pane's script is handed: the channel, the store, and where its own updates go. A pane
-	 *  that keeps a private draft registers `isDirty`, which the Close button asks before discarding. */
-	window.comonadPanes = {
-		store,
-		post: (id, message) => post({ type: 'pane', pane: id, message }),
-		dirty: markDirty,
-		register: (id, handlers) => {
-			panes.set(id, handlers || {});
-			// A pane's script loads after this one and may load after the first state: it is fed what is
-			// already here, so registration order is never what decides whether the tab draws.
-			if (paneSlices[id]) {
-				renderPane(id);
-			}
-			if (lastNote.has(id)) {
-				panes.get(id).note && panes.get(id).note(lastNote.get(id));
-			}
-			if (activeTab === id) {
-				panes.get(id).show && panes.get(id).show();
-			}
-		},
-	};
-
-	/** Feeds one pane its slice of the state the panel just pushed; a pane keeps its own edit state. */
-	function renderPane(id) {
-		const handlers = panes.get(id);
-		if (handlers && handlers.render) {
-			handlers.render(paneSlices[id]);
-		}
-	}
 
 	/* ------------------------------------------------------------- scope selector */
 
@@ -188,7 +130,7 @@
 		// A row's sheet belongs to the Prompts tab; leaving the tab puts it away.
 		closePromptDialog();
 		activeTab = name;
-		store.set({ tab: name, inspect: activeInspect });
+		vscode.setState({ ...(vscode.getState() || {}), tab: name, inspect: activeInspect });
 		for (const tab of document.querySelectorAll('.tab')) {
 			const on = tab.dataset.tab === name;
 			tab.classList.toggle('is-on', on);
@@ -205,10 +147,6 @@
 			// is never a blank page.
 			renderPrompts();
 			post({ type: 'prompts' });
-		}
-		// A pane may remember a sub-tab of its own: it is shown the tab that is now on screen.
-		if (panes.has(name) && panes.get(name).show) {
-			panes.get(name).show();
 		}
 		// Only the tab on screen is drawn — the pushes that landed while it was hidden are cached, and
 		// this is where the cache is spent.
@@ -657,8 +595,8 @@
 	const budgetMode = $('subagent-budget-mode');
 	budgetMode && budgetMode.addEventListener('change', syncSubagentBudget);
 
-	/** The tabs the Save button owns: a state push leaves them alone while the form is dirty. */
-	function renderDraftForm() {
+	/** The Policies tab's user rules: rendered from the state like any other control. */
+	function renderRules() {
 		const config = state.config;
 		const rules = config.permissions || {};
 		put($('rules-allow'), (rules.allow || []).join('\n'));
@@ -666,39 +604,14 @@
 		put($('rules-deny'), (rules.deny || []).join('\n'));
 	}
 
-	/** What the Save button owns: the draft pane tabs. The Agent tab saves itself. */
-	function collectDraft() {
-		const config = {};
-		// A pane owns its own keys: it contributes the ones its tab holds, and nothing else.
-		for (const handlers of panes.values()) {
-			if (handlers.collect) {
-				Object.assign(config, handlers.collect());
-			}
-		}
-		return config;
-	}
-
-	/** The Agent, UI and Subagents tabs' live save: one control, one key, no draft. */
+	/** One control, one key: every `data-key` control is live. */
 	function saveAgent(key, value) {
 		post({ type: 'saveAgent', config: { [key]: value }, scope: activeScope });
 	}
 
 	for (const node of document.querySelectorAll('[data-key]')) {
-		const live = node.closest('section[data-pane="agent"], section[data-pane="policies"], section[data-pane="ui"], section[data-pane="subagents"]') !== null;
-		const draft = () => {
-			markDirty();
-		};
-		node.addEventListener('input', () => {
-			if (!live) {
-				draft();
-			}
-		});
 		node.addEventListener('change', () => {
-			if (live) {
-				saveAgent(node.dataset.key, node.type === 'checkbox' ? node.checked : node.value);
-			} else {
-				draft();
-			}
+			saveAgent(node.dataset.key, node.type === 'checkbox' ? node.checked : node.value);
 		});
 	}
 
@@ -713,32 +626,7 @@
 	$('pr-reset').addEventListener('click', resetPrompts);
 	$('model-add').addEventListener('click', () => post({ type: 'configureModel' }));
 
-	function save() {
-		const payload = { type: 'save', config: collectDraft(), scope: activeScope };
-		const mcp = $('mcp').value;
-		if (mcp !== mcpSeen) {
-			try {
-				payload.mcpServers = JSON.parse(mcp || '{}');
-			} catch (error) {
-				status('MCP servers: ' + String((error && error.message) || error), true);
-				showTab('mcp');
-				return;
-			}
-		}
-		status('Saving…');
-		post(payload);
-	}
-
-	$('save').addEventListener('click', save);
-	// Close drops unsaved edits: the form's own dirty flag, and any pane that reports its own
-	// (a plugin editor may keep a private draft), so a half-edited pane is never lost silently.
-	$('close').addEventListener('click', () => {
-		const paneDirty = [...panes.values()].some((handlers) => typeof handlers.isDirty === 'function' && handlers.isDirty());
-		if ((dirty || paneDirty) && !window.confirm('Close Settings and discard the unsaved changes?')) {
-			return;
-		}
-		post({ type: 'close' });
-	});
+	$('close').addEventListener('click', () => post({ type: 'close' }));
 
 	/* ------------------------------------------------- working directory picker */
 
@@ -1238,7 +1126,7 @@
 	})();
 
 	// The note floats free of its table, so a scroll would strand it over other content: put it away
-	// on any scroll. Capture, because the panes scroll inside their own container, not the window.
+	// on any scroll. Capture, because the pages scroll inside their own container, not the window.
 	document.addEventListener('scroll', rowTip.hide, true);
 
 	/**
@@ -1357,7 +1245,6 @@
 			if (mcp.value !== text) {
 				mcp.value = text;
 			}
-			mcpSeen = text;
 		}
 		$('mcp-status').innerHTML = '';
 		table($('mcp-status'), ['server', 'connected', 'tools', 'error'], (state.mcp || []).map((item) => [
@@ -1380,8 +1267,7 @@
 	/* ------------------------------------------------------------------ prompts */
 
 	// The Prompts tab: Comonad's blocks (order, switch, editable static prefix) and the tool
-	// definitions (order, switch, read-only definition). The host reads the slice on demand; under ST
-	// the block order/switches mirror the active preset, while the prefix stays ours.
+	// definitions (order, switch, read-only definition). The host reads the slice on demand.
 	let promptsData = null;
 	/** The editable copy: arrays whose order is the send order. */
 	let promptLayout = null;
@@ -1431,51 +1317,47 @@
 	}
 
 	function promptRowElement(group, row, index) {
-		const readOnlyOrder = group === 'comonad' && row.readOnlyOrder === true;
 		const item = document.createElement('div');
 		item.className = 'pr-item' + (row.enabled === false ? ' is-off' : '');
-		item.draggable = !readOnlyOrder;
-		if (!readOnlyOrder) {
-			item.addEventListener('dragstart', (event) => {
-				promptDrag = { group, index };
-				item.classList.add('is-dragging');
-				event.dataTransfer.effectAllowed = 'move';
-				// Firefox needs some data on the transfer before it starts a drag.
-				event.dataTransfer.setData('text/plain', promptKey(group, row));
-			});
-			item.addEventListener('dragend', () => {
-				promptDrag = null;
-				item.classList.remove('is-dragging');
-				document.querySelectorAll('#pr-list .is-drop-target').forEach((node) => node.classList.remove('is-drop-target'));
-			});
-			item.addEventListener('dragover', (event) => {
-				if (!promptDrag || promptDrag.group !== group) {
-					return;
-				}
-				event.preventDefault();
-				item.classList.add('is-drop-target');
-			});
-			item.addEventListener('dragleave', () => item.classList.remove('is-drop-target'));
-			item.addEventListener('drop', (event) => {
-				if (!promptDrag || promptDrag.group !== group) {
-					return;
-				}
-				event.preventDefault();
-				const from = promptDrag.index;
-				promptDrag = null;
-				movePromptRow(group, from, index);
-			});
-		}
+		item.draggable = true;
+		item.addEventListener('dragstart', (event) => {
+			promptDrag = { group, index };
+			item.classList.add('is-dragging');
+			event.dataTransfer.effectAllowed = 'move';
+			// Firefox needs some data on the transfer before it starts a drag.
+			event.dataTransfer.setData('text/plain', promptKey(group, row));
+		});
+		item.addEventListener('dragend', () => {
+			promptDrag = null;
+			item.classList.remove('is-dragging');
+			document.querySelectorAll('#pr-list .is-drop-target').forEach((node) => node.classList.remove('is-drop-target'));
+		});
+		item.addEventListener('dragover', (event) => {
+			if (!promptDrag || promptDrag.group !== group) {
+				return;
+			}
+			event.preventDefault();
+			item.classList.add('is-drop-target');
+		});
+		item.addEventListener('dragleave', () => item.classList.remove('is-drop-target'));
+		item.addEventListener('drop', (event) => {
+			if (!promptDrag || promptDrag.group !== group) {
+				return;
+			}
+			event.preventDefault();
+			const from = promptDrag.index;
+			promptDrag = null;
+			movePromptRow(group, from, index);
+		});
 		const line = document.createElement('div');
 		line.className = 'pr-row';
 
 		const toggle = document.createElement('label');
 		toggle.className = 'switch';
-		toggle.title = readOnlyOrder ? 'ST owns this switch' : row.enabled === false ? 'Send this block' : 'Stop sending this block';
+		toggle.title = row.enabled === false ? 'Send this block' : 'Stop sending this block';
 		const input = document.createElement('input');
 		input.type = 'checkbox';
 		input.checked = row.enabled !== false;
-		input.disabled = readOnlyOrder;
 		input.addEventListener('change', () => {
 			row.enabled = input.checked;
 			promptMarkDirty();
@@ -1500,7 +1382,7 @@
 		note.className = 'pr-note';
 		note.textContent =
 			group === 'comonad'
-				? (readOnlyOrder ? 'ST order · ' : '') + (row.tokens || 0) + ' tokens'
+				? (row.tokens || 0) + ' tokens'
 				: (row.enabled === false ? 'off · ' : '') + (row.visible ? row.capability : row.reason || 'not offered') + ' · ' + row.tokens + ' tokens';
 
 		const controls = document.createElement('div');
@@ -1515,8 +1397,8 @@
 			button.addEventListener('click', onClick);
 			controls.append(button);
 		};
-		control('↑', 'Move up', () => movePromptRow(group, index, index - 1), readOnlyOrder || index === 0);
-		control('↓', 'Move down', () => movePromptRow(group, index, index + 1), readOnlyOrder || index === promptLayout[group].length - 1);
+		control('↑', 'Move up', () => movePromptRow(group, index, index - 1), index === 0);
+		control('↓', 'Move down', () => movePromptRow(group, index, index + 1), index === promptLayout[group].length - 1);
 
 		line.append(toggle, name, note, controls);
 		item.append(line);
@@ -1590,8 +1472,7 @@
 				(row.enabled === false ? 'off' : 'on') +
 				' · ' +
 				row.tokens +
-				' tokens' +
-				(row.readOnlyOrder ? ' · order and switch come from the active ST preset' : '');
+				' tokens';
 			const label = document.createElement('label');
 			label.textContent = 'Static prefix';
 			label.htmlFor = 'pr-prefix';
@@ -1710,26 +1591,7 @@
 
 		const note = $('prompts-note');
 		note.textContent = '';
-		if (promptsData && promptsData.takeover) {
-			note.append(
-				document.createTextNode(
-					'ST takes over the prompts: the block order and switches below come from the active preset. Edit them in ST → Presets; the prefixes here are still used by the composed request. ',
-				),
-			);
-			const open = document.createElement('button');
-			open.type = 'button';
-			open.className = 'secondary';
-			open.textContent = 'Open ST tab';
-			open.addEventListener('click', () => post({ type: 'openTab', tab: 'st' }));
-			note.append(open);
-		}
-		if (promptsData && promptsData.stToolsEnabled === false) {
-			const line = document.createElement('p');
-			line.className = 'hint';
-			line.textContent = "ST's Tools entry is off: no tools will be sent this turn. The tool switches below still save for when it is on.";
-			note.append(line);
-		}
-		if (promptsData && !promptsData.takeover && promptsData.toolsBlockEnabled === false) {
+		if (promptsData && promptsData.toolsBlockEnabled === false) {
 			const line = document.createElement('p');
 			line.className = 'hint';
 			line.textContent = 'The Tools block is off: no tools will be sent this turn. Turn it back on to offer them.';
@@ -1779,7 +1641,6 @@
 				order: index,
 				enabled: true,
 				prefix: row.prefix,
-				readOnlyOrder: promptsData.takeover,
 				body: live.body || '',
 				text: live.text || '',
 				tokens: live.tokens || 0,
@@ -1801,11 +1662,7 @@
 		if (!state) {
 			return;
 		}
-		// The draft tabs keep the user's edits; while clean, their widgets stay in step with the
-		// state even when another tab is showing — Save reads them without redrawing first.
-		if (!dirty || !ready) {
-			renderDraftForm();
-		}
+		renderRules();
 		switch (activeTab) {
 			case 'agent':
 			case 'ui':
@@ -1828,9 +1685,6 @@
 			default:
 				break;
 		}
-		if (panes.has(activeTab)) {
-			renderPane(activeTab);
-		}
 	}
 
 	window.addEventListener('message', (event) => {
@@ -1846,7 +1700,6 @@
 			}
 			case 'state':
 				state = message;
-				paneSlices = message.panes || {};
 				scopeInfo = { folderOpen: Boolean(message.folderOpen), trusted: Boolean(message.trusted) };
 				showScope(activeScope, true);
 				renderActive();
@@ -1872,19 +1725,9 @@
 				break;
 			case 'ok':
 				status(message.message);
-				clearDirty();
 				break;
 			case 'error':
 				status(message.message, true);
-				break;
-			case 'note':
-				lastNote.set(message.pane, message);
-				if (panes.has(message.pane) && panes.get(message.pane).note) {
-					panes.get(message.pane).note(message);
-				}
-				break;
-			case 'openTab':
-				showTab(message.tab);
 				break;
 		}
 	});

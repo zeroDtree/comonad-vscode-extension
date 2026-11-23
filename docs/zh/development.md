@@ -59,17 +59,17 @@ npm run package      # 生产打包
 
 esbuild 把扩展打成单个 CJS 文件；测试包用同样方式构建，所以快速套件在无头 Cordis 上下文和假 Host
 （`src/test/harness.ts`）上运行真实服务。测试覆盖策略门控、规则语法、图解析/编译/挂起、frontmatter、
-路径防护、diff、会话持久化、日志、内容层以及 Cordis 内核本身。
+路径防护、diff、会话持久化、日志以及 Cordis 内核本身。
 
 ## 插件包
 
 两个包作为插件随 bundle 发布：
 
-- `packages/comonad-plugin-tavern` —— SillyTavern 内容层。
 - `packages/comonad-plugin-math` —— KaTeX、样式与字体。
+- `packages/comonad-plugin-pdf` —— PDF 文本提取。
 
-每个都通过 `npm run build:plugins`（包含在 `npm run compile` 中）构建为独立 bundle。Tavern 插件按名字
-引用宿主共享词汇（`@comonad/*`），并以一个文件夹发布。
+每个都通过 `npm run build:plugins`（包含在 `npm run compile` 中）构建为独立 bundle。插件按名字引用
+宿主共享词汇（`@comonad/*`），并以一个文件夹发布。
 
 ## 文档
 

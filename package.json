@@ -118,62 +118,6 @@
     ],
     "commands": [
       {
-        "command": "comonad.openContent",
-        "title": "Comonad: Manage Content",
-        "category": "Comonad",
-        "icon": "$(library)",
-        "enablement": "comonad.tavern"
-      },
-      {
-        "command": "comonad.revealContentLibrary",
-        "title": "Comonad: Open the Content Folder",
-        "category": "Comonad",
-        "icon": "$(folder-opened)",
-        "enablement": "comonad.tavern"
-      },
-      {
-        "command": "comonad.exportCharacter",
-        "title": "Comonad: Export Character as a PNG Card",
-        "category": "Comonad",
-        "icon": "$(desktop-download)",
-        "enablement": "comonad.tavern"
-      },
-      {
-        "command": "comonad.pickCharacter",
-        "title": "Comonad: Pick Character",
-        "category": "Comonad",
-        "icon": "$(person)",
-        "enablement": "comonad.tavern"
-      },
-      {
-        "command": "comonad.pickLorebooks",
-        "title": "Comonad: Pick World Books",
-        "category": "Comonad",
-        "icon": "$(book)",
-        "enablement": "comonad.tavern"
-      },
-      {
-        "command": "comonad.reloadTavern",
-        "title": "Comonad: Reload Characters, Books and Presets",
-        "category": "Comonad",
-        "icon": "$(refresh)",
-        "enablement": "comonad.tavern"
-      },
-      {
-        "command": "comonad.pickPersona",
-        "title": "Comonad: Pick Persona",
-        "category": "Comonad",
-        "icon": "$(account)",
-        "enablement": "comonad.tavern"
-      },
-      {
-        "command": "comonad.pickTavernPreset",
-        "title": "Comonad: Pick Prompt Preset",
-        "category": "Comonad",
-        "icon": "$(symbol-structure)",
-        "enablement": "comonad.tavern"
-      },
-      {
         "command": "comonad.newSession",
         "title": "Comonad: New Session",
         "category": "Comonad",
@@ -479,11 +423,6 @@
           "group": "navigation@0"
         },
         {
-          "command": "comonad.openContent",
-          "when": "view == comonad.chat && comonad.tavern",
-          "group": "navigation@1"
-        },
-        {
           "command": "comonad.openSettings",
           "when": "view == comonad.chat",
           "group": "navigation@2"
@@ -514,11 +453,6 @@
           "command": "comonad.toggleHistory",
           "when": "activeWebviewPanelId == comonad.chat",
           "group": "navigation@0"
-        },
-        {
-          "command": "comonad.openContent",
-          "when": "activeWebviewPanelId == comonad.chat",
-          "group": "navigation@1"
         },
         {
           "command": "comonad.openSettings",
@@ -877,10 +811,7 @@
           "markdownDescription": "OpenAI-compatible endpoints to chat with. The model menu is read from each endpoint (`GET /models`), so a new model needs no configuration; a profile's `model` is what a bare profile id selects. Empty uses the shipped profiles (DeepSeek Flash first, so **Auto** runs on it). A key stored with **Comonad: Configure Model Provider** belongs to the endpoint and every profile with the same normalized `base` shares it; without a stored key, the variables in `keyEnv` are tried in order.",
           "items": {
             "type": "object",
-            "required": [
-              "id",
-              "model"
-            ],
+            "required": ["id", "model"],
             "properties": {
               "id": {
                 "type": "string"
@@ -1052,8 +983,7 @@
                   "comonad-memory",
                   "comonad-todos",
                   "comonad-skills",
-                  "comonad-agents",
-                  "comonad-lore",
+                  "comonad-orchestrator",
                   "comonad-context"
                 ]
               },
@@ -1177,217 +1107,10 @@
           "default": true,
           "description": "Offer the unrestricted preset. Set to false to keep the agent behind approvals and sandboxing."
         },
-        "comonad.tavernEnabled": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Compose every turn with the ST prompt collection: Comonad's blocks, a character, world books, a persona and a preset. With no preset selected the built-in **Default** is used. Off sends the agent prompt on its own."
-        },
-        "comonad.tavernCharacter": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Default character for new chats: the card's file name or its `name`. Use **Comonad: Pick Character** to choose per chat."
-        },
-        "comonad.tavernPersona": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Default user persona for new chats, by file name or title."
-        },
-        "comonad.tavernUserName": {
-          "type": "string",
-          "default": "User",
-          "description": "What the {{user}} macro expands to when no persona is selected."
-        },
-        "comonad.personaAutoLock": {
-          "type": "boolean",
-          "default": false,
-          "description": "Lock a persona to the chat as soon as it is picked, the way SillyTavern's Auto-lock does."
-        },
-        "comonad.personaAllowMultiConnections": {
-          "type": "boolean",
-          "default": false,
-          "description": "Allow more than one persona to be connected to the same character."
-        },
-        "comonad.personaShowNotifications": {
-          "type": "boolean",
-          "default": true,
-          "description": "Tell the user when the chat's persona changes."
-        },
-        "comonad.tavernLorebooks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "World books scanned for every chat that does not pick its own."
-        },
-        "comonad.tavernPreset": {
-          "type": "string",
-          "default": "",
-          "description": "Default OpenAI preset (prompts, order and samplers) for new chats, by file name. Empty uses the built-in Default."
-        },
-        "comonad.tavernAuthorNote": {
-          "type": "string",
-          "default": "",
-          "description": "Standing instruction injected into the chat at comonad.tavernNoteDepth, like Author's Note."
-        },
-        "comonad.tavernNoteDepth": {
-          "type": "number",
-          "default": 4,
-          "description": "How many messages from the end the author's note is injected at."
-        },
-        "comonad.tavernWiFormat": {
-          "type": "string",
-          "default": "{0}",
-          "markdownDescription": "Wrapper applied to activated world-book entries, e.g. `[Details: {0}]`."
-        },
-        "comonad.tavernScenarioFormat": {
-          "type": "string",
-          "default": "{{scenario}}",
-          "description": "Wrapper applied to the card's scenario before it is injected."
-        },
-        "comonad.tavernPersonalityFormat": {
-          "type": "string",
-          "default": "{{personality}}",
-          "description": "Wrapper applied to the card's personality before it is injected."
-        },
-        "comonad.tavernRegex": {
-          "type": "array",
-          "items": {
-            "type": "object"
-          },
-          "default": [],
-          "markdownDescription": "Regex scripts applied to the prompt or to replies. The same shape SillyTavern stores: `{ scriptName, findRegex, replaceString, placement, disabled, markdownOnly, promptOnly, runOnEdit, minDepth, maxDepth, trimStrings }`."
-        },
         "comonad.tokenizerDir": {
           "type": "string",
           "default": "",
-          "markdownDescription": "A SillyTavern folder whose `src/tokenizers` holds the tokenizers it ships itself — Gemma/Gemini, Llama3, Claude, Llama, Mistral, Yi, Jamba. Models with a published tokenizer (DeepSeek, Qwen2, Command R/A, Nemo, GLM) are downloaded and cached instead, and OpenAI-family models use `tiktoken`'s encodings. Empty means those models are counted with SillyTavern's own fallback estimate (bytes / 3.35)."
-        },
-        "comonad.wiScanDepth": {
-          "type": "number",
-          "default": 2,
-          "description": "How many recent messages the world-info scan reads for keywords."
-        },
-        "comonad.wiBudget": {
-          "type": "number",
-          "default": 25,
-          "description": "Percentage of the context window world-book entries may occupy (0 disables the budget)."
-        },
-        "comonad.wiBudgetCap": {
-          "type": "number",
-          "default": 0,
-          "description": "Hard cap in tokens on world-book entries, whatever the percentage allows (0 disables the cap)."
-        },
-        "comonad.wiRecursive": {
-          "type": "boolean",
-          "default": false,
-          "description": "Let activated entries scan the newest messages in turn and activate more."
-        },
-        "comonad.wiMaxRecursionSteps": {
-          "type": "number",
-          "default": 0,
-          "description": "Recursion depth (0 means unlimited passes)."
-        },
-        "comonad.wiMinActivations": {
-          "type": "number",
-          "default": 0,
-          "description": "Keep scanning further back until this many entries are active (0 disables)."
-        },
-        "comonad.wiMaxActivationsDepth": {
-          "type": "number",
-          "default": 0,
-          "description": "How far back the minimum-activations scan may look, in messages."
-        },
-        "comonad.wiCaseSensitive": {
-          "type": "boolean",
-          "default": false,
-          "description": "Match world-book keys case-sensitively."
-        },
-        "comonad.wiMatchWholeWords": {
-          "type": "boolean",
-          "default": false,
-          "description": "Require whole words when matching world-book keys."
-        },
-        "comonad.wiIncludeNames": {
-          "type": "boolean",
-          "default": true,
-          "description": "Prefix injected world-book entries with their title."
-        },
-        "comonad.wiCharacterStrategy": {
-          "type": "number",
-          "default": 1,
-          "enum": [
-            0,
-            1,
-            2
-          ],
-          "markdownDescription": "How character-bound and global books interleave: `0` sorted evenly, `1` character lore first, `2` global lore first."
-        },
-        "comonad.wiGroupScoring": {
-          "type": "boolean",
-          "default": false,
-          "description": "Score a group's entries together instead of keeping only its strongest member."
-        },
-        "comonad.wiOverflowAlert": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Say so when the world-info scan ran out of budget and dropped entries (SillyTavern's *Alert On Overflow*)."
-        },
-        "comonad.wiAutomation": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Run the automation an activated entry names in its *Automation ID*: the `WorldInfoActivated` hook, then a slash command of that name. Off by default — naming an automation is enough to run it."
-        },
-        "comonad.wiVectorEnabled": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Find world-info entries marked *Vectorized* by meaning instead of by keys, the way SillyTavern's Vectors extension does. Needs an endpoint that embeds."
-        },
-        "comonad.wiVectorProfile": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "The profile whose endpoint embeds. Empty means the chat's own model profile — set this when that endpoint has no embeddings."
-        },
-        "comonad.wiVectorModel": {
-          "type": "string",
-          "default": "text-embedding-3-small",
-          "description": "The embedding model to ask for."
-        },
-        "comonad.wiVectorThreshold": {
-          "type": "number",
-          "default": 0.25,
-          "minimum": 0,
-          "maximum": 1,
-          "markdownDescription": "The lowest cosine similarity an entry needs to be injected (SillyTavern's *Score threshold*)."
-        },
-        "comonad.wiVectorMaxEntries": {
-          "type": "number",
-          "default": 5,
-          "minimum": 0,
-          "description": "How many vectorized entries one book may contribute to a turn."
-        },
-        "comonad.wiVectorQuery": {
-          "type": "number",
-          "default": 2,
-          "minimum": 1,
-          "description": "How many of the newest messages of the chat form the search query."
-        },
-        "comonad.tagImportSetting": {
-          "type": "number",
-          "default": 1,
-          "enum": [
-            1,
-            2,
-            3,
-            4
-          ],
-          "enumDescriptions": [
-            "Ask every time a card's own tags could be imported.",
-            "Never import a card's tags.",
-            "Import every tag a card carries, creating the ones that are new.",
-            "Import only the card tags that already exist as tags in the library."
-          ],
-          "markdownDescription": "What to do with the tags a character card carries in its own `tags` field (SillyTavern's *Tag Import Option*): `1` ask, `2` none, `3` all, `4` only existing."
+          "markdownDescription": "A local tokenizer folder whose `src/tokenizers` holds the files it ships — Gemma/Gemini, Llama3, Claude, Llama, Mistral, Yi, Jamba (SillyTavern's folder layout is supported). Models with a published tokenizer (DeepSeek, Qwen2, Command R/A, Nemo, GLM) are downloaded and cached instead, and OpenAI-family models use `tiktoken`'s encodings. Empty means those models are counted with the fallback estimate (bytes / 3.35)."
         }
       }
     }
@@ -1443,7 +1166,6 @@
   "dependencies": {
     "@agnai/web-tokenizers": "^0.1.6-pre3",
     "cordis": "^4.0.0-rc.10",
-    "fuse.js": "^7.5.0",
     "gpt-tokenizer": "^4.0.0",
     "schemastery": "^3.18.0",
     "tiny-pinyin": "^1.3.2",

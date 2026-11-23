@@ -137,17 +137,6 @@ const SURFACE = 'panel';
 const VIEW_ID = 'comonad.chat';
 const CONTAINER_ID = 'workbench.view.extension.comonadChat';
 
-/**
- * What the content layer reports to the chat UI: the world-book entries the last turn's scan
- * injected, so the lore the model was given is visible next to the composer.
- */
-function tavernState(session: Session | undefined): Record<string, unknown> {
-	return {
-		activated: (session?.tavernActivated ?? []).map((hit) => `${hit.book} — ${hit.comment || hit.reason} (${hit.reason})`),
-		overflow: session?.tavernOverflow === true,
-	};
-}
-
 export function chatPanel(ctx: Context): void {
 	// The chat's webview asset registry: plugins add scripts/styles to the document through it. It is
 	// mounted here because the chat panel is its only consumer, and its lifetime is the chat's.
@@ -370,7 +359,6 @@ export function chatPanel(ctx: Context): void {
 			// on its own message, so a slow endpoint can never delay state.
 			historyScope,
 			sessionTotal: all.length,
-			tavern: tavernState(session),
 			sessions: all
 				.slice(0, 60)
 				.map((item) => ({ id: item.id, title: item.title, active: item.id === session?.id, updatedAt: item.updatedAt })),
@@ -546,7 +534,6 @@ export function chatPanel(ctx: Context): void {
 				sessionId: session.id,
 				prompt: turn.prompt,
 				promptAttachments: ctx.attachments.publicAttachments(turn.promptAttachments),
-				greeting: turn.greeting,
 				// The reply variants and which one is showing: the webview draws `‹ n/m ›` from these.
 				swipes: turn.swipes,
 				swipeId: turn.swipeId,
@@ -902,8 +889,8 @@ export function chatPanel(ctx: Context): void {
 			}
 		}
 	});
-	// One refresh answers a burst of events: a content save moves `tavern/changed`, and the settings
-	// it writes through move `settings/changed` a moment later — the panel needs one repaint, not two.
+	// One refresh answers a burst of events: a settings save moves `settings/changed` and the tools it
+	// writes through move `tools/changed` a moment later — the panel needs one repaint, not two.
 	let refreshTimer: NodeJS.Timeout | undefined;
 	const refreshSoon = (): void => {
 		clearTimeout(refreshTimer);
@@ -917,9 +904,6 @@ export function chatPanel(ctx: Context): void {
 	// Storing or clearing a key changes which rows the model menu can actually run.
 	ctx.on('llm/keys-changed', refreshSoon);
 	ctx.on('checkpoints/changed', () => void refreshChanges());
-	// Content changes (a reload, a card added) only move what the composer reads out, never the
-	// transcript.
-	ctx.on('tavern/changed', refreshSoon);
 	// The `/` menu is state, not a query: a new command (a plugin mounting, a file written) repaints it.
 	ctx.on('commands/changed', refreshSoon);
 	ctx.on('catalog/changed', refreshSoon);
@@ -1311,7 +1295,7 @@ export function chatPanel(ctx: Context): void {
 		const turns = turnsOf(session.transcript);
 		const last = turns[turns.length - 1];
 		if (trigger === 'swipe' || trigger === 'regenerate') {
-			if (!last || last.greeting) {
+			if (!last) {
 				post({ type: 'notice', text: 'There is nothing to generate again yet.' });
 				return;
 			}
@@ -1465,7 +1449,7 @@ export function chatPanel(ctx: Context): void {
 			return;
 		}
 		const turn = turnsOf(session.transcript).find((item) => item.index === turnIndex);
-		if (!turn || turn.greeting || turn.promptAt === undefined) {
+		if (!turn || turn.promptAt === undefined) {
 			post({ type: 'notice', text: 'That message is not a prompt that can be edited.' });
 			return;
 		}
@@ -2045,14 +2029,6 @@ export function chatPanel(ctx: Context): void {
 					}
 					break;
 				}
-				case 'lorebooks':
-					// The picker is the tavern row's own command: with that row off there is nothing to pick.
-					if (ctx.get('tavern')) {
-						await vscode.commands.executeCommand('comonad.pickLorebooks');
-					} else {
-						post({ type: 'notice', text: 'World books come from the SillyTavern content row — turn it on under Settings → Plugins.' });
-					}
-					break;
 			}
 		} catch (error) {
 			ctx.log.message(`chat panel error: ${describe(error)}`);
@@ -2347,7 +2323,6 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 			</div>
 			<!-- What belongs at the right edge of the box: the chips, the generation menu and Send. -->
 			<div id="sendbar">
-				<button id="lore" class="chip" hidden></button>
 				<div class="pill pill-caret" data-control="generate">
 					<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false" data-tip="Generation type — Normal, Continue, Impersonate, Swipe, Regenerate, Quiet"><span class="pill-label">Generate</span><span class="chev">▾</span></button>
 					<div class="pill-menu" hidden></div>

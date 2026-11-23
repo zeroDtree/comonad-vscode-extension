@@ -12,9 +12,9 @@ import { webTokenizers } from './web-tokenizers';
  * 1. **The OpenAI family** — `tiktoken`'s encodings, which the rank tables in `gpt-tokenizer`
  *    reproduce exactly (a pure-JS BPE: no wasm file to ship, no request to make).
  * 2. **A provider a feature installs** (`ctx.tokenizers.use`) — a plugin that owns tokenizer files of
- *    its own claims the models they cover and loads them; the tavern layer installs SillyTavern's
- *    collection this way. A provider that downloads answers at once and hands its encoder over when
- *    it lands, so a turn never waits on the network.
+ *    its own claims the models they cover and loads them; the built-in web provider installs the
+ *    SillyTavern-compatible collection this way. A provider that downloads answers at once and hands
+ *    its encoder over when it lands, so a turn never waits on the network.
  * 3. **Anything else** — upstream's own fallback, `ceil(bytes / 3.35)`, and one log line saying
  *    which tokenizer was missing.
  *

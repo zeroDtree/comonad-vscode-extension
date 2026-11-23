@@ -195,8 +195,8 @@ export function slashCommands(ctx: Context): void {
 		return { done: true, result: result.text };
 	});
 
-	// The generation types SillyTavern's own generate menu offers. Each one is a real generation: the
-	// type decides which world-info entries may activate and how the text is written down.
+	// The generation types the composer offers. Each one is a real generation: the type decides how
+	// the text is written down.
 	register('continue', 'Continue the last message instead of answering a new one', () => ({ done: false, text: '', trigger: 'continue' }));
 	register('impersonate', 'Write your next message for you', () => ({ done: false, text: '', trigger: 'impersonate' }));
 	register('swipe', 'Generate another version of the last reply', () => ({ done: false, text: '', trigger: 'swipe' }));

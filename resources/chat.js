@@ -19,7 +19,6 @@
 	const changesList = $('changes-list');
 	const changesToggle = $('changes-toggle');
 	const changesActions = $('changes-actions');
-	const loreChip = $('lore');
 	const barEl = $('bar');
 	const chatsEl = $('chats');
 	const chatsList = $('chats-list');
@@ -198,8 +197,8 @@
 		syncPlanCards();
 		vscode.postMessage({ type: 'setMode', mode });
 	});
-	// The generation menu is not a setting: every entry runs a generation of that type, which is how
-	// SillyTavern's own generate button works. The host owns the list (and its wording).
+	// The generation menu is not a setting: every entry runs a generation of that type. The host owns
+	// the list (and its wording).
 	const GENERATION_TIPS = {
 		normal: 'answer the text in the box',
 		continue: 'carry the last message on from where it stops',
@@ -469,10 +468,6 @@
 	modelPill.onOpen = () => {
 		renderModelMenu();
 	};
-
-	/* What the content layer reported after the last turn: the entries the world-book scan injected. */
-
-	const tavernState = { activated: [], overflow: false };
 
 	let state = null;
 	let shownSession = null;
@@ -2177,7 +2172,7 @@
 		renderPromptAttachments(turn);
 		if (!turn.command) {
 			const actions = [{ key: 'copy', icon: 'copy', tip: 'Copy message', run: (button) => copyAction(button, turn.prompt) }];
-			if (!readOnly && !turn.greeting && turn.prompt) {
+			if (!readOnly && turn.prompt) {
 				actions.push({ key: 'edit', icon: 'pencil', tip: 'Edit this prompt and run it again', run: () => beginEdit(turn) });
 			}
 			const long = promptIsLong(turn);
@@ -2190,11 +2185,8 @@
 				applyPromptState(turn, row.querySelector('.act[data-act="expand"]'));
 			}
 		}
-		if (turn.greeting) {
-			// A character's opening line has no prompt behind it: the bubble would be empty.
-			root.classList.add('greeting');
-		} else if (turn.prompt || (turn.promptAttachments && turn.promptAttachments.length)) {
-			// A continuation, an impersonation and a quiet turn have no prompt of their own either —
+		if (turn.prompt || (turn.promptAttachments && turn.promptAttachments.length)) {
+			// A continuation, an impersonation and a quiet turn have no prompt of their own —
 			// the host sends them with no text, and an empty bubble is not a message. An image-only
 			// prompt is a message even though its text is empty.
 			root.appendChild(prompt);
@@ -2229,7 +2221,7 @@
 	 * the footer count says that before anything is sent; the host asks separately about files.
 	 */
 	function beginEdit(turn) {
-		if (running || (state && state.suspended) || turn.greeting || turn.command || !turn.prompt) {
+		if (running || (state && state.suspended) || turn.command || !turn.prompt) {
 			return;
 		}
 		closeEdit();
@@ -2342,14 +2334,14 @@
 	function refreshActions() {
 		const last = turns.length ? turns[turns.length - 1] : null;
 		for (const button of messagesEl.querySelectorAll('.foot .act[data-act="again"]')) {
-			button.hidden = !last || button.closest('.turn') !== last._root || running || Boolean(last.greeting);
+			button.hidden = !last || button.closest('.turn') !== last._root || running;
 		}
 		const suspended = Boolean(state && state.suspended);
 		for (const button of messagesEl.querySelectorAll('.msg.user .act[data-act="edit"]')) {
 			const turn = button.closest('.turn')?._turn;
 			// An image-only prompt has no text but is still a prompt that can be run again.
 		const prompted = Boolean(turn && (turn.prompt || (turn.promptAttachments && turn.promptAttachments.length)));
-		button.hidden = running || suspended || !turn || Boolean(turn.greeting) || Boolean(turn.command) || !prompted;
+		button.hidden = running || suspended || !turn || Boolean(turn.command) || !prompted;
 		}
 	}
 
@@ -3716,8 +3708,6 @@
 		fillPill(approvalPill, state.approvals, state.approval, 'Tool approval policy — what happens to a call no rule matched');
 		fillPill(sandboxPill, state.sandboxes, state.sandboxMode, 'Sandbox mode — how far reads and writes may reach');
 		fillGenerations();
-		Object.assign(tavernState, state.tavern || {});
-		renderLore();
 		// Switching the display form or the tool card mode redraws what is on screen — never during a
 		// turn, where the transcript is being written to. A mode change also drops per-card toggles so
 		// every card follows the new default.
@@ -3832,24 +3822,6 @@
 			row.addEventListener('click', () => vscode.postMessage({ type: 'openFile', path: file.path }));
 			changesList.appendChild(row);
 		}
-	}
-
-	/** What the last turn's world-book scan injected, so the readout mirrors the request. */
-	function renderLore() {
-		const hits = tavernState.activated || [];
-		if (!hits.length) {
-			loreChip.hidden = true;
-			loreChip.textContent = '';
-			return;
-		}
-		loreChip.hidden = false;
-		loreChip.classList.toggle('is-over', tavernState.overflow === true);
-		loreChip.textContent = (tavernState.overflow ? '◈⚠ ' : '◈ ') + hits.length + (hits.length === 1 ? ' lore entry' : ' lore entries');
-		loreChip.dataset.tip =
-			'World-book entries injected into the last turn:\n' +
-			hits.join('\n') +
-			(tavernState.overflow ? '\n\n⚠ The world-info budget was reached, so later entries were left out.' : '') +
-			'\n\nClick to pick the books this chat scans';
 	}
 
 	function renderTasks() {
@@ -5201,7 +5173,6 @@
 	$('changes-undo').addEventListener('click', () => vscode.postMessage({ type: 'undoAll' }));
 	$('changes-keep').addEventListener('click', () => vscode.postMessage({ type: 'keepAll' }));
 	$('changes-review').addEventListener('click', () => vscode.postMessage({ type: 'review' }));
-	loreChip.addEventListener('click', () => vscode.postMessage({ type: 'lorebooks' }));
 
 	/* ------------------------------------------------------------------ focus */
 

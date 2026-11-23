@@ -24,11 +24,6 @@ suite('Comonad extension', () => {
 		]) {
 			assert.ok(commands.includes(id), `${id} is registered`);
 		}
-		// The tavern is a plugin of its own, mounted from a `cordis.yml` row: its commands come and go
-		// with that row, so a fresh window has none of them.
-		for (const id of ['comonad.pickCharacter', 'comonad.pickPersona', 'comonad.reloadTavern']) {
-			assert.ok(!commands.includes(id), `${id} belongs to the tavern plugin, not the kernel`);
-		}
 		// The change journal is a row of the shipped tree — on by default, and its review commands are
 		// there with it (the manifest's `enablement: comonad.checkpoints` hides them again when the row
 		// is turned off). Exporting a chat is not the journal's: that one is the sessions view's.

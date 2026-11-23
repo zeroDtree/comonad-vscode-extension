@@ -1444,12 +1444,6 @@ details.thinking summary::before {
 	margin-top: 6px;
 }
 
-/* A greeting turn has no prompt behind it, so a quiet rule sets the opening line apart. */
-.turn.greeting {
-	padding-left: 10px;
-	border-left: 2px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
-}
-
 .msg.assistant .steps > * {
 	margin-bottom: 6px;
 }
@@ -2385,27 +2379,6 @@ footer {
 
 #controls button {
 	padding: 3px 10px;
-}
-
-#lore.chip {
-	font-size: 11px;
-	padding: 2px 6px;
-	border-radius: 10px;
-	background: transparent;
-	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
-	opacity: 0.85;
-	white-space: nowrap;
-}
-
-#lore.chip {
-	cursor: pointer;
-}
-
-/* The scan ran out of world-info budget: the readout is no longer the whole story. */
-#lore.chip.is-over {
-	border-color: var(--vscode-editorWarning-foreground, #cca700);
-	color: var(--vscode-editorWarning-foreground, #cca700);
-	opacity: 1;
 }
 
 /* ------------------------------------------------------------------ hover tips */

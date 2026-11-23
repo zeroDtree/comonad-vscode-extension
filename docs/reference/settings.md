@@ -139,21 +139,14 @@ child unlimited; set a finite root budget if you want a cap.
 The journal is a row of the plugin tree; turning it off removes the review commands with it. See
 [Checkpoints](/guide/checkpoints).
 
-## Content layer
+## Tokenizers
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `tavernEnabled` | `true` | Compose every turn with the ST collection once the plugin is loaded |
-| `tokenizerDir` | empty | A SillyTavern checkout for its tokenizer files |
-| `wiAutomation` | `false` | Run an activated entry's Automation ID command |
-| `wiVectorEnabled` | `false` | Find vectorized entries by meaning |
-| `wiVectorProfile` | chat profile | Endpoint used for embeddings |
-| `wiVectorModel` | `text-embedding-3-small` | Embedding model |
-| `wiVectorThreshold` | `0.25` | Minimum cosine similarity |
-| `wiVectorMaxEntries` | `5` | Vectorized entries one book may contribute |
-| `wiVectorQuery` | `2` | Newest messages that form the query |
+| `tokenizerDir` | empty | A local tokenizer folder (`src/tokenizers` layout) for the tokenizer files it ships; downloaded and cached tokenizers are used otherwise |
 
-See [Content layer](/guide/content).
+Tokenizers make token counts exact for the context budget, compaction and `/context`. Models with a
+published tokenizer are downloaded on first use; OpenAI-family models use `tiktoken`'s encodings.
 
 ## Next
 

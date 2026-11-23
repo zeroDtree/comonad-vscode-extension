@@ -3,6 +3,14 @@
 > **Internal archive.** Implementation-level notes for the next release. User documentation lives
 > in `docs/`; the summary is in `CHANGELOG.md`.
 
+- **The tavern content layer, its pane framework and the remaining SillyTavern-only plumbing are
+  removed.** Deleted `packages/comonad-plugin-tavern`, the eight `comonad.tavern*` commands and
+  menus, the 36 tavern/persona/world-info settings, `services/panes.ts`, the settings-panel pane
+  tabs and Save/draft machinery, the chat lore chip, tavern/changed, session tavern fields and
+  greetings, the lore block/`lore_lookup` allowlists, preset samplers, `mergePromptPrefixes`,
+  `fuse.js`, and the content docs. Tokenizers (including `tokenizerDir`), the six generation
+  types, swipes, `contextForm`, attachments, references and compaction are untouched. Stored
+  sessions drop the removed fields on load.
 - **Compaction is proactive, calibrated and small.** `compactionHeadroom` (default 20,000 tokens,
   `0` disables) and `compactionRetainPercent` (default 20%) are read live before every model request;
   the whole request is estimated, scaled by `lastInputTokens / lastEstimateTokens` (clamped to

@@ -19,7 +19,6 @@ import { logPlugin } from './services/log';
 import { mailboxPlugin } from './services/mailbox';
 import { mcpPlugin } from './services/mcp';
 import { orchestratorPlugin } from './services/orchestrator';
-import { panesPlugin } from './services/panes';
 import { pluginHost, type PluginRow } from './services/plugins';
 import { sessionsPlugin } from './services/sessions';
 import { settingsPlugin } from './services/settings';
@@ -84,7 +83,6 @@ export const PLUGINS: Record<string, Plugin> = {
 	tasks: tasksPlugin,
 	tools: toolsPlugin,
 	catalog: catalogPlugin,
-	panes: panesPlugin,
 	tokenizers: tokenizersPlugin,
 	llm: llmPlugin,
 	hooks: hooksPlugin,
@@ -148,8 +146,6 @@ export const ROWS: PluginRow[] = [
 	{ id: 'tasks', group: 'kernel' },
 	{ id: 'tools', group: 'kernel' },
 	{ id: 'catalog', group: 'kernel' },
-	// The settings panel draws whatever panes are registered, whichever plugin brought them.
-	{ id: 'panes', group: 'kernel' },
 	{ id: 'tokenizers', group: 'kernel' },
 	{ id: 'llm', group: 'kernel' },
 	{ id: 'hooks', group: 'kernel' },

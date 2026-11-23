@@ -58,7 +58,6 @@ npm run compile
 | [安全](/zh/guide/safety) | 模式、审批策略、规则、沙箱、密钥 |
 | [上下文](/zh/guide/context) | 窗口预算、压缩、`/context` |
 | [检查点与审查](/zh/guide/checkpoints) | 变更日志、Keep/Undo、恢复点 |
-| [内容层](/zh/guide/content) | 角色、世界书、人格、预设（SillyTavern 格式） |
 | [扩展](/zh/guide/extend) | 插件、Hooks、Skills、Subagents、MCP |
 | [远程与容器](/zh/guide/remote) | Remote SSH、WSL、Dev Containers |
 | [命令](/zh/reference/commands) | 内置与自定义 slash 命令 |

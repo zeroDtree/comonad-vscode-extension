@@ -5,9 +5,9 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
-import { COMONAD_BLOCK, COMONAD_BLOCKS, DEFAULT_BLOCK_PREFIX, isComonadBlockId, type ComonadBlockId } from '../lib/blocks';
+import { COMONAD_BLOCK, COMONAD_BLOCKS, DEFAULT_BLOCK_PREFIX, type ComonadBlockId } from '../lib/blocks';
 import { isLoopbackBase, normalizeEndpoint } from '../lib/endpoint';
-import { defaultPromptLayout, mergePromptPrefixes, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
+import { defaultPromptLayout, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
 import { pluginNodeStatus, pluginTree, type PluginNode } from '../lib/plugins';
 import {
 	APPROVAL_LABELS,
@@ -21,14 +21,12 @@ import {
 import { type ContextForm } from '../lib/prompt';
 import { ensureSettingsFile, settingsDisplayPath, workspaceFirstScope, type SettingsScope } from '../lib/settings-file';
 import { estimateTokens } from '../lib/tokens';
-import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
 import { asList, normalizeAgentPatch, profileKeyEnvs, sanitizeSubagentGrants, subagentGrant, type Profile, type ToolCardMode } from '../services/settings';
 import { unavailableInSandbox } from '../services/tools';
-import type { PaneController, PaneHost, PaneSpec } from '../services/panes';
 import { registerCommand } from './register';
 
-/** Webview settings panel: the core tabs, plus whatever panes plugins register. */
+/** Webview settings panel: the core tabs. */
 
 /** A message's scope, defaulting to the user's own file when an older client sends none. */
 const panelScope = (value: unknown): SettingsScope => (value === 'workspace' ? 'workspace' : 'user');
@@ -53,7 +51,7 @@ const CONTEXT_LABELS: Record<ContextForm, string> = {
 
 export function settingsPanel(ctx: Context): void {
 	let panel: vscode.WebviewPanel | null = null;
-	// One message at a time: a live Agent save and a Save click must not interleave their writes.
+	// One message at a time: two live saves must not interleave their writes.
 	let queue: Promise<void> = Promise.resolve();
 	// The plugin list is the host's own service, and the host is what mounts this row: it is read when
 	// the tab is drawn rather than captured here, because at this moment it does not exist yet.
@@ -69,14 +67,6 @@ export function settingsPanel(ctx: Context): void {
 			requires: row.requires,
 			usedBy: row.usedBy,
 		}));
-	// The tavern service is a row of its own, so the panel names it where it needs it — the prompt list
-	// shows the collection the active chat would send — and a tree without that row still draws.
-	const tavern = () => ctx.get('tavern') as TavernApi | undefined;
-	// The panel draws whatever panes the tree registered: the **ST** tab, its markup, its scripts and
-	// its editor are the tavern plugin's, so with that row off there is no tab and no content code at
-	// all. Each pane is fed the whole state push and asked, at save time, for the keys it owns.
-	let controllers = new Map<string, PaneController>();
-	const paneList = (): PaneSpec[] => ctx.get('panes')?.list() ?? [];
 	/** What the document and the first state push both say about the scope selector. */
 	const scopeState = (): SettingsDocumentScope => {
 		const workspace = ctx.settings.workspace();
@@ -89,42 +79,6 @@ export function settingsPanel(ctx: Context): void {
 			workspaceFile: settingsDisplayPath(ctx.host.settingsPath('workspace'), homedir()),
 		};
 	};
-	const paneHost = (): PaneHost => ({
-		uri: (file: string) => (panel ? String(panel.webview.asWebviewUri(vscode.Uri.file(file))) : ''),
-		refresh: () => void schedulePush(),
-	});
-	// A pane arrives with its row, so its reveal command is registered the first time it is seen.
-	const paneCommands = new Set<string>();
-	/** The tab the document opens on: what the panel was last asked for, built again when a pane moves. */
-	let wanted = 'agent';
-	/** Rebuilds the controllers, the commands that reveal them, and the open document. */
-	const buildPanes = (scope: Context): void => {
-		controllers = new Map(
-			paneList()
-				.filter((pane) => pane.controller)
-				.map((pane) => [pane.id, pane.controller!(paneHost())] as const),
-		);
-		for (const pane of paneList()) {
-			if (pane.command && !paneCommands.has(pane.command)) {
-				paneCommands.add(pane.command);
-				registerCommand(scope, pane.command, () => open(pane.id));
-			}
-		}
-		if (panel) {
-			// The tab, its markup and its files are part of the document, so a row going on or off is a
-			// document, not a list, that changes.
-			panel.webview.html = settingsDocument(panel.webview, ctx.host.extensionUri as vscode.Uri, wanted, paneList(), scopeState());
-		}
-		void schedulePush();
-	};
-	ctx.inject(['panes'], (scope) => {
-		scope.on('panes/changed', () => buildPanes(scope));
-		// The row resolves a moment after the panel is built, so the first pass is made once it does.
-		void Promise.resolve().then(() => buildPanes(scope));
-		return () => {
-			controllers = new Map();
-		};
-	});
 
 	/** One level of directories for the working-directory picker. */
 	const listDirs = (raw: string): { path: string; parent: string; entries: { name: string; path: string }[]; error: string } => {
@@ -227,26 +181,8 @@ export function settingsPanel(ctx: Context): void {
 	};
 
 	/**
-	 * What the panes own of a save: every controller is asked for the keys it is responsible for,
-	 * and only the keys this patch actually carries are kept. The controller fills the rest from the
-	 * current settings, but writing those back would persist defaults on every unrelated save.
-	 */
-	const panePatch = (patch: Record<string, unknown>): Record<string, unknown> => {
-		const owned: Record<string, unknown> = {};
-		for (const controller of controllers.values()) {
-			for (const [key, value] of Object.entries(controller.patch?.(patch) ?? {})) {
-				if (Object.hasOwn(patch, key)) {
-					owned[key] = value;
-				}
-			}
-		}
-		return owned;
-	};
-
-	/**
-	 * Writes what the panel sent. Only keys the patch actually carries are touched: the Agent tab
-	 * sends one control at a time, the Save button sends the draft panes, and neither may write a
-	 * stale value for something it does not own.
+	 * Writes what the panel sent. Only keys the patch actually carries are touched: the live controls
+	 * send one key at a time, and none may write a stale value for something it does not own.
 	 */
 	const apply = async (patch: Record<string, unknown>, scope: SettingsScope): Promise<void> => {
 		const current = ctx.settings.get();
@@ -258,14 +194,12 @@ export function settingsPanel(ctx: Context): void {
 				deny: ruleList(patch.deny ?? current.permissions.deny, 'deny'),
 			};
 		}
-		Object.assign(next, panePatch(patch));
 		const mcpServers =
 			patch.mcpServers && typeof patch.mcpServers === 'object'
 				? (patch.mcpServers as Record<string, unknown>)
 				: undefined;
-		// Pane keys live outside the kernel's `Config`, so what is compared against is the raw store
-		// under the defaulted view: a kernel key reads exactly as it always did, and a pane's own key
-		// against the value the host reports for it.
+		// A key reads against the raw store under the defaulted view, so a value that did not actually
+		// change is not written back.
 		const seen: Record<string, unknown> = { ...ctx.host.config(), ...current };
 		for (const [key, value] of Object.entries(next)) {
 			if (!same(seen[key], value)) {
@@ -393,9 +327,6 @@ export function settingsPanel(ctx: Context): void {
 					};
 				}),
 			},
-			// Each pane's own slices travel under its id: the panel has no content code of its own, and a
-			// pane that is not registered is simply a tab that is not there.
-			panes: Object.fromEntries([...controllers].map(([id, controller]) => [id, controller.state()])),
 			plugins: {
 				rows: dependencies,
 				dependencies,
@@ -438,9 +369,8 @@ export function settingsPanel(ctx: Context): void {
 
 	/**
 	 * The one way a state is pushed. A single action lands as two or three events — the answer to the
-	 * message, `tavern/changed`, `settings/changed` — and each of them used to rebuild and resend the
-	 * whole state; they collapse into one push here. Never cancelled, only pushed later: the panes
-	 * treat the push after a note as its ack.
+	 * message, `settings/changed`, `tools/changed` — and each of them used to rebuild and resend the
+	 * whole state; they collapse into one push here. Never cancelled, only pushed later.
 	 */
 	let pushTimer: NodeJS.Timeout | undefined;
 	const schedulePush = (): void => {
@@ -455,9 +385,6 @@ export function settingsPanel(ctx: Context): void {
 	 * The layout editor's data: Comonad's blocks (their order, switch, editable prefix and generated
 	 * body) and every tool definition with its order/switch. Read on demand — it reads instruction
 	 * files and memory from disk — so the tab asks for it rather than waiting for a state push.
-	 *
-	 * Under ST the Comonad order and switches are the active preset's, mirrored read-only here; the
-	 * prefixes are still the kernel's and are used by the composed request.
 	 */
 	const promptsSlice = async (): Promise<Record<string, unknown>> => {
 		const session = ctx.sessions.active();
@@ -469,20 +396,8 @@ export function settingsPanel(ctx: Context): void {
 		const blocks = effective ? await ctx.agent.promptBlocks(effective) : [];
 		const byId = new Map(blocks.map((block) => [block.id, block]));
 		const layout = ctx.settings.get().prompts;
-		const takeover = tavern()?.enabled() === true;
-		let st: ReturnType<TavernApi['promptsFor']> = [];
-		if (takeover && session) {
-			try {
-				st = tavern()?.promptsFor(session.id) ?? [];
-			} catch {
-				st = [];
-			}
-		}
-		const stComonad = st.filter((prompt) => isComonadBlockId(prompt.identifier));
-		const stById = new Map(stComonad.map((prompt) => [prompt.identifier, prompt]));
-		const stToolsEnabled = takeover ? stById.get(COMONAD_BLOCK.tools)?.enabled !== false : true;
 		const toolsBlockEnabled = layout.find((entry) => entry.id === COMONAD_BLOCK.tools)?.enabled !== false;
-		const toolsGate = takeover ? stToolsEnabled : toolsBlockEnabled;
+		const toolsGate = toolsBlockEnabled;
 
 		const comonadRow = (id: ComonadBlockId, enabled: boolean, order: number): Record<string, unknown> => {
 			const block = byId.get(id);
@@ -497,22 +412,9 @@ export function settingsPanel(ctx: Context): void {
 				tokens: block ? estimateTokens(block.text) : 0,
 				enabled,
 				order,
-				readOnlyOrder: takeover,
 			};
 		};
-		const comonad = takeover
-			? (() => {
-					// The tavern's completeOrder guarantees all nine; a broken old build may not, so the
-					// missing ones follow in canonical order rather than vanishing from the editor.
-					const ids: ComonadBlockId[] = stComonad.map((prompt) => prompt.identifier as ComonadBlockId);
-					for (const block of COMONAD_BLOCKS) {
-						if (!stById.has(block.id)) {
-							ids.push(block.id);
-						}
-					}
-					return ids.map((id, index) => comonadRow(id, stById.get(id)?.enabled ?? true, index));
-				})()
-			: layout.map((entry, index) => comonadRow(entry.id, entry.enabled, index));
+		const comonad = layout.map((entry, index) => comonadRow(entry.id, entry.enabled, index));
 
 		const mode = policy ? (MODE_LABELS[policy.workMode] ?? policy.workMode).split(' — ')[0] : '';
 		const tools = ctx.tools.layout().map(({ tool, enabled }, order) => {
@@ -521,9 +423,7 @@ export function settingsPanel(ctx: Context): void {
 			const reason = !enabled
 				? 'switched off in Prompts'
 				: !toolsGate
-					? takeover
-						? 'ST Tools entry is off'
-						: 'the Tools block is off'
+					? 'the Tools block is off'
 					: policyOffered
 						? undefined
 						: !policy
@@ -562,8 +462,6 @@ export function settingsPanel(ctx: Context): void {
 							sandbox: SANDBOX_LABELS[policy.sandboxMode] ?? policy.sandboxMode,
 						}
 					: null,
-			takeover,
-			stToolsEnabled,
 			toolsBlockEnabled,
 			comonad,
 			tools,
@@ -594,20 +492,8 @@ export function settingsPanel(ctx: Context): void {
 				case 'close':
 					panel.dispose();
 					return;
-				case 'save': {
-					const scope = panelScope(message.scope);
-					const patch: Record<string, unknown> = { ...((message.config ?? {}) as Record<string, unknown>) };
-					if (message.mcpServers !== undefined) {
-						patch.mcpServers = message.mcpServers;
-					}
-					await apply(patch, scope);
-					const file = settingsDisplayPath(ctx.host.settingsPath(scope), homedir());
-					void panel.webview.postMessage({ type: 'ok', message: `Saved to ${file}.` });
-					break;
-				}
 				case 'saveAgent':
-					// No `ok`: that reply clears the Save button's dirty ring, which belongs to the
-					// draft tabs. The state push after the write redraws the Agent controls.
+					// No `ok`: the state push after the write redraws the live controls.
 					await apply((message.config ?? {}) as Record<string, unknown>, panelScope(message.scope));
 					break;
 				case 'saveSubagents':
@@ -658,11 +544,7 @@ export function settingsPanel(ctx: Context): void {
 				}
 				case 'savePrompts': {
 					const scope = panelScope(message.scope);
-					const incoming = parsePromptLayout(message.prompts);
-					// Under ST the rows mirror the preset's order and switches. Only the prefixes are the
-					// core layout's to change; saving the mirror as the fallback order would overwrite it.
-					const takeover = tavern()?.enabled() === true;
-					const prompts = takeover ? mergePromptPrefixes(ctx.settings.get().prompts, incoming) : incoming;
+					const prompts = parsePromptLayout(message.prompts);
 					const nextTools = parseToolLayout(message.toolPrompts);
 					// A tool that is temporarily unregistered keeps its saved place and switch: the editor
 					// only knows the tools loaded right now, so anything it did not mention is carried over.
@@ -694,18 +576,6 @@ export function settingsPanel(ctx: Context): void {
 					await vscode.window.showTextDocument(document, { preview: false });
 					return;
 				}
-				case 'openTab':
-					open(String(message.tab ?? 'agent'));
-					return;
-				case 'pane': {
-					// A pane's message is its own: it is routed by id and answered with a note of its own.
-					const id = String(message.pane ?? '');
-					const note = await controllers.get(id)?.action((message.message ?? {}) as Record<string, unknown>);
-					if (note) {
-						void panel.webview.postMessage({ type: 'note', pane: id, ...note });
-					}
-					break;
-				}
 			}
 		} catch (error) {
 			void panel.webview.postMessage({ type: 'error', message: describe(error) });
@@ -713,38 +583,23 @@ export function settingsPanel(ctx: Context): void {
 		schedulePush();
 	};
 
-	/** Reveal the panel, optionally on one of its tabs — `st` is where the content lives. */
-	const open = (tab?: string): void => {
-		wanted = tab ?? wanted;
+	/** Reveal the panel. */
+	const open = (): void => {
 		if (panel) {
 			panel.reveal();
-			if (tab) {
-				void panel.webview.postMessage({ type: 'openTab', tab });
-			}
 			pushState();
 			return;
 		}
 		const extensionUri = ctx.host.extensionUri as vscode.Uri;
-		// The panes' files and library folders come along: a pane's client travels beside its package,
-		// and a persona's picture is a file in the library the pane displays.
-		const roots = new Set<string>([join(extensionUri.fsPath, 'resources')]);
-		for (const pane of paneList()) {
-			for (const file of [...(pane.scripts ?? []), ...(pane.styles ?? [])]) {
-				roots.add(dirname(file));
-			}
-			for (const root of pane.roots?.() ?? []) {
-				roots.add(root);
-			}
-		}
 		panel = vscode.window.createWebviewPanel('comonad.settings', 'Comonad Settings', vscode.ViewColumn.Active, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
-			localResourceRoots: [...roots].map((root) => vscode.Uri.file(root)),
+			localResourceRoots: [vscode.Uri.file(join(extensionUri.fsPath, 'resources'))],
 		});
 		panel.onDidDispose(() => {
 			panel = null;
 		});
-		panel.webview.html = settingsDocument(panel.webview, extensionUri, tab ?? 'agent', paneList(), scopeState());
+		panel.webview.html = settingsDocument(panel.webview, extensionUri, scopeState());
 		panel.webview.onDidReceiveMessage((message: Record<string, unknown>) => {
 			queue = queue.then(() => handle(message));
 		});
@@ -970,25 +825,11 @@ export interface SettingsDocumentScope {
 export function settingsDocument(
 	webview: vscode.Webview,
 	extensionUri: vscode.Uri,
-	tab: string,
-	panes: readonly PaneSpec[],
 	scope: SettingsDocumentScope,
 ): string {
 	const nonce = randomBytes(16).toString('base64');
-	const uri = (file: string): string => String(webview.asWebviewUri(vscode.Uri.file(file)));
 	const script = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'settings.js'));
 	const style = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'settings.css'));
-	// A pane brings its own files: they are listed after the host's client, which is what hands them the
-	// message channel they post a pane's actions through.
-	const paneStyles = panes.flatMap((pane) => pane.styles ?? []).map(uri);
-	const paneScripts = panes.flatMap((pane) => pane.scripts ?? []).map(uri);
-	const paneTabs = panes
-		.map((pane) => tabButton(pane.id, pane.label, pane.title ?? pane.label, pane.icon ?? TAB_ICONS.plugins))
-		.join('\n');
-	// A pane is a guest page: its section is the markup it brings, undressed by the host.
-	const paneSections = panes
-		.map((pane) => `  <section data-pane="${escapeHtml(pane.id)}" hidden>\n${pane.markup}  </section>`)
-		.join('\n');
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -996,7 +837,6 @@ export function settingsDocument(
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' https://cdn.jsdelivr.net; connect-src https://cdn.jsdelivr.net; img-src ${webview.cspSource} data:; font-src ${webview.cspSource};" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <link rel="stylesheet" href="${style}" />
-${paneStyles.map((src) => `<link rel="stylesheet" href="${src}" />`).join('\n')}
 </head>
 <body>
   <aside id="side">
@@ -1006,7 +846,6 @@ ${tabButton('agent', 'Agent', 'Agent — model, workspace, conversation', TAB_IC
 ${tabButton('policies', 'Policies', 'Policies — the runtime policy pipeline', TAB_ICONS.policies)}
 ${tabButton('ui', 'UI', 'UI — how the conversation is displayed', TAB_ICONS.ui)}
 ${tabButton('subagents', 'Subagents', 'Subagents — step budget and per-agent capability grants', TAB_ICONS.subagents)}
-${paneTabs}
 ${tabButton('mcp', 'MCP', 'MCP — servers and their status', TAB_ICONS.mcp)}
 ${tabButton('tools', 'Tools', 'Tools — what a turn may run', TAB_ICONS.tools)}
 ${tabButton('prompts', 'Prompts', 'Prompts — Comonad blocks and tool definitions', TAB_ICONS.prompts)}
@@ -1016,8 +855,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     <div id="side-foot">
       <div id="status"></div>
       <div class="row">
-        <button class="primary" id="save" type="button" title="Save — write the draft pane tabs to this workspace"><span class="btn-icon" aria-hidden="true">✓</span><span class="btn-label">Save</span></button>
-        <button class="secondary" id="close" type="button" title="Close — unsaved edits are dropped"><span class="btn-icon" aria-hidden="true">✕</span><span class="btn-label">Close</span></button>
+        <button class="secondary" id="close" type="button" title="Close"><span class="btn-icon" aria-hidden="true">✕</span><span class="btn-label">Close</span></button>
       </div>
     </div>
   </aside>
@@ -1252,7 +1090,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     </details>
   </section>
 
-${paneSections}
 
   <section data-pane="prompts" hidden>
     <h1 class="page-title">Prompts</h1>
@@ -1261,14 +1098,14 @@ ${paneSections}
       <div id="pr-wrap">
         <div class="field">
           <label>Comonad blocks and tool definitions</label>
-          <p class="hint">Comonad's blocks carry the static prefix you can edit; the dynamic content below it is generated every turn. Tools keep the definitions their plugins register — this page only orders and switches them. When ST takes over, the block order and switches mirror the active preset. Pick a row to view or edit it.</p>
+          <p class="hint">Comonad's blocks carry the static prefix you can edit; the dynamic content below it is generated every turn. Tools keep the definitions their plugins register — this page only orders and switches them. Pick a row to view or edit it.</p>
           <p class="hint" id="pr-chat"></p>
           <div id="pr-list"></div>
         </div>
       </div>
       <div class="row">
         <button class="primary" id="pr-save" type="button" title="Write this layout to settings">Save</button>
-        <button class="secondary" id="pr-reset" type="button" title="Reset prefixes and tool switches; block order returns to the shipped order when ST is off">Reset to defaults</button>
+        <button class="secondary" id="pr-reset" type="button" title="Reset prefixes and tool switches; block order returns to the shipped order">Reset to defaults</button>
         <button class="secondary" id="pr-refresh" type="button" title="Read the prompts again">Refresh</button>
       </div>
     </div>
@@ -1371,8 +1208,7 @@ ${paneSections}
   </section>
   </main>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.min.js"></script>
-<script nonce="${nonce}" src="${script}" data-tab="${tab}" data-scope="${scope.defaultScope}" data-folder-open="${scope.folderOpen}" data-trusted="${scope.trusted}" data-user-file="${escapeHtml(scope.userFile)}" data-workspace-file="${escapeHtml(scope.workspaceFile)}"></script>
-${paneScripts.map((src) => `<script nonce="${nonce}" src="${src}"></script>`).join('\n')}
+<script nonce="${nonce}" src="${script}" data-scope="${scope.defaultScope}" data-folder-open="${scope.folderOpen}" data-trusted="${scope.trusted}" data-user-file="${escapeHtml(scope.userFile)}" data-workspace-file="${escapeHtml(scope.workspaceFile)}"></script>
 </body>
 </html>`;
 }

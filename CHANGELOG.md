@@ -12,6 +12,10 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 ### Highlights
 
+- **The SillyTavern content layer is removed.** The optional tavern plugin, its settings and
+  commands, the pane framework, the character/world-book/persona/preset library, greetings, the
+  lore tool and the `fuse.js` dependency are gone. Chat, the six generation types, swipes,
+  tokenizers and compaction remain.
 - **Compaction is proactive.** Before every model request — not only at a turn's start — the agent
   measures the whole request, calibrates the local estimate against the prompt size the provider
   last reported, and once fewer than `compactionHeadroom` tokens remain (20,000 by default) it

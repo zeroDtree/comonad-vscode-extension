@@ -76,7 +76,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## fuse.js 7.5.0 — Apache-2.0
+## Apache License 2.0
 
 Apache License
                            Version 2.0, January 2004
@@ -653,6 +653,6 @@ SOFTWARE.
 
 The `comonad-plugin-pdf` bundle includes PDF.js, bundled by unpdf. PDF.js is
 Copyright (c) Mozilla Foundation and contributors and is licensed under the
-Apache License, Version 2.0. A copy of that license appears above in the
-fuse.js notice. The PDF.js source is available at
+Apache License, Version 2.0. A copy of that license appears above. The PDF.js
+source is available at
 <https://github.com/mozilla/pdf.js>.

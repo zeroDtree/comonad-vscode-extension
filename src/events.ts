@@ -40,7 +40,6 @@ declare module 'cordis' {
 		'catalog/changed'(): void;
 		/** A slash command was registered or withdrawn: the composer's command menu may have changed. */
 		'commands/changed'(): void;
-		'tavern/changed'(): void;
 		'tools/changed'(): void;
 		/**
 		 * The tool policy pipeline, named and shaped as the DeepSeek Harness names and shapes it, so a

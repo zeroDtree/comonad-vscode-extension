@@ -62,17 +62,17 @@ npm run package      # production bundle
 esbuild bundles the extension into one CJS file; the test bundle is built the same way, so the fast
 suite runs the real services on a headless Cordis context with a fake host (`src/test/harness.ts`).
 Tests cover the policy gate, rule syntax, graph parse/compile/suspend, frontmatter, path guards,
-diff parsing, session persistence, the journal, the content layer and the Cordis kernel itself.
+diff parsing, session persistence, the journal and the Cordis kernel itself.
 
 ## Plugin packages
 
 Two packages ship beside the bundle as plugins:
 
-- `packages/comonad-plugin-tavern` — the SillyTavern content layer.
 - `packages/comonad-plugin-math` — KaTeX, its stylesheet and its fonts.
+- `packages/comonad-plugin-pdf` — PDF text extraction.
 
-Each is built as its own bundle by `npm run build:plugins` (part of `npm run compile`). The tavern
-plugin imports the host's shared vocabulary by name (`@comonad/*`) and ships as one folder.
+Each is built as its own bundle by `npm run build:plugins` (part of `npm run compile`). A plugin
+imports the host's shared vocabulary by name (`@comonad/*`) and ships as one folder.
 
 ## Documents
 

@@ -57,7 +57,6 @@ The full guide is at **<https://zeroDtree.github.io/comonad-vscode-extension/>**
 | [Context](https://zeroDtree.github.io/comonad-vscode-extension/guide/context.html) | Window budget and compaction |
 | [Checkpoints and review](https://zeroDtree.github.io/comonad-vscode-extension/guide/checkpoints.html) | Journal, Keep/Undo, restore points |
 | [Orchestration](https://zeroDtree.github.io/comonad-vscode-extension/guide/orchestration.html) | Orchestrator, 14 roles, task DAG, acceptance, parallel writes |
-| [Content layer](https://zeroDtree.github.io/comonad-vscode-extension/guide/content.html) | Characters, world books, personas, presets |
 | [Extending](https://zeroDtree.github.io/comonad-vscode-extension/guide/extend.html) | Plugins, hooks, skills, subagent roles, MCP |
 | [Reference](https://zeroDtree.github.io/comonad-vscode-extension/reference/commands.html) | Commands, tools and settings |
 
@@ -96,5 +95,5 @@ Comonad Agent for VS Code is licensed under **AGPL-3.0-only**. See
 
 Third-party components and their licenses are listed in
 [THIRD_PARTY_NOTICES.md](https://github.com/zeroDtree/comonad-vscode-extension/blob/main/THIRD_PARTY_NOTICES.md);
-the modifications relative to SillyTavern are recorded in
+provenance notes are in
 [NOTICE](https://github.com/zeroDtree/comonad-vscode-extension/blob/main/NOTICE).

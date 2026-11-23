@@ -72,7 +72,6 @@ const SHELL_TEST = ['run_shell_test'];
 const SKILL = ['skill'];
 const WEB = ['fetch_url', 'web_search'];
 const MATH = ['calculate', 'describe_numbers', 'percentile', 'convert_units'];
-const LORE = ['lore_lookup'];
 const MESSAGE = ['message'];
 const TODO = ['todo_write'];
 
@@ -101,7 +100,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 			'You handle a focused, lightweight task that has no clear specialist. Work only with the read-only tools you are given. Inspect the workspace, answer the question, and return concise facts with file paths and line references. Never modify anything.',
 		capabilities: ['ro', 'shell_ro'],
 		network: false,
-		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...LORE, ...MESSAGE, ...TODO],
+		tools: [...READ, ...DIAG, ...SHELL_READ, ...SKILL, ...MESSAGE, ...TODO],
 		budget: { turns: 8, tools: 30 },
 	}),
 	role({
@@ -112,7 +111,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 			'You research external sources for a delegated question. Search the web, prefer primary sources, and record title, URL, date and confidence for every claim. Separate sourced fact from inference. Never modify the workspace.',
 		capabilities: ['ro'],
 		network: true,
-		tools: [...READ, ...WEB, ...SKILL, ...LORE, ...MESSAGE, ...TODO],
+		tools: [...READ, ...WEB, ...SKILL, ...MESSAGE, ...TODO],
 		budget: { turns: 10, tools: 40 },
 	}),
 	role({
@@ -238,7 +237,7 @@ export const BUILTIN_ROLES: readonly AgentRole[] = [
 			'You write technical documentation for the delegated audience. Read the code and existing docs first; be accurate, concise and consistent with the project voice. Do not invent APIs or behavior. Report every file you change.',
 		capabilities: ['ro', 'rw', 'shell_ro'],
 		network: false,
-		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SKILL, ...LORE, ...MESSAGE, ...TODO],
+		tools: [...READ, ...DIAG, ...WRITE, ...SHELL_READ, ...SKILL, ...MESSAGE, ...TODO],
 		grant: files(),
 		budget: { turns: 10, tools: 40 },
 	}),

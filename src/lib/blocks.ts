@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The stable names of Comonad's own prompt blocks. A preset orders and switches these like any other
- * entry, but their text is generated every turn, so the identifiers — not the text — are the contract
- * between the agent that builds a block and the tavern that places it.
+ * The stable names of Comonad's own prompt blocks. The Prompts tab orders and switches these, but
+ * their text is generated every turn, so the identifiers — not the text — are the contract.
  *
- * This module is pure: no `vscode`, no `cordis`, and no import from the plugin.
+ * This module is pure: no `vscode`, no `cordis`, and no import from a plugin.
  */
 
 /** The identifiers, named for the code that builds a block. */
@@ -16,13 +15,12 @@ export const COMONAD_BLOCK = {
 	todos: 'comonad-todos',
 	skills: 'comonad-skills',
 	orchestrator: 'comonad-orchestrator',
-	lore: 'comonad-lore',
 	context: 'comonad-context',
 } as const;
 
 export type ComonadBlockId = (typeof COMONAD_BLOCK)[keyof typeof COMONAD_BLOCK];
 
-/** The blocks in the order the default collection places them, with the name a preset shows. */
+/** The blocks in the order the default layout places them, with the name the panel shows. */
 export const COMONAD_BLOCKS: readonly { id: ComonadBlockId; name: string }[] = [
 	{ id: COMONAD_BLOCK.identity, name: 'Identity' },
 	{ id: COMONAD_BLOCK.tools, name: 'Tools' },
@@ -31,7 +29,6 @@ export const COMONAD_BLOCKS: readonly { id: ComonadBlockId; name: string }[] = [
 	{ id: COMONAD_BLOCK.todos, name: 'Todos' },
 	{ id: COMONAD_BLOCK.skills, name: 'Skills' },
 	{ id: COMONAD_BLOCK.orchestrator, name: 'Orchestration' },
-	{ id: COMONAD_BLOCK.lore, name: 'Lore index' },
 	{ id: COMONAD_BLOCK.context, name: 'Context' },
 ];
 
@@ -49,7 +46,6 @@ export const DEFAULT_BLOCK_PREFIX: Record<ComonadBlockId, string> = {
 	[COMONAD_BLOCK.todos]: 'Current todo list:',
 	[COMONAD_BLOCK.skills]: 'Skills (load one with the skill tool before following it):',
 	[COMONAD_BLOCK.orchestrator]: 'You are the Orchestrator: answer directly when the work is trivial; otherwise plan, delegate, verify, and deliver.',
-	[COMONAD_BLOCK.lore]: 'World books (look one up with the lore_lookup tool when the user mentions something here):',
 	[COMONAD_BLOCK.context]: 'Context:',
 };
 
@@ -82,13 +78,7 @@ export const COMONAD_BLOCK_IDS: readonly ComonadBlockId[] = COMONAD_BLOCKS.map((
 
 const COMONAD_IDS: ReadonlySet<string> = new Set<string>(COMONAD_BLOCK_IDS);
 
-/** Whether a preset identifier names one of Comonad's generated blocks. */
+/** Whether an identifier names one of Comonad's generated blocks. */
 export function isComonadBlockId(value: string): value is ComonadBlockId {
 	return COMONAD_IDS.has(value);
 }
-
-/**
- * The blocks that advertise a tool. They are left out whenever the request carries no tools, so the
- * model is never told to call something it cannot reach.
- */
-export const TOOL_DEPENDENT_BLOCKS: readonly ComonadBlockId[] = [COMONAD_BLOCK.skills, COMONAD_BLOCK.orchestrator, COMONAD_BLOCK.lore];

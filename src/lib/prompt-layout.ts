@@ -103,25 +103,7 @@ export function parseToolLayout(value: unknown): ToolPromptSetting[] {
 }
 
 /**
- * The prefixes from an edited layout over the current core order and switches. Under ST the editor
- * shows the preset's order/switches (read-only), so a save must not copy that mirror into the
- * fallback layout: only the prefix fields are the core layout's to take.
- */
-export function mergePromptPrefixes(
-	current: readonly PromptBlockSetting[],
-	incoming: readonly PromptBlockSetting[],
-): PromptBlockSetting[] {
-	const byId = new Map(incoming.map((entry) => [entry.id, entry]));
-	return current.map((entry) => {
-		const edit = byId.get(entry.id);
-		return edit ? { ...entry, prefix: edit.prefix } : entry;
-	});
-}
-
-/**
- * The fallback system prompt's blocks: switched-on, non-empty, in the user's order. Under ST this is
- * not used — the active preset's order is authoritative there, and the agent's full block list is
- * handed to `compose` unchanged.
+ * The system prompt's blocks: switched-on, non-empty, in the user's order.
  */
 export function applyPromptLayout(blocks: readonly PromptBlock[], layout: readonly PromptBlockSetting[]): PromptBlock[] {
 	const position = new Map(layout.map((entry, index) => [entry.id, index]));

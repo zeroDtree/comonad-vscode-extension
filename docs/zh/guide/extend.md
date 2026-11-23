@@ -1,7 +1,7 @@
 # 扩展
 
 Comonad 的一切都是同一个 [Cordis](https://github.com/cordiverse/cordis) 上下文上的插件：内核、工具、
-模型适配器、面板和内容层。插件是 `cordis.yml` 里的一行，它注册的一切都是随行关闭而消失的 effect。
+模型适配器与面板。插件是 `cordis.yml` 里的一行，它注册的一切都是随行关闭而消失的 effect。
 
 ```mermaid
 flowchart TB
@@ -20,7 +20,7 @@ flowchart TB
 
 ```yaml
 # .comonad/cordis.yml
-- { id: comonad-plugin-tavern, name: ./plugins/comonad-plugin-tavern/dist/index.js }
+- { id: comonad-plugin-math, name: ./plugins/comonad-plugin-math/dist/index.js }
 - { id: mine, name: ./mine.js, config: { greeting: hello } }
 - { id: scratch, name: ./scratch.js, disabled: true }
 ```

@@ -999,7 +999,7 @@ suite('Context compaction', () => {
 			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
 			session.contextWindow = 32_768;
 			const older: Message[] = [];
-			for (let index = 0; index < 20; index += 1) {
+			for (let index = 0; index < 30; index += 1) {
 				older.push({ role: 'user', content: `older question ${index} ${'x'.repeat(2_000)}`, at: 1_000 + index * 2 });
 				older.push({ role: 'assistant', content: `older answer ${index} ${'y'.repeat(2_000)}`, at: 1_001 + index * 2 });
 			}

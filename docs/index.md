@@ -62,7 +62,6 @@ any OpenAI-compatible endpoint with **Comonad: Configure Model Provider**. Open 
 | [Safety](/guide/safety) | Modes, approval policies, rules, sandboxing, secrets |
 | [Context](/guide/context) | Window budget, compaction, `/context` |
 | [Checkpoints and review](/guide/checkpoints) | Journal, Keep/Undo, restore points |
-| [Content layer](/guide/content) | Characters, world books, personas, presets (SillyTavern formats) |
 | [Extending](/guide/extend) | Plugins, hooks, skills, subagents, MCP |
 | [Remote and containers](/guide/remote) | Remote SSH, WSL and Dev Containers |
 | [Commands](/reference/commands) | Built-in and custom slash commands |

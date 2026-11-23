@@ -41,10 +41,10 @@ export class Catalog extends Service {
 	agents: AgentRole[] = [...BUILTIN_ROLES];
 	commands: CustomCommand[] = [];
 
-	/** The first read, in flight from the moment the service exists: see `Tavern.ready`. */
+	/** The first read, in flight from the moment the service exists. */
 	readonly ready: Promise<void>;
 
-	/** The reads run one at a time, so the read that started first cannot land last: see `Tavern`. */
+	/** The reads run one at a time, so the read that started first cannot land last. */
 	private reading: Promise<void> = Promise.resolve();
 
 	constructor(ctx: Context) {

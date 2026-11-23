@@ -123,21 +123,13 @@ partial transcript；子任务进入 `paused`。`resume` 用新的分段预算�
 
 日志是插件树里的一行；关掉它会连同审查命令一起移除。见[检查点](/zh/guide/checkpoints)。
 
-## 内容层
+## 分词器
 
 | 键 | 默认值 | 用途 |
 | --- | --- | --- |
-| `tavernEnabled` | `true` | 插件加载后，每个回合都由 ST 集合组装 |
-| `tokenizerDir` | 空 | SillyTavern 检出目录，用于其 tokenizer 文件 |
-| `wiAutomation` | `false` | 运行激活条目的 Automation ID 命令 |
-| `wiVectorEnabled` | `false` | 按语义查找 vectorized 条目 |
-| `wiVectorProfile` | 聊天 profile | 用于 embeddings 的端点 |
-| `wiVectorModel` | `text-embedding-3-small` | 嵌入模型 |
-| `wiVectorThreshold` | `0.25` | 最低余弦相似度 |
-| `wiVectorMaxEntries` | `5` | 一本书最多贡献的 vectorized 条目数 |
-| `wiVectorQuery` | `2` | 构成查询的最新消息数 |
+| `tokenizerDir` | 空 | 本地 tokenizer 目录（`src/tokenizers` 布局），用于随附的 tokenizer 文件；否则使用下载并缓存的 tokenizer |
 
-见[内容层](/zh/guide/content)。
+Tokenizer 让上下文预算、压缩与 `/context` 的 token 计数保持精确。有公开 tokenizer 的模型会在首次使用时下载；OpenAI 系列使用 `tiktoken` 编码。
 
 ## 下一步
 

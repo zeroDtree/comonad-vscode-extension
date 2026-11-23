@@ -148,21 +148,6 @@ export interface Session {
 	lastInputModel?: string;
 	/** Instruction files loaded into the last system prompt. */
 	instructions?: string[];
-	/** Tavern selection: a character and persona by id, world books by name, a preset by id. */
-	character?: string;
-	persona?: string;
-	lorebooks?: string[];
-	preset?: string;
-	/** Standing text for the author's-note slot, when the chat sets its own. */
-	authorNote?: string;
-	/** Which of the character's greetings this chat opened with (0 is the card's own). */
-	greetingIndex?: number;
-	/** World-info sticky/cooldown windows carried across turns. */
-	tavernEffects?: Record<string, { activatedAt: number; stickyUntil?: number; cooldownUntil?: number }>;
-	/** What the books contributed to the last turn, for the chat's readout. */
-	tavernActivated?: Array<{ book: string; comment: string; reason: string }>;
-	/** True when the last scan ran out of world-info budget and had to drop entries. */
-	tavernOverflow?: boolean;
 }
 
 export function threadTitle(text: string): string {
@@ -479,7 +464,34 @@ export class SessionStore {
 		const transcript = sanitizeMessages(stored).filter((message) => message?.summarized !== true);
 		const legacy = (session as Session & { summary?: { text?: unknown; at?: unknown } }).summary;
 		const modelContext = normalizeModelContext(session.modelContext, transcript) ?? legacyModelContext(legacy, legacyHead);
-		const { summary: _legacy, workflow: _workflow, ...rest } = session as Session & { summary?: unknown; workflow?: unknown };
+		// Fields stored by a feature that no longer exists; drop them on load instead of carrying them
+		// into the next save.
+		const {
+			summary: _legacy,
+			workflow: _workflow,
+			character: _character,
+			persona: _persona,
+			lorebooks: _lorebooks,
+			preset: _preset,
+			authorNote: _authorNote,
+			greetingIndex: _greetingIndex,
+			tavernEffects: _tavernEffects,
+			tavernActivated: _tavernActivated,
+			tavernOverflow: _tavernOverflow,
+			...rest
+		} = session as Session & {
+			summary?: unknown;
+			workflow?: unknown;
+			character?: unknown;
+			persona?: unknown;
+			lorebooks?: unknown;
+			preset?: unknown;
+			authorNote?: unknown;
+			greetingIndex?: unknown;
+			tavernEffects?: unknown;
+			tavernActivated?: unknown;
+			tavernOverflow?: unknown;
+		};
 		// A delegated session fails closed on a missing or damaged capability/tool snapshot: falling
 		// back to the mode's full set would silently widen a child.
 		const delegated = Boolean(session.subagent || session.parentId);
@@ -572,9 +584,10 @@ function sanitizeMessages(messages: unknown): Message[] {
 		if (!value || typeof value !== 'object') {
 			return value as Message;
 		}
-		const message = value as Message;
+		const message = value as Message & { greeting?: unknown };
 		const attachments = asAttachments((value as { attachments?: unknown }).attachments);
-		return { ...message, attachments };
+		const { greeting: _greeting, ...clean } = message;
+		return { ...clean, attachments };
 	});
 }
 
@@ -1042,30 +1055,6 @@ export class Sessions extends Service {
 		this.save(session);
 		this.changed(id);
 		return true;
-	}
-
-	/**
-	 * Sets a character's opening line as the first turn of a chat that has not said anything yet.
-	 * A chat that already holds a real message is never rewritten: the caller reports that instead.
-	 */
-	greet(id: string, text: string, index = 0): boolean {
-		const session = this.require(id);
-		const content = text.trim();
-		if (!content || session.cursor || session.transcript.some((message) => !message.greeting)) {
-			return false;
-		}
-		session.transcript = [{ role: 'assistant', content, greeting: true, at: Date.now() }];
-		session.modelContext = undefined;
-		this.verified.delete(session);
-		session.greetingIndex = index;
-		this.save(session);
-		this.changed(id);
-		return true;
-	}
-
-	/** Which of a character's greetings a chat opened with, for the UI to show. */
-	greeted(id: string): number | undefined {
-		return this.get(id)?.greetingIndex;
 	}
 
 	/**

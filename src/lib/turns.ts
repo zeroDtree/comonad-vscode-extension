@@ -31,7 +31,7 @@ export interface Turn {
 	index: number;
 	prompt: string;
 	steps: Step[];
-	/** Index of the user message that opened this turn. Absent for a greeting. */
+	/** Index of the user message that opened this turn. */
 	promptAt?: number;
 	/** Typed context the prompt carried: references, images, documents. */
 	promptAttachments?: AttachmentPart[];
@@ -39,8 +39,6 @@ export interface Turn {
 	at: number;
 	startedAt?: number;
 	endedAt?: number;
-	/** A character's opening line: there is no prompt behind it, so it cannot be regenerated. */
-	greeting?: boolean;
 	/**
 	 * The reply's variants, when it has been swiped or regenerated: `steps` already holds the active
 	 * one, because the transcript's `content` is always the variant that is showing.
@@ -94,14 +92,6 @@ export function turnsOf(transcript: Message[], first = 0): Turn[] {
 			};
 			turns.push(current);
 			return;
-		}
-		if (message.greeting) {
-			// A character's opening line is a turn of its own: it belongs to no prompt.
-			if (current) {
-				current.at = index;
-			}
-			current = { index: first + turns.length, prompt: '', steps: [], at: index + 1, startedAt: message.at, greeting: true };
-			turns.push(current);
 		}
 		if (!current) {
 			// Tool or assistant traffic before any prompt: nothing to attach it to.

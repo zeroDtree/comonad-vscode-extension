@@ -1,8 +1,8 @@
 # Context
 
-A request carries more than the conversation: a system prompt, the definitions of every tool the
-turn may run, and anything the content layer composes. All of it is paid out of the model's window,
-which is why a 128K model does not hold 128K of chat.
+A request carries more than the conversation: a system prompt and the definitions of every tool the
+turn may run. All of it is paid out of the model's window, which is why a 128K model does not hold
+128K of chat.
 
 ## The window
 
@@ -45,8 +45,8 @@ folded, and the reply's reserve is still held back. Both settings live in Settin
 
 The order of work is: summarize first at the headroom, then elide old tool output only if the request
 still cannot fit the reply-reserved window, and only then let the endpoint's refusal trigger one hard
-shrink and retry. Composed tavern requests and subagent requests are not foldable from the chat
-record, so they only elide. A successful fold reports the before/after size once; a trimmed request
+shrink and retry. Subagent requests are not foldable from the chat record, so they only elide. A
+successful fold reports the before/after size once; a trimmed request
 reports at most once per turn. A summary is a short, non-thinking call and is attempted at most four
 times per turn; one that fails is reported once and the turn continues.
 

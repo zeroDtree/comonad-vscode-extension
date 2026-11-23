@@ -264,7 +264,7 @@ export interface Config {
 	budgetUsd: number;
 	filterSensitiveEnv: boolean;
 	allowFullAccess: boolean;
-	/** A SillyTavern folder whose `src/tokenizers` holds the tokenizer files it ships itself. */
+	/** A local tokenizer folder whose `src/tokenizers` holds the tokenizer files it ships. */
 	tokenizerDir: string;
 	/** Comonad's own prompt blocks: order, switches and the editable static prefix of each. */
 	prompts: PromptBlockSetting[];

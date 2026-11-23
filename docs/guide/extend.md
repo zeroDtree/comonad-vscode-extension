@@ -1,7 +1,7 @@
 # Extending
 
 Everything in Comonad is a plugin on one [Cordis](https://github.com/cordiverse/cordis) context:
-the kernel, tools, model adapters, panels and the content layer. A plugin is a row in `cordis.yml`,
+the kernel, tools, model adapters and panels. A plugin is a row in `cordis.yml`,
 and anything it registers is an effect that disappears when the row is turned off.
 
 ```mermaid
@@ -21,7 +21,7 @@ Project rows live in `.comonad/cordis.yml`; user rows in `~/.comonad/cordis.yml`
 
 ```yaml
 # .comonad/cordis.yml
-- { id: comonad-plugin-tavern, name: ./plugins/comonad-plugin-tavern/dist/index.js }
+- { id: comonad-plugin-math, name: ./plugins/comonad-plugin-math/dist/index.js }
 - { id: mine, name: ./mine.js, config: { greeting: hello } }
 - { id: scratch, name: ./scratch.js, disabled: true }
 ```

@@ -101,7 +101,7 @@ files too**. **Regenerate** on the newest turn does the same for its reply.
 
 ### Generation types
 
-The ▾ beside **Send** offers the six SillyTavern-style generations:
+The ▾ beside **Send** offers six generation types:
 
 | Type | Effect |
 | --- | --- |

@@ -26,20 +26,6 @@
 | `/export` | 把会话导出为 Markdown |
 | `/resume` | 恢复挂起（等待审批）的回合 |
 
-## 内容层命令
-
-安装 SillyTavern 内容层后可用：
-
-| 命令 | 用途 |
-| --- | --- |
-| `/char [name]` | 选择本聊天扮演的角色 |
-| `/persona [name]` | 选择你在本聊天中是谁 |
-| `/lore [names]` | 选择本聊天扫描的世界书（`/lore none` 清除） |
-| `/preset [name]` | 选择提示词与采样器预设 |
-| `/note [text]` | 设置或清除本聊天的常驻作者注记 |
-
-见[内容层](/zh/guide/content)。
-
 ## 自定义命令
 
 自定义命令是 `.comonad/commands/*.md` 下的 Markdown 文件。可选 frontmatter：

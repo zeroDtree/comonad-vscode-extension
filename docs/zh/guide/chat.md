@@ -89,7 +89,7 @@ Network 在 **Policies**（或使用 **Comonad: Toggle Network** 命令）。修
 
 ### 生成类型
 
-**Send** 旁的 ▾ 提供六种 SillyTavern 风格生成：
+**Send** 旁的 ▾ 提供六种生成类型：
 
 | 类型 | 效果 |
 | --- | --- |

@@ -95,11 +95,6 @@ export interface OpenAiRequest {
 	temperature?: number;
 	topP?: number;
 	maxTokens?: number;
-	/** The three knobs a preset may set that a chat-completions endpoint understands. */
-	frequencyPenalty?: number;
-	presencePenalty?: number;
-	seed?: number;
-	logitBias?: Record<string, number>;
 	/** Thinking effort for models that support `reasoning_effort`. */
 	reasoningEffort?: string;	/** How this endpoint turns thinking off, for the `none` effort: DeepSeek's `thinking` field, or `reasoning_effort: "none"`. */
 	thinkingOff?: 'thinking' | 'effort';	includeUsage?: boolean;
@@ -147,18 +142,6 @@ export async function openAiChat(request: OpenAiRequest): Promise<Completion> {
 	}
 	if (request.topP !== undefined) {
 		body.top_p = request.topP;
-	}
-	if (request.frequencyPenalty !== undefined) {
-		body.frequency_penalty = request.frequencyPenalty;
-	}
-	if (request.presencePenalty !== undefined) {
-		body.presence_penalty = request.presencePenalty;
-	}
-	if (request.seed !== undefined) {
-		body.seed = request.seed;
-	}
-	if (request.logitBias !== undefined) {
-		body.logit_bias = request.logitBias;
 	}
 	if (request.maxTokens !== undefined) {
 		body.max_tokens = request.maxTokens;
@@ -446,7 +429,7 @@ function toOpenAi(message: Message, bypass: Record<string, unknown> | undefined)
 /**
  * Google's own last resort for a function call whose thought signature is unknown — one written before
  * this was kept, or by another provider. Gemini 3 refuses the request without *something* in the field,
- * so the placeholder is sent rather than losing the turn; SillyTavern sends it for the same reason.
+ * so the placeholder is sent rather than losing the turn.
  */
 const SKIP_SIGNATURE: Record<string, unknown> = { google: { thought_signature: 'skip_thought_signature_validator' } };
 

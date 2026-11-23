@@ -20,8 +20,6 @@ import { tasksPlugin } from '../services/tasks';
 import { toolsPlugin } from '../services/tools';
 import { catalogPlugin } from '../services/catalog';
 import { commandsPlugin } from '../services/commands';
-import { tavernPlugin } from 'comonad-plugin-tavern/services/tavern';
-import { loreToolPlugin } from 'comonad-plugin-tavern/tools/tavern';
 import { llmPlugin } from '../services/llm';
 import { hooksPlugin } from '../services/hooks';
 import { approvalPlugin } from '../services/approval';
@@ -111,7 +109,7 @@ export function fakeHost(root: string, values: Record<string, unknown>, workspac
  * question a user asks with `cordis.yml`: does everything else still work without it?
  */
 export async function createTestKernel(
-	options: { config?: Record<string, unknown>; skip?: Array<'checkpoints' | 'tavern' | 'lore'> } = {},
+	options: { config?: Record<string, unknown>; skip?: Array<'checkpoints'> } = {},
 ): Promise<TestKernel> {
 	const root = mkdtempSync(join(tmpdir(), 'comonad-'));
 	const workspace = join(root, 'ws');
@@ -174,8 +172,6 @@ export async function createTestKernel(
 		'llm',
 		'hooks',
 		'catalog',
-		'tavern',
-		'vectors',
 		'tokenizers',
 		'usage',
 		'tasks',
@@ -188,8 +184,7 @@ export async function createTestKernel(
 		'mailbox',
 		'orchestrator',
 		'agent',
-		// `vectors` arrives with the tavern that mounts it, so it waits with it and is skipped with it.
-	].filter((name) => !skipped.has(name) && (name !== 'vectors' || !skipped.has('tavern')));
+	].filter((name) => !skipped.has(name));
 	const fiber: Fiber & PromiseLike<Fiber> = ctx.plugin(function kernel(child: Context) {
 		child.provide('host', host);
 		child.plugin(logPlugin);
@@ -206,15 +201,8 @@ export async function createTestKernel(
 		child.plugin(tasksPlugin);
 		child.plugin(toolsPlugin);
 		child.plugin(catalogPlugin);
-		// The tavern brings its own vectors along: the vector side of world info is its business.
-		if (!skipped.has('tavern')) {
-			child.plugin(tavernPlugin);
-		}
 		child.plugin(commandsPlugin);
 		child.plugin(tokenizersPlugin);
-		if (!skipped.has('lore')) {
-			child.plugin(loreToolPlugin);
-		}
 		child.plugin(llmPlugin);
 		child.plugin(hooksPlugin);
 		child.plugin(approvalPlugin);
