@@ -3699,6 +3699,18 @@
 		}
 	}
 
+	/**
+	 * The usage/context line above the composer. Recomposed from the snapshot so a status-only
+	 * message can update it without repainting anything else.
+	 */
+	function renderStatus() {
+		if (!state) {
+			return;
+		}
+		const detail = [state.detail, state.suspended ? '⏸ waiting for approval — send /resume' : ''].filter(Boolean).join('  ·  ');
+		$('status').textContent = detail;
+	}
+
 	function renderState() {
 		if (!state) {
 			return;
@@ -3757,8 +3769,7 @@
 				: 'No OS sandbox on this host — shell commands are refused.\nChoose danger-full-access with network on to run them unconfined.'
 			: '';
 		refreshTip();
-		const detail = [state.detail, state.suspended ? '⏸ waiting for approval — send /resume' : ''].filter(Boolean).join('  ·  ');
-		$('status').textContent = detail;
+		renderStatus();
 		renderTasks();
 		renderTodos();
 		// The snapshot is authoritative about what runs: an idle one drops a session id left over from
@@ -3933,6 +3944,14 @@
 				if (mention && mention.mode === 'command') {
 					mention.items = commandRows(mention.query);
 					renderMention();
+				}
+				break;
+			case 'status':
+				// One model round trip finished: the host sends the line alone, so the transcript
+				// and the rest of the snapshot are not rebuilt mid-turn.
+				if (state && message.sessionId === state.sessionId) {
+					state.detail = typeof message.detail === 'string' ? message.detail : '';
+					renderStatus();
 				}
 				break;
 			case 'models':

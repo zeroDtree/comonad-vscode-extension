@@ -4557,6 +4557,78 @@ suite('Cordis kernel', () => {
 		assert.strictEqual(statusDetail(undefined, window), '', 'no chat, no line');
 	});
 
+	test('every completed model round trip publishes the usage it charged', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const reports = [
+				{ input: 100, output: 10, cached: 60 },
+				{ input: 200, output: 20, cached: 100 },
+			];
+			let calls = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					const usage = reports[Math.min(calls, reports.length - 1)];
+					calls += 1;
+					if (calls === 1) {
+						const toolCall: ToolCall = { id: 'c1', name: 'probe', arguments: JSON.stringify({ value: '42' }) };
+						return { message: { role: 'assistant', content: 'working', toolCalls: [toolCall] }, toolCalls: [toolCall], usage };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage };
+				},
+			});
+			await kernel.ctx.plugin(
+				toolset([
+					{
+						name: 'probe',
+						description: 'probe tool',
+						parameters: objectSchema({ value: { type: 'string' } }, ['value']),
+						capability: 'ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						async execute(args) {
+							return `probe:${(args as { value: string }).value}`;
+						},
+					},
+				]),
+			);
+			const order: string[] = [];
+			const measured: Array<{ sessionId: string; turnIndex: number; lastInputTokens?: number; window: number; usage: SessionUsage }> = [];
+			kernel.ctx.on('agent/usage', (ref, snapshot) => {
+				order.push('usage');
+				measured.push({ sessionId: ref.sessionId, ...snapshot });
+			});
+			kernel.ctx.on('agent/tool-start', () => order.push('tool-start'));
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			assert.deepStrictEqual(order, ['usage', 'tool-start', 'usage'], 'one event per completed model request');
+			assert.strictEqual(measured.length, 2);
+			const session = kernel.ctx.sessions.require(result.sessionId);
+			for (const event of measured) {
+				assert.strictEqual(event.sessionId, result.sessionId);
+				assert.strictEqual(event.window, kernel.ctx.agent.windowFor(session));
+				assert.strictEqual(event.turnIndex, 0, 'the index flips only when the turn finishes');
+			}
+			assert.deepStrictEqual(
+				[measured[0]!.usage.inputTokens, measured[0]!.usage.outputTokens, measured[0]!.usage.requests, measured[0]!.usage.cachedTokens],
+				[100, 10, 1, 60],
+			);
+			assert.deepStrictEqual(
+				[measured[1]!.usage.inputTokens, measured[1]!.usage.outputTokens, measured[1]!.usage.requests, measured[1]!.usage.cachedTokens],
+				[300, 30, 2, 160],
+			);
+			assert.deepStrictEqual(
+				measured.map((event) => event.lastInputTokens),
+				[100, 200],
+				'each event reports the prompt size the provider just measured',
+			);
+			assert.strictEqual(measured[1]!.usage.cost, session.usage.cost, 'the last event carries the settled cost');
+			assert.strictEqual(measured[0]!.usage.inputTokens, 100, 'the event carries a snapshot, not the live object');
+			assert.strictEqual(session.turnIndex, 1);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('the webview carries the orchestrator task board and delegation seams', () => {
 		const root = join(__dirname, '..', '..');
 		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');

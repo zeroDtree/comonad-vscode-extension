@@ -1449,6 +1449,18 @@ export class Agent extends Service {
 			if (!live) {
 				this.ctx.sessions.save(session);
 			}
+			// The status line is painted from this snapshot. Emitted here rather than from the graph's
+			// step hook: usage is in memory now, the transcript only reaches disk after the node
+			// returns, and a request completed just before a Stop never reaches the hook. A child's
+			// spend belongs to the child, not to any open chat.
+			if (!session.parentId) {
+				this.ctx.emit('agent/usage', state.ref, {
+					usage: { ...session.usage },
+					turnIndex: session.turnIndex,
+					lastInputTokens: session.lastInputTokens,
+					window: this.windowFor(session),
+				});
+			}
 		}
 		return { completion, messages };
 	}

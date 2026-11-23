@@ -517,6 +517,33 @@ suite('Cancellation', () => {
 		assert.ok(!panel.includes('await state()'), 'no sender waits before posting a snapshot');
 	});
 
+	test('a finished model step repaints the status line without rebuilding the snapshot', () => {
+		const root = join(__dirname, '..', '..');
+		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		const mark = guest.indexOf('function renderStatus()');
+		const render = guest.indexOf('function renderState()');
+		assert.ok(mark >= 0 && mark < render, 'renderStatus is defined before renderState');
+		const status = guest.slice(mark, render);
+		assert.match(status, /state\.suspended/);
+		assert.match(status, /\$\('status'\)\.textContent = detail/);
+		const renderBody = guest.slice(render, guest.indexOf('/** The pending or reviewed changes'));
+		assert.match(renderBody, /renderStatus\(\)/);
+		assert.ok(!renderBody.includes("$('status').textContent"), 'the snapshot paints through the helper');
+		const handler = guest.slice(guest.indexOf("case 'status':"), guest.indexOf("case 'models':"));
+		assert.match(handler, /message\.sessionId === state\.sessionId/);
+		assert.match(handler, /state\.detail = typeof message\.detail === 'string'/);
+		assert.match(handler, /renderStatus\(\)/);
+		assert.ok(!handler.includes('renderState()'), 'a status message never rebuilds the snapshot');
+
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const listener = panel.slice(panel.indexOf("ctx.on('agent/usage'"), panel.indexOf("ctx.on('agent/subagent-start'"));
+		assert.match(listener, /type: 'status'/);
+		assert.match(listener, /sessionId: ref\.sessionId/);
+		assert.match(listener, /statusDetail\(measured, measured\.window\)/);
+		assert.ok(!listener.includes('refreshState'), 'the update is not a full refresh');
+		assert.ok(!listener.includes('sessions.active'), 'the update does not read the chat back from disk');
+	});
+
 	test('the model list is fetched off the state path and posted on its own', () => {
 		const root = join(__dirname, '..', '..');
 		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');

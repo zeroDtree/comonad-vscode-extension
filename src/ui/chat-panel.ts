@@ -870,6 +870,12 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'notice', text });
 		}
 	});
+	// A model step finished: update the status line alone. Deliberately not a state() snapshot —
+	// that reads the chat back from disk, where a live turn's usage has not landed, and re-runs
+	// transcript/summary reconciliation. The guest applies it only to the chat it is showing.
+	ctx.on('agent/usage', (ref, measured) => {
+		post({ type: 'status', sessionId: ref.sessionId, detail: statusDetail(measured, measured.window) });
+	});
 	// The card gains its "Open session" link as soon as the child exists, while the call still runs.
 	ctx.on('agent/subagent-start', (ref, info) => {
 		if (ref.surface === SURFACE) {
