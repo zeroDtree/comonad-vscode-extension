@@ -3,6 +3,16 @@
 > **Internal archive.** Implementation-level notes for the next release. User documentation lives
 > in `docs/`; the summary is in `CHANGELOG.md`.
 
+- **Compaction counts reasoning and no longer races the prompt.** `estimateMessages` includes
+  `message.reasoning` (the adapter's `reasoning_content`), and `planCompaction` uses a single
+  `suffixTokens` pass. `runTurn` commits the user message before prompt building and turn-start
+  compaction; the panel publishes an in-flight `pendingPrompt` on resync and marks only the live
+  turn for `resumeLive`. Summaries are non-thinking calls with a small `maxTokens` and a 60s timeout,
+  capped at two attempts per turn via a `RunState.compaction` guard; usage is recorded without
+  touching `lastInputTokens`. The permanent “Summarizing…” notice is gone, the footer shows elapsed
+  time from turn start, and the composer clears only after `turn-start` (with `send-refused` / a
+  restored draft when the host rejects a prompt).
+
 - **A malformed verifier report no longer deletes a valid verification.** Evidence is read through
   one tolerant policy (`src/lib/agent-evidence.ts`): a non-array becomes empty with a warning, a bad
   item is dropped by index, an over-long list is trimmed with command evidence first, and

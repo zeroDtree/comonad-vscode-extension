@@ -98,20 +98,57 @@ export function estimateAttachments(attachments?: readonly AttachmentPart[]): nu
 	return total;
 }
 
+/**
+ * Everything one message contributes to the request. `reasoning` is part of the wire body whenever
+ * it is present (DeepSeek requires `reasoning_content` back), so a context budget that ignores it
+ * undercounts by however much the model thought.
+ */
+export function messageTokens(message: {
+	content?: string;
+	reasoning?: string;
+	toolCalls?: unknown;
+	attachments?: readonly AttachmentPart[];
+}): number {
+	let total = TOKENS_PER_MESSAGE;
+	total += countRaw(message.content ?? '');
+	total += countRaw(message.reasoning ?? '');
+	total += estimateAttachments(message.attachments);
+	if (message.toolCalls !== undefined) {
+		total += countRaw(JSON.stringify(message.toolCalls));
+	}
+	return total;
+}
+
 /** A message list counted the way upstream's `countTokensOpenAI(…, full)` does. */
 export function estimateMessages(
-	messages: readonly { content?: string; toolCalls?: unknown; attachments?: readonly AttachmentPart[] }[],
+	messages: readonly {
+		content?: string;
+		reasoning?: string;
+		toolCalls?: unknown;
+		attachments?: readonly AttachmentPart[];
+	}[],
 ): number {
 	let total = 0;
 	for (const message of messages) {
-		total += TOKENS_PER_MESSAGE;
-		total += countRaw(message.content ?? '');
-		total += estimateAttachments(message.attachments);
-		if (message.toolCalls !== undefined) {
-			total += countRaw(JSON.stringify(message.toolCalls));
-		}
+		total += messageTokens(message);
 	}
 	return total + TOKENS_PADDING;
+}
+
+/** The same totals from each cut to the end, in one pass, for every candidate cut. */
+export function suffixTokens(
+	messages: readonly {
+		content?: string;
+		reasoning?: string;
+		toolCalls?: unknown;
+		attachments?: readonly AttachmentPart[];
+	}[],
+): number[] {
+	const suffix = new Array<number>(messages.length + 1).fill(0);
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		suffix[index] = suffix[index + 1]! + messageTokens(messages[index]!);
+	}
+	return suffix;
 }
 
 /** A token count the way a window is spoken about: raw below 1K, whole K, one-decimal M/G. */

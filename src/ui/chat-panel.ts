@@ -17,7 +17,7 @@ import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES } from '
 import { APPROVAL_LABELS, MODE_LABELS, SANDBOX_LABELS } from '../lib/policy';
 import { turnsOf, type Step, type Turn } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
-import type { Approval, ApprovalDecision, AttachmentPart, SandboxMode, WorkMode } from '../lib/types';
+import type { Approval, ApprovalDecision, AttachmentPart, Message, SandboxMode, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
 import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
 import {
@@ -155,6 +155,17 @@ export function chatPanel(ctx: Context): void {
 	let runningSessionId: string | null = null;
 	/** The panel's own stop for work before `runTurn` registers the agent's turn signal. */
 	let turnController: AbortController | null = null;
+	/**
+	 * A normal prompt accepted by the composer but not yet committed by `runTurn`. The host knows it
+	 * before the agent saves it, so a resync during pre-flight still draws the turn it belongs to.
+	 */
+	let pendingPrompt: {
+		sessionId: string;
+		text: string;
+		attachments?: AttachmentPart[];
+		at: number;
+		fromLength: number;
+	} | null = null;
 	/** References picked in the editor before the chat webview finished loading. */
 	let pendingReferences: string[] = [];
 	/** The picker's file list, shared by every client and invalidated by a short TTL. */
@@ -480,18 +491,44 @@ export function chatPanel(ctx: Context): void {
 		};
 	};
 
+	/** Whether the prompt the host is about to draw has already reached the session transcript. */
+	const pendingCommitted = (session: Session): boolean => {
+		if (!pendingPrompt || pendingPrompt.sessionId !== session.id) {
+			return true;
+		}
+		return session.transcript
+			.slice(pendingPrompt.fromLength)
+			.some((message) => message.role === 'user' && message.content === pendingPrompt!.text);
+	};
+
 	const history = (session: Session | undefined, before?: number, limit = 60) => {
 		if (!session) {
 			return { turns: [] as unknown[], summary: undefined, firstTurnIndex: undefined, totalTurns: 0, hasMore: false };
 		}
-		const all = turnsOf(session.transcript);
+		// A resync can land while the host is still resolving references or compacting, before
+		// `runTurn` commits the prompt. Publish it as the newest turn anyway, so the guest binds the
+		// live stream to it instead of the previous, already settled turn.
+		const pending =
+			running && before === undefined && pendingPrompt?.sessionId === session.id && !pendingCommitted(session)
+				? ({
+						role: 'user',
+						content: pendingPrompt.text,
+						attachments: pendingPrompt.attachments,
+						at: pendingPrompt.at,
+					} as Message)
+				: undefined;
+		const all = turnsOf(pending ? [...session.transcript, pending] : session.transcript);
 		const found = before === undefined ? all.length : all.findIndex((turn) => turn.index >= before);
 		const end = found < 0 ? all.length : found;
 		const page = Math.max(1, Math.min(limit, 200));
 		const start = Math.max(0, end - page);
+		const liveIndex = running && session.id === runningSessionId ? all[all.length - 1]?.index : undefined;
 		return {
 			turns: all.slice(start, end).map((turn) => ({
 				index: turn.index,
+				// Only the turn the host is actually streaming may receive the live stream after a
+				// redraw. A settled turn with a missing prompt must never be re-armed.
+				live: turn.index === liveIndex,
 				// The chat this turn belongs to, so a live turn re-attached from a redraw can match
 				// the `turn-end` that settles it.
 				sessionId: session.id,
@@ -1105,6 +1142,7 @@ export function chatPanel(ctx: Context): void {
 	const send = async (text: string, incoming?: unknown, source?: vscode.Webview): Promise<void> => {
 		if (running) {
 			post({ type: 'notice', text: 'A turn is already running in this chat — Stop it or wait for it to finish.' }, source);
+			post({ type: 'send-refused' }, source);
 			return;
 		}
 		running = true;
@@ -1116,6 +1154,8 @@ export function chatPanel(ctx: Context): void {
 		let started = false;
 		let handledByCommand = false;
 		let rewrite = false;
+		let refused = false;
+		const restoreText = text.trim();
 		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
 		try {
 			const input = text.trim();
@@ -1191,8 +1231,18 @@ export function chatPanel(ctx: Context): void {
 			// A command that hands the turn over (`/review`) says what it printed first, and then
 			// the turn's own streaming takes over.
 			flush();
+			const turnText = handled.text ?? input;
+			if ((handled.trigger ?? 'normal') === 'normal' && turnText.trim()) {
+				pendingPrompt = {
+					sessionId: session.id,
+					text: turnText,
+					attachments,
+					at: Date.now(),
+					fromLength: session.transcript.length,
+				};
+			}
 			const result = await ctx.agent.runTurn({
-				text: handled.text ?? input,
+				text: turnText,
 				attachments,
 				sessionId: session.id,
 				policy: handled.policy,
@@ -1202,25 +1252,34 @@ export function chatPanel(ctx: Context): void {
 			});
 			turnSession = result.sessionId;
 			stopped ||= result.stopped === true;
+			refused = result.promptKept === false;
 			// `/continue`, `/impersonate`, `/swipe`, `/regenerate` and `/quiet` are the ▾ menu from the
 			// keyboard, so their answer is delivered the same way the menu's is.
 			settled = result.stopped && !result.text ? null : deliver(handled.trigger ?? 'normal', result.text);
 			rewrite = rewrote(handled.trigger);
 		} finally {
+			pendingPrompt = null;
 			running = false;
 			runningSessionId = null;
 			turnController = null;
-			if (rewrite) {
+			if (rewrite || refused) {
 				publishTurns(ctx.sessions.get(turnSession ?? '') ?? ctx.sessions.active());
 			}
 			if (started) {
 				const settledSession = ctx.sessions.get(turnSession ?? '') ?? ctx.sessions.active();
 				post({ type: 'turn-end', sessionId: settledSession?.id ?? turnSession, stopped, command: handledByCommand, ...settledTurn(settledSession) });
+			} else {
+				// Nothing was accepted (empty input, attachment failure, or a stop before turn-start):
+				// tell the guest its pending send is over; the text is still in the composer.
+				post({ type: 'send-refused' }, source);
 			}
 			stopped = false;
 			// After the redraw: a notice and a draft have nowhere else to be read.
 			if (settled) {
 				post(settled);
+			}
+			if (refused && restoreText) {
+				post({ type: 'draft', text: restoreText });
 			}
 			refresh();
 		}
@@ -1234,6 +1293,7 @@ export function chatPanel(ctx: Context): void {
 		}
 		if (running) {
 			post({ type: 'notice', text: 'A turn is already running in this chat — Stop it or wait for it to finish.' });
+			post({ type: 'send-refused', ...(trigger === 'quiet' && text ? { text } : {}) });
 			return;
 		}
 		const turns = turnsOf(session.transcript);
@@ -1278,6 +1338,7 @@ export function chatPanel(ctx: Context): void {
 			attachments: ctx.attachments.publicAttachments(replaces !== undefined ? last?.promptAttachments : undefined),
 		});
 		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
+		let refused = false;
 		try {
 			const result = await ctx.agent.runTurn({
 				text,
@@ -1287,6 +1348,7 @@ export function chatPanel(ctx: Context): void {
 				signal: turnController.signal,
 			});
 			stopped ||= result.stopped === true;
+			refused = result.promptKept === false;
 			settled = result.stopped && !result.text ? null : deliver(trigger, result.text);
 		} finally {
 			running = false;
@@ -1303,6 +1365,9 @@ export function chatPanel(ctx: Context): void {
 			// After the redraw: a quiet reply, a draft and an error have nowhere else to be read.
 			if (settled) {
 				post(settled);
+			}
+			if (refused && trigger === 'quiet' && text) {
+				post({ type: 'draft', text });
 			}
 			refresh();
 		}

@@ -2081,6 +2081,12 @@
 		}
 	}
 
+	/** The live footer's label: elapsed time even before the first token or tool call. */
+	function workingLabel(turn) {
+		const seconds = turn.startedAt ? Math.max(0, Math.round((Date.now() - turn.startedAt) / 1000)) : 0;
+		return seconds >= 1 ? 'Working… · ' + seconds + 's' : 'Working…';
+	}
+
 	/** The turn's dated footer: how long it worked, how many tools it used, what it offers. */
 	function renderFoot(turn) {
 		const foot = turn._foot;
@@ -2095,7 +2101,7 @@
 		const meta = document.createElement('span');
 		meta.className = 'foot-meta';
 		if (busy) {
-			meta.textContent = 'Working…';
+			meta.textContent = workingLabel(turn);
 		} else {
 			const tools = turnTools(turn);
 			const seconds = turn.startedAt && turn.endedAt ? Math.max(0, Math.round((turn.endedAt - turn.startedAt) / 1000)) : 0;
@@ -2568,8 +2574,12 @@
 		// settled step, and the rest of the stream continues in this same turn. Whether this page is
 		// the running turn's chat is decided by the host on the message itself, beside the transcript:
 		// a stale snapshot, or a turn that ended while this guest was hidden, must never re-arm one.
-		if (runningHere) {
-			resumeLive(turns[turns.length - 1]);
+		const lastTurn = turns[turns.length - 1];
+		// Only the turn the host marks live may receive the stream after a redraw. Binding to a
+		// settled previous turn is what made a prompt sent during pre-flight compaction disappear.
+		if (runningHere && lastTurn && lastTurn.live) {
+			resumeLive(lastTurn);
+			tick();
 		}
 	}
 
@@ -2792,6 +2802,9 @@
 		// The live marker goes up first: the footer reads it to show "Working…" while the turn runs.
 		live = { turn, thought: null, text: null, think: '', pending: false };
 		renderFoot(turn);
+		// Start the clock now: a turn that spends its first seconds resolving references or
+		// compacting has no steps yet, and a static "Working…" is indistinguishable from a freeze.
+		tick();
 		refreshActions();
 		scroll(true);
 	}
@@ -2834,6 +2847,12 @@
 			for (const step of live ? live.turn.steps : []) {
 				if (step.ms === undefined && step.startedAt !== undefined) {
 					paintTimer(step, true, now);
+				}
+			}
+			if (live) {
+				const meta = live.turn._foot && live.turn._foot.querySelector('.foot-meta');
+				if (meta) {
+					meta.textContent = workingLabel(live.turn);
 				}
 			}
 		};
@@ -4012,9 +4031,13 @@
 				addNotice(message.text);
 				break;
 			case 'turn-start':
+				acceptPendingSend();
 				runningSession = message.sessionId || runningSession;
 				setRunning(true);
 				beginTurn(message);
+				break;
+			case 'send-refused':
+				refusePendingSend(message);
 				break;
 			case 'turn-resume': {
 				runningSession = message.sessionId || runningSession;
@@ -4863,6 +4886,48 @@
 	}
 
 	let submitting = false;
+	/** What the host has not accepted yet. The composer keeps it until `turn-start` settles it. */
+	let pendingSend = null;
+	/**
+	 * The host accepted the send: clear exactly what was sent. A prompt the user edited while the
+	 * host was accepting it, or attachments added after Send, are left alone.
+	 */
+	function acceptPendingSend() {
+		if (!pendingSend) {
+			submitting = false;
+			return;
+		}
+		if (input.value.trim() === pendingSend.text) {
+			input.value = '';
+			resizeInput();
+		}
+		for (const paste of pendingSend.sentPastes) {
+			const at = composerPastes.indexOf(paste);
+			if (at >= 0) {
+				composerPastes.splice(at, 1);
+			}
+		}
+		for (const image of pendingSend.sentImages) {
+			const at = composerImages.indexOf(image);
+			if (at >= 0) {
+				composerImages.splice(at, 1);
+			}
+		}
+		renderComposerPastes();
+		renderComposerImages();
+		pendingSend = null;
+		submitting = false;
+	}
+	/** The host refused before accepting: keep the text and let the user send it again. */
+	function refusePendingSend(message) {
+		pendingSend = null;
+		submitting = false;
+		if (message && typeof message.text === 'string' && !input.value.trim()) {
+			input.value = message.text;
+			resizeInput();
+			input.focus();
+		}
+	}
 	async function submit() {
 		if (running) {
 			addNotice('A turn is still running in this chat — press Stop or wait for it to finish.');
@@ -4879,23 +4944,22 @@
 			}
 			const text = input.value.trim();
 			if (!text && !composerImages.length && !composerPastes.length) {
+				submitting = false;
 				return;
 			}
 			closeMention();
+			const sentImages = [...composerImages];
+			const sentPastes = [...composerPastes];
 			const attachments = [
-				...composerPastes.map((paste) => ({ kind: 'text', name: paste.name, text: paste.text })),
-				...composerImages.map((attachment) => ({ kind: attachment.kind, name: attachment.name, data: attachment.dataUrl })),
+				...sentPastes.map((paste) => ({ kind: 'text', name: paste.name, text: paste.text })),
+				...sentImages.map((attachment) => ({ kind: attachment.kind, name: attachment.name, data: attachment.dataUrl })),
 			];
-			input.value = '';
-			resizeInput();
-			composerImages.length = 0;
-			renderComposerImages();
-			composerPastes.length = 0;
-			renderComposerPastes();
+			pendingSend = { text, sentImages, sentPastes };
 			vscode.postMessage({ type: 'send', text, attachments });
 			input.focus();
-		} finally {
+		} catch (error) {
 			submitting = false;
+			throw error;
 		}
 	}
 
@@ -4916,6 +4980,9 @@
 		const text =
 			trigger === 'quiet' ? [...composerPastes.map((paste) => paste.text), input.value.trim()].filter(Boolean).join('\n\n') : '';
 		if (trigger === 'quiet') {
+			if (text.trim()) {
+				pendingSend = { text: text.trim(), sentImages: [], sentPastes: [...composerPastes] };
+			}
 			input.value = '';
 			resizeInput();
 			composerPastes.length = 0;

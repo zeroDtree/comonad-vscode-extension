@@ -226,7 +226,13 @@ export class Llm extends Service {
 		policyModel: string,
 		system: string,
 		user: string,
-		options: { signal?: AbortSignal; timeoutMs?: number; onUsage?: (usage: CompletionUsage) => void } = {},
+		options: {
+			signal?: AbortSignal;
+			timeoutMs?: number;
+			onUsage?: (usage: CompletionUsage) => void;
+			reasoningEffort?: string;
+			maxTokens?: number;
+		} = {},
 	): Promise<string> {
 		const timeout = AbortSignal.timeout(options.timeoutMs ?? 180_000);
 		const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
@@ -239,6 +245,7 @@ export class Llm extends Service {
 			[],
 			{},
 			signal,
+			{ reasoningEffort: options.reasoningEffort, maxTokens: options.maxTokens },
 		);
 		// A stopped or timed-out request leaves a partial stream. Returning it would let a fragment be
 		// read as the whole answer — a summary replacing the conversation with half a sentence.

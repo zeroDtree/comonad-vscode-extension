@@ -12,7 +12,7 @@ import { messageTools } from '../tools/message';
 import { orchestrateTools } from '../tools/orchestrate';
 import { planTools } from '../tools/plan';
 import { shellTools } from '../tools/shell';
-import type { ToolCall } from '../lib/types';
+import type { Message, ToolCall } from '../lib/types';
 
 const reply = (content: string, toolCalls: ToolCall[] = []) => ({
 	message: { role: 'assistant' as const, content, toolCalls },
@@ -986,6 +986,52 @@ suite('Verifier acceptance mapping', () => {
 				evidence.some((item) => item.kind === 'command' && item.command === 'true' && item.exitCode === 0),
 				'the transcript command is recorded as evidence',
 			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+});
+
+suite('Context compaction', () => {
+	test('the new prompt reaches disk before the summary request', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
+			session.contextWindow = 32_768;
+			const older: Message[] = [];
+			for (let index = 0; index < 20; index += 1) {
+				older.push({ role: 'user', content: `older question ${index} ${'x'.repeat(2_000)}`, at: 1_000 + index * 2 });
+				older.push({ role: 'assistant', content: `older answer ${index} ${'y'.repeat(2_000)}`, at: 1_001 + index * 2 });
+			}
+			session.transcript = older;
+			kernel.ctx.sessions.save(session);
+			let sawPrompt = false;
+			let summaryRequest: { reasoningEffort?: string; maxTokens?: number } | undefined;
+			kernel.ctx.llm.use({
+				name: 'compaction-fake',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('You summarize agent conversations')) {
+						summaryRequest = request;
+						const file = join(kernel.host.storage.root, 'sessions', `${session.id}.json`);
+						const stored = existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as { transcript?: Message[] }) : undefined;
+						sawPrompt = Boolean(
+							stored?.transcript?.some((message) => message.role === 'user' && message.content === 'new prompt'),
+						);
+						return reply('older turns summarized');
+					}
+					return reply('answered');
+				},
+			});
+			const result = await kernel.ctx.agent.runTurn({ text: 'new prompt', surface: 'test' });
+			assert.strictEqual(result.text, 'answered');
+			assert.strictEqual(sawPrompt, true, 'the prompt is on disk before the summarizer starts');
+			assert.strictEqual(summaryRequest?.reasoningEffort, 'none');
+			assert.strictEqual(summaryRequest?.maxTokens, 3_072);
+			assert.ok(
+				kernel.ctx.sessions.active()!.transcript.some((message) => message.role === 'user' && message.content === 'new prompt'),
+			);
+			assert.strictEqual(kernel.ctx.sessions.active()!.usage.requests, 2, 'the summary and the answer are both charged');
 		} finally {
 			await kernel.dispose();
 		}

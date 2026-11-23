@@ -734,7 +734,7 @@ suite('Idle chat panel', () => {
 		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
 		const render = guest.slice(guest.indexOf('function renderTurns('), guest.indexOf('/** Registers a drawn turn'));
 		assert.match(render, /function renderTurns\(list, sessionId, summary, page, runningHere\)/);
-		assert.match(render, /if \(runningHere\) \{\s*resumeLive\(turns\[turns\.length - 1\]\);/);
+		assert.match(render, /if \(runningHere && lastTurn && lastTurn\.live\) \{\s*resumeLive\(lastTurn\);/);
 		assert.ok(!/\brunningSession\b/.test(render), 'the guest cannot re-arm a drawn turn from stale memory');
 		const turns = guest.slice(guest.indexOf("case 'turns':"), guest.indexOf("case 'summary':"));
 		assert.match(turns, /message\.running === true/);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { createHash } from 'node:crypto';
-import { countRaw, estimateAttachments, estimateMessages } from './tokens';
+import { TOKENS_PADDING, countRaw, estimateAttachments, estimateMessages, suffixTokens } from './tokens';
 import type { AttachmentPart, Message, ModelContext } from './types';
 
 /** How much of the recorded transcript is sent back to the model. Pure module. */
@@ -264,10 +264,11 @@ export interface CompactionPlan {
 export function planCompaction(messages: readonly Message[], budget: number, reserve = 0, from = 0): CompactionPlan {
 	const start = Math.max(0, Math.min(from, messages.length));
 	const starts = turnStarts(messages).filter((index) => index >= start);
+	// One suffix pass: `suffix[cut] + padding` is exactly estimateMessages(messages.slice(cut)).
+	const suffix = suffixTokens(messages);
 	for (const cut of starts) {
-		const recent = messages.slice(cut);
-		if (estimateMessages(recent) + reserve <= budget) {
-			return { from: start, cut, older: messages.slice(start, cut), recent };
+		if (suffix[cut]! + TOKENS_PADDING + reserve <= budget) {
+			return { from: start, cut, older: messages.slice(start, cut), recent: messages.slice(cut) };
 		}
 	}
 	const cut = starts[starts.length - 1] ?? start;

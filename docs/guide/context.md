@@ -44,8 +44,12 @@ Consequences:
 - A turn that outgrows the window mid-flight is handled in two steps, cheapest first: old tool output
   is elided, and only a request that still does not fit extends the summary. The current turn is
   never summarized.
-- A summary that fails changes nothing. The model context stays as it was and the turn is answered
-  from it.
+- The budget counts everything the request carries, including the assistant reasoning that
+  DeepSeek requires back as `reasoning_content`. A summary is written by a short, non-thinking call;
+  it is attempted at most twice per turn. A summary that fails is reported once and the turn
+  continues from the trimmed history.
+- The user prompt is committed to the canonical transcript before turn-start compaction, so a
+  reload, Stop or failed turn never loses it; a summary cannot delay the prompt reaching disk.
 - **Restore points are not moved by compaction.** They name canonical message indices, so file
   restoration still works after any number of summaries.
 - Old attachments stay referenced by the canonical transcript; compaction does not sweep them away.

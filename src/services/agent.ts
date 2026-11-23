@@ -20,7 +20,7 @@ import {
 } from '../lib/prompt';
 import { MAX_IMAGES_PER_MESSAGE } from '../lib/images';
 import { attachmentNotes, imageParts } from '../lib/attachments';
-import { estimateAttachments, estimateMessages, estimateTokens } from '../lib/tokens';
+import { countRaw, estimateAttachments, estimateMessages, estimateTokens } from '../lib/tokens';
 import {
 	runGraph,
 	type CompiledGraph,
@@ -72,6 +72,7 @@ import type {
 	AgentSpawnOutcome,
 	AgentSpawnRequest,
 	AttachmentPart,
+	CompletionUsage,
 	ImageAttachment,
 	Message,
 	ModelContext,
@@ -117,11 +118,19 @@ import {
 import type { ComposeResult, TavernApi } from 'comonad-plugin-tavern';
 import { scopeOf, type ResolveResult } from './references';
 
-/** Room held back for the summary a compaction adds, so the fit it plans survives its own output. */
-const SUMMARY_RESERVE = 1_024;
+/** The summary is a short, non-thinking call; it must not inherit the chat's max effort. */
+const SUMMARY_MAX_TOKENS = 3_072;
+const SUMMARY_TIMEOUT_MS = 60_000;
+/** One turn may summarize once at turn start and once more when the provider refuses it. */
+const MAX_COMPACTIONS_PER_TURN = 2;
+/** A provider that accepts the request but stops emitting anything must not freeze the turn. */
+const MODEL_STALL_MS = 180_000;
 
-/** How many characters of the older turns one summary is allowed to read. */
-const SUMMARY_SOURCE_LIMIT = 120_000;
+/** Room held back for the summary a compaction adds, so the fit it plans survives its own output. */
+const SUMMARY_RESERVE = SUMMARY_MAX_TOKENS + 512;
+
+/** How many tokens of the older turns one summary is allowed to read (a cap, not the window). */
+const SUMMARY_SOURCE_TOKENS = 80_000;
 
 /** A summary larger than this is clipped; it is model context, not a second transcript. */
 const SUMMARY_TEXT_LIMIT = 8_000;
@@ -169,6 +178,8 @@ export interface TurnResult {
 	stopped?: boolean;
 	/** A native budget stopped this turn; `text` is the partial output. */
 	budget?: BudgetReport;
+	/** False when the prompt was refused before it reached the transcript; the panel restores it. */
+	promptKept?: boolean;
 }
 
 /** One running turn: the signal every part of it shares, from prompt building to the last tool. */
@@ -195,6 +206,8 @@ interface RunState {
 	budget?: RunBudget;
 	/** The first exhausted dimension. The run stops at the next message boundary. */
 	stop?: BudgetDimension;
+	/** Per-turn summary attempts, so a broken summarizer cannot retry on every graph step. */
+	compaction?: { attempts: number; failed: boolean; notified: boolean };
 	/** The last tool call this run attempted, for partial reports. */
 	lastTool?: string;
 	policy: SessionPolicy;
@@ -426,13 +439,13 @@ export class Agent extends Service {
 		let text = input.text.trim();
 		const trigger: GenerationTrigger = input.trigger ?? 'normal';
 		if (input.rewriteAt !== undefined && trigger !== 'normal') {
-			return { sessionId: input.sessionId ?? '', text: 'Error: only a new prompt can be edited.' };
+			return { sessionId: input.sessionId ?? '', text: 'Error: only a new prompt can be edited.', promptKept: false };
 		}
 		const replay = trigger === 'swipe' || trigger === 'regenerate';
 		const target = replay ? (input.sessionId ?? this.ctx.sessions.active()?.id ?? '') : '';
 		// A swipe cuts the stored transcript as it starts: refuse it before the cut, not after.
 		if (target && this.turns.has(target)) {
-			return { sessionId: target, text: 'Error: a turn is already running in this chat.' };
+			return { sessionId: target, text: 'Error: a turn is already running in this chat.', promptKept: false };
 		}
 		// A swipe or a regenerate re-runs the prompt that is already there: the reply it produced is
 		// dropped here, and the variants it had are handed to `finish` so none of them is lost. What
@@ -452,6 +465,17 @@ export class Agent extends Service {
 			restore = replayed.replaced;
 		}
 		const session = input.sessionId ? (this.ctx.sessions.get(input.sessionId) ?? this.ctx.sessions.ensureActive(this.policyFor())) : this.ctx.sessions.ensureActive(this.policyFor());
+		// A replay cuts the last exchange before the turn begins. If the turn is refused, put that
+		// exchange back instead of leaving the chat without the prompt or the reply it replaced.
+		const restoreReplay = (): void => {
+			if (!restore) {
+				return;
+			}
+			session.transcript = restore;
+			this.ctx.sessions.invalidateModelContext(session, restore.length);
+			this.ctx.sessions.save(session);
+			this.ctx.sessions.changed(session.id);
+		};
 		if (!text && !attachments?.length && !input.resolveAttachments && trigger !== 'continue' && trigger !== 'impersonate') {
 			return { sessionId: session.id, text: '' };
 		}
@@ -461,15 +485,18 @@ export class Agent extends Service {
 			return { sessionId: session.id, text: 'There is nothing to continue yet.' };
 		}
 		if (session.cursor) {
+			restoreReplay();
 			return {
 				sessionId: session.id,
 				text: 'This session has a suspended tool call. Run "Comonad: Resume Suspended Turn" to continue it.',
+				promptKept: false,
 			};
 		}
 		// A stale index must not fire the session hooks or drain pending contexts for a prompt that
 		// cannot be replaced; `rewriteAt` validates again after the hooks, before it cuts.
 		if (input.rewriteAt !== undefined && !canRewrite(session, input.rewriteAt)) {
-			return { sessionId: session.id, text: 'Error: that message is not a prompt that can be edited.' };
+			restoreReplay();
+			return { sessionId: session.id, text: 'Error: that message is not a prompt that can be edited.', promptKept: false };
 		}
 		const ref: TurnRef = { sessionId: session.id, surface: input.surface };
 		// A continue and an impersonation add no prompt of their own: the conversation is already there,
@@ -482,7 +509,8 @@ export class Agent extends Service {
 			input.signal,
 		);
 		if (!turn) {
-			return { sessionId: session.id, text: 'Error: a turn is already running in this chat.' };
+			restoreReplay();
+			return { sessionId: session.id, text: 'Error: a turn is already running in this chat.', promptKept: false };
 		}
 		// The prompt keeps the time it was asked at however often the transcript is re-derived below, so
 		// a compaction in the middle of this turn cannot make it look like a later message.
@@ -540,7 +568,12 @@ export class Agent extends Service {
 				this.ctx.hooks.fire('UserPromptSubmit', undefined, { session_id: session.id, prompt: text }),
 			);
 			if (submitted.blocked) {
-				return { sessionId: session.id, text: `Blocked by hook: ${submitted.reason ?? 'no reason given'}` };
+				restoreReplay();
+				return {
+					sessionId: session.id,
+					text: `Blocked by hook: ${submitted.reason ?? 'no reason given'}`,
+					promptKept: false,
+				};
 			}
 			contexts.push(...submitted.contexts, ...this.ctx.hooks.drainContexts(), ...(this.pending.get(session.id) ?? []));
 			this.pending.delete(session.id);
@@ -551,7 +584,8 @@ export class Agent extends Service {
 			if (input.rewriteAt !== undefined) {
 				// A restore is not raced: abandoning it halfway would leave the workspace inconsistent.
 				if (input.prepareRewrite && !(await input.prepareRewrite(session))) {
-					return { sessionId: session.id, text: '' };
+					restoreReplay();
+					return { sessionId: session.id, text: '', promptKept: false };
 				}
 				// The cut follows the restore without an abort check: once files are rolled back, leaving
 				// the later turns in the chat would make the transcript disagree with the workspace. A
@@ -563,7 +597,8 @@ export class Agent extends Service {
 				}
 				const problem = this.ctx.sessions.rewriteAt(session, input.rewriteAt);
 				if (problem) {
-					return { sessionId: session.id, text: `Error: ${problem}` };
+					restoreReplay();
+					return { sessionId: session.id, text: `Error: ${problem}`, promptKept: false };
 				}
 				cut = true;
 			}
@@ -643,6 +678,19 @@ export class Agent extends Service {
 			// — merging there would cut that away. With nothing to grow, the answer is a turn of its own.
 			// It is derived again whenever a fold rewrites the transcript the turn is running on.
 			let continueInto = trigger === 'continue' ? continuationIndex(seeded) : undefined;
+			// The prompt belongs to the chat before any model call. Turn-start compaction can take a
+			// while, and a reload or resync during it must still find this message: without it the
+			// webview repaints the previous turns and binds the live stream to the wrong one.
+			if (prompted && !SILENT_TRIGGERS.has(trigger)) {
+				session.transcript = seeded;
+				committed = true;
+				this.ctx.sessions.save(session);
+				this.ctx.audit.write(session.id, {
+					kind: 'user',
+					text: clip(text, 2_000),
+					images: attachmentNotes(attachments),
+				});
+			}
 			// What the model is asked to do when the turn carries no prompt of its own. It is also said *as a
 			// turn*: a request whose last turn is the model's own is completed by OpenAI but refused outright
 			// by Gemini ("Requests ending with a model turn are not supported"). Upstream answers the same
@@ -685,12 +733,21 @@ export class Agent extends Service {
 			const budget = this.budgetFor(session.policy, session.contextWindow, system, tools);
 			const form = session.contextForm ?? config.contextForm;
 			let history = buildModelHistory(seeded, session.modelContext, form);
+			const compaction = { attempts: 0, failed: false, notified: false };
 			// Compaction only changes the model context: the canonical transcript (and every index into
 			// it, including prior/restore/continueInto) stays exactly where it was.
 			if (estimateMessages(history) > budget.input) {
-				this.notice(ref, 'Summarizing the conversation — it no longer fits the model’s window.');
+				compaction.attempts += 1;
 				try {
-					const context = await this.compactContext(session, seeded, budget.input, undefined, turn.signal);
+					const context = await this.compactContext(
+						session,
+						seeded,
+						budget.input,
+						undefined,
+						turn.signal,
+						false,
+						(usage) => this.recordSummaryUsage(session, usage),
+					);
 					if (context) {
 						history = buildModelHistory(seeded, context, form);
 					}
@@ -698,8 +755,13 @@ export class Agent extends Service {
 					if (turn.signal.aborted) {
 						throw error;
 					}
+					compaction.failed = true;
 					this.ctx.log.message(`summarize failed: ${describe(error)}`);
-					this.notice(ref, `Could not summarize the conversation (${describe(error)}); its older turns stay as they are.`);
+					if (!compaction.notified) {
+						compaction.notified = true;
+						this.notice(ref, `Could not summarize the conversation (${describe(error)}); continuing with trimmed history.`);
+					}
+					history = elideToolResults(history, budget.input).messages;
 				}
 			}
 			const tavern = await abortable(turn.signal, this.tavernTurn(session, seeded, history, blocks, trigger, budget.window));
@@ -749,6 +811,7 @@ export class Agent extends Service {
 				turn: session.turnIndex,
 				gateReason: '',
 				batch: 0,
+				compaction,
 				toolsEnabled,
 				samplers: tavern?.samplers,
 				trigger,
@@ -759,10 +822,12 @@ export class Agent extends Service {
 				// A composed request is not a slice of the chat, so there is nothing to fold it back into.
 				foldable: !composed,
 			};
-			session.transcript = seeded;
-			committed = true;
-			this.ctx.sessions.save(session);
-			this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000), images: attachmentNotes(attachments) });
+			if (!committed) {
+				session.transcript = seeded;
+				committed = true;
+				this.ctx.sessions.save(session);
+				this.ctx.audit.write(session.id, { kind: 'user', text: clip(text, 2_000), images: attachmentNotes(attachments) });
+			}
 			return await this.execute(session, state, turn);
 		} catch (error) {
 			if (turn.signal.aborted) {
@@ -782,7 +847,27 @@ export class Agent extends Service {
 				}
 				return { sessionId: session.id, text: '', stopped: true };
 			}
-			throw error;
+			// A failure before the prompt was committed must not erase it. Keep the same exchange the
+			// abort path would, then report the error through the normal result rather than throwing
+			// out of the panel's send (which would settle the turn with a transcript missing the text).
+			let keep: Message[] | undefined;
+			if (restore) {
+				keep = restore;
+			} else if (!committed && !SILENT_TRIGGERS.has(trigger) && (input.rewriteAt === undefined || cut)) {
+				keep = seed();
+			}
+			if (keep) {
+				session.transcript = keep;
+				this.ctx.sessions.invalidateModelContext(session, keep.length);
+				this.ctx.sessions.save(session);
+				this.ctx.sessions.changed(session.id);
+			}
+			this.ctx.log.message(`turn failed: ${describe(error)}`);
+			return {
+				sessionId: session.id,
+				text: `Error: ${describe(error)}`,
+				promptKept: committed || keep !== undefined,
+			};
 		} finally {
 			this.endTurn(turn);
 		}
@@ -938,6 +1023,8 @@ export class Agent extends Service {
 		if (!older.length) {
 			return null;
 		}
+		const sourceTokens =
+			budget > 0 ? Math.max(4_000, Math.min(SUMMARY_SOURCE_TOKENS, budget - SUMMARY_RESERVE)) : SUMMARY_SOURCE_TOKENS;
 		const text = await this.summaryText(
 			session.policy.model,
 			older,
@@ -945,11 +1032,32 @@ export class Agent extends Service {
 			instructions,
 			signal,
 			onUsage,
+			sourceTokens,
 		);
 		if (!text) {
-			return null;
+			throw new Error('the summarizer returned an empty summary');
 		}
-		return this.ctx.sessions.recordModelContext(session, text, cut, session.policy.model) ?? null;
+		const context = this.ctx.sessions.recordModelContext(session, text, cut, session.policy.model);
+		if (!context) {
+			throw new Error('the summary could not be recorded');
+		}
+		return context;
+	}
+
+	/** A summary is a real request: count it, but never let it overwrite the chat's last input size. */
+	private recordSummaryUsage(session: Session, usage: CompletionUsage): void {
+		session.usage.inputTokens += usage.input;
+		session.usage.outputTokens += usage.output;
+		session.usage.requests += 1;
+		if (usage.cached !== undefined && Number.isFinite(usage.cached)) {
+			session.usage.cachedTokens = (session.usage.cachedTokens ?? 0) + Math.min(Math.max(0, usage.cached), usage.input);
+		}
+		this.ctx.usage.add(usage);
+		const cost = this.ctx.llm.costFor(session.policy.model, usage);
+		if (cost > 0) {
+			session.usage.cost += cost;
+		}
+		this.ctx.sessions.save(session);
 	}
 
 	/**
@@ -984,11 +1092,16 @@ export class Agent extends Service {
 		if (estimateMessages(elidedBody) <= budget.input || !state.foldable || !session) {
 			return { messages: elided.messages };
 		}
-		this.notice(state.ref, 'Summarizing the conversation — this turn outgrew the model’s window.');
+		const guard = (state.compaction ??= { attempts: 0, failed: false, notified: false });
+		if (guard.failed || guard.attempts >= MAX_COMPACTIONS_PER_TURN) {
+			return { messages: elided.messages };
+		}
+		guard.attempts += 1;
 		try {
-			const context = await this.compactContext(session, state.transcript, budget.input, undefined, signal, false, (usage) =>
-				state.budget?.spendTokens(usage.input + usage.output),
-			);
+			const context = await this.compactContext(session, state.transcript, budget.input, undefined, signal, false, (usage) => {
+				state.budget?.spendTokens(usage.input + usage.output);
+				this.recordSummaryUsage(session, usage);
+			});
 			if (!context) {
 				return { messages: elided.messages };
 			}
@@ -998,7 +1111,12 @@ export class Agent extends Service {
 		} catch (error) {
 			signal.throwIfAborted();
 			// The turn still has to be answered, so a summary that failed is reported and not fatal.
+			guard.failed = true;
 			this.ctx.log.message(`summarize failed mid-turn: ${describe(error)}`);
+			if (!guard.notified) {
+				guard.notified = true;
+				this.notice(state.ref, `Could not summarize the conversation (${describe(error)}); continuing with trimmed history.`);
+			}
 			return { messages: elided.messages };
 		}
 	}
@@ -1021,6 +1139,20 @@ export class Agent extends Service {
 		// Whether this attempt already reached the screen. A failure after tokens were streamed must not
 		// retry: the reader would see the answer twice.
 		let streamed = false;
+		// A request that connects and then goes silent is indistinguishable from a freeze. The timer
+		// resets on every visible delta, so long reasoning is fine; three silent minutes are not.
+		let stall: ReturnType<typeof setTimeout> | undefined;
+		const watchdog = new AbortController();
+		const arm = (): void => {
+			if (stall) {
+				clearTimeout(stall);
+			}
+			stall = setTimeout(
+				() => watchdog.abort(new Error(`the model sent no output for ${Math.round(MODEL_STALL_MS / 1_000)} seconds`)),
+				MODEL_STALL_MS,
+			);
+		};
+		const callSignal = AbortSignal.any([signal, watchdog.signal]);
 		const call = (messages: Message[]): Promise<Completion> =>
 			this.ctx.llm.chat(
 				state.policy.model,
@@ -1029,20 +1161,24 @@ export class Agent extends Service {
 				{
 					onToken: (text) => {
 						streamed = true;
+						arm();
 						this.ctx.emit('agent/token', state.ref, text);
 					},
 					onReasoning: (text) => {
 						streamed = true;
+						arm();
 						this.ctx.emit('agent/reasoning', state.ref, text);
 					},
 					onToolDelta: (call) => {
 						streamed = true;
+						arm();
 						this.ctx.emit('agent/tool-delta', state.ref, call);
 					},
 				},
-				signal,
+				callSignal,
 				{ reasoningEffort: session?.reasoningEffort, ...state.samplers },
 			);
+		arm();
 		const attempt = (messages: Message[]): Promise<Completion> => {
 			streamed = false;
 			return call(messages);
@@ -1089,6 +1225,10 @@ export class Agent extends Service {
 				}
 				messages = shrunk;
 				completion = await attempt(messages);
+			}
+		} finally {
+			if (stall) {
+				clearTimeout(stall);
 			}
 		}
 		// The run budget counts real spend; without a provider usage event, estimate rather than
@@ -1138,10 +1278,16 @@ export class Agent extends Service {
 		if (!session || !state.foldable) {
 			return estimateMessages(body) < estimateMessages(state.messages) ? [...system, ...body] : null;
 		}
+		const guard = (state.compaction ??= { attempts: 0, failed: false, notified: false });
+		if (guard.failed || guard.attempts >= MAX_COMPACTIONS_PER_TURN) {
+			return null;
+		}
+		guard.attempts += 1;
 		try {
-			const context = await this.compactContext(session, state.transcript, 0, undefined, signal, false, (usage) =>
-				state.budget?.spendTokens(usage.input + usage.output),
-			);
+			const context = await this.compactContext(session, state.transcript, 0, undefined, signal, false, (usage) => {
+				state.budget?.spendTokens(usage.input + usage.output);
+				this.recordSummaryUsage(session, usage);
+			});
 			if (!context) {
 				return null;
 			}
@@ -1150,7 +1296,12 @@ export class Agent extends Service {
 			return [...system, ...history, ...(state.trailer ?? [])];
 		} catch (error) {
 			signal.throwIfAborted();
+			guard.failed = true;
 			this.ctx.log.message(`emergency summarize failed: ${describe(error)}`);
+			if (!guard.notified) {
+				guard.notified = true;
+				this.notice(state.ref, `Could not summarize the conversation (${describe(error)}); continuing with trimmed history.`);
+			}
 			return null;
 		}
 	}
@@ -1177,26 +1328,31 @@ export class Agent extends Service {
 		instructions?: string,
 		signal?: AbortSignal,
 		onUsage?: (usage: { input: number; output: number }) => void,
+		sourceTokens = SUMMARY_SOURCE_TOKENS,
 	): Promise<string> {
 		const lines = older.map((message) => {
 			const notes = attachmentNotes(message.attachments);
 			const suffix = notes?.length ? ` [attachments: ${notes.join('; ')}]` : '';
 			return `${message.role}: ${clip(message.content, 2_000)}${suffix}`;
 		});
+		// Counts are tokens, not characters: the same 120k characters are ~40k tokens in English and
+		// more than 100k in CJK, and the summary request must itself fit the model's window.
+		const costs = lines.map((line) => countRaw(line));
 		let head = 0;
-		let used = previous ? previous.length : 0;
-		while (head < lines.length && used + lines[head]!.length < SUMMARY_SOURCE_LIMIT / 4) {
-			used += lines[head]!.length;
+		let used = previous ? countRaw(previous) : 0;
+		const headBudget = Math.max(1_000, Math.floor(sourceTokens / 4));
+		while (head < lines.length && used + costs[head]! < headBudget) {
+			used += costs[head]!;
 			head += 1;
 		}
 		const tail: string[] = [];
-		for (let index = lines.length - 1; index >= head && used < SUMMARY_SOURCE_LIMIT; index -= 1) {
-			const line = lines[index]!;
-			if (used + line.length > SUMMARY_SOURCE_LIMIT) {
+		for (let index = lines.length - 1; index >= head && used < sourceTokens; index -= 1) {
+			const cost = costs[index]!;
+			if (used + cost > sourceTokens) {
 				break;
 			}
-			used += line.length;
-			tail.unshift(line);
+			used += cost;
+			tail.unshift(lines[index]!);
 		}
 		const omitted = lines.length - head - tail.length;
 		const text = await this.ctx.llm.complete(
@@ -1210,7 +1366,15 @@ export class Agent extends Service {
 			]
 				.filter(Boolean)
 				.join('\n\n'),
-			{ signal, onUsage },
+			{
+				signal,
+				onUsage,
+				// Summarizing is not reasoning: the chat's Max effort belongs to the answer, not to
+				// folding old turns, and a thinking summary can sit for minutes before emitting text.
+				reasoningEffort: 'none',
+				maxTokens: SUMMARY_MAX_TOKENS,
+				timeoutMs: SUMMARY_TIMEOUT_MS,
+			},
 		);
 		return text.length <= SUMMARY_TEXT_LIMIT
 			? text

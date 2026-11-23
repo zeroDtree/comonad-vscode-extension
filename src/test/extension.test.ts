@@ -186,7 +186,7 @@ import { keepHunkAction, undoHunkAction } from '../ui/hunk-actions';
 import { panesPlugin } from '../services/panes';
 import { createTestKernel } from './harness';
 import { McpConnection } from '../services/mcp';
-import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, estimateMessages, countRaw, estimateTokens, encodingForModel, formatTokens, guesstimate, setEncoder } from '../lib/tokens';
+import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, estimateMessages, messageTokens, countRaw, estimateTokens, encodingForModel, formatTokens, guesstimate, setEncoder } from '../lib/tokens';
 
 const readTool: ToolSpec = {
 	name: 'read_file',
@@ -286,6 +286,11 @@ suite('Token counting', () => {
 			assert.strictEqual(guesstimate('abcd'), Math.ceil(4 / BYTES_PER_TOKEN));
 			assert.ok(estimateTokens('四字漢字') > 0, 'multibyte text is measured in bytes');
 			assert.strictEqual(estimateMessages([{ content: 'a' }, { content: 'b' }]), 2 * (TOKENS_PER_MESSAGE + 1) + TOKENS_PADDING);
+			// `reasoning_content` is sent back on every assistant message, so it is part of the bill.
+			setEncoder(() => 7);
+			assert.strictEqual(messageTokens({ content: 'a', reasoning: 'b' }), TOKENS_PER_MESSAGE + 14);
+			assert.strictEqual(estimateMessages([{ content: 'a', reasoning: 'b' }]), TOKENS_PER_MESSAGE + 14 + TOKENS_PADDING);
+			setEncoder(null);
 
 			// The real thing: the kernel's tokenizer service installs a BPE for the model.
 			setEncoder(null);
@@ -2469,6 +2474,22 @@ suite('Comonad domain', () => {
 		assert.strictEqual(plan.cut, 4);
 		assert.deepStrictEqual(plan.older.map((message) => message.content), ['c', 'd']);
 		assert.deepStrictEqual(plan.recent.map((message) => message.content), ['e']);
+	});
+
+	test('planCompaction folds reasoning that the provider will count', () => {
+		setEncoder((text) => Math.ceil(text.length / 4));
+		try {
+			const messages: Message[] = [
+				{ role: 'user', content: 'q1' },
+				{ role: 'assistant', content: 'a1', reasoning: 'r'.repeat(4_000) },
+				{ role: 'user', content: 'q2' },
+				{ role: 'assistant', content: 'a2', reasoning: 'r'.repeat(4_000) },
+			];
+			// Both turns fit only if the reasoning is ignored. Counting it must cut at the last turn.
+			assert.strictEqual(planCompaction(messages, 2_000).cut, 2);
+		} finally {
+			setEncoder(null);
+		}
 	});
 
 	test('eliding tool output shrinks the request without breaking a call from its result', () => {
@@ -10107,6 +10128,7 @@ suite('Plan tools', () => {
 				},
 			});
 			assert.match(blocked.text, /Blocked by hook/);
+			assert.strictEqual(blocked.promptKept, false, 'the panel can put the refused prompt back in the composer');
 			assert.strictEqual(blockedPrepared, false, 'the hook refuses before any restore or cut');
 			assert.deepStrictEqual(kernel.ctx.sessions.require(first.sessionId).transcript.map((message) => message.content), before);
 		} finally {
@@ -11529,6 +11551,22 @@ suite('Images', () => {
 		assert.ok(panel.includes('id="composer-images"'));
 	});
 
+	test('the composer clears only after the host accepts, and keeps a refused prompt', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		assert.ok(js.includes('let pendingSend = null'), 'the guest keeps what it sent');
+		assert.ok(js.includes('function acceptPendingSend()'), 'turn-start settles the pending send');
+		assert.ok(js.includes('function refusePendingSend('), 'a refusal leaves the text in place');
+		assert.match(js, /case 'send-refused':/);
+		const submit = js.slice(js.indexOf('async function submit()'), js.indexOf('function runGeneration'));
+		assert.ok(!/input\.value = ''/.test(submit), 'Send must not clear before the host accepts');
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.ok(panel.includes("type: 'send-refused'"), 'the host answers an unaccepted send');
+		assert.ok(panel.includes('pendingPrompt'), 'the in-flight prompt is published to a resync');
+		assert.ok(panel.includes('live: turn.index === liveIndex'), 'only the host-marked live turn is re-armed');
+		assert.ok(!readFileSync(join(root, 'src', 'services', 'agent.ts'), 'utf8').includes('Summarizing the conversation'));
+	});
+
 	test('a long paste becomes a chip instead of textarea text', () => {
 		const root = join(__dirname, '..', '..');
 		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
@@ -11574,7 +11612,7 @@ suite('Images', () => {
 		assert.match(js, /toolCards\.set\(message\.id, step\);\s*tick\(\);\s*(?:\/\/[^\n]*\s*)*scroll\(\);/);
 		assert.match(js, /messagesEl\.appendChild\(root\);\s*\}\s*(?:\/\/[^\n]*\s*)*scroll\(\);/);
 		// The deliberate jumps stay: a turn the user just sent, and the Latest control they press.
-		assert.match(js, /renderFoot\(turn\);\s*refreshActions\(\);\s*scroll\(true\);/);
+		assert.match(js, /renderFoot\(turn\);\s*(?:\/\/[^\n]*\s*)*tick\(\);\s*refreshActions\(\);\s*scroll\(true\);/);
 		assert.match(js, /jumpButton\.addEventListener\('click', \(\) => \{\s*pinned = true;\s*scroll\(true\);/);
 	});
 
