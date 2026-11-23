@@ -4736,6 +4736,11 @@ suite('Cordis kernel', () => {
 			statusDetail({ usage: { ...silent, cachedTokens: 50 }, turnIndex: 1 }, window),
 			'120 tokens · $0.000  ·  cache 50 (50%)  ·  turn 1',
 		);
+		assert.strictEqual(
+			statusDetail({ usage: silent, turnIndex: 1, lastInputTokens: 306_049 }, 262_144),
+			'120 tokens · $0.000  ·  turn 1  ·  context 117% · 299K/256K',
+			'an over-window request is shown honestly rather than clamped',
+		);
 		assert.strictEqual(statusDetail(undefined, window), '', 'no chat, no line');
 	});
 
@@ -4751,6 +4756,8 @@ suite('Cordis kernel', () => {
 			"message: 'Coordination note'",
 			"step.name === 'delegate'",
 			'data-subagent',
+			'verificationSessionIds',
+			'Open the verifier session',
 			'tasksEl.addEventListener',
 		]) {
 			assert.ok(js.includes(needle), needle);

@@ -179,6 +179,7 @@ async function main() {
 					entryPoints: [
 						'src/test/extension.test.ts',
 						'src/test/activation.test.ts',
+						'src/test/agent-output.test.ts',
 						'src/test/authorization.test.ts',
 						'src/test/cancellation.test.ts',
 						'src/test/graph.test.ts',

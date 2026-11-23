@@ -51,13 +51,16 @@ graph, so the build turn starts fresh with the plan file as its handoff.
 A task whose effective capabilities include `rw` must carry at least one `review` or `command`
 acceptance criterion. After the worker batch finishes, the runtime derives a **pinned built-in**
 `reviewer` or `tester` child for those criteria; a project file with the same name cannot weaken
-acceptance. The worker/verifier final message must be a single JSON envelope; malformed output is an
-`invalid_output` rejection. Each acceptance entry must use the task's exact criterion id, one entry
-per criterion; an equal-length list whose ids are all different is mapped positionally and the
-mapping is recorded, while partial coverage is `invalid_output`. A `command` criterion runs in a
-read-only workspace with a scratch-only test shell; if the exact command must write the workspace the
-tester may run it in a byte-identical `$COMONAD_SCRATCH` copy and reports the exact command, its real
-exit code and a `mirror: <path>` note. The structural rules live in the tool schema and validation;
+acceptance. The worker/verifier final message is a JSON envelope. It is read tolerantly: malformed
+evidence items are dropped and over-long lists are trimmed with warnings. A report that still fails
+the contract gets one repair round in the same child session; a worker that remains invalid is an
+`invalid_output` rejection, while a verifier that remains invalid is `verification_unavailable` —
+the work was not judged. Each acceptance entry must use the task's exact criterion id, one entry per
+criterion; an equal-length list whose ids are all different is mapped positionally and the mapping is
+recorded, while partial coverage is `verification_unavailable`. A `command` criterion runs in a
+read-only workspace with a scratch-only test shell; the runtime records the command and its real exit
+code from the transcript (a byte-identical `$COMONAD_SCRATCH` copy still matches), so the model does
+not need to transcribe command evidence. The structural rules live in the tool schema and validation;
 the current phase rules live in the dynamic Tools and Orchestration prompt blocks. See
 [Orchestration](/guide/orchestration).
 

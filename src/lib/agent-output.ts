@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import type { AgentEvidence, CriterionResult } from './task-graph';
+import { readEvidence } from './agent-evidence';
+import { MAX_ACCEPTANCE, type AgentEvidence, type CriterionResult } from './task-graph';
 
 /**
  * The structured report a worker or verifier returns. The contract is a single JSON object so the
- * task graph can decide acceptance deterministically; prose around it is tolerated, a wrong shape is
- * not. Pure module.
+ * task graph can decide acceptance deterministically; prose around it is tolerated, and evidence or
+ * acceptance defects are reported as warnings rather than discarding a semantically valid report.
+ * Only a missing/ill-typed envelope or an invalid status/verdict is fatal. Pure module.
  */
 
 export interface AgentEnvelope {
@@ -19,103 +21,72 @@ export interface AgentEnvelope {
 	questions?: string[];
 }
 
-export type EnvelopeResult = { ok: true; value: AgentEnvelope } | { ok: false; reason: string };
+export type EnvelopeResult =
+	| { ok: true; value: AgentEnvelope; warnings: string[] }
+	| { ok: false; reason: string };
 
 const text = (value: unknown, limit: number): string => (typeof value === 'string' ? value.trim().slice(0, limit) : '');
 
-function evidenceOf(value: unknown): AgentEvidence[] | undefined {
-	if (value === undefined) {
-		return [];
+function truth(value: unknown): boolean | undefined {
+	if (typeof value === 'boolean') {
+		return value;
 	}
-	if (!Array.isArray(value) || value.length > 16) {
-		return undefined;
+	if (value === 'true') {
+		return true;
 	}
-	const out: AgentEvidence[] = [];
-	for (const item of value) {
-		if (!item || typeof item !== 'object') {
-			return undefined;
-		}
-		const raw = item as Record<string, unknown>;
-		switch (raw.kind) {
-			case 'file':
-				if (typeof raw.path !== 'string' || !raw.path.trim()) {
-					return undefined;
-				}
-				out.push({
-					kind: 'file',
-					path: text(raw.path, 256),
-					...(typeof raw.note === 'string' ? { note: text(raw.note, 1000) } : {}),
-				});
-				break;
-			case 'search':
-				if (typeof raw.query !== 'string' || !raw.query.trim()) {
-					return undefined;
-				}
-				out.push({
-					kind: 'search',
-					query: text(raw.query, 500),
-					...(typeof raw.note === 'string' ? { note: text(raw.note, 1000) } : {}),
-				});
-				break;
-			case 'command':
-				if (
-					typeof raw.command !== 'string' ||
-					!raw.command.trim() ||
-					typeof raw.exitCode !== 'number' ||
-					!Number.isFinite(raw.exitCode)
-				) {
-					return undefined;
-				}
-				out.push({
-					kind: 'command',
-					command: text(raw.command, 2000),
-					exitCode: Math.trunc(raw.exitCode),
-					...(typeof raw.output === 'string' ? { output: text(raw.output, 2000) } : {}),
-				});
-				break;
-			case 'note':
-				if (typeof raw.text !== 'string' || !raw.text.trim()) {
-					return undefined;
-				}
-				out.push({ kind: 'note', text: text(raw.text, 2000) });
-				break;
-			default:
-				return undefined;
-		}
+	if (value === 'false') {
+		return false;
 	}
-	return out;
+	return undefined;
 }
 
-function acceptanceOf(value: unknown): CriterionResult[] | undefined {
+function acceptanceOf(value: unknown): { items: CriterionResult[]; warnings: string[] } {
+	const warnings: string[] = [];
 	if (value === undefined) {
-		return undefined;
+		return { items: [], warnings };
 	}
-	if (!Array.isArray(value) || value.length > 8) {
-		return undefined;
+	if (!Array.isArray(value)) {
+		return { items: [], warnings: ['acceptance was not an array; ignored'] };
 	}
-	const out: CriterionResult[] = [];
-	for (const item of value) {
-		if (!item || typeof item !== 'object') {
-			return undefined;
+	const items: CriterionResult[] = [];
+	value.forEach((item, index) => {
+		if (!item || typeof item !== 'object' || Array.isArray(item)) {
+			warnings.push(`acceptance[${index}] was not an object; dropped`);
+			return;
 		}
 		const raw = item as Record<string, unknown>;
 		const id = text(raw.id, 64);
-		if (!id || typeof raw.met !== 'boolean') {
-			return undefined;
+		const met = truth(raw.met);
+		if (!id || met === undefined) {
+			warnings.push(`acceptance[${index}] needs an id and a boolean met; dropped`);
+			return;
 		}
-		out.push({ id, met: raw.met, ...(typeof raw.note === 'string' ? { note: text(raw.note, 1000) } : {}) });
+		items.push({ id, met, ...(typeof raw.note === 'string' ? { note: text(raw.note, 1000) } : {}) });
+	});
+	if (items.length > MAX_ACCEPTANCE) {
+		warnings.push(`acceptance had ${items.length} entries; kept the first ${MAX_ACCEPTANCE}`);
+		items.length = MAX_ACCEPTANCE;
 	}
-	return out;
+	return { items, warnings };
 }
 
-function questionsOf(value: unknown): string[] | undefined {
+function questionsOf(value: unknown): { items: string[]; warnings: string[] } {
+	const warnings: string[] = [];
 	if (value === undefined) {
-		return undefined;
+		return { items: [], warnings };
 	}
-	if (!Array.isArray(value) || value.length > 8) {
-		return undefined;
+	if (!Array.isArray(value)) {
+		return { items: [], warnings: ['questions was not an array; ignored'] };
 	}
-	return value.map((item) => (typeof item === 'string' ? text(item, 1000) : '')).filter(Boolean);
+	const parsed = value.map((item) => (typeof item === 'string' ? text(item, 1000) : '')).filter(Boolean);
+	if (parsed.length < value.length) {
+		warnings.push('empty or non-string questions were dropped');
+	}
+	const items = parsed.slice(0, 8);
+	if (parsed.length > 8) {
+		warnings.push(`questions had ${parsed.length} entries; kept the first 8`);
+	}
+	return { items, warnings };
 }
 
 function fromObject(value: unknown): EnvelopeResult {
@@ -131,28 +102,21 @@ function fromObject(value: unknown): EnvelopeResult {
 	if (verdict !== undefined && verdict !== 'pass' && verdict !== 'fail') {
 		return { ok: false, reason: 'invalid verdict' };
 	}
-	const evidence = evidenceOf(raw.evidence);
-	if (!evidence) {
-		return { ok: false, reason: 'invalid evidence' };
-	}
+	const evidence = readEvidence(raw.evidence);
 	const acceptance = acceptanceOf(raw.acceptance);
-	if (raw.acceptance !== undefined && !acceptance) {
-		return { ok: false, reason: 'invalid acceptance' };
-	}
 	const questions = questionsOf(raw.questions);
-	if (raw.questions !== undefined && !questions) {
-		return { ok: false, reason: 'invalid questions' };
-	}
+	const warnings = [...evidence.warnings, ...acceptance.warnings, ...questions.warnings];
 	return {
 		ok: true,
 		value: {
 			...(status !== undefined ? { status } : {}),
 			...(verdict !== undefined ? { verdict } : {}),
 			summary: text(raw.summary, 2000),
-			evidence,
-			...(acceptance !== undefined ? { acceptance } : {}),
-			...(questions !== undefined ? { questions } : {}),
+			evidence: evidence.items,
+			...(raw.acceptance !== undefined ? { acceptance: acceptance.items } : {}),
+			...(raw.questions !== undefined ? { questions: questions.items } : {}),
 		},
+		warnings,
 	};
 }
 

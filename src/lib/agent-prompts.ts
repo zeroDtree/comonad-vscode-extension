@@ -22,15 +22,15 @@ export interface SubagentPromptInput {
 
 const workerContract = `Your final message must be exactly one JSON object, with no prose outside it:
 {"status":"ok|blocked|failed","summary":"...","evidence":[{"kind":"file","path":"..."}],"acceptance":[{"id":"<criterion id>","met":true,"note":"..."}],"questions":[]}
-Evidence kinds are file (path, note), search (query, note), command (command, exitCode, output) and note (text).
+Evidence kinds are file (path, note), search (query, note) and note (text). The runtime records every shell command and its exit code from your tool calls, so do not transcribe commands into evidence. Report only the decisive file/search/note evidence, at most 16 items.
 Use the exact acceptance ids from the task, one entry per criterion; never invent ids such as a1.
 Base every acceptance claim on evidence you actually produced.`;
 
 const verifierContract = `Your final message must be exactly one JSON object, with no prose outside it:
 {"verdict":"pass|fail","summary":"...","evidence":[{"kind":"file","path":"..."}],"acceptance":[{"id":"<criterion id>","met":true,"note":"..."}]}
 Use the exact acceptance ids from the task's Acceptance criteria, one entry per criterion; never invent ids such as a1, and ignore any acceptance ids quoted in the worker report.
-Evidence kinds are file (path, note), search (query, note), command (command, exitCode, output) and note (text).
-For a command criterion, run the exact command with run_shell_test and report it as command evidence with its exit code. The workspace is read-only except the scratch tree; if the command fails only because it must write the workspace, copy the workspace to a byte-identical tree under $COMONAD_SCRATCH, run the exact command there, and write "mirror: <path>" in your note. Never report exit code 0 for a command that failed.
+Evidence kinds are file (path, note) and search (query, note); the runtime records every shell command and its exit code from your tool calls, so do not transcribe commands into evidence. Report only decisive file/search evidence, at most 16 items.
+For a command criterion, run the exact command with run_shell_test. The workspace is read-only except the scratch tree; if the command fails only because it must write the workspace, copy the workspace to a byte-identical tree under $COMONAD_SCRATCH and run the exact command there; the runtime records the real exit code and the mirror wrapper. Never claim a command passed that you did not run.
 Inspect the workspace and diff yourself. Do not modify anything.
 Set "met" per criterion from your own inspection; use "verdict":"pass" only when every criterion is met.`;
 
@@ -162,7 +162,7 @@ export function buildOrchestratorBody(input: OrchestratorBodyInput): string {
 	const protocol = rules.planMode
 		? [
 				agent,
-				`This is Plan mode: the session is read-only. Answer directly when a few read-only calls are enough; otherwise delegate only read-only research nodes (roles without rw) with evidence or review acceptance criteria.
+				`This is Plan mode: the session is read-only. Answer directly when a few read-only calls are enough; otherwise delegate only read-only research nodes (roles without rw) with evidence or review acceptance criteria. For a standalone verification node, prefer evidence criteria: a tester/reviewer node with command or review criteria is verified again.
 ${limitSentence}
 ${deliverable}
 Before summarizing, check task_status and the verdicts of any research you delegated. A task paused by a budget keeps its child session; resume it rather than replanning unless the pause reason says the resume limit is spent.`,
@@ -171,7 +171,7 @@ Before summarizing, check task_status and the verdicts of any research you deleg
 				agent,
 				'Answer directly when the work is trivial or one specialist with a few read-only calls is enough. Otherwise plan the minimum task graph before acting.',
 				'Use task_graph to record or revise the graph, delegate to run ready nodes, and task_status to recover or check before delivering.',
-				`Each node has one objective, its inputs and outputs, and testable acceptance criteria. ${WRITE_TASK_CRITERION_RULE}. The runtime derives an independent pinned verifier for it.`,
+				`Each node has one objective, its inputs and outputs, and testable acceptance criteria. ${WRITE_TASK_CRITERION_RULE}. The runtime derives an independent pinned verifier for it. Put acceptance on the node that produces the work; a standalone verification node should use evidence criteria, because a tester/reviewer node with command or review criteria is verified again.`,
 				delegate,
 				limitSentence,
 				writeRule,

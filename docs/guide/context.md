@@ -23,7 +23,9 @@ The status line above the composer shows the same share, e.g.
 `15.7M tokens · $0.000 · cache 8M (51%) · turn 5 · context 80% · 204K/256K`. Counts scale to K/M/G.
 `cache` is the cumulative input the provider served from its prompt cache and its share of all
 input; a provider that reports no cache statistics is left off the line rather than shown as
-`0 (0%)`.
+`0 (0%)`. The context share is not clamped: `context 117% · 299K/256K` means the last request
+exceeded the configured window. A provider may accept it anyway; the fix is to correct the model
+profile's `contextWindow`, not to read 100% as a hard ceiling.
 
 ## Compaction
 

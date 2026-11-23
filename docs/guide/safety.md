@@ -181,12 +181,15 @@ Consequences:
 - A task whose effective capabilities include `rw` must have at least one `review` or `command`
   acceptance criterion. The runtime derives a **pinned built-in** `reviewer` or `tester` child after
   the worker batch; a project `.comonad/agents/reviewer.md` cannot weaken acceptance.
-- The worker and verifier return a JSON envelope. Malformed output is `invalid_output`; a
-  self-declared verdict is advisory and acceptance is recomputed from per-criterion results. Each
-  acceptance entry must use the task's exact criterion id; an equal-length all-different list is
-  mapped positionally and recorded, while partial coverage is `invalid_output`. A `command` criterion
-  runs read-only with a scratch-only shell; a tester may use a byte-identical `$COMONAD_SCRATCH` copy
-  and must report the exact command, its real exit code and a `mirror: <path>` note.
+- The worker and verifier return a JSON envelope. Evidence is read tolerantly: bad items are dropped
+  and over-long lists are trimmed with warnings, and a report that still fails the contract gets one
+  repair round in the same session. A worker that remains invalid is `invalid_output`; a verifier
+  that remains invalid is `verification_unavailable` (the work was not judged). A self-declared
+  verdict is advisory and acceptance is recomputed from per-criterion results. Each acceptance entry
+  must use the task's exact criterion id; an equal-length all-different list is mapped positionally
+  and recorded, while partial coverage is `verification_unavailable`. A `command` criterion runs
+  read-only with a scratch-only shell; the runtime harvests the command and its real exit code from
+  the transcript, including a byte-identical `$COMONAD_SCRATCH` copy.
 - Read and write tasks may run in parallel. Every tracked write passes through `ctx.edit`, which
   serialises writes to the **same absolute path**; different files proceed concurrently.
 - Parallel workers coordinate through the `message` tool. One append-only JSONL mailbox per root chat

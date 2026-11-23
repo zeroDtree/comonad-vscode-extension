@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Context } from 'cordis';
 import { effectiveCapabilities } from '../lib/agents';
+import { commandMatches, mergeEvidence } from '../lib/agent-evidence';
 import { clampResumeBudget, type BudgetDimension, type BudgetInput } from '../lib/budget';
 import { buildVerifierPrompt, buildWorkerTaskPrompt } from '../lib/agent-prompts';
 import { parseAgentEnvelope } from '../lib/agent-output';
@@ -12,6 +13,8 @@ import {
 	boardOf,
 	formatBoard,
 	mapReportedCriteria,
+	type AcceptanceCriterion,
+	type AgentEvidence,
 	type TaskGraphAccess,
 	type TaskNode,
 	type TaskNodeInput,
@@ -23,6 +26,36 @@ import { objectSchema, type ToolContext } from '../lib/types';
 /** The Orchestrator's task tools and the shared coordination mailbox. */
 
 const FAILED = (error: unknown): string => `Error: ${error instanceof Error ? error.message : String(error)}`;
+
+/** A worker report only has to be a usable envelope; its criterion coverage is checked at finish. */
+const parseCheck = (report: string): string | null => {
+	const parsed = parseAgentEnvelope(report);
+	return parsed.ok ? null : parsed.reason;
+};
+
+/** A verifier owns exactly its kind of criteria, so parse and coverage are both part of the contract. */
+const verifierCheck =
+	(criteria: readonly AcceptanceCriterion[]) =>
+	(report: string): string | null => {
+		const parsed = parseAgentEnvelope(report);
+		if (!parsed.ok) {
+			return parsed.reason;
+		}
+		const match = mapReportedCriteria(criteria, parsed.value.acceptance ?? []);
+		return match.ok ? null : `the acceptance does not cover the criteria: ${match.reason}`;
+	};
+
+function attemptAdvice(node: TaskNode): string {
+	const left = node.maxAttempts - node.attempts;
+	return left > 0
+		? ` (attempt ${node.attempts}/${node.maxAttempts} used; revise the task and delegate again)`
+		: ' (attempt budget spent)';
+}
+
+function warningsText(warnings: readonly string[]): string {
+	const unique = [...new Set(warnings.filter(Boolean))];
+	return unique.length ? `\n\nReport warnings:\n${unique.map((warning) => `- ${warning}`).join('\n')}` : '';
+}
 
 /** The phase rules for the current tool context, from the one visible tool set. */
 function rulesOf(ctx: Context, toolCtx: ToolContext) {
@@ -213,12 +246,14 @@ export function orchestrateTools(ctx: Context): void {
 								description: node.title,
 								...(tasks.length === 1 && toolCtx.callId ? { callId: toolCtx.callId } : {}),
 								onStart: (sessionId) => ctx.orchestrator.attach(access, node.id, sessionId),
+								checkReport: parseCheck,
 								signal: toolCtx.signal,
 							});
 							return { run, outcome };
 						}),
 					);
 					const pendingVerification: Array<{ node: TaskNode; report: string; writes: string[] }> = [];
+					const warnings: string[] = [];
 					for (const { run, outcome } of settled) {
 						const node = run.node;
 						if (outcome.paused) {
@@ -245,14 +280,21 @@ export function orchestrateTools(ctx: Context): void {
 						}
 						const parsed = parseAgentEnvelope(outcome.report);
 						if (!parsed.ok) {
-							ctx.orchestrator.reject(access, node.id, { code: 'invalid_output', reason: parsed.reason, at: Date.now() });
+							ctx.orchestrator.reject(access, node.id, {
+								code: 'invalid_output',
+								reason: `${outcome.contractError ?? parsed.reason}${attemptAdvice(node)}`,
+								at: Date.now(),
+							});
 							continue;
 						}
+						warnings.push(...parsed.warnings);
 						const envelope = parsed.value;
+						const merged = mergeEvidence(envelope.evidence, outcome.observedCommands);
+						warnings.push(...merged.warnings);
 						const result: TaskResult = {
 							status: envelope.status === 'blocked' || envelope.status === 'failed' ? envelope.status : 'ok',
 							summary: envelope.summary,
-							evidence: envelope.evidence,
+							evidence: merged.items,
 							criteria: envelope.acceptance ?? [],
 							writes: outcome.writes,
 							...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
@@ -272,9 +314,9 @@ export function orchestrateTools(ctx: Context): void {
 					// Review verifiers run in parallel; command verifiers run one at a time so two test
 					// processes cannot fight over the same scratch or build outputs.
 					const review = pendingVerification.filter((item) => item.node.acceptance.some((criterion) => criterion.check === 'review'));
-					await Promise.all(review.map((item) => runVerifier(ctx, toolCtx, access, item, 'reviewer')));
+					await Promise.all(review.map((item) => runVerifier(ctx, toolCtx, access, item, 'reviewer', warnings)));
 					for (const item of pendingVerification.filter((entry) => entry.node.acceptance.some((criterion) => criterion.check === 'command'))) {
-						await runVerifier(ctx, toolCtx, access, item, 'tester');
+						await runVerifier(ctx, toolCtx, access, item, 'tester', warnings);
 					}
 					for (const item of pendingVerification) {
 						const node = access.get()?.nodes.find((candidate) => candidate.id === item.node.id);
@@ -283,7 +325,9 @@ export function orchestrateTools(ctx: Context): void {
 						}
 					}
 					const final = access.get();
-					return final ? `${formatBoard(boardOf(final))}\n\n${detailsOf(final, tasks)}` : 'The task graph disappeared.';
+					return final
+						? `${formatBoard(boardOf(final))}\n\n${detailsOf(final, tasks)}${warningsText(warnings)}`
+						: 'The task graph disappeared.';
 				});
 			} catch (error) {
 				return FAILED(error);
@@ -419,12 +463,14 @@ export function orchestrateTools(ctx: Context): void {
 								description: node.title,
 								...(tasks.length === 1 && toolCtx.callId ? { callId: toolCtx.callId } : {}),
 								onStart: (sessionId) => ctx.orchestrator.attach(access, node.id, sessionId),
+								checkReport: parseCheck,
 								signal: toolCtx.signal,
 							});
 							return { run, outcome, prior: priorWrites.get(node.id) ?? [] };
 						}),
 					);
 					const pendingVerification: Array<{ node: TaskNode; report: string; writes: string[] }> = [];
+					const warnings: string[] = [];
 					for (const { run, outcome, prior } of settled) {
 						const node = run.node;
 						if (outcome.paused) {
@@ -455,15 +501,22 @@ export function orchestrateTools(ctx: Context): void {
 						}
 						const parsed = parseAgentEnvelope(outcome.report);
 						if (!parsed.ok) {
-							ctx.orchestrator.reject(access, node.id, { code: 'invalid_output', reason: parsed.reason, at: Date.now() });
+							ctx.orchestrator.reject(access, node.id, {
+								code: 'invalid_output',
+								reason: `${outcome.contractError ?? parsed.reason}${attemptAdvice(node)}`,
+								at: Date.now(),
+							});
 							continue;
 						}
+						warnings.push(...parsed.warnings);
 						const envelope = parsed.value;
+						const merged = mergeEvidence(envelope.evidence, outcome.observedCommands);
+						warnings.push(...merged.warnings);
 						const writes = [...new Set([...prior, ...outcome.writes])];
 						const result: TaskResult = {
 							status: envelope.status === 'blocked' || envelope.status === 'failed' ? envelope.status : 'ok',
 							summary: envelope.summary,
-							evidence: envelope.evidence,
+							evidence: merged.items,
 							criteria: envelope.acceptance ?? [],
 							writes,
 							...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
@@ -481,9 +534,9 @@ export function orchestrateTools(ctx: Context): void {
 						pendingVerification.push({ node, report: outcome.report, writes });
 					}
 					const review = pendingVerification.filter((item) => item.node.acceptance.some((criterion) => criterion.check === 'review'));
-					await Promise.all(review.map((item) => runVerifier(ctx, toolCtx, access, item, 'reviewer')));
+					await Promise.all(review.map((item) => runVerifier(ctx, toolCtx, access, item, 'reviewer', warnings)));
 					for (const item of pendingVerification.filter((entry) => entry.node.acceptance.some((criterion) => criterion.check === 'command'))) {
-						await runVerifier(ctx, toolCtx, access, item, 'tester');
+						await runVerifier(ctx, toolCtx, access, item, 'tester', warnings);
 					}
 					for (const item of pendingVerification) {
 						const node = access.get()?.nodes.find((candidate) => candidate.id === item.node.id);
@@ -503,7 +556,9 @@ export function orchestrateTools(ctx: Context): void {
 								.join('\n')}`
 						: '';
 					const final = access.get();
-					return final ? `${formatBoard(boardOf(final))}\n\n${detailsOf(final, tasks)}${notice}` : 'The task graph disappeared.';
+					return final
+						? `${formatBoard(boardOf(final))}\n\n${detailsOf(final, tasks)}${warningsText(warnings)}${notice}`
+						: 'The task graph disappeared.';
 				});
 			} catch (error) {
 				return FAILED(error);
@@ -519,6 +574,7 @@ async function runVerifier(
 	access: TaskGraphAccess,
 	item: { node: TaskNode; report: string; writes: string[] },
 	roleId: 'reviewer' | 'tester',
+	warnings: string[],
 ): Promise<void> {
 	const node = access.get()?.nodes.find((candidate) => candidate.id === item.node.id);
 	if (!node || node.status !== 'verifying') {
@@ -555,6 +611,8 @@ async function runVerifier(
 		capabilities: role.capabilities.filter((capability) => capability !== 'rw'),
 		network: role.network,
 		description: `Verify ${node.id}`,
+		onStart: (sessionId) => ctx.orchestrator.attachVerification(access, node.id, sessionId),
+		checkReport: verifierCheck(criteria),
 		signal: toolCtx.signal,
 	});
 	if (!outcome.ok) {
@@ -569,18 +627,32 @@ async function runVerifier(
 	}
 	const parsed = parseAgentEnvelope(outcome.report);
 	if (!parsed.ok) {
-		ctx.orchestrator.reject(access, node.id, { code: 'invalid_output', reason: parsed.reason, at: Date.now() });
+		ctx.orchestrator.reject(access, node.id, {
+			code: 'verification_unavailable',
+			reason: `the ${roleId} report was invalid after one repair: ${outcome.contractError ?? parsed.reason}; the work was not judged${
+				outcome.sessionId ? `; verifier session ${outcome.sessionId}` : ''
+			}${attemptAdvice(node)}`,
+			at: Date.now(),
+		});
 		return;
 	}
+	warnings.push(...parsed.warnings);
 	const envelope = parsed.value;
+	// A tester may run many commands; the ones named by the criteria must survive the evidence cap.
+	const observed = outcome.observedCommands;
+	const decisive = (item: AgentEvidence): boolean =>
+		item.kind === 'command' && criteria.some((criterion) => criterion.command && commandMatches(item.command, criterion.command));
+	const orderedObserved = observed ? [...observed.filter(decisive), ...observed.filter((item) => !decisive(item))] : undefined;
+	const merged = mergeEvidence(envelope.evidence, orderedObserved);
+	warnings.push(...merged.warnings);
 	const match = mapReportedCriteria(criteria, envelope.acceptance ?? []);
 	if (!match.ok) {
 		const summary = envelope.summary.trim();
 		ctx.orchestrator.reject(access, node.id, {
-			code: 'invalid_output',
-			reason: `the ${roleId} acceptance does not cover the criteria: ${match.reason}${
+			code: 'verification_unavailable',
+			reason: `the ${roleId} acceptance does not cover the criteria: ${match.reason}; the work was not judged${
 				summary ? `; verifier summary: ${summary.slice(0, 300)}` : ''
-			}`,
+			}${outcome.sessionId ? `; verifier session ${outcome.sessionId}` : ''}${attemptAdvice(node)}`,
 			at: Date.now(),
 		});
 		return;
@@ -591,7 +663,7 @@ async function runVerifier(
 		...(criterion.note ? { note: criterion.note } : {}),
 		by: roleId,
 		...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
-		...(envelope.evidence.length ? { evidence: envelope.evidence } : {}),
+		...(merged.items.length ? { evidence: merged.items } : {}),
 	}));
 	const summary = [envelope.summary, match.positional ? 'acceptance ids were mapped positionally to the task criteria' : '']
 		.filter(Boolean)

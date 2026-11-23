@@ -5,7 +5,7 @@ import type { ToolAuthorization } from './authorization';
 import type { BudgetInput, BudgetLimits, BudgetReport } from './budget';
 import type { PolicyStep, RuleSet } from './policy';
 import type { SandboxMode, SandboxOptions } from './sandbox';
-import type { TaskGraphAccess } from './task-graph';
+import type { AgentEvidence, TaskGraphAccess } from './task-graph';
 
 export type { SandboxMode } from './sandbox';
 
@@ -256,6 +256,11 @@ export interface AgentSpawnRequest {
 	callId?: string;
 	/** Called as soon as the child session exists, before the graph starts. */
 	onStart?: (sessionId: string) => void;
+	/**
+	 * Validates the child's final report. The child gets exactly one repair round in its own session
+	 * when this returns an error; the error text is shown to the child.
+	 */
+	checkReport?: (report: string) => string | null;
 	signal: AbortSignal;
 }
 
@@ -275,6 +280,10 @@ export interface AgentSpawnOutcome {
 	budget?: BudgetReport;
 	/** The last tool the child attempted, useful when a budget cut it off. */
 	lastTool?: string;
+	/** `checkReport` still rejected the report after the one repair round. */
+	contractError?: string;
+	/** Shell commands the runtime observed in the child transcript, with their real exit codes. */
+	observedCommands?: AgentEvidence[];
 }
 
 export type AgentSpawnFunction = (request: AgentSpawnRequest) => Promise<AgentSpawnOutcome>;

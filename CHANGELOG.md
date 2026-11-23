@@ -36,6 +36,12 @@ Highlights are below; the full implementation notes are linked at the end. The u
   structured JSON envelope. The model cannot mark a task accepted. Read and write tasks run in
   parallel; tracked writes are serialised per absolute path, and each child gets its own test scratch
   subtree.
+
+- **Verification survives a formatting slip.** The worker/verifier envelope is read tolerantly:
+  malformed evidence is dropped and over-long lists are trimmed with warnings instead of discarding
+  the report. A report that still fails the contract gets one repair round in the same child session,
+  command evidence is harvested from the transcript's real exit codes, and a verifier that remains
+  invalid is `verification_unavailable` — linked to its session, not reported as failed work.
 - **Native run budgets and resumable pauses.** Every run has four independent hard limits — turns
   (model round trips), tool calls, tokens and wall-clock time. A limit stops the run at a message
   boundary, keeps the partial transcript and pauses the task; `resume` continues the same child
@@ -150,7 +156,8 @@ Highlights are below; the full implementation notes are linked at the end. The u
 - **The status line scales its numbers and shows prompt-cache reuse.** Session totals print as
   K/M/G, and a provider that reports prompt-cache statistics adds a cumulative `cache 8M (51%)`
   segment — the hits and their share of all input. Providers that report none are left off the
-  line rather than shown as `0 (0%)`.
+  line rather than shown as `0 (0%)`. The context share is not clamped, so a request over the
+  configured window reads `117%` rather than a misleading `100%`.
 
 ### Detailed notes
 

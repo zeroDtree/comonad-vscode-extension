@@ -88,6 +88,7 @@ import type { PresetSamplers } from 'comonad-plugin-tavern';
 import { describe, formatTodos, lastAssistant, lastReplyIndex } from '../lib/util';
 import { allowedToolsFor, BUILTIN_ROLE_BY_ID, SUBAGENT_EXCLUDED_TOOLS, type AgentRole } from '../lib/agents';
 import { buildSubagentSystemPrompt } from '../lib/agent-prompts';
+import { collectShellEvidence } from '../lib/agent-evidence';
 import { planRules } from '../lib/plan-rules';
 import { KeyedMutex } from '../lib/locks';
 import { skillLines } from './catalog';
@@ -2820,17 +2821,64 @@ export class Agent extends Service {
 				description: request.description,
 			});
 			abort.signal.throwIfAborted();
-			const outcome = await runGraph(this.graph(), state, {
-				signal: abort.signal,
-				choose: (soft: SoftRequest) =>
-					this.ctx.llm.choose(policy.model, soft, abort.signal, (usage) =>
-						state.budget?.spendTokens(usage.input + usage.output),
-					),
-				onStep: (current) => remember(current.transcript),
-			});
-			const latestState = outcome.state;
-			const dimension = budget.stopReason ?? latestState.stop ?? budget.check();
+			const runSegment = (current: RunState) =>
+				runGraph(this.graph(), current, {
+					signal: abort.signal,
+					choose: (soft: SoftRequest) =>
+						this.ctx.llm.choose(policy.model, soft, abort.signal, (usage) =>
+							state.budget?.spendTokens(usage.input + usage.output),
+						),
+					onStep: (next) => remember(next.transcript),
+				});
+			const check = (report: string): string | null => {
+				if (!request.checkReport) {
+					return null;
+				}
+				try {
+					return request.checkReport(report);
+				} catch (error) {
+					return describe(error);
+				}
+			};
+			const outcome = await runSegment(state);
+			let latestState = outcome.state;
+			let status = outcome.status;
+			let contractError: string | undefined;
+			let dimension = budget.stopReason ?? latestState.stop ?? budget.check();
+			// One repair round in the same child session: presentation errors are cheap to correct,
+			// while rerunning the worker would repeat its tools and spend an attempt.
+			if (status !== 'aborted' && !dimension && request.checkReport) {
+				const rejected = check(lastAssistant(latestState.transcript)?.content ?? '');
+				if (rejected) {
+					const repair: Message = {
+						role: 'user',
+						content: `(runtime) Your final message failed the contract: ${rejected}\nReturn exactly one corrected JSON object matching the contract in your system prompt. Do not repeat completed work and do not run tools; reuse what is already in the transcript.`,
+						at: Date.now(),
+					};
+					const transcript = [...latestState.transcript, repair];
+					remember(transcript);
+					const repaired = await runSegment({
+						...latestState,
+						messages: [...latestState.messages, repair],
+						transcript,
+						toolCalls: [],
+						traces: undefined,
+						stop: undefined,
+						lastTool: undefined,
+						gateReason: '',
+						batch: 0,
+						approval: undefined,
+						outcome: undefined,
+						authorization: undefined,
+					});
+					latestState = repaired.state;
+					status = repaired.status;
+					contractError = check(lastAssistant(latestState.transcript)?.content ?? '') ?? undefined;
+					dimension = budget.stopReason ?? latestState.stop ?? budget.check();
+				}
+			}
 			const lastTool = latestState.lastTool ?? state.lastTool;
+			const observedCommands = collectShellEvidence(latestState.transcript);
 			if (dimension) {
 				budget.stop(dimension);
 				const partial = sealPartial(latestState.messages, latestState.transcript, dimension);
@@ -2844,9 +2892,10 @@ export class Agent extends Service {
 					sessionId: subId,
 					budget: budget.report(),
 					...(lastTool ? { lastTool } : {}),
+					observedCommands,
 				};
 			}
-			const stopped = outcome.status === 'aborted';
+			const stopped = status === 'aborted';
 			return {
 				ok: !stopped,
 				report: stopped ? '(stopped)' : (lastAssistant(latestState.transcript)?.content ?? ''),
@@ -2855,6 +2904,8 @@ export class Agent extends Service {
 				budget: budget.report(),
 				...(stopped ? { stopped: true } : {}),
 				...(lastTool ? { lastTool } : {}),
+				...(contractError ? { contractError } : {}),
+				observedCommands,
 			};
 		} catch (error) {
 			const dimension = budget.stopReason ?? budget.check();

@@ -3,6 +3,20 @@
 > **Internal archive.** Implementation-level notes for the next release. User documentation lives
 > in `docs/`; the summary is in `CHANGELOG.md`.
 
+- **A malformed verifier report no longer deletes a valid verification.** Evidence is read through
+  one tolerant policy (`src/lib/agent-evidence.ts`): a non-array becomes empty with a warning, a bad
+  item is dropped by index, an over-long list is trimmed with command evidence first, and
+  `exitCode` accepts numeric strings/`exit_code`. `parseAgentEnvelope` returns warnings instead of an
+  `invalid evidence` failure, and persistence reuses the same sanitizer. A report that still fails
+  the contract gets one repair round in the same child session through
+  `AgentSpawnRequest.checkReport`; it does not spend a node attempt. Verifier sessions are attached
+  on spawn, so a failed verification is inspectable; a verifier contract failure is
+  `verification_unavailable` ("the work was not judged"), while a worker failure stays
+  `invalid_output`. Command evidence is harvested from the child transcript (shell tool calls paired
+  with their real `exit_code`), and commands named by the acceptance criteria are kept ahead of the
+  cap. The UI task row links the latest verifier session, and the status line no longer clamps
+  context share to 100%.
+
 - **Tool calls read like a transcript, not a JSON dump.** Every call is now a card: the model writes
   a 5–10 word `description` for `run_shell`, `run_shell_readonly` and `start_shell` (a required
   argument), which becomes the title; the utilities the command used (`ls, echo, find, sort`) are

@@ -101,20 +101,29 @@ After the worker batch finishes, the runtime verifies the successful nodes:
    with the scratch-only test shell and reports its exit code.
 
 Review verifiers run in parallel; command verifiers run one at a time. The verifier's final message
-is also a JSON envelope. Each `acceptance` entry must use the task's exact criterion id, one entry
-per criterion; the runtime maps an equal-length list whose ids are all different positionally and
-records the mapping, but partial coverage or a count mismatch is an `invalid_output` rejection
-rather than a silent zero-check result. Its self-declared `verdict` is advisory: acceptance is
-recomputed from the per-criterion `met` values, and a command criterion also needs matching
+is also a JSON envelope. The envelope is read tolerantly: a malformed evidence item is dropped, an
+over-long list is trimmed (command evidence first), and the report is accepted with warnings; only a
+non-JSON body or an invalid `status`/`verdict` is fatal. A report that still fails the contract gets
+**one repair round in the same child session**, with the exact validation error; this does not spend
+a node attempt. Each `acceptance` entry must use the task's exact criterion id, one entry per
+criterion; the runtime maps an equal-length list whose ids are all different positionally and
+records the mapping. Partial coverage or a count mismatch is a `verification_unavailable` rejection
+— "the work was not judged", not a failed check. Its self-declared `verdict` is advisory: acceptance
+is recomputed from the per-criterion `met` values, and a command criterion also needs matching
 `exitCode: 0` evidence for the exact command string.
+
+Command evidence is harvested from the child's transcript: the runtime pairs every
+`run_shell_test`/`run_shell_readonly`/`run_shell` call with its real `exit_code` and uses that, not
+the model's transcription. A `cd <copy> && <command>` mirror wrapper still matches the criterion.
+Report only decisive file/search/note evidence; the transcript is the source of truth for commands.
 
 Command criteria run against a read-only workspace with only the scratch tree writable. Prefer
 commands that pass there (a no-emit typecheck, or a test whose caches go to `$COMONAD_SCRATCH`); for
 a check that must write build artifacts, use a `review` criterion instead. If the exact command fails
 only because the workspace is read-only, the tester may run it in a byte-identical copy under
-`$COMONAD_SCRATCH` and must report the exact criterion command with that run's real exit code plus a
-`mirror: <path>` note. A failed command is never reported as exit 0, and a rejection reason names the
-criterion command and the command/exit code the tester actually observed.
+`$COMONAD_SCRATCH`; the runtime harvests that run's real exit code and recognizes the `cd <copy> &&
+<command>` wrapper. A failed command can never be reported as exit 0, and a rejection reason names
+the criterion command and the command/exit code the tester actually observed.
 
 A write task must have at least one `review` or `command` criterion. The model has no tool that can
 mark a task accepted. A rejected node carries a code and reason; revise the graph within the attempt

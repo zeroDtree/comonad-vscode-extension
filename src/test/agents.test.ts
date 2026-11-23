@@ -211,6 +211,11 @@ suite('Orchestrator prompt', () => {
 		assert.match(body({ canCommand: true }), /A command criterion runs in a read-only workspace/);
 		assert.ok(!body({ canCommand: false }).includes('A command criterion runs in a read-only workspace'));
 	});
+
+	test('acceptance belongs to the producing node, not a verifier of the verifier', () => {
+		assert.match(body(), /standalone verification node should use evidence criteria/);
+		assert.match(body({ planMode: true }), /For a standalone verification node, prefer evidence criteria/);
+	});
 });
 
 suite('Subagent contracts', () => {
@@ -234,8 +239,11 @@ suite('Subagent contracts', () => {
 		const verifier = subagent('verifier');
 		assert.match(verifier, /ignore any acceptance ids quoted in the worker report/);
 		assert.match(verifier, /run_shell_test/);
-		assert.match(verifier, /mirror: <path>/);
-		assert.match(verifier, /Never report exit code 0 for a command that failed/);
+		assert.match(verifier, /the runtime records every shell command/i);
+		assert.match(verifier, /Never claim a command passed that you did not run/);
+		for (const contract of ['worker', 'verifier'] as const) {
+			assert.match(subagent(contract), /do not transcribe commands into evidence/);
+		}
 	});
 
 	test('the task prompts restate the real acceptance ids', () => {

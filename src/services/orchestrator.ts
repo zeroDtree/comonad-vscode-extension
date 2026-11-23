@@ -323,6 +323,20 @@ export class Orchestrator extends Service {
 		this.emit(access, graph);
 	}
 
+	/** Records a verifier session as soon as it exists, so a failed verification is still inspectable. */
+	attachVerification(access: TaskGraphAccess, id: string, sessionId: string): void {
+		const graph = this.require(access);
+		const node = this.nodeOf(graph, id);
+		const sessions = node.verificationSessionIds ?? [];
+		if (sessions.includes(sessionId)) {
+			return;
+		}
+		node.verificationSessionIds = [...sessions, sessionId].slice(-8);
+		graph.updatedAt = Date.now();
+		access.set(graph);
+		this.emit(access, graph);
+	}
+
 	/** Stores the worker's structured result; acceptance is still computed by `finish`. */
 	recordWorker(access: TaskGraphAccess, id: string, result: TaskResult): TaskNode {
 		const graph = this.require(access);
@@ -360,7 +374,7 @@ export class Orchestrator extends Service {
 		const merged = [...previous.filter((check) => !checks.some((next) => next.id === check.id)), ...checks];
 		const summaries = [node.verification?.summary, summary].filter((text): text is string => Boolean(text?.trim()));
 		node.verification = { summary: summaries.join('\n'), checks: merged, at: Date.now() };
-		if (sessionId) {
+		if (sessionId && !node.verificationSessionIds?.includes(sessionId)) {
 			node.verificationSessionIds = [...(node.verificationSessionIds ?? []), sessionId];
 		}
 		graph.updatedAt = Date.now();

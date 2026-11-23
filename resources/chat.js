@@ -3870,6 +3870,16 @@
 							esc(task.subagentSessionId) +
 							'" data-tip="Open the task session">Open</button>'
 						: '';
+					const verifier =
+						Array.isArray(task.verificationSessionIds) && task.verificationSessionIds.length
+							? task.verificationSessionIds[task.verificationSessionIds.length - 1]
+							: '';
+					const openVerifier =
+						verifier && verifier !== task.subagentSessionId
+							? '<button type="button" class="tool-open-subagent" data-subagent="' +
+								esc(verifier) +
+								'" data-tip="Open the verifier session">Verify</button>'
+							: '';
 					return (
 						'<span class="task ' +
 						esc(task.status) +
@@ -3882,6 +3892,7 @@
 						' · ' +
 						esc(task.role) +
 						open +
+						openVerifier +
 						'</span>'
 					);
 				})

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { AgentRisk, AgentRole } from './agents';
 import { effectiveCapabilities, roleRisk } from './agents';
+import { commandMatches, sanitizeEvidence } from './agent-evidence';
 import { normalizeBudget, type BudgetDimension, type BudgetInput, type BudgetReport, type BudgetUsage } from './budget';
 import type { Capability } from './types';
 
@@ -392,6 +393,17 @@ export function checkTaskGraph(input: TaskGraphInput, roles: ReadonlyMap<string,
 			if (effectiveRisk(node, role) === 'write' && !acceptance.some((criterion) => criterion?.check === 'review' || criterion?.check === 'command')) {
 				errors.push(`${node.id}: ${WRITE_TASK_CRITERION_RULE}`);
 			}
+			// A standalone verification node would itself be verified: acceptance belongs on the node
+			// that produces the work, or on a read-only node with evidence criteria.
+			if (
+				(role.id === 'tester' || role.id === 'reviewer') &&
+				!(Array.isArray(writes) && writes.length) &&
+				acceptance.some((criterion) => criterion?.check === 'review' || criterion?.check === 'command')
+			) {
+				warnings.push(
+					`${node.id}: a ${role.id} verification node with no writes will be verified again; put acceptance on the producing node or use evidence criteria`,
+				);
+			}
 		}
 		const maxAttempts = node.maxAttempts;
 		if (maxAttempts !== undefined && (typeof maxAttempts !== 'number' || !Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > MAX_ATTEMPTS)) {
@@ -751,7 +763,7 @@ export function satisfiesAcceptance(node: TaskNode): { accepted: boolean; reason
 		if (criterion.check === 'command') {
 			const command = (check.evidence ?? []).find(
 				(evidence) =>
-					evidence.kind === 'command' && evidence.command === criterion.command && evidence.exitCode === 0,
+					evidence.kind === 'command' && commandMatches(evidence.command, criterion.command ?? '') && evidence.exitCode === 0,
 			);
 			if (!command) {
 				const observed = (check.evidence ?? [])
@@ -916,47 +928,6 @@ export function sanitizeTaskGraph(value: unknown): TaskGraph | undefined {
 		createdAt: integer(raw.createdAt, 0, Number.MAX_SAFE_INTEGER, 0),
 		updatedAt: integer(raw.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
 	};
-}
-
-function sanitizeEvidence(value: unknown): AgentEvidence[] {
-	if (!Array.isArray(value)) {
-		return [];
-	}
-	const out: AgentEvidence[] = [];
-	for (const item of value.slice(0, 16)) {
-		if (!item || typeof item !== 'object') {
-			continue;
-		}
-		const raw = item as Record<string, unknown>;
-		switch (raw.kind) {
-			case 'file':
-				if (typeof raw.path === 'string') {
-					out.push({ kind: 'file', path: clean(raw.path, 256), ...(typeof raw.note === 'string' ? { note: clean(raw.note, 1000) } : {}) });
-				}
-				break;
-			case 'search':
-				if (typeof raw.query === 'string') {
-					out.push({ kind: 'search', query: clean(raw.query, 500), ...(typeof raw.note === 'string' ? { note: clean(raw.note, 1000) } : {}) });
-				}
-				break;
-			case 'command':
-				if (typeof raw.command === 'string' && typeof raw.exitCode === 'number' && Number.isFinite(raw.exitCode)) {
-					out.push({
-						kind: 'command',
-						command: clean(raw.command, 2000),
-						exitCode: Math.trunc(raw.exitCode),
-						...(typeof raw.output === 'string' ? { output: clean(raw.output, 2000) } : {}),
-					});
-				}
-				break;
-			case 'note':
-				if (typeof raw.text === 'string') {
-					out.push({ kind: 'note', text: clean(raw.text, 2000) });
-				}
-				break;
-		}
-	}
-	return out;
 }
 
 function sanitizeCriteria(value: unknown): CriterionResult[] {

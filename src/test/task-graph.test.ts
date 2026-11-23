@@ -262,6 +262,23 @@ suite('Task acceptance', () => {
 		assert.ok(!satisfiesAcceptance(nodeValue).accepted, 'a failed command is not accepted');
 		nodeValue.verification.checks[0]!.evidence = [{ kind: 'command', command: 'false', exitCode: 0 }];
 		assert.ok(!satisfiesAcceptance(nodeValue).accepted, 'a different command is not accepted');
+		nodeValue.verification.checks[0]!.evidence = [{ kind: 'command', command: 'cd /tmp/mirror && true', exitCode: 0 }];
+		assert.strictEqual(satisfiesAcceptance(nodeValue).accepted, true, 'a mirror wrapper runs the exact command');
+	});
+
+	test('a standalone verification node warns that it will be verified again', () => {
+		const verify = node({
+			id: 'verify',
+			title: 'Verify the work',
+			role: 'tester',
+			objective: 'verify',
+			acceptance: [command('a1', 'true')],
+		});
+		const checked = checkTaskGraph(graphInput(verify), roles);
+		assert.deepStrictEqual(checked.errors, []);
+		assert.ok(checked.warnings.some((warning) => warning.includes('verified again')));
+		const producing = checkTaskGraph(graphInput(node({ acceptance: [command('a1', 'true')] })), roles);
+		assert.ok(!producing.warnings.some((warning) => warning.includes('verified again')));
 	});
 
 	test('a missing or failed check names what the verifier reported', () => {

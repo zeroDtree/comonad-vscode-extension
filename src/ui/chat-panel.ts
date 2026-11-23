@@ -87,7 +87,9 @@ function contextUsage(session: Pick<Session, 'lastInputTokens'> | undefined, win
 	if (!session?.lastInputTokens || !window) {
 		return '';
 	}
-	const share = Math.min(100, Math.round((session.lastInputTokens / window) * 100));
+	// Do not clamp: a provider may accept a request larger than the configured window, and hiding
+	// the overage makes a mis-sized profile look healthy.
+	const share = Math.round((session.lastInputTokens / window) * 100);
 	return `context ${share}% · ${formatTokens(session.lastInputTokens)}/${formatTokens(window)}`;
 }
 

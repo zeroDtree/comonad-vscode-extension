@@ -812,7 +812,13 @@ suite('Resume budget clamp', () => {
 });
 
 suite('Verifier acceptance mapping', () => {
-	async function commandTaskKernel(tester: { acceptance: unknown[]; evidence: unknown[]; verdict?: string }) {
+	async function commandTaskKernel(tester: {
+		acceptance: unknown[];
+		evidence: unknown[];
+		verdict?: string;
+		call?: ToolCall;
+		repair?: { acceptance: unknown[]; evidence: unknown[] };
+	}) {
 		const kernel = await createTestKernel();
 		kernel.ctx.llm.use({
 			name: `command-orchestrator-${Math.random()}`,
@@ -835,6 +841,20 @@ suite('Verifier acceptance mapping', () => {
 					]);
 				}
 				if (system.includes('You are the tester subagent of Comonad')) {
+					const last = request.messages[request.messages.length - 1];
+					if (last?.role === 'user' && String(last.content).includes('failed the contract') && tester.repair) {
+						return reply(
+							JSON.stringify({
+								verdict: 'pass',
+								summary: 'repaired the report',
+								evidence: tester.repair.evidence,
+								acceptance: tester.repair.acceptance,
+							}),
+						);
+					}
+					if (tester.call && last?.role !== 'tool') {
+						return reply('', [tester.call]);
+					}
 					return reply(
 						JSON.stringify({
 							verdict: tester.verdict ?? 'pass',
@@ -875,6 +895,7 @@ suite('Verifier acceptance mapping', () => {
 		const kernel = await commandTaskKernel({
 			acceptance: [{ id: 'a1', met: true, note: 'ran true' }],
 			evidence: [{ kind: 'command', command: 'true', exitCode: 0 }],
+			call: { id: 'run-check', name: 'run_shell_test', arguments: JSON.stringify({ command: 'true', description: 'run the check' }) },
 		});
 		try {
 			await kernel.ctx.agent.runTurn({ text: 'make made.txt', surface: 'test' });
@@ -888,7 +909,7 @@ suite('Verifier acceptance mapping', () => {
 		}
 	});
 
-	test('incomplete coverage is an invalid_output rejection, not a silent zero-check pass', async () => {
+	test('incomplete coverage is a verification_unavailable rejection, not a silent zero-check pass', async () => {
 		const kernel = await commandTaskKernel({
 			acceptance: [
 				{ id: 'a1', met: true },
@@ -900,8 +921,71 @@ suite('Verifier acceptance mapping', () => {
 			await kernel.ctx.agent.runTurn({ text: 'make made.txt', surface: 'test' });
 			const node = kernel.ctx.sessions.active()!.taskGraph!.nodes[0]!;
 			assert.strictEqual(node.status, 'rejected');
-			assert.strictEqual(node.rejection?.code, 'invalid_output');
+			assert.strictEqual(node.rejection?.code, 'verification_unavailable');
 			assert.match(node.rejection?.reason ?? '', /expected acceptance ids check but got a1, a2/);
+			assert.match(node.rejection?.reason ?? '', /not judged/);
+			assert.strictEqual(node.verificationSessionIds?.length, 1, 'the failed verifier is still linked');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a 20-item evidence list is trimmed and still accepts', async () => {
+		const evidence = [
+			{ kind: 'command', command: 'true', exitCode: 0 },
+			...Array.from({ length: 19 }, (_, index) => ({ kind: 'file', path: `src/file-${index}.ts` })),
+		];
+		const kernel = await commandTaskKernel({
+			acceptance: [{ id: 'check', met: true }],
+			evidence,
+			call: { id: 'run-check', name: 'run_shell_test', arguments: JSON.stringify({ command: 'true', description: 'run the check' }) },
+		});
+		try {
+			await kernel.ctx.agent.runTurn({ text: 'make made.txt', surface: 'test' });
+			const node = kernel.ctx.sessions.active()!.taskGraph!.nodes[0]!;
+			assert.strictEqual(node.status, 'accepted');
+			assert.strictEqual(node.verification?.checks[0]?.evidence?.length, 16);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a contract failure is repaired in the same verifier session', async () => {
+		const kernel = await commandTaskKernel({
+			acceptance: [],
+			evidence: [{ kind: 'command', command: 'true', exitCode: 0 }],
+			call: { id: 'run-check', name: 'run_shell_test', arguments: JSON.stringify({ command: 'true', description: 'run the check' }) },
+			repair: {
+				acceptance: [{ id: 'check', met: true }],
+				evidence: [{ kind: 'command', command: 'true', exitCode: 0 }],
+			},
+		});
+		try {
+			await kernel.ctx.agent.runTurn({ text: 'make made.txt', surface: 'test' });
+			const node = kernel.ctx.sessions.active()!.taskGraph!.nodes[0]!;
+			assert.strictEqual(node.status, 'accepted');
+			assert.strictEqual(node.attempts, 1, 'the repair does not spend an attempt');
+			assert.match(node.verification?.summary ?? '', /repaired the report/);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a real shell run supplies command evidence even when the report omits it', async () => {
+		const kernel = await commandTaskKernel({
+			acceptance: [{ id: 'check', met: true }],
+			evidence: [],
+			call: { id: 'run-check', name: 'run_shell_test', arguments: JSON.stringify({ command: 'true', description: 'run the check' }) },
+		});
+		try {
+			await kernel.ctx.agent.runTurn({ text: 'make made.txt', surface: 'test' });
+			const node = kernel.ctx.sessions.active()!.taskGraph!.nodes[0]!;
+			assert.strictEqual(node.status, 'accepted');
+			const evidence = node.verification?.checks[0]?.evidence ?? [];
+			assert.ok(
+				evidence.some((item) => item.kind === 'command' && item.command === 'true' && item.exitCode === 0),
+				'the transcript command is recorded as evidence',
+			);
 		} finally {
 			await kernel.dispose();
 		}
