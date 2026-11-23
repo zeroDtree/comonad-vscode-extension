@@ -46,8 +46,10 @@ Below the input:
 | **Sandbox** | The OS-enforced read and write range |
 | **Tool cards** | How a tool card starts: collapsed (default), preview or open |
 
-Every pick is written back to the matching `comonad.*` setting, so a new chat starts with the same
-policy.
+Every pick is saved under its key in Comonad's settings files. With a trusted folder open, the
+Model, Reasoning and Context window menus and the Mode, Tool approval and Sandbox pills are saved
+in this workspace's file; without one they go to your user file. A new chat starts from the same
+values, and the plan card's **Build** saves its model and mode the same way.
 
 **Context**, **Display** and **Network** are set in Settings instead: Context under **Agent**,
 Display under **UI**, and Network under **Policies** (or with **Comonad: Toggle Network**).

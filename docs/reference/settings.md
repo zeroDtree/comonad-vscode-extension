@@ -7,9 +7,16 @@ Settings live in Comonad's own files, not in VS Code's configuration:
 | **User** | `~/.comonad/settings.json` | Defaults for every workspace |
 | **Workspace** | `<workspace>/.comonad/settings.json` | This workspace only; a key here overrides the user's |
 
-The Settings panel's scope selector chooses where a save lands. The panel always shows the merged
-effective value; the selector changes only the destination. Keys are stored bare (`model`, not
-`comonad.model`).
+The Settings panel's scope selector chooses where a save lands, and a newly opened panel starts on
+**Workspace** when a folder is open and trusted and on **User** otherwise. The panel always shows
+the merged effective value; the selector changes only the destination. Keys are stored bare
+(`model`, not `comonad.model`).
+
+Picks made in the chat composer — **Model**, **Reasoning**, **Context window**, and the **Mode**,
+**Tool approval** and **Sandbox** pills, including the plan card's **Build** — are written to the
+workspace's file when a folder is open and trusted, and to your user file otherwise. Two windows on
+different projects therefore keep their own picks. In a multi-root workspace the first folder is
+the workspace.
 
 The workspace file is read, imported and written only in a trusted workspace. Existing VS Code
 `comonad.*` values are imported once on activation and are not read afterwards; edit the files

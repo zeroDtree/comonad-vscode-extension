@@ -140,6 +140,16 @@ export function defaultWriteScope(key: string, workspace: SettingsData | undefin
 	return workspace && Object.hasOwn(workspace, key) ? 'workspace' : 'user';
 }
 
+/**
+ * Where a composer pick or a freshly opened Settings panel writes by default: the workspace's file
+ * when a folder is open and trusted, the user's file otherwise. Unlike `defaultWriteScope` this
+ * ignores who owns the key today: a composer pick is a per-project choice even when only the user
+ * file has the key. An explicit `update` scope still wins.
+ */
+export function workspaceFirstScope(workspace: string, trusted: boolean): SettingsScope {
+	return workspace && trusted ? 'workspace' : 'user';
+}
+
 /** Creates `{}\n` when the file is missing; an existing file is never truncated or repaired here. */
 export function ensureSettingsFile(file: string): void {
 	if (file && !existsSync(file)) {

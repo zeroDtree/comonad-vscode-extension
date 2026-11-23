@@ -43,7 +43,9 @@ Secondary Side Bar。同样的会话也可以在 VS Code 内置聊天视图里�
 | **Sandbox** | OS 强制的读写范围（Sandbox mode） |
 | **Tool cards** | 工具卡初始状态：collapsed（默认）、preview、open |
 
-这里的每个选择都会写回对应的 `comonad.*` 设置，所以新建聊天会沿用同样的策略。
+这里的每个选择都会保存到 Comonad 设置文件的对应键。有受信任的工作区时，Model、Reasoning、
+Context window 菜单以及 Mode、Tool approval、Sandbox 胶囊会写入当前工作区的文件；否则写入用户文件。
+新建聊天沿用同样的值，计划卡片的 **Build** 也以同样方式保存模型与模式。
 
 **Context**、**Display** 和 **Network** 在设置中配置：Context 在 **Agent**，Display 在 **UI**，
 Network 在 **Policies**（或使用 **Comonad: Toggle Network** 命令）。修改 Context 会作用于当前

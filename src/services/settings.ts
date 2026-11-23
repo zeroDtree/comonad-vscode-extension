@@ -544,28 +544,32 @@ export class Settings extends Service {
 		this.ctx.emit('settings/changed');
 	}
 
-	/** Applies a preset or partial policy through the host's scope-aware update. */
-	async applyPolicy(patch: {
-		mode?: WorkMode;
-		approval?: Approval;
-		approvalResponse?: ApprovalResponse;
-		network?: boolean;
-		sandboxMode?: SandboxMode;
-	}): Promise<void> {
+	/** Applies a preset or partial policy through the host's scope-aware update. A `scope` (the chat
+	 *  composer) pins every key to that file; without one each key follows `defaultWriteScope`. */
+	async applyPolicy(
+		patch: {
+			mode?: WorkMode;
+			approval?: Approval;
+			approvalResponse?: ApprovalResponse;
+			network?: boolean;
+			sandboxMode?: SandboxMode;
+		},
+		scope?: SettingsScope,
+	): Promise<void> {
 		if (patch.mode) {
-			await this.host.update('mode', patch.mode);
+			await this.host.update('mode', patch.mode, scope);
 		}
 		if (patch.approval) {
-			await this.host.update('approval', patch.approval);
+			await this.host.update('approval', patch.approval, scope);
 		}
 		if (patch.approvalResponse) {
-			await this.host.update('approvalResponse', patch.approvalResponse);
+			await this.host.update('approvalResponse', patch.approvalResponse, scope);
 		}
 		if (patch.network !== undefined) {
-			await this.host.update('network', patch.network);
+			await this.host.update('network', patch.network, scope);
 		}
 		if (patch.sandboxMode) {
-			await this.host.update('sandboxMode', patch.sandboxMode);
+			await this.host.update('sandboxMode', patch.sandboxMode, scope);
 		}
 		this.ctx.emit('settings/changed');
 	}

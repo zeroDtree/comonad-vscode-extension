@@ -32,6 +32,7 @@ import {
 } from '../lib/plan-files';
 import { formatReference } from '../lib/references';
 import { guardPath, isInside, sandboxAllowsWrites } from '../lib/sandbox';
+import { workspaceFirstScope, type SettingsScope } from '../lib/settings-file';
 import { countRaw, formatTokens } from '../lib/tokens';
 import { ChatWebviewAssets, type ChatAssetSpec } from '../services/chat-assets';
 import { inWorkspace, markForRestore, type Session, type SessionUsage } from '../services/sessions';
@@ -138,6 +139,8 @@ export function chatPanel(ctx: Context): void {
 	// mounted here because the chat panel is its only consumer, and its lifetime is the chat's.
 	ctx.plugin(ChatWebviewAssets);
 	const extensionUri = ctx.host.extensionUri as vscode.Uri;
+	/** Composer picks are a project choice: the workspace file when one is open and trusted. */
+	const composerScope = (): SettingsScope => workspaceFirstScope(ctx.settings.workspace(), ctx.settings.trusted());
 	const clients = new Set<vscode.Webview>();
 	const readyClients = new Set<vscode.Webview>();
 	const listeners = new Map<vscode.Webview, vscode.Disposable>();
@@ -1623,10 +1626,10 @@ export function chatPanel(ctx: Context): void {
 		}
 		try {
 			if (modelPick) {
-				await ctx.settings.update('model', modelPick);
+				await ctx.settings.update('model', modelPick, composerScope());
 			}
 			// Only the mode moves: approval, sandbox and network stay exactly as the user set them.
-			await ctx.settings.applyPolicy({ mode: buildMode });
+			await ctx.settings.applyPolicy({ mode: buildMode }, composerScope());
 		} catch (error) {
 			ctx.log.message(`plan build settings failed: ${describe(error)}`);
 			post({ type: 'notice', text: 'Could not save the model and mode for this build.' }, source);
@@ -1859,7 +1862,7 @@ export function chatPanel(ctx: Context): void {
 					break;
 				case 'setMode':
 					if (typeof message.mode === 'string' && message.mode in MODE_LABELS) {
-						await ctx.settings.applyPolicy({ mode: message.mode as WorkMode });
+						await ctx.settings.applyPolicy({ mode: message.mode as WorkMode }, composerScope());
 					}
 					break;
 				case 'previewPlan':
@@ -1870,12 +1873,12 @@ export function chatPanel(ctx: Context): void {
 					break;
 				case 'setApproval':
 					if (typeof message.approval === 'string' && message.approval in APPROVAL_LABELS) {
-						await ctx.settings.applyPolicy({ approval: message.approval as Approval });
+						await ctx.settings.applyPolicy({ approval: message.approval as Approval }, composerScope());
 					}
 					break;
 				case 'setSandboxMode':
 					if (typeof message.sandboxMode === 'string' && message.sandboxMode in SANDBOX_LABELS) {
-						await ctx.settings.applyPolicy({ sandboxMode: message.sandboxMode as SandboxMode });
+						await ctx.settings.applyPolicy({ sandboxMode: message.sandboxMode as SandboxMode }, composerScope());
 					}
 					break;
 				case 'setReasoningEffort': {
@@ -1888,7 +1891,7 @@ export function chatPanel(ctx: Context): void {
 						ctx.sessions.save(session);
 						ctx.sessions.changed(session.id);
 					}
-					await ctx.settings.update('reasoningEffort', effort);
+					await ctx.settings.update('reasoningEffort', effort, composerScope());
 					break;
 				}
 				case 'setContextWindow': {
@@ -1899,7 +1902,7 @@ export function chatPanel(ctx: Context): void {
 						ctx.sessions.save(session);
 						ctx.sessions.changed(session.id);
 					}
-					await ctx.settings.update('contextWindow', window);
+					await ctx.settings.update('contextWindow', window, composerScope());
 					break;
 				}
 				case 'setModel': {
@@ -1914,7 +1917,7 @@ export function chatPanel(ctx: Context): void {
 						}
 						break;
 					}
-					await ctx.settings.update('model', model);
+					await ctx.settings.update('model', model, composerScope());
 					break;
 				}
 				case 'review':

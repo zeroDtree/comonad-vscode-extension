@@ -35,11 +35,22 @@
 		user: 'User — global defaults for every workspace',
 		workspace: 'Workspace — this workspace only',
 	};
-	let activeScope = (vscode.getState() || {}).settingsScope || 'user';
-	let scopeInfo = { folderOpen: false, trusted: false };
+	// The extension's first-paint answers, carried beside `data-tab`: a fresh panel starts where the
+	// extension says, while a live webview's remembered pick still wins. The paths let the first
+	// paint name the right file before the state push arrives.
+	const askedScope = document.querySelector('script[data-scope]');
+	const askedFiles = {
+		user: (askedScope && askedScope.dataset.userFile) || '',
+		workspace: (askedScope && askedScope.dataset.workspaceFile) || '',
+	};
+	let activeScope = (vscode.getState() || {}).settingsScope || (askedScope && askedScope.dataset.scope) || 'user';
+	let scopeInfo = {
+		folderOpen: Boolean(askedScope && askedScope.dataset.folderOpen === 'true'),
+		trusted: Boolean(askedScope && askedScope.dataset.trusted === 'true'),
+	};
 	const scopeAvailable = (scope) => scope === 'user' || Boolean(scopeInfo.folderOpen && scopeInfo.trusted);
 	const scopeFile = (scope) => {
-		const files = (state && state.settingsFiles) || {};
+		const files = (state && state.settingsFiles) || askedFiles;
 		return scope === 'user' ? files.user || '~/.comonad/settings.json' : files.workspace || '';
 	};
 

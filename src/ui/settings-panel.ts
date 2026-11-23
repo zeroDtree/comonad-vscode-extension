@@ -19,7 +19,7 @@ import {
 	SANDBOX_LABELS,
 } from '../lib/policy';
 import { type ContextForm } from '../lib/prompt';
-import { ensureSettingsFile, settingsDisplayPath, type SettingsScope } from '../lib/settings-file';
+import { ensureSettingsFile, settingsDisplayPath, workspaceFirstScope, type SettingsScope } from '../lib/settings-file';
 import { estimateTokens } from '../lib/tokens';
 import type { TavernApi } from 'comonad-plugin-tavern';
 import { describe } from '../lib/util';
@@ -77,6 +77,18 @@ export function settingsPanel(ctx: Context): void {
 	// all. Each pane is fed the whole state push and asked, at save time, for the keys it owns.
 	let controllers = new Map<string, PaneController>();
 	const paneList = (): PaneSpec[] => ctx.get('panes')?.list() ?? [];
+	/** What the document and the first state push both say about the scope selector. */
+	const scopeState = (): SettingsDocumentScope => {
+		const workspace = ctx.settings.workspace();
+		const trusted = ctx.settings.trusted();
+		return {
+			defaultScope: workspaceFirstScope(workspace, trusted),
+			folderOpen: Boolean(workspace),
+			trusted,
+			userFile: settingsDisplayPath(ctx.host.settingsPath('user'), homedir()),
+			workspaceFile: settingsDisplayPath(ctx.host.settingsPath('workspace'), homedir()),
+		};
+	};
 	const paneHost = (): PaneHost => ({
 		uri: (file: string) => (panel ? String(panel.webview.asWebviewUri(vscode.Uri.file(file))) : ''),
 		refresh: () => void schedulePush(),
@@ -101,7 +113,7 @@ export function settingsPanel(ctx: Context): void {
 		if (panel) {
 			// The tab, its markup and its files are part of the document, so a row going on or off is a
 			// document, not a list, that changes.
-			panel.webview.html = settingsDocument(panel.webview, ctx.host.extensionUri as vscode.Uri, wanted, paneList());
+			panel.webview.html = settingsDocument(panel.webview, ctx.host.extensionUri as vscode.Uri, wanted, paneList(), scopeState());
 		}
 		void schedulePush();
 	};
@@ -328,6 +340,7 @@ export function settingsPanel(ctx: Context): void {
 			return;
 		}
 		const config = ctx.settings.get();
+		const scope = scopeState();
 		// One walk of the plugin tree answers every question the panel asks about it.
 		const dependencies = pluginDependencies();
 		void panel.webview.postMessage({
@@ -413,12 +426,9 @@ export function settingsPanel(ctx: Context): void {
 			flow: gateFlow(),
 			workspace: config.workingDirectory,
 			home: ctx.settings.home(),
-			settingsFiles: {
-				user: settingsDisplayPath(ctx.host.settingsPath('user'), homedir()),
-				workspace: settingsDisplayPath(ctx.host.settingsPath('workspace'), homedir()),
-			},
-			folderOpen: Boolean(ctx.settings.workspace()),
-			trusted: ctx.host.trusted(),
+			settingsFiles: { user: scope.userFile, workspace: scope.workspaceFile },
+			folderOpen: scope.folderOpen,
+			trusted: scope.trusted,
 			environment: { remote: ctx.host.remoteName() ?? '', sandbox: ctx.host.sandboxKind() },
 		});
 		void refreshModels();
@@ -732,7 +742,7 @@ export function settingsPanel(ctx: Context): void {
 		panel.onDidDispose(() => {
 			panel = null;
 		});
-		panel.webview.html = settingsDocument(panel.webview, extensionUri, tab ?? 'agent', paneList());
+		panel.webview.html = settingsDocument(panel.webview, extensionUri, tab ?? 'agent', paneList(), scopeState());
 		panel.webview.onDidReceiveMessage((message: Record<string, unknown>) => {
 			queue = queue.then(() => handle(message));
 		});
@@ -944,7 +954,24 @@ const TAB_ICONS = {
 const tabButton = (id: string, label: string, title: string, icon: string): string =>
 	`        <button class="tab" type="button" role="tab" data-tab="${escapeHtml(id)}" title="${escapeHtml(title)}"><span class="tab-icon">${icon}</span><span class="tab-label">${escapeHtml(label)}</span></button>`;
 
-export function settingsDocument(webview: vscode.Webview, extensionUri: vscode.Uri, tab: string, panes: readonly PaneSpec[]): string {
+/** What the scope selector needs before the first state push arrives. */
+export interface SettingsDocumentScope {
+	/** The scope a fresh document (no remembered pick) starts on. */
+	defaultScope: SettingsScope;
+	folderOpen: boolean;
+	trusted: boolean;
+	/** Display paths, so the first paint names the right file. */
+	userFile: string;
+	workspaceFile: string;
+}
+
+export function settingsDocument(
+	webview: vscode.Webview,
+	extensionUri: vscode.Uri,
+	tab: string,
+	panes: readonly PaneSpec[],
+	scope: SettingsDocumentScope,
+): string {
 	const nonce = randomBytes(16).toString('base64');
 	const uri = (file: string): string => String(webview.asWebviewUri(vscode.Uri.file(file)));
 	const script = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'settings.js'));
@@ -999,8 +1026,8 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
     <div class="scope-row">
       <span class="scope-title">&#9881;&#65039; Setting Scope:</span>
       <div id="scope-tabs" class="scope-tabs" role="tablist" aria-label="Where settings are saved">
-        <button class="scope-tab" type="button" role="tab" data-scope="user" aria-selected="true" title="User — global defaults for every workspace"><span class="scope-icon" aria-hidden="true">&#128100;</span><span>User</span></button>
-        <button class="scope-tab" type="button" role="tab" data-scope="workspace" aria-selected="false" title="Workspace — this workspace only"><span class="scope-icon" aria-hidden="true">&#128193;</span><span>Workspace</span></button>
+        <button class="scope-tab" type="button" role="tab" data-scope="user" aria-selected="${scope.defaultScope === 'user'}" title="User — global defaults for every workspace"><span class="scope-icon" aria-hidden="true">&#128100;</span><span>User</span></button>
+        <button class="scope-tab" type="button" role="tab" data-scope="workspace" aria-selected="${scope.defaultScope === 'workspace'}" title="Workspace — this workspace only"><span class="scope-icon" aria-hidden="true">&#128193;</span><span>Workspace</span></button>
       </div>
       <button id="scope-path" class="link scope-path" type="button" title="Open the settings file in the editor"></button>
     </div>
@@ -1332,7 +1359,7 @@ ${paneSections}
   </section>
   </main>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.min.js"></script>
-<script nonce="${nonce}" src="${script}" data-tab="${tab}"></script>
+<script nonce="${nonce}" src="${script}" data-tab="${tab}" data-scope="${scope.defaultScope}" data-folder-open="${scope.folderOpen}" data-trusted="${scope.trusted}" data-user-file="${escapeHtml(scope.userFile)}" data-workspace-file="${escapeHtml(scope.workspaceFile)}"></script>
 ${paneScripts.map((src) => `<script nonce="${nonce}" src="${src}"></script>`).join('\n')}
 </body>
 </html>`;

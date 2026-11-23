@@ -2801,6 +2801,62 @@ suite('Comonad domain', () => {
 		}
 	});
 
+	test('an explicit policy scope lands every key in that layer', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const before = kernel.host.writes.length;
+			await kernel.ctx.settings.applyPolicy(
+				{
+					mode: 'aw',
+					approval: 'universal_accept',
+					approvalResponse: 'never',
+					network: true,
+					sandboxMode: 'danger-full-access',
+				},
+				'workspace',
+			);
+			assert.deepStrictEqual(
+				kernel.host.writes.slice(before).map(({ key, scope }) => [key, scope]),
+				[
+					['mode', 'workspace'],
+					['approval', 'workspace'],
+					['approvalResponse', 'workspace'],
+					['network', 'workspace'],
+					['sandboxMode', 'workspace'],
+				],
+				'every policy key goes to the workspace layer',
+			);
+			assert.strictEqual(kernel.host.values.mode, 'sw', 'the user layer keeps its own mode');
+			assert.strictEqual(kernel.host.workspaceValues.mode, 'aw');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the chat composer saves its picks to the workspace first', () => {
+		const root = join(__dirname, '..', '..');
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(
+			panel,
+			/const composerScope = \(\): SettingsScope => workspaceFirstScope\(ctx\.settings\.workspace\(\), ctx\.settings\.trusted\(\)\)/,
+			'the composer asks the live workspace and its trust',
+		);
+		for (const call of [
+			"ctx.settings.update('reasoningEffort', effort, composerScope())",
+			"ctx.settings.update('contextWindow', window, composerScope())",
+			"ctx.settings.update('model', model, composerScope())",
+			"ctx.settings.update('model', modelPick, composerScope())",
+			"ctx.settings.applyPolicy({ mode: buildMode }, composerScope())",
+			"ctx.settings.applyPolicy({ mode: message.mode as WorkMode }, composerScope())",
+			"ctx.settings.applyPolicy({ approval: message.approval as Approval }, composerScope())",
+			"ctx.settings.applyPolicy({ sandboxMode: message.sandboxMode as SandboxMode }, composerScope())",
+		]) {
+			assert.ok(panel.includes(call), `${call} saves to the composer scope`);
+		}
+		const status = readFileSync(join(root, 'src', 'ui', 'status.ts'), 'utf8');
+		assert.ok(!status.includes('composerScope'), 'the status bar keeps the implicit rule');
+	});
+
 	test('every setting the manifest declares is one the code actually reads', () => {
 		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
 			extensionKind?: string[];
@@ -4146,9 +4202,16 @@ suite('Cordis kernel', () => {
 		});
 		try {
 			const pane = tavernPane(kernel.ctx);
+			const scope = {
+				defaultScope: 'workspace' as const,
+				folderOpen: true,
+				trusted: true,
+				userFile: '~/.comonad/settings.json',
+				workspaceFile: '/ws/.comonad/settings.json',
+			};
 			// Nothing but a plain pane in the host's document: its tab, its markup, its styles and its
 			// scripts, with the host's client loaded first because it is what hands a pane its channel.
-			const document = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [pane]);
+			const document = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [pane], scope);
 			assert.match(document, /<button class="tab" type="button" role="tab" data-tab="st" title="ST —/, 'the pane is a tab');
 			assert.match(document, /<section data-pane="st" hidden>/, 'and a section of its own');
 			assert.match(document, /id="st-pane"/, 'holding the markup it brought');
@@ -4157,6 +4220,14 @@ suite('Cordis kernel', () => {
 			assert.match(document, /Setting Scope:/, 'and names itself');
 			assert.match(document, /data-scope="user"/, 'with the user scope');
 			assert.match(document, /data-scope="workspace"/, 'and the workspace scope');
+			assert.match(document, /data-scope="workspace"[^>]*aria-selected="true"/, 'a trusted folder opens on workspace');
+			assert.match(document, /data-scope="user"[^>]*aria-selected="false"/, 'with user unselected');
+			assert.match(
+				document,
+				/data-scope="workspace" data-folder-open="true" data-trusted="true"/,
+				'the first paint already knows the folder is trusted',
+			);
+			assert.match(document, /data-workspace-file="\/ws\/\.comonad\/settings\.json"/, 'and names the workspace file');
 			assert.match(document, /id="scope-path"/, 'the file path is a control of its own');
 			assert.match(document, /id="scope-hint"/, 'with the scope’s explanation under it');
 			assert.ok(
@@ -4198,18 +4269,37 @@ suite('Cordis kernel', () => {
 			assert.match(hostScript, /function renderSubagents\(/, 'the client draws the matrix');
 			assert.match(hostScript, /type: 'saveSubagents'/, 'and saves a grant');
 			assert.match(hostScript, /settingsScope/, 'the guest remembers the chosen scope');
+			assert.match(hostScript, /script\[data-scope\]/, 'a fresh panel reads the first-paint scope');
+			assert.match(hostScript, /dataset\.folderOpen/, 'and whether a folder is open');
+			assert.match(hostScript, /dataset\.workspaceFile/, 'and the file paths');
 			assert.match(hostScript, /Changes apply globally/, 'the user hint says what it affects');
 			assert.match(hostScript, /Applies only to this workspace/, 'the workspace hint says what it overrides');
 			assert.match(hostScript, /scope: activeScope/, 'every save payload carries the selected scope');
 			assert.match(hostScript, /type: 'openConfig'/, 'and the path asks the host to open the file');
 
+			// Without a trusted folder the same document starts on the user's file.
+			const untrusted = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [pane], {
+				...scope,
+				defaultScope: 'user',
+				folderOpen: false,
+				trusted: false,
+				workspaceFile: '',
+			});
+			assert.match(untrusted, /data-scope="user"[^>]*aria-selected="true"/, 'no folder lands on user');
+			assert.match(untrusted, /data-folder-open="false" data-trusted="false"/, 'and says why');
+
 			const panelSource = readFileSync(join(root, 'src', 'ui', 'settings-panel.ts'), 'utf8');
 			assert.match(panelSource, /case 'openConfig'/, 'the host opens the file the path names');
 			assert.match(panelSource, /settingsFiles/, 'and the state names both files');
+			const renderSites = panelSource.split('\n').filter((line) => line.includes('settingsDocument(panel.webview'));
+			assert.strictEqual(renderSites.length, 2, 'both render sites carry the scope');
+			for (const line of renderSites) {
+				assert.match(line, /scopeState\(\)/, 'the document and the state agree');
+			}
 
 			// A tab and its markup are the pane's own strings, so they are escaped rather than trusted.
 			const hostile = { ...pane, id: 'x"><script>alert(1)</script>', label: '<b>no</b>', title: '" onload="alert(1)' };
-			const escaped = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [hostile]);
+			const escaped = settingsDocument(panel.webview, vscode.Uri.file(root), 'agent', [hostile], scope);
 			assert.ok(!escaped.includes('<script>alert(1)</script>'), 'a pane cannot close the attribute and open a script');
 			assert.match(escaped, /&lt;b&gt;no&lt;\/b&gt;/, 'and its label is text, not markup');
 		} finally {

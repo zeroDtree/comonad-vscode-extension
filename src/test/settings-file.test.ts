@@ -13,6 +13,7 @@ import {
 	readSettings,
 	settingsDisplayPath,
 	settingsFile,
+	workspaceFirstScope,
 	writeSettings,
 } from '../lib/settings-file';
 
@@ -110,6 +111,13 @@ suite('Settings files', () => {
 		assert.strictEqual(defaultWriteScope('model', undefined), 'user');
 		assert.strictEqual(defaultWriteScope('model', {}), 'user');
 		assert.strictEqual(defaultWriteScope('model', { model: 'auto' }), 'workspace');
+	});
+
+	test('the workspace-first default needs an open, trusted folder', () => {
+		assert.strictEqual(workspaceFirstScope('', true), 'user', 'no folder');
+		assert.strictEqual(workspaceFirstScope('/ws', false), 'user', 'untrusted');
+		assert.strictEqual(workspaceFirstScope('', false), 'user');
+		assert.strictEqual(workspaceFirstScope('/ws', true), 'workspace');
 	});
 
 	test('explicit values split into the user and workspace layers', () => {
