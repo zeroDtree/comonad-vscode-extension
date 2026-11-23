@@ -2414,7 +2414,8 @@
 			if (!turn._root) {
 				continue;
 			}
-			if (summary && turn.at <= covers) {
+			// A turn with no host boundary yet is the live one: a summary cannot cover it.
+			if (summary && Number.isFinite(turn.at) && turn.at <= covers) {
 				if (turn._root.parentElement !== details) {
 					details.appendChild(turn._root);
 				}
@@ -2782,7 +2783,9 @@
 			prompt: message.text || replacing?.prompt || '',
 			promptAttachments: message.attachments || replacing?.promptAttachments || [],
 			steps: [],
-			at: 0,
+			// A live turn has no transcript boundary yet: the host sends it with turn-end. Without
+			// one, a mid-turn summary cannot fold the running turn (and its approval cards) into
+			// the covered originals.
 			startedAt: Date.now(),
 			endedAt: undefined,
 			command: false,
@@ -3020,6 +3023,11 @@
 		// The window too: the footer then reads the same whether it was watched or reloaded.
 		turn.startedAt = message.startedAt ?? turn.startedAt;
 		turn.endedAt = message.endedAt ?? settledAt;
+		// The host knows where the finished turn ends; that boundary is what lets a later summary
+		// fold this turn once it is no longer the newest.
+		if (Number.isFinite(message.at)) {
+			turn.at = message.at;
+		}
 		turn.stopped = Boolean(message.stopped);
 		turn.command = Boolean(message.command);
 		// A normal turn is not republished, so this is how a just-finished reply learns an edit of it

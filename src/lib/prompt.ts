@@ -102,7 +102,7 @@ export const DEFAULT_OUTPUT_RESERVE = 8_192;
 export const DEFAULT_COMPACTION_HEADROOM = 20_000;
 export const MAX_COMPACTION_HEADROOM = 2_000_000;
 /** How much of the window is kept verbatim after a summary. */
-export const DEFAULT_COMPACTION_RETAIN_PERCENT = 20;
+export const DEFAULT_COMPACTION_RETAIN_PERCENT = 10;
 export const MIN_COMPACTION_RETAIN_PERCENT = 5;
 export const MAX_COMPACTION_RETAIN_PERCENT = 80;
 

@@ -2384,7 +2384,7 @@ suite('Comonad domain', () => {
 		assert.strictEqual(resolveBudget(1_000, 0, 0).input, 1_000);
 		assert.ok(DEFAULT_OUTPUT_RESERVE > 0);
 		assert.strictEqual(DEFAULT_COMPACTION_HEADROOM, 20_000);
-		assert.strictEqual(DEFAULT_COMPACTION_RETAIN_PERCENT, 20);
+		assert.strictEqual(DEFAULT_COMPACTION_RETAIN_PERCENT, 10);
 	});
 
 	test('compaction limits turn the two settings into a trigger and a retained tail', () => {
@@ -2810,7 +2810,7 @@ suite('Comonad domain', () => {
 		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
 			extensionKind?: string[];
 			capabilities?: { virtualWorkspaces?: boolean; untrustedWorkspaces?: { supported?: string } };
-			contributes: { configuration: { properties: Record<string, unknown> } };
+			contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
 		};
 		// The agent runs where the workspace is, exactly like Cursor's server and Copilot's
 		// workspace extension; credentials stay in client-side SecretStorage.
@@ -2830,6 +2830,13 @@ suite('Comonad domain', () => {
 			[...read].filter((key) => !declared.has(key)).sort(),
 			[],
 			'the code reads settings the manifest does not declare',
+		);
+		// The manifest keeps a copy of the code default for the settings UI; this is the one whose
+		// default is otherwise easy to change in only one place.
+		assert.strictEqual(
+			manifest.contributes.configuration.properties['comonad.compactionRetainPercent']?.default,
+			DEFAULT_COMPACTION_RETAIN_PERCENT,
+			'the manifest default tracks the code default',
 		);
 	});
 
@@ -4873,7 +4880,7 @@ suite('Cordis kernel', () => {
 	});
 
 	test('/context reports the compaction trigger, retain target and pressure', async () => {
-		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000, compactionRetainPercent: 20 } });
+		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000, compactionRetainPercent: 10 } });
 		try {
 			kernel.ctx.llm.use({
 				name: 'test',
@@ -4896,7 +4903,7 @@ suite('Cordis kernel', () => {
 
 			const report = kernel.ctx.agent.contextReport();
 			assert.ok(report.includes('automatic compaction: summarize at 242144 tokens'), report);
-			assert.ok(report.includes('keep 52428 tokens (20% of the window)'), report);
+			assert.ok(report.includes('keep 26214 tokens (10% of the window)'), report);
 			assert.ok(report.includes('current pressure:'), report);
 			assert.ok(report.includes('×1.26'), report);
 		} finally {

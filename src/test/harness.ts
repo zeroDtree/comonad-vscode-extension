@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context, type Fiber } from 'cordis';
+import { DEFAULT_COMPACTION_RETAIN_PERCENT } from '../lib/prompt';
 import type { SandboxKind } from '../lib/sandbox';
 import { defaultWriteScope, type SettingsScope } from '../lib/settings-file';
 import { hostStorage, type Host } from '../services/host';
@@ -142,7 +143,7 @@ export async function createTestKernel(
 		// Existing tests assert the hard-limit behavior; a test that wants proactive compaction
 		// passes a positive headroom explicitly.
 		compactionHeadroom: 0,
-		compactionRetainPercent: 20,
+		compactionRetainPercent: DEFAULT_COMPACTION_RETAIN_PERCENT,
 		budgetUsd: 0,
 		filterSensitiveEnv: true,
 		allowFullAccess: true,

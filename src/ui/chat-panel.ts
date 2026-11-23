@@ -552,12 +552,17 @@ export function chatPanel(ctx: Context): void {
 		};
 	};
 
-	/** The turn that just finished, so a live turn settles on the same numbers as a replayed one. */
-	const settledTurn = (session: Session | undefined = ctx.sessions.active()): { steps: unknown[]; startedAt?: number; endedAt?: number; files?: boolean } => {
+	/**
+	 * The turn that just finished, so a live turn settles on the same numbers as a replayed one —
+	 * including the transcript boundary (`at`) a later summary may cover.
+	 */
+	const settledTurn = (
+		session: Session | undefined = ctx.sessions.active(),
+	): { steps: unknown[]; at?: number; startedAt?: number; endedAt?: number; files?: boolean } => {
 		const turns = turnsOf(session?.transcript ?? []);
 		const last = turns[turns.length - 1];
 		return last
-			? { steps: last.steps.map((step) => stepPayload(step, session)), startedAt: last.startedAt, endedAt: last.endedAt, files: restorePossible(session, last) }
+			? { steps: last.steps.map((step) => stepPayload(step, session)), at: last.at, startedAt: last.startedAt, endedAt: last.endedAt, files: restorePossible(session, last) }
 			: { steps: [] };
 	};
 

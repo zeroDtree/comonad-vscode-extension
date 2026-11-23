@@ -12,7 +12,7 @@
   types, swipes, `contextForm`, attachments, references and compaction are untouched. Stored
   sessions drop the removed fields on load.
 - **Compaction is proactive, calibrated and small.** `compactionHeadroom` (default 20,000 tokens,
-  `0` disables) and `compactionRetainPercent` (default 20%) are read live before every model request;
+  `0` disables) and `compactionRetainPercent` (default 10%) are read live before every model request;
   the whole request is estimated, scaled by `lastInputTokens / lastEstimateTokens` (clamped to
   `[0.5, 2]`, ignored below 1,000 tokens or across models), and compared with
   `window - max(headroom, reserve)`. At the trigger the planner folds the older turns and keeps only

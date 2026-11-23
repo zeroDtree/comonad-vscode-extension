@@ -1087,7 +1087,7 @@
         },
         "comonad.compactionRetainPercent": {
           "type": "number",
-          "default": 20,
+          "default": 10,
           "minimum": 5,
           "maximum": 80,
           "markdownDescription": "Percent of the context window kept verbatim after an automatic summary. The newest turn is always kept; `/summarize` still folds everything before the current turn."

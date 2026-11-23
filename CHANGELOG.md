@@ -19,7 +19,7 @@ Highlights are below; the full implementation notes are linked at the end. The u
 - **Compaction is proactive.** Before every model request — not only at a turn's start — the agent
   measures the whole request, calibrates the local estimate against the prompt size the provider
   last reported, and once fewer than `compactionHeadroom` tokens remain (20,000 by default) it
-  summarizes the older turns and keeps only `compactionRetainPercent` of the window verbatim (20% by
+  summarizes the older turns and keeps only `compactionRetainPercent` of the window verbatim (10% by
   default). Summarizing now comes before tool-output trimming; trimming is the hard-limit fallback.
   Both settings are in Settings → Agent, and a successful fold reports its before/after size once.
 - **One plan vocabulary.** The Orchestrator's execution DAG is `task_graph`; the Plan work mode is

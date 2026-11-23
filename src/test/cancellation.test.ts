@@ -750,4 +750,25 @@ suite('Idle chat panel', () => {
 		const history = panel.slice(panel.indexOf('const history = '), panel.indexOf('/** The turn that just finished'));
 		assert.match(history, /sessionId: session\.id/);
 	});
+
+	test('a mid-turn summary cannot fold the live turn', () => {
+		const root = join(__dirname, '..', '..');
+		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		// A live turn has no transcript boundary; inventing one let updateSummaryDetails treat it
+		// as covered and hide it (with its approval/question cards) under "Show original messages".
+		const begin = guest.slice(guest.indexOf('function beginTurn('), guest.indexOf('function paint('));
+		assert.doesNotMatch(begin, /at: 0\b/, 'a live turn has no transcript boundary to be covered');
+
+		const details = guest.slice(guest.indexOf('function updateSummaryDetails('), guest.indexOf('function renderLoadOlder('));
+		assert.match(details, /if \(summary && Number\.isFinite\(turn\.at\) && turn\.at <= covers\)\s*\{/);
+
+		// The boundary the host reports at turn-end is what lets a later summary fold a settled turn.
+		const end = guest.slice(guest.indexOf('function endTurn('), guest.indexOf('approvals */'));
+		assert.match(end, /if \(Number\.isFinite\(message\.at\)\) \{\s*turn\.at = message\.at;/);
+
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const settled = panel.slice(panel.indexOf('const settledTurn ='), panel.indexOf('/** The transcript each panel'));
+		assert.match(settled, /at\?: number/);
+		assert.match(settled, /at: last\.at/, 'turn-end carries the settled transcript boundary');
+	});
 });

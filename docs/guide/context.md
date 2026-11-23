@@ -40,7 +40,7 @@ the agent estimates the whole request (system prompt, tool definitions and messa
 estimate against the last prompt size the provider reported for the same request, and compares it
 with the window. When fewer than `compactionHeadroom` tokens remain (20,000 by default; `0` turns
 proactive compaction off), it summarizes the turns before the current one and keeps a small verbatim
-tail: `compactionRetainPercent` percent of the window (20% by default). The current turn is never
+tail: `compactionRetainPercent` percent of the window (10% by default). The current turn is never
 folded, and the reply's reserve is still held back. Both settings live in Settings → Agent.
 
 The order of work is: summarize first at the headroom, then elide old tool output only if the request
