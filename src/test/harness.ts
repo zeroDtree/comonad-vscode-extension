@@ -141,6 +141,10 @@ export async function createTestKernel(
 		toolCard: 'collapsed',
 		reasoningEffort: 'auto',
 		contextWindow: 0,
+		// Existing tests assert the hard-limit behavior; a test that wants proactive compaction
+		// passes a positive headroom explicitly.
+		compactionHeadroom: 0,
+		compactionRetainPercent: 20,
 		budgetUsd: 0,
 		filterSensitiveEnv: true,
 		allowFullAccess: true,

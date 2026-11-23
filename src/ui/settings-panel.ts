@@ -362,6 +362,8 @@ export function settingsPanel(ctx: Context): void {
 				displayForm: config.displayForm,
 				toolCard: config.toolCard,
 				contextForm: config.contextForm,
+				compactionHeadroom: config.compactionHeadroom,
+				compactionRetainPercent: config.compactionRetainPercent,
 				questionNotification: config.questionNotification,
 				model: config.model,
 				permissions: config.permissions,
@@ -1080,6 +1082,16 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <label for="context">Context</label>
         <p class="hint">What the model actually receives: rendered text, token counts or raw form. Applies to the active chat and is the default for new chats.</p>
         <select id="context" class="control" data-key="contextForm"></select>
+      </div>
+      <div class="field">
+        <label for="compaction-headroom">Summarize headroom</label>
+        <p class="hint">Tokens kept free before a request triggers a summary. Checked before every model request; <code>0</code> turns proactive compaction off and leaves only the hard-limit trimming. Capped at half the window.</p>
+        <input id="compaction-headroom" class="control" type="number" min="0" max="2000000" step="1000" data-key="compactionHeadroom" />
+      </div>
+      <div class="field">
+        <label for="compaction-retain">Keep after summarizing</label>
+        <p class="hint">Percent of the window kept verbatim after a summary. The newest turn is always kept; <code>/summarize</code> still folds everything before it.</p>
+        <input id="compaction-retain" class="control" type="number" min="5" max="80" step="1" data-key="compactionRetainPercent" />
       </div>
     </div>
     <h2 class="group-title">Run budgets</h2>

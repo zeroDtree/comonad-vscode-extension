@@ -35,6 +35,13 @@ JSON files hold the same names.
 | `reasoningEffort` | `auto` | Thinking effort: `auto`, `none` (Off), `low`, `medium`, `high` or `max`; a profile's `topEffort` caps it |
 | `contextWindow` | `0` | Override the model's input window; `0` uses the profile |
 
+## Context compaction
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `compactionHeadroom` | `20000` | Summarize when fewer than this many tokens remain before the window is full; checked before every model request. `0` turns proactive compaction off. Capped at half the window |
+| `compactionRetainPercent` | `20` | Percent of the window kept verbatim after a summary; the newest turn is always kept |
+
 ## Chat display
 
 | Key | Default | Purpose |

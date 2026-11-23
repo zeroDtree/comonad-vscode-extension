@@ -30,6 +30,13 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件；打开�
 | `reasoningEffort` | `auto` | 思考强度：`auto`、`none`（Off）、`low`、`medium`、`high`、`max`；受 profile 的 `topEffort` 封顶 |
 | `contextWindow` | `0` | 覆盖模型输入窗口；`0` 使用 profile |
 
+## 上下文压缩
+
+| 键 | 默认值 | 用途 |
+| --- | --- | --- |
+| `compactionHeadroom` | `20000` | 距窗口填满还剩这么多 token 时触发摘要；每次模型请求前都会检查。`0` 关闭主动压缩。上限为窗口的一半 |
+| `compactionRetainPercent` | `20` | 摘要后按窗口百分比保留原文；最新回合始终保留 |
+
 ## 聊天显示
 
 | 键 | 默认值 | 用途 |

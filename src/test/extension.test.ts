@@ -33,6 +33,10 @@ import type { SandboxKind } from '../lib/sandbox';
 import {
 	applyContextForm,
 	buildModelHistory,
+	calibrate,
+	calibrationRatio,
+	DEFAULT_COMPACTION_HEADROOM,
+	DEFAULT_COMPACTION_RETAIN_PERCENT,
 	DEFAULT_OUTPUT_RESERVE,
 	dropPromptAttachments,
 	elideToolResults,
@@ -40,6 +44,7 @@ import {
 	modelContextDigest,
 	planCompaction,
 	resolveBudget,
+	resolveCompactionLimits,
 	stripImageAttachments,
 } from '../lib/prompt';
 import { isContextOverflow, isImageUnsupported, isTransportFailure, ModelRequestError, toOpenAiMessages } from '../lib/openai';
@@ -1125,6 +1130,8 @@ suite('Comonad domain', () => {
 			displayForm: 'rendered' as const,
 			toolCard: 'collapsed' as const,
 			contextForm: 'rendered' as const,
+			compactionHeadroom: 20_000,
+			compactionRetainPercent: 20,
 			questionNotification: true,
 			network: false,
 			sandboxMode: 'workspace-write' as const,
@@ -1145,6 +1152,12 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'nonsense' }, current), { toolCard: 'collapsed' });
 		assert.deepStrictEqual(normalizeAgentPatch({ questionNotification: false }, current), { questionNotification: false });
 		assert.deepStrictEqual(normalizeAgentPatch({ questionNotification: true }, current), { questionNotification: true });
+		assert.deepStrictEqual(normalizeAgentPatch({ compactionHeadroom: -5 }, current), { compactionHeadroom: 0 });
+		assert.deepStrictEqual(normalizeAgentPatch({ compactionHeadroom: '45000' }, current), { compactionHeadroom: 45_000 });
+		assert.deepStrictEqual(normalizeAgentPatch({ compactionHeadroom: 9_000_000 }, current), { compactionHeadroom: 2_000_000 });
+		assert.deepStrictEqual(normalizeAgentPatch({ compactionRetainPercent: 1 }, current), { compactionRetainPercent: 5 });
+		assert.deepStrictEqual(normalizeAgentPatch({ compactionRetainPercent: 200 }, current), { compactionRetainPercent: 80 });
+		assert.deepStrictEqual(normalizeAgentPatch({ compactionRetainPercent: '33.6' }, current), { compactionRetainPercent: 34 });
 		assert.deepStrictEqual(normalizeAgentPatch({ budget: { turns: 12 } }, current), {
 			budget: { turns: 12, tools: 0, tokens: 0, milliseconds: 0 },
 		});
@@ -1174,6 +1187,8 @@ suite('Comonad domain', () => {
 				'displayForm',
 				'toolCard',
 				'contextForm',
+				'compactionHeadroom',
+				'compactionRetainPercent',
 				'questionNotification',
 				'network',
 				'sandboxMode',
@@ -2416,6 +2431,41 @@ suite('Comonad domain', () => {
 		assert.strictEqual(resolveBudget(100, 200, 300).input, 0);
 		assert.strictEqual(resolveBudget(1_000, 0, 0).input, 1_000);
 		assert.ok(DEFAULT_OUTPUT_RESERVE > 0);
+		assert.strictEqual(DEFAULT_COMPACTION_HEADROOM, 20_000);
+		assert.strictEqual(DEFAULT_COMPACTION_RETAIN_PERCENT, 20);
+	});
+
+	test('compaction limits turn the two settings into a trigger and a retained tail', () => {
+		const limits = resolveCompactionLimits(262_144, 8_192, 20_000, 20);
+		assert.strictEqual(limits.enabled, true);
+		assert.strictEqual(limits.headroom, 20_000);
+		assert.strictEqual(limits.trigger, 242_144);
+		assert.strictEqual(limits.retain, 52_428);
+		// A headroom larger than half the window is clamped: a small window must still have a request.
+		const small = resolveCompactionLimits(32_768, 500, 20_000, 20);
+		assert.strictEqual(small.headroom, 16_384);
+		assert.strictEqual(small.trigger, 16_384);
+		// Zero turns the feature off; the reply reserve still stands.
+		assert.deepStrictEqual(resolveCompactionLimits(262_144, 8_192, 0, 20), {
+			enabled: false,
+			trigger: 253_952,
+			retain: 52_428,
+			headroom: 0,
+		});
+		// The retain percentage is bounded rather than trusted.
+		assert.strictEqual(resolveCompactionLimits(100_000, 0, 1_000, 1).retain, 5_000);
+		assert.strictEqual(resolveCompactionLimits(100_000, 0, 1_000, 99).retain, 80_000);
+		// A reply reserve larger than the headroom is the one that must be held back.
+		assert.strictEqual(resolveCompactionLimits(100_000, 40_000, 1_000, 20).trigger, 60_000);
+	});
+
+	test('calibration turns a provider count into a scale for local estimates', () => {
+		assert.strictEqual(calibrationRatio(undefined), 1);
+		assert.strictEqual(calibrationRatio({ input: 1, estimate: 1 }), 1, 'tiny samples are noise, not a ratio');
+		assert.strictEqual(calibrationRatio({ input: 5_000, estimate: 4_000 }), 1.25);
+		assert.strictEqual(calibrationRatio({ input: 1_000_000, estimate: 1_000 }), 2, 'the ratio is clamped');
+		assert.strictEqual(calibrationRatio({ input: 1_000, estimate: 1_000_000 }), 0.5);
+		assert.strictEqual(calibrate(4_000, { input: 5_000, estimate: 4_000 }), 5_000);
 	});
 
 	test('a compaction keeps the newest turn and folds the rest', () => {
@@ -2469,7 +2519,7 @@ suite('Comonad domain', () => {
 
 	test('planCompaction can start after an already summarized prefix', () => {
 		const messages: Message[] = ['a', 'b', 'c', 'd', 'e'].map((content) => ({ role: 'user' as const, content }));
-		const plan = planCompaction(messages, 0, 0, 2);
+		const plan = planCompaction(messages, 0, 2);
 		assert.strictEqual(plan.from, 2);
 		assert.strictEqual(plan.cut, 4);
 		assert.deepStrictEqual(plan.older.map((message) => message.content), ['c', 'd']);
@@ -2781,6 +2831,17 @@ suite('Comonad domain', () => {
 		assert.match(panel, /The model's fallback when it picks no timeout/, 'the number explains its fallback role');
 		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
 		assert.match(guest, /checked\('timeout-override', config\.commandTimeoutOverride\)/, 'the guest renders it');
+	});
+
+	test('the agent tab carries the compaction settings', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		assert.match(panel, /id="compaction-headroom"[^>]*data-key="compactionHeadroom"/, 'the headroom is a live agent-tab control');
+		assert.match(panel, /id="compaction-retain"[^>]*data-key="compactionRetainPercent"/, 'the retain share sits beside it');
+		assert.match(panel, /compactionHeadroom: config\.compactionHeadroom/, 'the headroom is pushed with the agent config');
+		assert.match(panel, /compactionRetainPercent: config\.compactionRetainPercent/, 'and so is the retain share');
+		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
+		assert.match(guest, /put\(\$\('compaction-headroom'\), String\(config\.compactionHeadroom\)\)/, 'the guest renders the headroom');
+		assert.match(guest, /put\(\$\('compaction-retain'\), String\(config\.compactionRetainPercent\)\)/, 'and the retain share');
 	});
 
 	test('the UI tab carries the question notification switch', () => {
@@ -4879,6 +4940,243 @@ suite('Cordis kernel', () => {
 			assert.ok(folded.transcript.some((message) => message.content.startsWith('ask 0 ')), 'the full chat is kept');
 			assert.ok(folded.modelContext && folded.modelContext.covers > 0, 'the summary records what it stands in for');
 			assert.ok(folded.modelContext!.summary.includes('SUMMARY OF THE EARLIER TURNS'));
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a request at the configured headroom is summarized before the hard limit', async () => {
+		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000 } });
+		try {
+			let summaryCalls = 0;
+			let seen: Message[] = [];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages.some((message) => message.content.startsWith('You summarize'))) {
+						summaryCalls += 1;
+						return { message: { role: 'assistant', content: 'PROACTIVE SUMMARY' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					seen = request.messages;
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'proactive');
+			session.contextWindow = 40_000;
+			session.policy.maxTokens = 500;
+			for (let turn = 0; turn < 5; turn += 1) {
+				session.transcript.push(
+					{ role: 'user', content: `old ask ${turn} ${'a'.repeat(8_000)}` },
+					{ role: 'assistant', content: `old answer ${turn} ${'b'.repeat(8_000)}` },
+				);
+			}
+			kernel.ctx.sessions.save(session);
+
+			await kernel.ctx.agent.runTurn({ text: 'the newest ask', sessionId: 'proactive' });
+
+			assert.strictEqual(summaryCalls, 1, 'the turn-start pressure triggered one summary');
+			assert.ok(seen.some((message) => message.content.includes('PROACTIVE SUMMARY')), 'the summary stands in for the folded turns');
+			assert.ok(!seen.some((message) => message.content.startsWith('old ask 0 ')), 'the oldest turns are gone from the request');
+			assert.ok(seen.some((message) => message.role === 'user' && message.content === 'the newest ask'));
+			const folded = kernel.ctx.sessions.require('proactive');
+			assert.ok(folded.modelContext && folded.modelContext.covers > 0);
+			assert.ok(estimateMessages(seen) < 20_000, `the compacted request stays small (${estimateMessages(seen)})`);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a growing turn is summarized before its tool output is elided', async () => {
+		// A composed (tavern) request is not a slice of the chat, so the agent may not fold it; this
+		// test is about the agent's own request shape.
+		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000, tavernEnabled: false } });
+		try {
+			const notices: string[] = [];
+			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
+			kernel.ctx.tools.register({
+				name: 'big_read',
+				description: 'Reads something enormous.',
+				capability: 'ro',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: objectSchema({}),
+				execute: async () => `START ${'x'.repeat(80_000)} END`,
+			});
+			let summaryCalls = 0;
+			let last: Message[] = [];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages.some((message) => message.content.startsWith('You summarize'))) {
+						summaryCalls += 1;
+						return { message: { role: 'assistant', content: 'MIDTURN SUMMARY' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					last = request.messages;
+					if (request.tools.some((tool) => tool.name === 'big_read') && !request.messages.some((message) => message.role === 'tool')) {
+						const toolCall: ToolCall = { id: 'big-1', name: 'big_read', arguments: '{}' };
+						return { message: { role: 'assistant', content: '', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 1, output: 1 } };
+					}
+					return { message: { role: 'assistant', content: 'read it' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'midturn');
+			session.contextWindow = 40_000;
+			session.policy.maxTokens = 500;
+			session.transcript.push(
+				{ role: 'user', content: `old ask ${'a'.repeat(4_000)}` },
+				{ role: 'assistant', content: `old answer ${'b'.repeat(4_000)}` },
+			);
+			kernel.ctx.sessions.save(session);
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'read everything', sessionId: 'midturn' });
+
+			assert.strictEqual(result.text, 'read it');
+			assert.strictEqual(summaryCalls, 1, 'the turn grew past the headroom and was summarized');
+			assert.ok(last.some((message) => message.content.includes('MIDTURN SUMMARY')), 'the summary travels with the next request');
+			assert.ok(!last.some((message) => message.content.startsWith('old ask')), 'the earlier turn was folded');
+			const toolText = last.filter((message) => message.role === 'tool').map((message) => message.content).join('');
+			assert.ok(toolText.includes('x'.repeat(1_000)), 'the current turn’s tool result is still there in full');
+			assert.ok(!toolText.includes('elided'), 'the summary made elision unnecessary');
+			assert.ok(!notices.some((text) => text.startsWith('Trimmed older tool output')), 'no trim notice was needed');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a provider count calibrates the compaction pressure', async () => {
+		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000 } });
+		try {
+			let summaryCalls = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages.some((message) => message.content.startsWith('You summarize'))) {
+						summaryCalls += 1;
+						return { message: { role: 'assistant', content: 'CALIBRATED SUMMARY' }, toolCalls: [], usage: { input: 1, output: 1 } };
+					}
+					// The endpoint counts far more than the local estimate: the sample is usable.
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 100_000, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'calibrated');
+			session.contextWindow = 1_000_000;
+			session.policy.maxTokens = 500;
+			for (let turn = 0; turn < 4; turn += 1) {
+				session.transcript.push(
+					{ role: 'user', content: `seed ${turn} ${'a'.repeat(1_000)}` },
+					{ role: 'assistant', content: `seed answer ${turn} ${'b'.repeat(1_000)}` },
+				);
+			}
+			kernel.ctx.sessions.save(session);
+
+			await kernel.ctx.agent.runTurn({ text: 'first', sessionId: 'calibrated' });
+			const measured = kernel.ctx.sessions.require('calibrated');
+			const estimate = measured.lastEstimateTokens ?? 0;
+			assert.ok(estimate >= 1_000, `the first request leaves a usable sample (${estimate})`);
+			assert.strictEqual(measured.lastInputTokens, 100_000);
+			// Trigger at local estimate + 2,000: the raw next request fits, twice it does not.
+			const window = Math.ceil((estimate + 2_000) * 2);
+			measured.contextWindow = window;
+			kernel.ctx.sessions.save(measured);
+			await kernel.ctx.settings.update('compactionHeadroom', window);
+
+			const before = summaryCalls;
+			await kernel.ctx.agent.runTurn({ text: 'second', sessionId: 'calibrated' });
+
+			assert.strictEqual(summaryCalls, before + 1, 'the calibrated pressure crossed the trigger');
+			const folded = kernel.ctx.sessions.require('calibrated');
+			assert.ok(folded.modelContext && folded.modelContext.covers > 0);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a proactive summary that fails is reported once and the turn continues', async () => {
+		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000 } });
+		try {
+			const notices: string[] = [];
+			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.messages.some((message) => message.content.startsWith('You summarize'))) {
+						throw new Error('summarizer down');
+					}
+					return { message: { role: 'assistant', content: 'still answered' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'failing');
+			session.contextWindow = 40_000;
+			session.policy.maxTokens = 500;
+			for (let turn = 0; turn < 5; turn += 1) {
+				session.transcript.push(
+					{ role: 'user', content: `old ask ${turn} ${'a'.repeat(8_000)}` },
+					{ role: 'assistant', content: `old answer ${turn} ${'b'.repeat(8_000)}` },
+				);
+			}
+			kernel.ctx.sessions.save(session);
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'the newest ask', sessionId: 'failing' });
+
+			assert.strictEqual(result.text, 'still answered');
+			assert.strictEqual(notices.filter((text) => text.startsWith('Could not summarize')).length, 1, 'one failure notice');
+			const after = kernel.ctx.sessions.require('failing');
+			assert.strictEqual(after.modelContext, undefined, 'nothing was recorded');
+			assert.ok(after.transcript.some((message) => message.content.startsWith('old ask 0 ')), 'the full chat is kept');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a hand-edited session cannot feed the compaction trigger', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'calib-file');
+			session.transcript.push({ role: 'user', content: 'hi' });
+			kernel.ctx.sessions.save(session);
+			const file = join(kernel.host.storage.sessions, 'calib-file.json');
+			const stored = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+			stored.lastInputTokens = 'wrong';
+			stored.lastEstimateTokens = -1;
+			stored.lastInputModel = 42;
+			writeFileSync(file, JSON.stringify(stored));
+
+			const loaded = kernel.ctx.sessions.require('calib-file');
+			assert.strictEqual(loaded.lastInputTokens, undefined);
+			assert.strictEqual(loaded.lastEstimateTokens, undefined);
+			assert.strictEqual(loaded.lastInputModel, undefined);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('/context reports the compaction trigger, retain target and pressure', async () => {
+		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000, compactionRetainPercent: 20 } });
+		try {
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'context-check');
+			session.contextWindow = 262_144;
+			session.policy.maxTokens = 8_192;
+			session.transcript.push({ role: 'user', content: 'hi' });
+			kernel.ctx.sessions.save(session);
+			kernel.ctx.sessions.setActive('context-check');
+
+			const measured = kernel.ctx.sessions.require('context-check');
+			measured.lastInputTokens = 252_285;
+			measured.lastEstimateTokens = 200_000;
+			measured.lastInputModel = measured.policy.model;
+			kernel.ctx.sessions.save(measured);
+
+			const report = kernel.ctx.agent.contextReport();
+			assert.ok(report.includes('automatic compaction: summarize at 242144 tokens'), report);
+			assert.ok(report.includes('keep 52428 tokens (20% of the window)'), report);
+			assert.ok(report.includes('current pressure:'), report);
+			assert.ok(report.includes('×1.26'), report);
 		} finally {
 			await kernel.dispose();
 		}

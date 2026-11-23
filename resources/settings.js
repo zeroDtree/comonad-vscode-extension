@@ -446,6 +446,8 @@
 		fillSelect($('display'), state.labels.displays, config.displayForm);
 		fillSelect($('toolCard'), state.labels.toolCards, config.toolCard);
 		fillSelect($('context'), state.labels.contexts, config.contextForm);
+		put($('compaction-headroom'), String(config.compactionHeadroom));
+		put($('compaction-retain'), String(config.compactionRetainPercent));
 		fillModels(state.models, config.model);
 		const checked = (id, value) => {
 			const node = $(id);

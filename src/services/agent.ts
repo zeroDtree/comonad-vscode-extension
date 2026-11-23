@@ -7,20 +7,26 @@ import { abortable, linkAbort } from '../lib/cancel';
 import type { TurnRef } from '../lib/types';
 import {
 	DEFAULT_OUTPUT_RESERVE,
+	MIN_INPUT_BUDGET,
 	buildModelHistory,
+	calibrate,
+	calibrationRatio,
 	dropPromptAttachments,
 	elideToolResults,
 	hasImageAttachments,
 	modelSummaryMessage,
 	planCompaction,
 	resolveBudget,
+	resolveCompactionLimits,
 	stripImageAttachments,
 	type Budget,
+	type CompactionLimits,
 	type ContextForm,
+	type RequestSample,
 } from '../lib/prompt';
 import { MAX_IMAGES_PER_MESSAGE } from '../lib/images';
 import { attachmentNotes, imageParts } from '../lib/attachments';
-import { countRaw, estimateAttachments, estimateMessages, estimateTokens } from '../lib/tokens';
+import { countRaw, estimateAttachments, estimateMessages, estimateTokens, formatTokens } from '../lib/tokens';
 import {
 	runGraph,
 	type CompiledGraph,
@@ -121,8 +127,11 @@ import { scopeOf, type ResolveResult } from './references';
 /** The summary is a short, non-thinking call; it must not inherit the chat's max effort. */
 const SUMMARY_MAX_TOKENS = 3_072;
 const SUMMARY_TIMEOUT_MS = 60_000;
-/** One turn may summarize once at turn start and once more when the provider refuses it. */
-const MAX_COMPACTIONS_PER_TURN = 2;
+/**
+ * A turn may fold at its start, again when the request grows past the headroom, and once more when
+ * the provider refuses it. Each fold frees most of the window, so four is a backstop, not a cadence.
+ */
+const MAX_COMPACTIONS_PER_TURN = 4;
 /** A provider that accepts the request but stops emitting anything must not freeze the turn. */
 const MODEL_STALL_MS = 180_000;
 
@@ -191,6 +200,17 @@ interface Turn {
 	unlink: () => void;
 }
 
+/** Per-turn summary state, so a broken or pointless summarizer cannot retry on every graph step. */
+interface CompactionGuard {
+	attempts: number;
+	failed: boolean;
+	notified: boolean;
+	/** The once-per-turn tool-output trim notice has been shown. */
+	trimmed: boolean;
+	/** There is nothing new to fold this turn; do not ask again until the next turn. */
+	blocked: boolean;
+}
+
 interface RunState {
 	ref: TurnRef;
 	sessionId: string;
@@ -207,7 +227,7 @@ interface RunState {
 	/** The first exhausted dimension. The run stops at the next message boundary. */
 	stop?: BudgetDimension;
 	/** Per-turn summary attempts, so a broken summarizer cannot retry on every graph step. */
-	compaction?: { attempts: number; failed: boolean; notified: boolean };
+	compaction?: CompactionGuard;
 	/** The last tool call this run attempted, for partial reports. */
 	lastTool?: string;
 	policy: SessionPolicy;
@@ -731,18 +751,71 @@ export class Agent extends Service {
 			// A silent generation is offered no tools, so its budget is measured without them.
 			const tools = SILENT_TRIGGERS.has(trigger) ? [] : this.ctx.tools.visible(session.policy);
 			const budget = this.budgetFor(session.policy, session.contextWindow, system, tools);
+			const room = this.roomFor(budget);
+			const toolCost = this.toolTokens(tools);
 			const form = session.contextForm ?? config.contextForm;
 			let history = buildModelHistory(seeded, session.modelContext, form);
-			const compaction = { attempts: 0, failed: false, notified: false };
+			const compaction: CompactionGuard = { attempts: 0, failed: false, notified: false, trimmed: false, blocked: false };
+			const model = session.policy.model;
+			const preview = (): Message[] => [{ role: 'system', content: system } as Message, ...history];
+			const pressure = (): number => this.pressure(session, model, preview(), toolCost);
 			// Compaction only changes the model context: the canonical transcript (and every index into
 			// it, including prior/restore/continueInto) stays exactly where it was.
-			if (estimateMessages(history) > budget.input) {
+			if (room.enabled) {
+				if (pressure() >= room.trigger) {
+					const before = pressure();
+					const previousCovers = session.modelContext?.covers ?? 0;
+					compaction.attempts += 1;
+					try {
+						const context = await this.compactContext(
+							session,
+							seeded,
+							this.compactTail(room, session, model),
+							budget.window,
+							undefined,
+							turn.signal,
+							false,
+							(usage) => this.recordSummaryUsage(session, usage),
+						);
+						if (context) {
+							history = buildModelHistory(seeded, context, form);
+							this.announceCompaction(ref, before, pressure(), context.covers - previousCovers, budget.window);
+						} else {
+							compaction.blocked = true;
+						}
+					} catch (error) {
+						if (turn.signal.aborted) {
+							throw error;
+						}
+						compaction.failed = true;
+						this.ctx.log.message(`summarize failed: ${describe(error)}`);
+						if (!compaction.notified) {
+							compaction.notified = true;
+							this.notice(ref, `Could not summarize the conversation (${describe(error)}); continuing without a summary.`);
+						}
+					}
+				}
+				// A current turn that still cannot fit the reply-reserved window is trimmed; a successful
+				// fold leaves the request far below it.
+				if (pressure() > budget.window - budget.reserve) {
+					const elided = elideToolResults(history, this.rawBodyLimit(budget, session, model));
+					if (elided.changed) {
+						history = elided.messages;
+						if (!compaction.trimmed) {
+							compaction.trimmed = true;
+							this.notice(ref, 'Trimmed older tool output to fit the model’s window.');
+						}
+					}
+				}
+			} else if (estimateMessages(history) > budget.input) {
+				// Legacy hard-budget path: proactive compaction is off.
 				compaction.attempts += 1;
 				try {
 					const context = await this.compactContext(
 						session,
 						seeded,
-						budget.input,
+						this.legacyTail(session, budget),
+						budget.window,
 						undefined,
 						turn.signal,
 						false,
@@ -942,14 +1015,21 @@ export class Agent extends Service {
 	}
 
 	/**
-	 * Summarizes the conversation on demand. The cut is planned against a budget of zero, which keeps
-	 * only the turns after the last prompt: what a reader asking for this wants is the conversation
-	 * folded now, not the longest tail that happens to fit.
+	 * Summarizes the conversation on demand. The cut keeps only the turns after the last prompt: what
+	 * a reader asking for this wants is the conversation folded now, not a tail that happens to fit.
 	 */
 	async compact(sessionId: string, instructions?: string, rebuild = false): Promise<string> {
 		const session = this.ctx.sessions.require(sessionId);
 		const before = session.modelContext?.covers ?? 0;
-		const context = await this.compactContext(session, session.transcript, 0, instructions, undefined, rebuild);
+		const context = await this.compactContext(
+			session,
+			session.transcript,
+			0,
+			this.windowFor(session),
+			instructions,
+			undefined,
+			rebuild,
+		);
 		if (!context) {
 			return 'Nothing to compact yet.';
 		}
@@ -993,6 +1073,74 @@ export class Agent extends Service {
 		);
 	}
 
+	/** The provider count paired with the local estimate for the same request, when it is usable. */
+	private requestSample(session: Session | undefined, model: string): RequestSample | undefined {
+		if (!session?.lastInputTokens || !session.lastEstimateTokens) {
+			return undefined;
+		}
+		// A different model has a different tokenizer; wait for its first measurement.
+		if (session.lastInputModel && session.lastInputModel !== model) {
+			return undefined;
+		}
+		return { input: session.lastInputTokens, estimate: session.lastEstimateTokens };
+	}
+
+	/** What the provider is likely to count for this whole request. */
+	private pressure(session: Session | undefined, model: string, messages: readonly Message[], toolCost: number): number {
+		return calibrate(estimateMessages(messages) + Math.max(0, toolCost), this.requestSample(session, model));
+	}
+
+	/** Where this request compacts and how much it may keep; the settings are read live. */
+	private roomFor(budget: Budget): CompactionLimits & { overhead: number; window: number } {
+		const config = this.ctx.settings.get();
+		const limits = resolveCompactionLimits(
+			budget.window,
+			budget.reserve,
+			config.compactionHeadroom,
+			config.compactionRetainPercent,
+		);
+		return {
+			...limits,
+			enabled: limits.enabled && budget.input >= MIN_INPUT_BUDGET,
+			overhead: budget.overhead,
+			window: budget.window,
+		};
+	}
+
+	/** A provider-scale limit, in the raw units the estimator and planner use. */
+	private rawLimit(tokens: number, session: Session | undefined, model: string): number {
+		return Math.floor(Math.max(0, tokens) / calibrationRatio(this.requestSample(session, model)));
+	}
+
+	/** How much of the body may stay before the reply-reserved window is exceeded. */
+	private rawBodyLimit(budget: Budget, session: Session | undefined, model: string): number {
+		const raw = this.rawLimit(budget.window - budget.reserve, session, model) - budget.overhead;
+		return Math.max(0, Math.min(budget.input, raw));
+	}
+
+	/** The verbatim tail one proactive fold may keep, in raw estimate tokens. */
+	private compactTail(room: CompactionLimits & { overhead: number }, session: Session, model: string): number {
+		const ratio = calibrationRatio(this.requestSample(session, model));
+		const summaryTokens = session.modelContext ? estimateTokens(modelSummaryMessage(session.modelContext.summary).content) : 0;
+		const ceiling = this.rawLimit(room.trigger, session, model) - room.overhead - summaryTokens - SUMMARY_RESERVE;
+		return Math.max(0, Math.min(Math.floor(Math.max(0, room.retain) / ratio), ceiling));
+	}
+
+	/** The tail the old hard-budget planner used, for the disabled-proactive path. */
+	private legacyTail(session: Session, budget: Budget): number {
+		const summaryTokens = session.modelContext ? estimateTokens(modelSummaryMessage(session.modelContext.summary).content) : 0;
+		return Math.max(0, budget.input - summaryTokens - SUMMARY_RESERVE);
+	}
+
+	/** Announces one successful fold: what it stood in for and what the request became. */
+	private announceCompaction(ref: TurnRef, before: number, after: number, messages: number, window: number): void {
+		const share = window > 0 ? Math.round((after / window) * 100) : 0;
+		this.notice(
+			ref,
+			`Summarized ${messages} earlier message${messages === 1 ? '' : 's'}: about ${formatTokens(after)} tokens now instead of ${formatTokens(before)} (${share}% of the ${formatTokens(window)} window).`,
+		);
+	}
+
 	/**
 	 * Summarizes the canonical prefix, extending the previous summary unless `rebuild` is set. The
 	 * transcript, marks and cursor are untouched; the caller rebuilds only its model messages.
@@ -1000,7 +1148,8 @@ export class Agent extends Service {
 	private async compactContext(
 		session: Session,
 		source: readonly Message[],
-		budget: number,
+		tail: number,
+		window: number,
 		instructions?: string,
 		signal?: AbortSignal,
 		rebuild = false,
@@ -1008,10 +1157,7 @@ export class Agent extends Service {
 	): Promise<ModelContext | null> {
 		const previous = session.modelContext;
 		const from = rebuild ? 0 : previous?.covers ?? 0;
-		// The summary itself is part of the body budget; reserve what the existing one costs, and let
-		// SUMMARY_RESERVE cover the new summary's growth.
-		const summaryTokens = previous ? estimateTokens(modelSummaryMessage(previous.summary).content) : 0;
-		const plan = planCompaction(source, Math.max(0, budget - summaryTokens), SUMMARY_RESERVE, from);
+		const plan = planCompaction(source, Math.max(0, tail), from);
 		let cut = Math.min(plan.cut, source.length);
 		if (rebuild && previous) {
 			cut = Math.max(cut, previous.covers);
@@ -1023,8 +1169,9 @@ export class Agent extends Service {
 		if (!older.length) {
 			return null;
 		}
-		const sourceTokens =
-			budget > 0 ? Math.max(4_000, Math.min(SUMMARY_SOURCE_TOKENS, budget - SUMMARY_RESERVE)) : SUMMARY_SOURCE_TOKENS;
+		// The summarizer reads as much of the old turns as its own cap allows; a small retain target
+		// must not starve it.
+		const sourceTokens = Math.max(4_000, Math.min(SUMMARY_SOURCE_TOKENS, Math.max(0, window - SUMMARY_RESERVE)));
 		const text = await this.summaryText(
 			session.policy.model,
 			older,
@@ -1061,9 +1208,10 @@ export class Agent extends Service {
 	}
 
 	/**
-	 * The request about to be sent, made to fit. Old tool output is elided first, because that is what
-	 * grew the request and it costs no model call; only a request that still does not fit has the turns
-	 * before this one folded away. The current turn is never folded: it is what the user just asked for.
+	 * The request about to be sent, made to fit. At the configured headroom it folds the turns before
+	 * this one into a summary, keeping the retained tail small; only a request that still cannot fit
+	 * the reply-reserved window has its tool output elided. The current turn is never folded: it is
+	 * what the user just asked for.
 	 *
 	 * A composed request — tavern content rewrote it, or a subagent owns it — no longer lines up with a
 	 * chat record, so only elision may touch it.
@@ -1075,50 +1223,134 @@ export class Agent extends Service {
 		signal: AbortSignal,
 	): Promise<{ messages: Message[]; transcript?: Message[] }> {
 		const budget = this.budgetFor(state.policy, session?.contextWindow, this.systemText(state.messages), tools);
-		// The primary system prompt and the tool definitions are fixed overhead; the derived summary is
-		// body, not overhead, or it would be invisible to this budget and to /context.
-		const systems = state.messages.filter((message) => message.role === 'system' && !message.summarized);
-		const body = state.messages.filter((message) => message.role !== 'system' || message.summarized);
-		const fixed = estimateMessages(systems);
-		if (estimateMessages(body) <= budget.input) {
-			return { messages: state.messages };
-		}
-		// Elision still walks the whole request; its limit carries the fixed part so only the body shrinks.
-		const elided = elideToolResults(state.messages, budget.input + fixed);
-		if (elided.changed) {
-			this.notice(state.ref, 'Trimmed older tool output to fit the model’s window.');
-		}
-		const elidedBody = elided.messages.filter((message) => message.role !== 'system' || message.summarized);
-		if (estimateMessages(elidedBody) <= budget.input || !state.foldable || !session) {
-			return { messages: elided.messages };
-		}
-		const guard = (state.compaction ??= { attempts: 0, failed: false, notified: false });
-		if (guard.failed || guard.attempts >= MAX_COMPACTIONS_PER_TURN) {
-			return { messages: elided.messages };
-		}
-		guard.attempts += 1;
-		try {
-			const context = await this.compactContext(session, state.transcript, budget.input, undefined, signal, false, (usage) => {
-				state.budget?.spendTokens(usage.input + usage.output);
-				this.recordSummaryUsage(session, usage);
-			});
-			if (!context) {
+		const room = this.roomFor(budget);
+		const toolCost = this.toolTokens(tools);
+		const model = state.policy.model;
+		const guard = (state.compaction ??= { attempts: 0, failed: false, notified: false, trimmed: false, blocked: false });
+		let messages = state.messages;
+
+		if (!room.enabled) {
+			// Proactive compaction off: keep the cheap trim first, then fold only what is still too large.
+			// The primary system prompt and the tool definitions are fixed overhead; the derived summary
+			// is body, not overhead, or it would be invisible to this budget and to /context.
+			const systems = state.messages.filter((message) => message.role === 'system' && !message.summarized);
+			const body = state.messages.filter((message) => message.role !== 'system' || message.summarized);
+			const fixed = estimateMessages(systems);
+			if (estimateMessages(body) <= budget.input) {
+				return { messages: state.messages };
+			}
+			// Elision still walks the whole request; its limit carries the fixed part so only the body shrinks.
+			const elided = elideToolResults(state.messages, budget.input + fixed);
+			if (elided.changed && !guard.trimmed) {
+				guard.trimmed = true;
+				this.notice(state.ref, 'Trimmed older tool output to fit the model’s window.');
+			}
+			const elidedBody = elided.messages.filter((message) => message.role !== 'system' || message.summarized);
+			if (estimateMessages(elidedBody) <= budget.input || !state.foldable || !session) {
 				return { messages: elided.messages };
 			}
-			state.modelContextVersion = context.version;
-			const history = buildModelHistory(state.transcript, context, state.contextForm ?? this.ctx.settings.get().contextForm);
-			return { messages: [...systems, ...history, ...(state.trailer ?? [])] };
-		} catch (error) {
-			signal.throwIfAborted();
-			// The turn still has to be answered, so a summary that failed is reported and not fatal.
-			guard.failed = true;
-			this.ctx.log.message(`summarize failed mid-turn: ${describe(error)}`);
-			if (!guard.notified) {
-				guard.notified = true;
-				this.notice(state.ref, `Could not summarize the conversation (${describe(error)}); continuing with trimmed history.`);
+			if (guard.failed || guard.blocked || guard.attempts >= MAX_COMPACTIONS_PER_TURN) {
+				return { messages: elided.messages };
 			}
-			return { messages: elided.messages };
+			guard.attempts += 1;
+			try {
+				const context = await this.compactContext(
+					session,
+					state.transcript,
+					this.legacyTail(session, budget),
+					budget.window,
+					undefined,
+					signal,
+					false,
+					(usage) => {
+						state.budget?.spendTokens(usage.input + usage.output);
+						this.recordSummaryUsage(session, usage);
+					},
+				);
+				if (!context) {
+					guard.blocked = true;
+					return { messages: elided.messages };
+				}
+				state.modelContextVersion = context.version;
+				const history = buildModelHistory(state.transcript, context, state.contextForm ?? this.ctx.settings.get().contextForm);
+				return { messages: [...systems, ...history, ...(state.trailer ?? [])] };
+			} catch (error) {
+				signal.throwIfAborted();
+				// The turn still has to be answered, so a summary that failed is reported and not fatal.
+				guard.failed = true;
+				this.ctx.log.message(`summarize failed mid-turn: ${describe(error)}`);
+				if (!guard.notified) {
+					guard.notified = true;
+					this.notice(state.ref, `Could not summarize the conversation (${describe(error)}); continuing with trimmed history.`);
+				}
+				return { messages: elided.messages };
+			}
 		}
+
+		// Proactive path: fold first at the headroom, then trim only if the current turn alone still
+		// cannot fit the reply-reserved window.
+		if (this.pressure(session, model, messages, toolCost) >= room.trigger) {
+			if (state.foldable && session && !guard.failed && !guard.blocked && guard.attempts < MAX_COMPACTIONS_PER_TURN) {
+				const before = this.pressure(session, model, messages, toolCost);
+				const previousCovers = session.modelContext?.covers ?? 0;
+				guard.attempts += 1;
+				try {
+					const context = await this.compactContext(
+						session,
+						state.transcript,
+						this.compactTail(room, session, model),
+						budget.window,
+						undefined,
+						signal,
+						false,
+						(usage) => {
+							state.budget?.spendTokens(usage.input + usage.output);
+							this.recordSummaryUsage(session, usage);
+						},
+					);
+					if (context) {
+						state.modelContextVersion = context.version;
+						const systems = state.messages.filter((message) => message.role === 'system' && !message.summarized);
+						messages = [
+							...systems,
+							...buildModelHistory(state.transcript, context, state.contextForm ?? this.ctx.settings.get().contextForm),
+							...(state.trailer ?? []),
+						];
+						this.announceCompaction(
+							state.ref,
+							before,
+							this.pressure(session, model, messages, toolCost),
+							context.covers - previousCovers,
+							budget.window,
+						);
+					} else {
+						guard.blocked = true;
+					}
+				} catch (error) {
+					signal.throwIfAborted();
+					guard.failed = true;
+					this.ctx.log.message(`summarize failed mid-turn: ${describe(error)}`);
+					if (!guard.notified) {
+						guard.notified = true;
+						this.notice(state.ref, `Could not summarize the conversation (${describe(error)}); continuing without a summary.`);
+					}
+				}
+			}
+		}
+
+		if (this.pressure(session, model, messages, toolCost) > budget.window - budget.reserve) {
+			const systems = messages.filter((message) => message.role === 'system' && !message.summarized);
+			const fixed = estimateMessages(systems);
+			const elided = elideToolResults(messages, this.rawBodyLimit(budget, session, model) + fixed);
+			if (elided.changed) {
+				messages = elided.messages;
+				if (!guard.trimmed) {
+					guard.trimmed = true;
+					this.notice(state.ref, 'Trimmed older tool output to fit the model’s window.');
+				}
+			}
+		}
+		return { messages };
 	}
 
 	/**
@@ -1248,6 +1480,10 @@ export class Agent extends Service {
 					(session.usage.cachedTokens ?? 0) + Math.min(Math.max(0, cached), completion.usage.input);
 			}
 			session.lastInputTokens = completion.usage.input;
+			// The local estimate for the request whose size the provider just reported. Their ratio
+			// calibrates the next pressure check against the endpoint's own tokenizer.
+			session.lastEstimateTokens = estimateMessages(messages) + this.toolTokens(tools);
+			session.lastInputModel = state.policy.model;
 			this.ctx.usage.add(completion.usage);
 			const cost = this.ctx.llm.costFor(state.policy.model, completion.usage);
 			if (cost > 0) {
@@ -1275,21 +1511,33 @@ export class Agent extends Service {
 		const body = (dropped.changed ? dropped.messages : elided).filter(
 			(message) => message.role !== 'system' || message.summarized,
 		);
+		// When a summary cannot do any more, the hard trim is still a better answer than the refusal.
+		const fallback = (): Message[] | null =>
+			estimateMessages(body) < estimateMessages(state.messages) ? [...system, ...body] : null;
 		if (!session || !state.foldable) {
-			return estimateMessages(body) < estimateMessages(state.messages) ? [...system, ...body] : null;
+			return fallback();
 		}
-		const guard = (state.compaction ??= { attempts: 0, failed: false, notified: false });
-		if (guard.failed || guard.attempts >= MAX_COMPACTIONS_PER_TURN) {
-			return null;
+		const guard = (state.compaction ??= { attempts: 0, failed: false, notified: false, trimmed: false, blocked: false });
+		if (guard.failed || guard.blocked || guard.attempts >= MAX_COMPACTIONS_PER_TURN) {
+			return fallback();
 		}
 		guard.attempts += 1;
 		try {
-			const context = await this.compactContext(session, state.transcript, 0, undefined, signal, false, (usage) => {
-				state.budget?.spendTokens(usage.input + usage.output);
-				this.recordSummaryUsage(session, usage);
-			});
+			const context = await this.compactContext(
+				session,
+				state.transcript,
+				0,
+				this.windowOf(state.policy, session.contextWindow),
+				undefined,
+				signal,
+				false,
+				(usage) => {
+					state.budget?.spendTokens(usage.input + usage.output);
+					this.recordSummaryUsage(session, usage);
+				},
+			);
 			if (!context) {
-				return null;
+				return fallback();
 			}
 			state.modelContextVersion = context.version;
 			const history = buildModelHistory(state.transcript, context, state.contextForm ?? this.ctx.settings.get().contextForm);
@@ -1302,7 +1550,7 @@ export class Agent extends Service {
 				guard.notified = true;
 				this.notice(state.ref, `Could not summarize the conversation (${describe(error)}); continuing with trimmed history.`);
 			}
-			return null;
+			return fallback();
 		}
 	}
 
@@ -1446,6 +1694,10 @@ export class Agent extends Service {
 		const profile = this.ctx.llm.profileFor(session.policy.model);
 		const system = this.systems.get(session.id) ?? '';
 		const budget = this.budgetFor(session.policy, session.contextWindow, system, visible);
+		const room = this.roomFor(budget);
+		const sample = this.requestSample(session, session.policy.model);
+		const ratio = calibrationRatio(sample);
+		const currentPressure = calibrate(estimateMessages(modelHistory) + budget.overhead, sample);
 		const used = session.lastInputTokens;
 		const windowLine = profile?.contextWindow
 			? `- window: ${budget.window} tokens${session.contextWindow ? ' (set for this chat)' : ` — from the ${profile.label || profile.id} profile`}`
@@ -1455,9 +1707,13 @@ export class Agent extends Service {
 			windowLine,
 			`- room for messages: ${budget.input} tokens = ${budget.window} window − ${budget.reserve} held for the reply − ${budget.overhead} of system prompt and tool definitions`,
 			`  - of that overhead: ${estimateTokens(system)} system prompt, ${this.toolTokens(visible)} the ${visible.length} tool definitions`,
+			room.enabled
+				? `- automatic compaction: summarize at ${room.trigger} tokens (${room.headroom} headroom, ${budget.reserve} held for the reply); keep ${room.retain} tokens (${config.compactionRetainPercent}% of the window)`
+				: '- automatic compaction: off (`compactionHeadroom` is 0, or the window leaves no room for messages)',
+			`- current pressure: ${currentPressure} tokens estimated${ratio !== 1 ? ` (local estimate ×${ratio.toFixed(2)})` : ''}`,
 			used === undefined
 				? '- last request: none yet, so the numbers below are estimates'
-				: `- last request: ${used} tokens, as the provider counted them`,
+				: `- last request: ${used} tokens, as the provider counted them${sample ? ` (local estimate ${sample.estimate}, ×${ratio.toFixed(2)})` : ''}`,
 			`- canonical transcript: ${session.transcript.length} messages, ${canonicalTokens} tokens (the full chat is kept)`,
 			`- model context: ${modelTokens} tokens = ${summaryTokens} summary + ${user + assistant + tool} messages (user ${user} · assistant ${assistant} · tool ${tool})`,
 			...(attachmentLine ? [attachmentLine] : []),

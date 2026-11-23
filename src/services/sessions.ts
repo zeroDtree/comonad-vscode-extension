@@ -139,6 +139,13 @@ export interface Session {
 	 * panels read it rather than counting the transcript themselves.
 	 */
 	lastInputTokens?: number;
+	/**
+	 * The local whole-request estimate for the request that produced `lastInputTokens`. The two
+	 * together calibrate the estimator against the provider, whose count is the only exact measure.
+	 */
+	lastEstimateTokens?: number;
+	/** The model that produced those measurements; a different tokenizer makes the ratio stale. */
+	lastInputModel?: string;
 	/** Instruction files loaded into the last system prompt. */
 	instructions?: string[];
 	/** Tavern selection: a character and persona by id, world books by name, a preset by id. */
@@ -290,6 +297,11 @@ function matchSnippet(session: Session, needle: string): string | undefined {
 function emptyUsage(): SessionUsage {
 	// `cachedTokens` is deliberately absent: its presence is the "provider reports cache" signal.
 	return { inputTokens: 0, outputTokens: 0, requests: 0, cost: 0 };
+}
+
+/** A stored token count that is positive and finite, or nothing. */
+function storedCount(value: unknown): number | undefined {
+	return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 /** Repairs usage loaded from disk; never invents `cachedTokens`, which absence marks as unreported. */
@@ -529,6 +541,11 @@ export class SessionStore {
 			taskGraph: delegated ? undefined : sanitizeTaskGraph(session.taskGraph),
 			archivedTaskGraphs: delegated ? undefined : sanitizeArchivedTaskGraphs(session.archivedTaskGraphs),
 			usage: normalizeUsage(session.usage),
+			// A session file is untrusted input, and these feed the compaction trigger: a bad value
+			// must read as "no sample" rather than as an enormous prompt.
+			lastInputTokens: storedCount(session.lastInputTokens),
+			lastEstimateTokens: storedCount(session.lastEstimateTokens),
+			lastInputModel: typeof session.lastInputModel === 'string' && session.lastInputModel ? session.lastInputModel : undefined,
 			instructions: session.instructions ?? [],
 		};
 	}

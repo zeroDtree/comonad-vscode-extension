@@ -1146,7 +1146,21 @@
         "comonad.contextWindow": {
           "type": "number",
           "default": 0,
-          "markdownDescription": "Overrides the model's input window in tokens. `0` uses the window on the model profile, falling back to 128K for a model that has none. The chat summarizes itself when the request no longer fits. New chats start here; the model menu changes the current chat and saves the pick here."
+          "markdownDescription": "Overrides the model's input window in tokens. `0` uses the window on the model profile, falling back to 128K for a model that has none. The chat summarizes itself as the request nears the window (see `compactionHeadroom`). New chats start here; the model menu changes the current chat and saves the pick here."
+        },
+        "comonad.compactionHeadroom": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 0,
+          "maximum": 2000000,
+          "markdownDescription": "Summarize automatically when fewer than this many tokens remain before the model's context window is full. Checked before every model request, not only at a turn's start. `0` disables proactive compaction; the hard-limit trimming still applies. Capped at half the window."
+        },
+        "comonad.compactionRetainPercent": {
+          "type": "number",
+          "default": 20,
+          "minimum": 5,
+          "maximum": 80,
+          "markdownDescription": "Percent of the context window kept verbatim after an automatic summary. The newest turn is always kept; `/summarize` still folds everything before the current turn."
         },
         "comonad.budgetUsd": {
           "type": "number",

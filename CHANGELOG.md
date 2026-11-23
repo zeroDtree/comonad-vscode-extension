@@ -12,6 +12,12 @@ Highlights are below; the full implementation notes are linked at the end. The u
 
 ### Highlights
 
+- **Compaction is proactive.** Before every model request — not only at a turn's start — the agent
+  measures the whole request, calibrates the local estimate against the prompt size the provider
+  last reported, and once fewer than `compactionHeadroom` tokens remain (20,000 by default) it
+  summarizes the older turns and keeps only `compactionRetainPercent` of the window verbatim (20% by
+  default). Summarizing now comes before tool-output trimming; trimming is the hard-limit fallback.
+  Both settings are in Settings → Agent, and a successful fold reports its before/after size once.
 - **One plan vocabulary.** The Orchestrator's execution DAG is `task_graph`; the Plan work mode is
   `plan`; `write_plan` / `edit_plan` / `read_plan` / `list_plans` are the plan-file tools. The mode
   is now a hard capability ceiling, Build archives the research task graph and starts a fresh one,
@@ -47,7 +53,7 @@ Highlights are below; the full implementation notes are linked at the end. The u
   DeepSeek sends back with every tool request, so a summary actually lands the next prompt under the
   configured window instead of leaving it at 145%. The user prompt is saved before compaction (a
   reload during a summary no longer drops it or binds the stream to the previous turn), the summary
-  is a short non-thinking call bounded to two attempts per turn, and the transient “Summarizing…”
+  is a short non-thinking call bounded to four attempts per turn, and the transient “Summarizing…”
   row is replaced by a live footer timer.
 - **Native run budgets and resumable pauses.** Every run has four independent hard limits — turns
   (model round trips), tool calls, tokens and wall-clock time. A limit stops the run at a message

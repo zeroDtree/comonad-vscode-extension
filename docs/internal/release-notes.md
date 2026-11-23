@@ -3,15 +3,25 @@
 > **Internal archive.** Implementation-level notes for the next release. User documentation lives
 > in `docs/`; the summary is in `CHANGELOG.md`.
 
+- **Compaction is proactive, calibrated and small.** `compactionHeadroom` (default 20,000 tokens,
+  `0` disables) and `compactionRetainPercent` (default 20%) are read live before every model request;
+  the whole request is estimated, scaled by `lastInputTokens / lastEstimateTokens` (clamped to
+  `[0.5, 2]`, ignored below 1,000 tokens or across models), and compared with
+  `window - max(headroom, reserve)`. At the trigger the planner folds the older turns and keeps only
+  the newest tail within the retain share; the summary source cap is tied to the window instead of
+  the small retain target. Tool-result elision is demoted to the hard-limit/no-session/composed
+  fallback. `MAX_COMPACTIONS_PER_TURN` is four, a `null` plan blocks further attempts for the turn,
+  a successful fold reports its before/after size once, and the trim notice is once per turn.
+  `Session.lastEstimateTokens` / `lastInputModel` persist the calibration sample and are sanitized on
+  load; `/context` reports the trigger, retain target, pressure and multiplier.
 - **Compaction counts reasoning and no longer races the prompt.** `estimateMessages` includes
   `message.reasoning` (the adapter's `reasoning_content`), and `planCompaction` uses a single
   `suffixTokens` pass. `runTurn` commits the user message before prompt building and turn-start
   compaction; the panel publishes an in-flight `pendingPrompt` on resync and marks only the live
-  turn for `resumeLive`. Summaries are non-thinking calls with a small `maxTokens` and a 60s timeout,
-  capped at two attempts per turn via a `RunState.compaction` guard; usage is recorded without
-  touching `lastInputTokens`. The permanent “Summarizing…” notice is gone, the footer shows elapsed
-  time from turn start, and the composer clears only after `turn-start` (with `send-refused` / a
-  restored draft when the host rejects a prompt).
+  turn for `resumeLive`. Summaries are non-thinking calls with a small `maxTokens` and a 60s timeout;
+  usage is recorded without touching `lastInputTokens`. The permanent “Summarizing…” notice is gone,
+  the footer shows elapsed time from turn start, and the composer clears only after `turn-start`
+  (with `send-refused` / a restored draft when the host rejects a prompt).
 
 - **A malformed verifier report no longer deletes a valid verification.** Evidence is read through
   one tolerant policy (`src/lib/agent-evidence.ts`): a non-array becomes empty with a warning, a bad

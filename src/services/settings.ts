@@ -4,7 +4,14 @@ import { BUILTIN_ROLES, READ_ONLY_GRANT, type AgentRole, type SubagentGrant } fr
 import { normalizeBudget, type BudgetLimits, type SubagentBudgetMode } from '../lib/budget';
 import type { EffortTop } from '../lib/effort';
 import { asApproval, asApprovalResponse, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
-import type { ContextForm } from '../lib/prompt';
+import {
+	DEFAULT_COMPACTION_HEADROOM,
+	DEFAULT_COMPACTION_RETAIN_PERCENT,
+	MAX_COMPACTION_HEADROOM,
+	MAX_COMPACTION_RETAIN_PERCENT,
+	MIN_COMPACTION_RETAIN_PERCENT,
+	type ContextForm,
+} from '../lib/prompt';
 import { parsePromptLayout, parseToolLayout, type PromptBlockSetting, type ToolPromptSetting } from '../lib/prompt-layout';
 import { asSandboxMode, DEFAULT_SANDBOX_MODE } from '../lib/sandbox';
 import type { Approval, ApprovalResponse, Capability, ReasoningEffort, SandboxMode, WorkMode } from '../lib/types';
@@ -250,6 +257,10 @@ export interface Config {
 	reasoningEffort: ReasoningEffort;
 	/** Window override in tokens for new chats; `0` resolves from the model profile. */
 	contextWindow: number;
+	/** Tokens left before the window fills at which a request triggers a summary; `0` disables it. */
+	compactionHeadroom: number;
+	/** Percent of the window kept verbatim after a summary. */
+	compactionRetainPercent: number;
 	budgetUsd: number;
 	filterSensitiveEnv: boolean;
 	allowFullAccess: boolean;
@@ -297,6 +308,8 @@ export const CONFIG_KEYS = [
 	'toolCard',
 	'reasoningEffort',
 	'contextWindow',
+	'compactionHeadroom',
+	'compactionRetainPercent',
 	'budgetUsd',
 	'filterSensitiveEnv',
 	'allowFullAccess',
@@ -314,6 +327,8 @@ export const AGENT_KEYS = [
 	'displayForm',
 	'toolCard',
 	'contextForm',
+	'compactionHeadroom',
+	'compactionRetainPercent',
 	'questionNotification',
 	'network',
 	'sandboxMode',
@@ -378,6 +393,18 @@ export function normalizeAgentPatch(
 	}
 	if (has('contextForm')) {
 		next.contextForm = form('contextForm');
+	}
+	if (has('compactionHeadroom')) {
+		const value = Number(patch.compactionHeadroom);
+		next.compactionHeadroom = Number.isFinite(value)
+			? Math.min(MAX_COMPACTION_HEADROOM, Math.max(0, Math.round(value)))
+			: current.compactionHeadroom;
+	}
+	if (has('compactionRetainPercent')) {
+		const value = Number(patch.compactionRetainPercent);
+		next.compactionRetainPercent = Number.isFinite(value)
+			? Math.min(MAX_COMPACTION_RETAIN_PERCENT, Math.max(MIN_COMPACTION_RETAIN_PERCENT, Math.round(value)))
+			: current.compactionRetainPercent;
 	}
 	if (has('toolCard')) {
 		const value = patch.toolCard;
@@ -458,6 +485,10 @@ export class Settings extends Service {
 			const found = Number(raw[key]);
 			return Number.isFinite(found) && found >= minimum ? found : fallback;
 		};
+		const range = (key: keyof Config, fallback: number, minimum: number, maximum: number): number => {
+			const found = Number(raw[key]);
+			return Number.isFinite(found) ? Math.min(maximum, Math.max(minimum, Math.round(found))) : fallback;
+		};
 		const flag = (key: keyof Config, fallback: boolean): boolean => {
 			const found = raw[key];
 			return typeof found === 'boolean' ? found : fallback;
@@ -511,6 +542,13 @@ export class Settings extends Service {
 			toolCard: oneOf('toolCard', TOOL_CARD_MODES, 'collapsed'),
 			reasoningEffort: oneOf('reasoningEffort', REASONING_EFFORTS, 'auto'),
 			contextWindow: count('contextWindow', 0, 0),
+			compactionHeadroom: range('compactionHeadroom', DEFAULT_COMPACTION_HEADROOM, 0, MAX_COMPACTION_HEADROOM),
+			compactionRetainPercent: range(
+				'compactionRetainPercent',
+				DEFAULT_COMPACTION_RETAIN_PERCENT,
+				MIN_COMPACTION_RETAIN_PERCENT,
+				MAX_COMPACTION_RETAIN_PERCENT,
+			),
 			budgetUsd: count('budgetUsd', 0, 0),
 			filterSensitiveEnv: flag('filterSensitiveEnv', true),
 			allowFullAccess: flag('allowFullAccess', true),
