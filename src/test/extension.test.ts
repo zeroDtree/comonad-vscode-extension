@@ -4727,6 +4727,22 @@ suite('Cordis kernel', () => {
 			'120 tokens · $0.000  ·  turn 1  ·  context 117% · 299K/256K',
 			'an over-window request is shown honestly rather than clamped',
 		);
+		const first = { inputTokens: 0, outputTokens: 0, requests: 0, cost: 0 };
+		assert.strictEqual(
+			statusDetail({ usage: first, turnIndex: 0, lastInputTokens: 70_656 }, 262_144, true),
+			'turn 0  ·  context ~27% · ~69K/256K',
+			'a first-reply estimate is marked provisional on both numbers',
+		);
+		assert.strictEqual(
+			statusDetail({ usage: first, turnIndex: 0, lastInputTokens: 70_656 }, 262_144),
+			'turn 0  ·  context 27% · 69K/256K',
+			'the same count without the flag is a measurement',
+		);
+		assert.strictEqual(
+			statusDetail({ usage: silent, turnIndex: 1, lastInputTokens: 306_049 }, 262_144, true),
+			'120 tokens · $0.000  ·  turn 1  ·  context ~117% · ~299K/256K',
+			'an estimate over the window is shown honestly too',
+		);
 		assert.strictEqual(statusDetail(undefined, window), '', 'no chat, no line');
 	});
 
@@ -4767,15 +4783,36 @@ suite('Cordis kernel', () => {
 			);
 			const order: string[] = [];
 			const measured: Array<{ sessionId: string; turnIndex: number; lastInputTokens?: number; window: number; usage: SessionUsage }> = [];
+			const estimates: Array<{ sessionId: string; turnIndex: number; estimateTokens: number; window: number; requests: number }> = [];
 			kernel.ctx.on('agent/usage', (ref, snapshot) => {
 				order.push('usage');
 				measured.push({ sessionId: ref.sessionId, ...snapshot });
 			});
+			kernel.ctx.on('agent/estimate', (ref, snapshot) => {
+				order.push('estimate');
+				estimates.push({
+					sessionId: ref.sessionId,
+					turnIndex: snapshot.turnIndex,
+					estimateTokens: snapshot.estimateTokens,
+					window: snapshot.window,
+					requests: snapshot.usage.requests,
+				});
+			});
 			kernel.ctx.on('agent/tool-start', () => order.push('tool-start'));
 			const result = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
-			assert.deepStrictEqual(order, ['usage', 'tool-start', 'usage'], 'one event per completed model request');
+			assert.deepStrictEqual(
+				order,
+				['estimate', 'usage', 'tool-start', 'usage'],
+				'the first reply is estimated before it is measured; later round trips are measured',
+			);
 			assert.strictEqual(measured.length, 2);
 			const session = kernel.ctx.sessions.require(result.sessionId);
+			assert.strictEqual(estimates.length, 1, 'only the request with no provider count is estimated');
+			assert.strictEqual(estimates[0]!.sessionId, result.sessionId);
+			assert.strictEqual(estimates[0]!.turnIndex, 0);
+			assert.strictEqual(estimates[0]!.requests, 0, 'painted before the provider charged anything');
+			assert.strictEqual(estimates[0]!.window, kernel.ctx.agent.windowFor(session));
+			assert.ok(estimates[0]!.estimateTokens > 0);
 			for (const event of measured) {
 				assert.strictEqual(event.sessionId, result.sessionId);
 				assert.strictEqual(event.window, kernel.ctx.agent.windowFor(session));
@@ -4797,6 +4834,78 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(measured[1]!.usage.cost, session.usage.cost, 'the last event carries the settled cost');
 			assert.strictEqual(measured[0]!.usage.inputTokens, 100, 'the event carries a snapshot, not the live object');
 			assert.strictEqual(session.turnIndex, 1);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the estimate painted before the first reply is that request\'s calibration sample', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 100, output: 10 } };
+				},
+			});
+			const estimates: number[] = [];
+			kernel.ctx.on('agent/estimate', (_ref, snapshot) => estimates.push(snapshot.estimateTokens));
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			const session = kernel.ctx.sessions.require(result.sessionId);
+			assert.strictEqual(estimates.length, 1);
+			assert.strictEqual(
+				estimates[0],
+				session.lastEstimateTokens,
+				'the painted estimate is the calibration sample for the same request',
+			);
+			assert.strictEqual(session.lastInputTokens, 100);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a provider that reports no usage keeps a fresh estimate for every request', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let calls = 0;
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat() {
+					calls += 1;
+					if (calls === 1) {
+						const toolCall: ToolCall = { id: 'c1', name: 'probe', arguments: JSON.stringify({ value: '42' }) };
+						return { message: { role: 'assistant', content: 'working', toolCalls: [toolCall] }, toolCalls: [toolCall] };
+					}
+					return { message: { role: 'assistant', content: 'done' }, toolCalls: [] };
+				},
+			});
+			await kernel.ctx.plugin(
+				toolset([
+					{
+						name: 'probe',
+						description: 'probe tool',
+						parameters: objectSchema({ value: { type: 'string' } }, ['value']),
+						capability: 'ro',
+						needsNetwork: false,
+						needsWorkspace: false,
+						async execute(args) {
+							return `probe:${(args as { value: string }).value}`;
+						},
+					},
+				]),
+			);
+			const estimates: number[] = [];
+			let measured = 0;
+			kernel.ctx.on('agent/estimate', (_ref, snapshot) => estimates.push(snapshot.estimateTokens));
+			kernel.ctx.on('agent/usage', () => {
+				measured += 1;
+			});
+			const result = await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
+			const session = kernel.ctx.sessions.require(result.sessionId);
+			assert.strictEqual(estimates.length, 2, 'each round trip repaints its own estimate');
+			assert.ok(estimates[1]! > estimates[0]!, 'the tool result grew the request');
+			assert.strictEqual(measured, 0, 'no provider count was ever published');
+			assert.strictEqual(session.lastInputTokens, undefined, 'the chat has no measurement to show');
 		} finally {
 			await kernel.dispose();
 		}

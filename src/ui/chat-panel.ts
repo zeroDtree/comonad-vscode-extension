@@ -82,16 +82,18 @@ export function sanitizeQuestionAnswers(
 /**
  * How full the window was on the last request, as a share of the window. It reads the prompt size the
  * provider reported rather than counting the transcript, so it is the same number the budget uses and
- * the same one the endpoint charged for.
+ * the same one the endpoint charged for. A local estimate is rendered with `~` until a provider count
+ * exists, so the two can never be mistaken for each other.
  */
-function contextUsage(session: Pick<Session, 'lastInputTokens'> | undefined, window: number): string {
+function contextUsage(session: Pick<Session, 'lastInputTokens'> | undefined, window: number, estimated = false): string {
 	if (!session?.lastInputTokens || !window) {
 		return '';
 	}
 	// Do not clamp: a provider may accept a request larger than the configured window, and hiding
 	// the overage makes a mis-sized profile look healthy.
 	const share = Math.round((session.lastInputTokens / window) * 100);
-	return `context ${share}% · ${formatTokens(session.lastInputTokens)}/${formatTokens(window)}`;
+	const mark = estimated ? '~' : '';
+	return `context ${mark}${share}% · ${mark}${formatTokens(session.lastInputTokens)}/${formatTokens(window)}`;
 }
 
 /** The cumulative cache readout; empty until a provider reports cache statistics. */
@@ -103,10 +105,14 @@ function cacheDetail(usage: SessionUsage | undefined): string {
 	return `cache ${formatTokens(usage.cachedTokens)} (${share}%)`;
 }
 
-/** The status line's segments. Pure, so `state()` never gains a suspension point. */
+/**
+ * The status line's segments. Pure, so `state()` never gains a suspension point. `estimated` marks the
+ * context numbers as a local estimate rather than a provider measurement.
+ */
 export function statusDetail(
 	session: Pick<Session, 'usage' | 'turnIndex' | 'lastInputTokens'> | undefined,
 	window: number,
+	estimated = false,
 ): string {
 	const usage = session?.usage;
 	const total = usage ? usage.inputTokens + usage.outputTokens : 0;
@@ -114,7 +120,7 @@ export function statusDetail(
 		usage && usage.requests ? `${formatTokens(total)} tokens · $${usage.cost.toFixed(3)}` : '',
 		cacheDetail(usage),
 		session ? `turn ${session.turnIndex}` : '',
-		contextUsage(session, window),
+		contextUsage(session, window, estimated),
 	]
 		.filter(Boolean)
 		.join('  ·  ');
@@ -190,6 +196,12 @@ export function chatPanel(ctx: Context): void {
 	const questions = new Map<string, PendingQuestion>();
 	/** The subagent conversation each guest has open over the chat, if any. */
 	const subagentViews = new Map<vscode.Webview, string>();
+	/**
+	 * The latest provisional prompt size per chat, painted until a provider reports a real count. A
+	 * snapshot reads the chat back from disk, where a live first request's measurement has not landed,
+	 * so the fallback keeps a resync from erasing the `~` line.
+	 */
+	const estimates = new Map<string, { estimateTokens: number; window: number }>();
 
 	/**
 	 * Which chats the recent-chats list shows: the folder this window has open, or every workspace on
@@ -323,9 +335,21 @@ export function chatPanel(ctx: Context): void {
 		const session = ctx.sessions.active();
 		const all = ctx.sessions.list().filter(inHistory);
 		const effort = session?.reasoningEffort ?? config.reasoningEffort;
+		// Until the provider measures this chat, a snapshot has no context number of its own. Reuse the
+		// last estimate the agent handed us, still marked provisional, so a mid-request refresh or a
+		// resync does not drop the line.
+		const estimate = session && !session.lastInputTokens ? estimates.get(session.id) : undefined;
+		const measured =
+			session && estimate
+				? { usage: session.usage, turnIndex: session.turnIndex, lastInputTokens: estimate.estimateTokens }
+				: session;
 		return {
 			type: 'state',
-			detail: statusDetail(session, session ? ctx.agent.windowFor(session) : 0),
+			detail: statusDetail(
+				measured,
+				estimate ? estimate.window : session ? ctx.agent.windowFor(session) : 0,
+				estimate !== undefined,
+			),
 			suspended: Boolean(session?.cursor),
 			running,
 			runningSessionId,
@@ -893,10 +917,27 @@ export function chatPanel(ctx: Context): void {
 		}
 		post({ type: 'notice', text });
 	});
+	// A request is about to be sent and the chat has never been measured: paint its local estimate,
+	// marked `~`, so the context share is visible during the first reply. Status-only, like the
+	// listener below; the first measurement replaces this line.
+	ctx.on('agent/estimate', (ref, estimated) => {
+		estimates.set(ref.sessionId, { estimateTokens: estimated.estimateTokens, window: estimated.window });
+		post({
+			type: 'status',
+			sessionId: ref.sessionId,
+			detail: statusDetail(
+				{ usage: estimated.usage, turnIndex: estimated.turnIndex, lastInputTokens: estimated.estimateTokens },
+				estimated.window,
+				true,
+			),
+		});
+	});
 	// A model step finished: update the status line alone. Deliberately not a state() snapshot —
 	// that reads the chat back from disk, where a live turn's usage has not landed, and re-runs
 	// transcript/summary reconciliation. The guest applies it only to the chat it is showing.
 	ctx.on('agent/usage', (ref, measured) => {
+		// The provider's count is authoritative from now on; the provisional line is obsolete.
+		estimates.delete(ref.sessionId);
 		post({ type: 'status', sessionId: ref.sessionId, detail: statusDetail(measured, measured.window) });
 	});
 	// The card gains its "Open session" link as soon as the child exists, while the call still runs.

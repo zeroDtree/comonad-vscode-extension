@@ -23,6 +23,10 @@
 自动缩放；`cache` 是累计命中 provider prompt cache 的输入量及其占全部输入的比例；provider
 不报告缓存统计时整段省略，而不是显示为 `0 (0%)`。
 
+provider 尚未测量该聊天时，context 一段是本地估算，带 `~` 标记，例如
+`turn 0 · context ~27% · ~69K/256K`；首个完成的往返会替换为 provider 的精确计数。provider
+始终不上报 usage 时，该估算会一直保留。
+
 ## 压缩
 
 压缩是**模型上下文操作**，不是聊天编辑。`Session.transcript` 是权威记录，摘要永远不会缩短它；

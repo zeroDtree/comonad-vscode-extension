@@ -25,6 +25,12 @@ declare module 'cordis' {
 		 * status line from this snapshot; the live chat is not on disk yet, so reading it back is stale.
 		 */
 		'agent/usage'(ref: TurnRef, measured: { usage: SessionUsage; turnIndex: number; lastInputTokens?: number; window: number }): void;
+		/**
+		 * A chat with no provider measurement yet is about to send a request: its prompt size is a
+		 * local estimate, painted with `~` until `agent/usage` reports the exact count. Never for a
+		 * child request.
+		 */
+		'agent/estimate'(ref: TurnRef, estimated: { usage: SessionUsage; turnIndex: number; estimateTokens: number; window: number }): void;
 		'agent/turn-end'(ref: TurnRef): void;
 		/** A subagent created its own conversation; the parent card links to it. */
 		'agent/subagent-start'(ref: TurnRef, info: { callId?: string; id: string; name: string; description?: string }): void;

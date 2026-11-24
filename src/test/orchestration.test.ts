@@ -104,11 +104,14 @@ suite('Orchestrator task loop', () => {
 			await kernel.ctx.plugin(orchestrateTools);
 			const starts: Array<{ callId?: string; id: string; name: string }> = [];
 			kernel.ctx.on('agent/subagent-start', (_ref, info) => starts.push(info));
+			const estimates: string[] = [];
+			kernel.ctx.on('agent/estimate', (ref) => estimates.push(ref.sessionId));
 
 			await kernel.ctx.agent.runTurn({ text: 'make made.txt', surface: 'test' });
 
 			assert.strictEqual(readFileSync(join(workspace, 'made.txt'), 'utf8'), 'made\n');
 			const parent = kernel.ctx.sessions.active()!;
+			assert.deepStrictEqual(estimates, [parent.id], 'a child request never paints the parent status line');
 			const graph = parent.taskGraph!;
 			assert.ok(graph, 'the task graph is persisted');
 			const node = graph.nodes[0]!;

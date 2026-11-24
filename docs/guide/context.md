@@ -28,6 +28,10 @@ input; a provider that reports no cache statistics is left off the line rather t
 exceeded the configured window. A provider may accept it anyway; the fix is to correct the model
 profile's `contextWindow`, not to read 100% as a hard ceiling.
 
+Before the provider has measured a chat, the context segment is a local estimate marked with `~`,
+e.g. `turn 0 · context ~27% · ~69K/256K`; the first completed round trip replaces it with the
+provider's exact count. A provider that never reports usage leaves the estimate in place.
+
 ## Compaction
 
 Compaction is a **model-context operation**, not a chat edit. `Session.transcript` is the canonical

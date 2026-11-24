@@ -1421,6 +1421,18 @@ export class Agent extends Service {
 		const off = refusedModel === state.policy.model || state.imagesOff === state.policy.model;
 		let messages = off ? stripImageAttachments(state.messages) : state.messages;
 		let completion: Completion;
+		// A new chat has no provider count yet, so the status line would show no context segment during
+		// its first reply. Hand the surface the same local estimate that calibrates the provider's count
+		// below, marked provisional. Emitted once per request, outside `attempt`, so an image, transport
+		// or overflow retry cannot make the line jump; a child's request never paints the parent's line.
+		if (session && !session.parentId && !session.lastInputTokens && !signal.aborted) {
+			this.ctx.emit('agent/estimate', state.ref, {
+				usage: { ...session.usage },
+				turnIndex: session.turnIndex,
+				estimateTokens: estimateMessages(messages) + this.toolTokens(tools),
+				window: this.windowFor(session),
+			});
+		}
 		try {
 			completion = await attempt(messages);
 		} catch (error) {

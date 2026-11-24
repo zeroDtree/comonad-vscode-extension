@@ -567,8 +567,18 @@ suite('Cancellation', () => {
 		assert.match(listener, /type: 'status'/);
 		assert.match(listener, /sessionId: ref\.sessionId/);
 		assert.match(listener, /statusDetail\(measured, measured\.window\)/);
+		assert.match(listener, /estimates\.delete\(ref\.sessionId\)/, 'a measurement retires the estimate');
 		assert.ok(!listener.includes('refreshState'), 'the update is not a full refresh');
 		assert.ok(!listener.includes('sessions.active'), 'the update does not read the chat back from disk');
+		const estimateListener = panel.slice(panel.indexOf("ctx.on('agent/estimate'"), panel.indexOf("ctx.on('agent/usage'"));
+		assert.match(estimateListener, /type: 'status'/);
+		assert.match(estimateListener, /sessionId: ref\.sessionId/);
+		assert.match(estimateListener, /estimated\.estimateTokens/);
+		assert.match(estimateListener, /statusDetail\([\s\S]*?true,/);
+		assert.ok(!estimateListener.includes('refreshState'), 'the estimate is a status update, not a snapshot');
+		assert.ok(!estimateListener.includes('sessions.active'), 'the estimate does not read the chat back from disk');
+		const snapshot = panel.slice(panel.indexOf('const state = '), panel.indexOf('suspended: Boolean'));
+		assert.match(snapshot, /estimates\.get\(session\.id\)/, 'a snapshot falls back to the last estimate');
 	});
 
 	test('the model list is fetched off the state path and posted on its own', () => {
