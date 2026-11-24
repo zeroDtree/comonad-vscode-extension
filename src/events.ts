@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import type { ApprovalDecision, ApprovalRequest, AttachmentPart, ImagePart, QuestionRequest, ToolCall, TurnRef } from './lib/types';
+import type { ApprovalDecision, ApprovalRequest, AttachmentPart, ImagePart, NoticeDetail, QuestionRequest, ToolCall, TurnRef } from './lib/types';
 import type { TaskBoard } from './lib/task-graph';
 import type { SessionUsage } from './services/sessions';
 import type { PostToolDecision, PreToolDecision, ToolExecution, ToolOutcome } from './services/tools';
@@ -19,7 +19,7 @@ declare module 'cordis' {
 		'agent/tool-result'(ref: TurnRef, call: ToolCall, output: string, images?: ImagePart[]): void;
 		/** The turn's resolved references and prompt attachments, before the first model step. */
 		'agent/attachments'(ref: TurnRef, attachments: AttachmentPart[]): void;
-		'agent/notice'(ref: TurnRef, text: string): void;
+		'agent/notice'(ref: TurnRef, text: string, detail?: NoticeDetail): void;
 		/**
 		 * A model round trip completed and its usage was charged to the chat. A surface repaints its
 		 * status line from this snapshot; the live chat is not on disk yet, so reading it back is stale.

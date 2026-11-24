@@ -112,6 +112,33 @@ export interface ModelContext {
 	hash?: string;
 }
 
+/**
+ * One automatic fold, remembered for the chat surface. It is not a transcript message: `anchor` is
+ * the canonical transcript length when the fold finished, so grouping puts the marker back inside
+ * the turn where it happened — live and after a reload alike.
+ */
+export interface TurnNote {
+	/** Canonical transcript length when the fold finished: the marker's place in the chat. */
+	anchor: number;
+	at: number;
+	version: number;
+	/** Messages this fold newly added to the summary. */
+	folded: number;
+	/** Messages the summary covers in total at this point. */
+	covers: number;
+	before: number;
+	after: number;
+	window: number;
+	/** The summary produced by this fold, for the card body. */
+	summary: string;
+}
+
+/** Structured detail beside an `agent/notice` line; a surface may draw a card instead. */
+export interface NoticeDetail {
+	kind: 'compaction';
+	note: TurnNote;
+}
+
 /** A resolved reference, in the shape a tool needs without importing the reference service. */
 export interface ReferenceResolution {
 	attachments: AttachmentPart[];

@@ -11,7 +11,7 @@ import { asSandboxMode, DEFAULT_SANDBOX_MODE, isInside } from '../lib/sandbox';
 import { modelContextDigest, type ContextForm } from '../lib/prompt';
 import { sanitizeTaskGraph, type TaskGraph } from '../lib/task-graph';
 import { turnsOf } from '../lib/turns';
-import type { AttachmentPart, Message, ModelContext, ReasoningEffort, SessionPolicy, SwipeInfo } from '../lib/types';
+import type { AttachmentPart, Message, ModelContext, ReasoningEffort, SessionPolicy, SwipeInfo, TurnNote } from '../lib/types';
 
 /** Session persistence and the active-session pointer. One JSON document per chat. */
 
@@ -50,6 +50,16 @@ export interface Mark {
  */
 export function markForRestore(marks: readonly Mark[], promptAt: number): Mark | undefined {
 	return marks.find((mark) => mark.length >= promptAt);
+}
+
+/** Fold markers are presentation history; a long chat's file stays small. */
+export const MAX_TURN_NOTES = 100;
+export const MAX_NOTE_SUMMARY = 20_000;
+
+/** Appends one automatic fold marker, keeping the newest; the caller saves the session. */
+export function addTurnNote(session: Session, note: TurnNote): void {
+	const bounded = { ...note, summary: note.summary.slice(0, MAX_NOTE_SUMMARY) };
+	session.notes = [...(session.notes ?? []), bounded].slice(-MAX_TURN_NOTES);
 }
 
 /** Whether the message at `index` is a prompt an edit can replace. */
@@ -106,6 +116,11 @@ export interface Session {
 	turnIndex: number;
 	cursor: Cursor | null;
 	marks: Mark[];
+	/**
+	 * Automatic fold markers, anchored by canonical transcript length. Presentation history, not
+	 * model context: compaction never edits the transcript. Absent in chats that never folded.
+	 */
+	notes?: TurnNote[];
 	/**
 	 * Workspace-relative forward-slash paths this chat created: file-tool writes and conservatively
 	 * parsed shell creations. Bound to `createdRoot`; a different workspace discards them.
@@ -531,6 +546,7 @@ export class SessionStore {
 			// media type is derived from the id rather than trusted.
 			transcript,
 			modelContext,
+			notes: sanitizeNotes(session.notes, transcript.length),
 			turnIndex: session.turnIndex ?? 0,
 			cursor: sanitizeCursor(session.cursor ?? null),
 			// Marks from the shadow-snapshot era have no journal to restore to, so they are dropped.
@@ -589,6 +605,61 @@ function sanitizeMessages(messages: unknown): Message[] {
 		const { greeting: _greeting, ...clean } = message;
 		return { ...clean, attachments };
 	});
+}
+
+/** Stored fold markers are untrusted like every other field; anchors must be real positions. */
+function sanitizeNotes(value: unknown, transcriptLength: number): TurnNote[] | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const count = (input: unknown): input is number => typeof input === 'number' && Number.isFinite(input) && input >= 0;
+	const notes: TurnNote[] = [];
+	for (const entry of value) {
+		if (!entry || typeof entry !== 'object') {
+			continue;
+		}
+		const record = entry as Record<string, unknown>;
+		const { anchor, at, version, folded, covers, before, after, window, summary } = record;
+		if (typeof anchor !== 'number' || !Number.isInteger(anchor) || anchor < 1 || anchor > transcriptLength) {
+			continue;
+		}
+		if (typeof at !== 'number' || !Number.isFinite(at)) {
+			continue;
+		}
+		if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) {
+			continue;
+		}
+		if (typeof folded !== 'number' || !Number.isInteger(folded) || folded < 0) {
+			continue;
+		}
+		if (typeof covers !== 'number' || !Number.isInteger(covers) || covers < 0 || covers > anchor) {
+			continue;
+		}
+		if (!count(before) || !count(after) || !count(window)) {
+			continue;
+		}
+		if (typeof summary !== 'string' || !summary.trim()) {
+			continue;
+		}
+		notes.push({
+			anchor,
+			at,
+			version,
+			folded,
+			covers,
+			before,
+			after,
+			window,
+			summary: summary.trim().slice(0, MAX_NOTE_SUMMARY),
+		});
+	}
+	return notes.length ? notes.slice(-MAX_TURN_NOTES) : undefined;
+}
+
+/** Drops markers whose position a transcript cut removed; a marker at the new end stays. */
+function trimNotes(session: Session, length: number): void {
+	const kept = (session.notes ?? []).filter((note) => note.anchor <= length);
+	session.notes = kept.length ? kept : undefined;
 }
 
 /** A stored model context is untrusted too: coverage must be a real turn boundary. */
@@ -658,6 +729,10 @@ function sanitizeCursor(cursor: Cursor | null): Cursor | null {
 	// turn would crash on `writes.add`. Revive it from its array.
 	if (state.writes !== undefined) {
 		next.writes = new Set(Array.isArray(state.writes) ? state.writes.filter((path): path is string => typeof path === 'string') : []);
+	}
+	// A suspended swipe/regenerate keeps the markers it must restore with the transcript it replaced.
+	if (Array.isArray(state.restoreNotes)) {
+		next.restoreNotes = sanitizeNotes(state.restoreNotes, Array.isArray(state.restore) ? state.restore.length : 0);
 	}
 	// A budget is a class with methods; the cursor stores its plain JSON, so revive it.
 	if (state.budget !== undefined) {
@@ -932,6 +1007,7 @@ export class Sessions extends Service {
 		const session = this.require(id);
 		session.transcript = session.transcript.slice(0, length);
 		session.marks = session.marks.filter((mark) => mark.length <= session.transcript.length);
+		trimNotes(session, session.transcript.length);
 		session.cursor = null;
 		this.invalidateModelContext(session, session.transcript.length);
 		this.save(session);
@@ -952,6 +1028,7 @@ export class Sessions extends Service {
 		}
 		session.transcript = session.transcript.slice(0, index);
 		session.marks = session.marks.filter((mark) => mark.length < index);
+		trimNotes(session, index);
 		this.invalidateModelContext(session, session.transcript.length);
 		this.save(session);
 		this.changed(session.id);
@@ -977,22 +1054,23 @@ export class Sessions extends Service {
 	 * an image-only message is still something to replay. The transcript it replaced travels with the
 	 * prompt, so a stopped generation can put the turn back instead of losing it.
 	 */
-	replayLast(id: string): { text: string; attachments?: AttachmentPart[]; replaced: Message[] } {
+	replayLast(id: string): { text: string; attachments?: AttachmentPart[]; replaced: Message[]; notes: TurnNote[] } {
 		const session = this.require(id);
 		if (session.cursor) {
-			return { text: '', replaced: [] };
+			return { text: '', replaced: [], notes: [] };
 		}
 		let at = session.transcript.length - 1;
 		while (at >= 0 && session.transcript[at]!.role !== 'user') {
 			at -= 1;
 		}
 		if (at < 0) {
-			return { text: '', replaced: [] };
+			return { text: '', replaced: [], notes: [] };
 		}
 		const message = session.transcript[at]!;
-		const replay = { text: message.content, attachments: message.attachments, replaced: [...session.transcript] };
+		const replay = { text: message.content, attachments: message.attachments, replaced: [...session.transcript], notes: [...(session.notes ?? [])] };
 		session.transcript = session.transcript.slice(0, at);
 		session.marks = session.marks.filter((mark) => mark.length <= session.transcript.length);
+		trimNotes(session, session.transcript.length);
 		this.invalidateModelContext(session, session.transcript.length);
 		this.save(session);
 		return replay;

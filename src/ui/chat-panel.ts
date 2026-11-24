@@ -460,6 +460,22 @@ export function chatPanel(ctx: Context): void {
 				: undefined,
 		// A recorded plan carries the file it wrote, so a replayed card keeps its Build/Preview buttons.
 		plan: step.kind === 'tool' && isPlanWriterTool(step.name) ? planInfoOf(session, step.result) : undefined,
+		// A fold marker carries the card's numbers and the summary it produced. The transcript itself
+		// is untouched; the marker is presentation history stored beside it.
+		note:
+			step.kind === 'note' && step.note
+				? {
+						anchor: step.note.anchor,
+						at: step.note.at,
+						version: step.note.version,
+						folded: step.note.folded,
+						covers: step.note.covers,
+						before: step.note.before,
+						after: step.note.after,
+						window: step.note.window,
+						summary: clip(step.note.summary, 20_000),
+					}
+				: undefined,
 		status: step.status,
 		ms: step.ms,
 		at: step.at,
@@ -517,7 +533,7 @@ export function chatPanel(ctx: Context): void {
 						at: pendingPrompt.at,
 					} as Message)
 				: undefined;
-		const all = turnsOf(pending ? [...session.transcript, pending] : session.transcript);
+		const all = turnsOf(pending ? [...session.transcript, pending] : session.transcript, 0, session.notes ?? []);
 		const found = before === undefined ? all.length : all.findIndex((turn) => turn.index >= before);
 		const end = found < 0 ? all.length : found;
 		const page = Math.max(1, Math.min(limit, 200));
@@ -559,7 +575,7 @@ export function chatPanel(ctx: Context): void {
 	const settledTurn = (
 		session: Session | undefined = ctx.sessions.active(),
 	): { steps: unknown[]; at?: number; startedAt?: number; endedAt?: number; files?: boolean } => {
-		const turns = turnsOf(session?.transcript ?? []);
+		const turns = turnsOf(session?.transcript ?? [], 0, session?.notes ?? []);
 		const last = turns[turns.length - 1];
 		return last
 			? { steps: last.steps.map((step) => stepPayload(step, session)), at: last.at, startedAt: last.startedAt, endedAt: last.endedAt, files: restorePossible(session, last) }
@@ -865,10 +881,17 @@ export function chatPanel(ctx: Context): void {
 			post({ type: 'attachments', attachments: ctx.attachments.publicAttachments(attachments) });
 		}
 	});
-	ctx.on('agent/notice', (ref, text) => {
-		if (ref.surface === SURFACE) {
-			post({ type: 'notice', text });
+	ctx.on('agent/notice', (ref, text, detail) => {
+		if (ref.surface !== SURFACE) {
+			return;
 		}
+		// A fold is not a loose line: the card belongs to the turn that folded, at the point it
+		// happened, and the guest applies it only to the chat it is showing.
+		if (detail?.kind === 'compaction') {
+			post({ type: 'compaction', sessionId: ref.sessionId, note: detail.note });
+			return;
+		}
+		post({ type: 'notice', text });
 	});
 	// A model step finished: update the status line alone. Deliberately not a state() snapshot —
 	// that reads the chat back from disk, where a live turn's usage has not landed, and re-runs

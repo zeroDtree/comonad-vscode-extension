@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { imageParts } from './attachments';
-import type { AttachmentPart, ImagePart, Message } from './types';
+import type { AttachmentPart, ImagePart, Message, TurnNote } from './types';
 
 /**
  * The transcript is a wire format (one message per model step); the UI's unit is a **turn**: one
@@ -8,12 +8,16 @@ import type { AttachmentPart, ImagePart, Message } from './types';
  * once, purely — is what keeps the live stream and a replayed session identical: both render the
  * same turns, so a tool result is part of the step that asked for it and can never be re-attached
  * to the wrong one.
+ *
+ * A persisted fold marker (`TurnNote`) is interleaved here as a `note` step. It is not a wire
+ * message; `anchor` is a transcript index, so the marker sits after the steps the reader had seen
+ * when the fold finished, and a replayed turn places it exactly where the live stream did.
  */
 
 export type StepStatus = 'running' | 'ok' | 'error';
 
 export interface Step {
-	kind: 'thought' | 'text' | 'tool';
+	kind: 'thought' | 'text' | 'tool' | 'note';
 	text?: string;
 	id?: string;
 	name?: string;
@@ -25,6 +29,8 @@ export interface Step {
 	/** How long this step took, when the transcript can tell: the model round trip, or the call. */
 	ms?: number;
 	at?: number;
+	/** The fold this step marks, for `kind: 'note'`. */
+	note?: TurnNote;
 }
 
 export interface Turn {
@@ -67,16 +73,41 @@ function duration(from: number | undefined, to: number | undefined): number | un
 }
 
 /** Turns of a transcript, oldest first. `first` numbers the first one (turns already dropped). */
-export function turnsOf(transcript: Message[], first = 0): Turn[] {
+export function turnsOf(transcript: Message[], first = 0, notes: readonly TurnNote[] = []): Turn[] {
 	const results = new Map<string, { content: string; at?: number; attachments?: AttachmentPart[] }>();
 	for (const message of transcript) {
 		if (message.role === 'tool' && message.toolCallId) {
 			results.set(message.toolCallId, { content: message.content, at: message.at, attachments: message.attachments });
 		}
 	}
+	// Fold markers are not messages: index them by the transcript length they followed, in fold
+	// order, so the grouping below emits each one where the reader saw it happen.
+	const anchored = new Map<number, TurnNote[]>();
+	for (const note of [...notes].sort((left, right) => left.at - right.at)) {
+		if (!Number.isInteger(note.anchor) || note.anchor < 1 || note.anchor > transcript.length) {
+			continue;
+		}
+		const list = anchored.get(note.anchor);
+		if (list) {
+			list.push(note);
+		} else {
+			anchored.set(note.anchor, [note]);
+		}
+	}
 	const turns: Turn[] = [];
 	let current: Turn | undefined;
+	const place = (index: number): void => {
+		if (!current) {
+			return;
+		}
+		for (const note of anchored.get(index) ?? []) {
+			current.steps.push({ kind: 'note', id: `compaction:${note.version}:${note.anchor}`, note, at: note.at });
+		}
+	};
 	transcript.forEach((message, index) => {
+		// Before the role check: a marker anchored where the next prompt begins belongs to the turn
+		// that was cut short, not to the turn the new prompt opens.
+		place(index);
 		if (message.role === 'user') {
 			if (current) {
 				current.at = index;
@@ -135,5 +166,7 @@ export function turnsOf(transcript: Message[], first = 0): Turn[] {
 	if (current) {
 		current.at = transcript.length;
 	}
+	// A fold that finished after the last committed message (a stopped turn) closes the last turn.
+	place(transcript.length);
 	return turns;
 }

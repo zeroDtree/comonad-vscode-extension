@@ -1437,6 +1437,59 @@ details.thinking summary::before {
 	}
 }
 
+/* A fold: a quiet card in the step flow. The blue accent separates it from tool rows without
+   competing with the green "plan ready" card. */
+.tool-card.compaction-card {
+	--compaction-accent: var(--vscode-charts-blue, #3794ff);
+	border-left: 3px solid var(--compaction-accent);
+	background:
+		radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--compaction-accent) 8%, transparent), transparent 58%),
+		var(--vscode-editorWidget-background, var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.06)));
+}
+
+.compaction-card .tool-glyph {
+	color: var(--compaction-accent);
+}
+
+.compaction-card .tool-title {
+	font-weight: 600;
+}
+
+.compaction-body {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.compaction-stats {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 14px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.compaction-stat b {
+	color: var(--vscode-foreground);
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
+.compaction-summary {
+	max-height: 280px;
+	overflow-y: auto;
+	font-size: 12px;
+	line-height: 1.5;
+	white-space: normal;
+}
+
+.compaction-keep {
+	margin: 0;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.8;
+}
+
 /* ------------------------------------------------------------------ turns */
 
 /* A turn is one prompt plus the ordered steps the agent took for it, closed by a dated footer. */

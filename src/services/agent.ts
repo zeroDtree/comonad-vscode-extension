@@ -82,12 +82,14 @@ import type {
 	ImageAttachment,
 	Message,
 	ModelContext,
+	NoticeDetail,
 	SessionPolicy,
 	TodoItem,
 	ToolCall,
 	ToolContext,
 	ToolImage,
 	ToolSpec,
+	TurnNote,
 } from '../lib/types';
 import type { GenerationTrigger } from '../lib/generations';
 import type { ToolOutcome } from './tools';
@@ -111,6 +113,7 @@ import {
 	type BudgetReport,
 } from '../lib/budget';
 import {
+	addTurnNote,
 	canRewrite,
 	createdDirsInWorkspace,
 	createdInWorkspace,
@@ -265,6 +268,8 @@ interface RunState {
 	prior: Message[];
 	/** The exchange a swipe or a regenerate replaced, put back if the turn is stopped. */
 	restore?: Message[];
+	/** Fold markers as they stood before a swipe/regenerate cut, restored with `restore`. */
+	restoreNotes?: TurnNote[];
 	/** The reply a continue extends: its index in the transcript as it stood before this turn. */
 	continueInto?: number;
 	/** The variants a swipe or a regenerate replaces or grows. */
@@ -458,9 +463,10 @@ export class Agent extends Service {
 		let swipes: SwipeCarry | undefined;
 		let attachments = input.attachments;
 		let restore: Message[] | undefined;
+		let restoreNotes: TurnNote[] | undefined;
 		if (replay) {
 			swipes = target ? this.ctx.sessions.swipeCarry(target) : undefined;
-			const replayed = target ? this.ctx.sessions.replayLast(target) : { text: '', replaced: [] };
+			const replayed = target ? this.ctx.sessions.replayLast(target) : { text: '', replaced: [], notes: [] };
 			if (!replayed.text && !replayed.attachments?.length) {
 				return { sessionId: target, text: 'There is nothing to generate again yet.' };
 			}
@@ -468,6 +474,7 @@ export class Agent extends Service {
 			// A replayed prompt brings its attachments back; an explicit new set wins.
 			attachments = input.attachments?.length ? input.attachments : replayed.attachments;
 			restore = replayed.replaced;
+			restoreNotes = replayed.notes;
 		}
 		const session = input.sessionId ? (this.ctx.sessions.get(input.sessionId) ?? this.ctx.sessions.ensureActive(this.policyFor())) : this.ctx.sessions.ensureActive(this.policyFor());
 		// A replay cuts the last exchange before the turn begins. If the turn is refused, put that
@@ -477,6 +484,7 @@ export class Agent extends Service {
 				return;
 			}
 			session.transcript = restore;
+			session.notes = restoreNotes?.length ? restoreNotes : undefined;
 			this.ctx.sessions.invalidateModelContext(session, restore.length);
 			this.ctx.sessions.save(session);
 			this.ctx.sessions.changed(session.id);
@@ -752,7 +760,12 @@ export class Agent extends Service {
 						);
 						if (context) {
 							history = buildModelHistory(seeded, context, form);
-							this.announceCompaction(ref, before, pressure(), context.covers - previousCovers, budget.window);
+							this.announceCompaction(session, ref, trigger, context, {
+								before,
+								after: pressure(),
+								folded: context.covers - previousCovers,
+								window: budget.window,
+							});
 						} else {
 							compaction.blocked = true;
 						}
@@ -847,6 +860,7 @@ export class Agent extends Service {
 				trigger,
 				prior,
 				restore,
+				restoreNotes,
 				continueInto,
 				swipes,
 				foldable: true,
@@ -870,6 +884,9 @@ export class Agent extends Service {
 				}
 				if (keep) {
 					session.transcript = keep;
+					if (restore && restoreNotes) {
+						session.notes = restoreNotes.length ? restoreNotes : undefined;
+					}
 					this.ctx.sessions.invalidateModelContext(session, keep.length);
 					this.ctx.sessions.save(session);
 					this.ctx.sessions.changed(session.id);
@@ -887,6 +904,9 @@ export class Agent extends Service {
 			}
 			if (keep) {
 				session.transcript = keep;
+				if (restore && restoreNotes) {
+					session.notes = restoreNotes.length ? restoreNotes : undefined;
+				}
 				this.ctx.sessions.invalidateModelContext(session, keep.length);
 				this.ctx.sessions.save(session);
 				this.ctx.sessions.changed(session.id);
@@ -1088,13 +1108,37 @@ export class Agent extends Service {
 		return Math.max(0, budget.input - summaryTokens - SUMMARY_RESERVE);
 	}
 
-	/** Announces one successful fold: what it stood in for and what the request became. */
-	private announceCompaction(ref: TurnRef, before: number, after: number, messages: number, window: number): void {
-		const share = window > 0 ? Math.round((after / window) * 100) : 0;
-		this.notice(
-			ref,
-			`Summarized ${messages} earlier message${messages === 1 ? '' : 's'}: about ${formatTokens(after)} tokens now instead of ${formatTokens(before)} (${share}% of the ${formatTokens(window)} window).`,
-		);
+	/** Announces one successful fold and records the marker the chat draws in the turn it happened. */
+	private announceCompaction(
+		session: Session,
+		ref: TurnRef,
+		trigger: GenerationTrigger,
+		context: ModelContext,
+		fold: { before: number; after: number; folded: number; window: number },
+	): void {
+		const share = fold.window > 0 ? Math.round((fold.after / fold.window) * 100) : 0;
+		const text = `Summarized ${fold.folded} earlier message${fold.folded === 1 ? '' : 's'}: about ${formatTokens(fold.after)} tokens now instead of ${formatTokens(fold.before)} (${share}% of the ${formatTokens(fold.window)} window).`;
+		// A silent generation has no turn in the chat to mark; the text notice stands in.
+		if (SILENT_TRIGGERS.has(trigger)) {
+			this.notice(ref, text);
+			return;
+		}
+		const note: TurnNote = {
+			anchor: session.transcript.length,
+			at: context.at,
+			version: context.version,
+			folded: fold.folded,
+			covers: context.covers,
+			before: fold.before,
+			after: fold.after,
+			window: fold.window,
+			summary: context.summary,
+		};
+		addTurnNote(session, note);
+		// recordModelContext already fired sessions/changed for the summary; this save only adds the
+		// marker, so it deliberately emits no second event.
+		this.ctx.sessions.save(session);
+		this.notice(ref, text, { kind: 'compaction', note });
 	}
 
 	/**
@@ -1272,13 +1316,12 @@ export class Agent extends Service {
 							...buildModelHistory(state.transcript, context, state.contextForm ?? this.ctx.settings.get().contextForm),
 							...(state.trailer ?? []),
 						];
-						this.announceCompaction(
-							state.ref,
+						this.announceCompaction(session, state.ref, state.trigger, context, {
 							before,
-							this.pressure(session, model, messages, toolCost),
-							context.covers - previousCovers,
-							budget.window,
-						);
+							after: this.pressure(session, model, messages, toolCost),
+							folded: context.covers - previousCovers,
+							window: budget.window,
+						});
 					} else {
 						guard.blocked = true;
 					}
@@ -1946,6 +1989,7 @@ export class Agent extends Service {
 			// chat at all, so it leaves the record as it stood before the turn.
 			if (state.restore) {
 				session.transcript = state.restore;
+				session.notes = state.restoreNotes?.length ? state.restoreNotes : undefined;
 			} else if (state.trigger === 'quiet' || state.trigger === 'impersonate') {
 				session.transcript = state.prior;
 			} else {
@@ -3473,8 +3517,8 @@ export class Agent extends Service {
 		return this.lastBlocks.get(sessionId) ?? [];
 	}
 
-	private notice(ref: TurnRef, text: string): void {
-		this.ctx.emit('agent/notice', ref, text);
+	private notice(ref: TurnRef, text: string, detail?: NoticeDetail): void {
+		this.ctx.emit('agent/notice', ref, text, detail);
 	}
 }
 

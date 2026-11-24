@@ -76,7 +76,7 @@ import {
 import { parseFrontmatter } from '../lib/frontmatter';
 import { applyHunk, diffLines, editForHunk, hunkKey, revertHunk } from '../lib/line-diff';
 import { listEndpointModels, openAiChat } from '../lib/openai';
-import type { ApprovalDecision, ApprovalRequest, ImageAttachment, ImagePart, Message, ModelContext, QuestionRequest, SessionPolicy, ToolCall, ToolSpec, WorkMode } from '../lib/types';
+import type { ApprovalDecision, ApprovalRequest, ImageAttachment, ImagePart, Message, ModelContext, NoticeDetail, QuestionRequest, SessionPolicy, ToolCall, ToolSpec, TurnNote, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
 import { findSymbolRange, formatReference, looksLikePath, normalizeQuery, parseReferences, pathEntry, rankEntries, rankPaths } from '../lib/references';
@@ -1572,6 +1572,82 @@ suite('Comonad domain', () => {
 		assert.strictEqual(createdPath('./a'), 'a');
 		for (const bad of ['', '/a', '../a', 'a/../b', 'a//b', 'a\0b', 42 as unknown]) {
 			assert.strictEqual(createdPath(bad), undefined, String(bad));
+		}
+	});
+
+	test('fold notes persist, sanitize and follow transcript cuts', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'comonad-notes-'));
+		const kernel = await createTestKernel();
+		try {
+			const note = (anchor: number, at: number, version = 1): TurnNote => ({
+				anchor,
+				at,
+				version,
+				folded: 2,
+				covers: 1,
+				before: 900,
+				after: 200,
+				window: 1_000,
+				summary: `S${anchor}`,
+			});
+			const store = new SessionStore(dir);
+			const session = store.build(policy());
+			session.transcript = [
+				{ role: 'user', content: 'one' },
+				{ role: 'assistant', content: 'a1' },
+				{ role: 'user', content: 'two' },
+				{ role: 'assistant', content: 'a2' },
+			];
+			session.notes = [
+				note(1, 1),
+				note(4, 2),
+				note(0, 3),
+				note(5, 4),
+				{ ...note(2, 5), covers: 3 },
+				{ ...note(2, 6), summary: '   ' },
+				{ ...note(2, 7), after: Number.NaN },
+				{ anchor: '2' } as unknown as TurnNote,
+			];
+			store.save(session);
+			const loaded = store.get(session.id)!;
+			assert.deepStrictEqual(loaded.notes?.map((entry) => entry.anchor), [1, 4], 'only real positions survive');
+			assert.strictEqual(loaded.notes?.[1]?.summary, 'S4');
+			assert.deepStrictEqual(store.copy(loaded).notes?.map((entry) => entry.anchor), [1, 4], 'a fork keeps the markers of the transcript it copies');
+			const many = Array.from({ length: 130 }, (_, index) => note(1, index));
+			loaded.notes = many;
+			store.save(loaded);
+			assert.strictEqual(store.get(loaded.id)?.notes?.length, 100, 'the newest markers are kept');
+
+			const build = () => {
+				const created = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), `notes-${Math.random().toString(36).slice(2)}`);
+				created.transcript = [
+					{ role: 'user', content: 'one' },
+					{ role: 'assistant', content: 'a1' },
+					{ role: 'user', content: 'two' },
+					{ role: 'assistant', content: 'a2' },
+					{ role: 'user', content: 'three' },
+					{ role: 'assistant', content: 'a3' },
+				];
+				created.notes = [note(2, 2), note(5, 5)];
+				kernel.ctx.sessions.save(created);
+				return created.id;
+			};
+
+			const cut = build();
+			kernel.ctx.sessions.truncate(cut, 3);
+			assert.deepStrictEqual(kernel.ctx.sessions.require(cut).notes?.map((entry) => entry.anchor), [2]);
+
+			const rewritten = build();
+			assert.strictEqual(kernel.ctx.sessions.rewriteAt(kernel.ctx.sessions.require(rewritten), 4), undefined);
+			assert.deepStrictEqual(kernel.ctx.sessions.require(rewritten).notes?.map((entry) => entry.anchor), [2]);
+
+			const replayed = build();
+			const replay = kernel.ctx.sessions.replayLast(replayed);
+			assert.deepStrictEqual(replay.notes.map((entry) => entry.anchor), [2, 5], 'the snapshot can put every marker back');
+			assert.deepStrictEqual(kernel.ctx.sessions.require(replayed).notes?.map((entry) => entry.anchor), [2], 'the stored record follows the cut');
+		} finally {
+			await kernel.dispose();
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
@@ -4147,6 +4223,48 @@ suite('Cordis kernel', () => {
 		assert.deepStrictEqual(turnsOf([]), []);
 	});
 
+	test('fold markers interleave where the fold happened', () => {
+		const transcript: Message[] = [
+			{ role: 'user', content: 'one' },
+			{ role: 'assistant', content: 'a1' },
+			{ role: 'user', content: 'two' },
+			{ role: 'assistant', content: 'a2' },
+			{ role: 'assistant', content: 'a3' },
+		];
+		const note = (anchor: number, at: number, version = 1): TurnNote => ({
+			anchor,
+			at,
+			version,
+			folded: 2,
+			covers: 1,
+			before: 900,
+			after: 200,
+			window: 1_000,
+			summary: `summary ${anchor}`,
+		});
+		// A turn-start fold: directly under the prompt, before the first step.
+		const opening = turnsOf(transcript, 0, [note(1, 10)]);
+		assert.deepStrictEqual(opening[0]!.steps.map((step) => step.kind), ['note', 'text']);
+		// A marker anchored where the next prompt begins still belongs to the turn it finished in.
+		const boundary = turnsOf(transcript, 0, [note(2, 20)]);
+		assert.deepStrictEqual(boundary[0]!.steps.map((step) => step.kind), ['text', 'note']);
+		assert.deepStrictEqual(boundary[1]!.steps.map((step) => step.kind), ['text', 'text']);
+		// A mid-turn fold sits between the messages it followed and the ones after it.
+		const middle = turnsOf(transcript, 0, [note(4, 30)]);
+		assert.deepStrictEqual(middle[1]!.steps.map((step) => step.kind), ['text', 'note', 'text']);
+		// A fold at the end of a stopped turn closes the last turn; same-anchor markers keep fold order.
+		const end = turnsOf(transcript, 0, [note(5, 60, 2), note(5, 40, 1), note(0, 1), note(6, 1)]);
+		assert.deepStrictEqual(end[1]!.steps.map((step) => step.id), [undefined, undefined, 'compaction:1:5', 'compaction:2:5']);
+		assert.strictEqual(end[1]!.steps[2]!.note?.summary, 'summary 5');
+		assert.strictEqual(end[1]!.steps[2]!.at, 40);
+		// A pending prompt published before it is committed keeps the marker with the previous turn.
+		const pending = turnsOf([...transcript, { role: 'user', content: 'next' }], 0, [note(5, 70)]);
+		assert.strictEqual(pending[pending.length - 2]!.steps.filter((step) => step.kind === 'note').length, 1);
+		assert.strictEqual(pending[pending.length - 1]!.steps.length, 0);
+		// The default keeps every existing caller byte-identical.
+		assert.deepStrictEqual(turnsOf(transcript).map((turn) => turn.steps.map((step) => step.kind)), [['text'], ['text', 'text']]);
+	});
+
 	test('a step reports how long it took, when the transcript can tell', () => {
 		const transcript: Message[] = [
 			{ role: 'user', content: 'go', at: 500 },
@@ -4753,6 +4871,8 @@ suite('Cordis kernel', () => {
 		try {
 			let summaryCalls = 0;
 			let seen: Message[] = [];
+			const notices: { text: string; detail?: NoticeDetail }[] = [];
+			kernel.ctx.on('agent/notice', (_ref, text, detail) => notices.push({ text, detail }));
 			kernel.ctx.llm.use({
 				name: 'test',
 				async chat(request) {
@@ -4784,6 +4904,18 @@ suite('Cordis kernel', () => {
 			const folded = kernel.ctx.sessions.require('proactive');
 			assert.ok(folded.modelContext && folded.modelContext.covers > 0);
 			assert.ok(estimateMessages(seen) < 20_000, `the compacted request stays small (${estimateMessages(seen)})`);
+			const announced = notices.find((entry) => entry.detail?.kind === 'compaction');
+			assert.ok(announced, 'the fold announces a marker');
+			assert.ok(announced!.text.startsWith('Summarized '), 'the text notice still travels for other surfaces');
+			const note = (announced!.detail as { kind: 'compaction'; note: TurnNote }).note;
+			assert.strictEqual(note.anchor, 11, 'the marker follows the committed prompt');
+			assert.strictEqual(note.version, folded.modelContext!.version);
+			assert.strictEqual(note.covers, folded.modelContext!.covers);
+			assert.strictEqual(note.summary, 'PROACTIVE SUMMARY');
+			assert.ok(note.folded > 0);
+			assert.deepStrictEqual(folded.notes?.map((entry) => entry.anchor), [11]);
+			const replay = turnsOf(folded.transcript, 0, folded.notes ?? []);
+			assert.deepStrictEqual(replay[replay.length - 1]!.steps.map((step) => step.kind), ['note', 'text'], 'the card opens the newest turn on replay');
 		} finally {
 			await kernel.dispose();
 		}
@@ -4792,8 +4924,8 @@ suite('Cordis kernel', () => {
 	test('a growing turn is summarized before its tool output is elided', async () => {
 		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000 } });
 		try {
-			const notices: string[] = [];
-			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
+			const notices: { text: string; detail?: NoticeDetail }[] = [];
+			kernel.ctx.on('agent/notice', (_ref, text, detail) => notices.push({ text, detail }));
 			kernel.ctx.tools.register({
 				name: 'big_read',
 				description: 'Reads something enormous.',
@@ -4838,7 +4970,19 @@ suite('Cordis kernel', () => {
 			const toolText = last.filter((message) => message.role === 'tool').map((message) => message.content).join('');
 			assert.ok(toolText.includes('x'.repeat(1_000)), 'the current turn’s tool result is still there in full');
 			assert.ok(!toolText.includes('elided'), 'the summary made elision unnecessary');
-			assert.ok(!notices.some((text) => text.startsWith('Trimmed older tool output')), 'no trim notice was needed');
+			assert.ok(!notices.some((entry) => entry.text.startsWith('Trimmed older tool output')), 'no trim notice was needed');
+			const announced = notices.find((entry) => entry.detail?.kind === 'compaction');
+			assert.ok(announced, 'the mid-turn fold announces a marker');
+			const note = (announced!.detail as { kind: 'compaction'; note: TurnNote }).note;
+			const after = kernel.ctx.sessions.require('midturn');
+			assert.strictEqual(note.anchor, 5, 'after the prompt, the call and its result');
+			assert.deepStrictEqual(after.notes?.map((entry) => entry.anchor), [5]);
+			const replay = turnsOf(after.transcript, 0, after.notes ?? []);
+			assert.deepStrictEqual(
+				replay[replay.length - 1]!.steps.map((step) => step.kind),
+				['tool', 'note', 'text'],
+				'the card sits between the step it followed and the next one',
+			);
 		} finally {
 			await kernel.dispose();
 		}
@@ -5372,6 +5516,7 @@ suite('Cordis kernel', () => {
 			assert.ok(after.transcript.some((message) => message.content.startsWith('answer 8')), 'including the newest turn');
 			assert.ok(!after.transcript.some((message) => message.content === 'answer this privately'), 'while the quiet prompt is still not a turn of the chat');
 			assert.ok(after.marks.every((mark) => mark.length <= after.transcript.length), 'no restore point is past the transcript');
+			assert.strictEqual(after.notes, undefined, 'a quiet fold has no visible turn to mark');
 		} finally {
 			await kernel.dispose();
 		}
@@ -9363,6 +9508,38 @@ suite('Images', () => {
 		assert.ok(css.includes('.summary-card') && css.includes('.summary-originals') && css.includes('.load-older'));
 		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		for (const needle of ["case 'loadOlder'", "case 'rebuildSummary'", 'summaryMeta', 'modelContextVersion']) {
+			assert.ok(panel.includes(needle), needle);
+		}
+	});
+
+	test('a fold is a card inside the turn, live and replayed', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		for (const needle of [
+			'function compactionCard',
+			"case 'compaction'",
+			'function appendCompaction',
+			'compaction-card',
+			'compaction-stats',
+			'compaction-summary',
+			'Conversation summarized',
+			"kind: 'note'",
+			'md(String(note.summary',
+			'flushOpen();',
+		]) {
+			assert.ok(js.includes(needle), needle);
+		}
+		assert.match(js, /case 'compaction':[\s\S]{0,300}appendCompaction\(message\)/);
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.ok(css.includes('.compaction-card') && css.includes('.compaction-stats') && css.includes('.compaction-summary'));
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		for (const needle of [
+			"step.kind === 'note' && step.note",
+			'turnsOf(pending ? [...session.transcript, pending] : session.transcript, 0, session.notes ?? [])',
+			'turnsOf(session?.transcript ?? [], 0, session?.notes ?? [])',
+			"detail?.kind === 'compaction'",
+			"type: 'compaction'",
+		]) {
 			assert.ok(panel.includes(needle), needle);
 		}
 	});

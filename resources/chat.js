@@ -765,6 +765,26 @@
 				if (step.kind === 'tool') {
 					return '> ' + (step.name || 'tool') + ' ' + (step.args || '') + '\n' + (step.result || '');
 				}
+				if (step.kind === 'note' && step.note) {
+					const note = step.note;
+					const share = note.window > 0 ? Math.round((note.after / note.window) * 100) : 0;
+					return (
+						'Compaction\n' +
+						note.folded +
+						' earlier message' +
+						(note.folded === 1 ? '' : 's') +
+						' · ' +
+						formatTokens(note.before) +
+						' → ' +
+						formatTokens(note.after) +
+						' tokens · ' +
+						share +
+						'% of the ' +
+						formatTokens(note.window) +
+						' window\n' +
+						(note.summary || '')
+					);
+				}
 				return step.text || '';
 			})
 			.filter(Boolean)
@@ -872,6 +892,8 @@
 		tool: '<svg viewBox="0 0 16 16"><path d="M9.6 2.6a3.4 3.4 0 0 0-3.2 4.5L2.6 10.9l2.5 2.5 3.8-3.8a3.4 3.4 0 0 0 4.5-3.2l-2 2-2.3-.6-.6-2.3z"/></svg>',
 	};
 	const CHEVRON_ICON = '<svg viewBox="0 0 16 16"><path d="M4.8 6.4L8 9.6l3.2-3.2"/></svg>';
+	// Two arrows closing on a line: a request folded onto the summary that stands in for it.
+	const COMPACTION_ICON = '<svg viewBox="0 0 16 16"><path d="M2.8 5.4L5.2 8l-2.4 2.6"/><path d="M13.2 5.4L10.8 8l2.4 2.6"/><path d="M5.8 8h4.4"/></svg>';
 
 	function toolIcon(name) {
 		return TOOL_ICONS[TOOL_FAMILIES[name]] || TOOL_ICONS.tool;
@@ -1938,6 +1960,109 @@
 		return card;
 	}
 
+	/**
+	 * A fold is a card in the step flow, not a chat line: the stats stay readable while folded and
+	 * the summary the fold produced is one click away. It borrows the tool card's shell so the theme,
+	 * chevron and focus behave exactly like the calls around it.
+	 */
+	function compactionCard(step) {
+		const note = step.note || {};
+		const folded = Math.max(0, Number(note.folded) || 0);
+		const before = Math.max(0, Number(note.before) || 0);
+		const after = Math.max(0, Number(note.after) || 0);
+		const window = Math.max(0, Number(note.window) || 0);
+		const covers = Math.max(0, Number(note.covers) || 0);
+		const anchor = Math.max(covers, Number(note.anchor) || covers);
+		const share = window > 0 ? Math.round((after / window) * 100) : 0;
+
+		const card = document.createElement('div');
+		card.className = 'tool-card compaction-card';
+		card.dataset.status = 'ok';
+
+		const details = document.createElement('details');
+		details.className = 'tool-details';
+		details.open = step._open === true;
+
+		const head = document.createElement('summary');
+		head.className = 'tool-head';
+		head.innerHTML =
+			'<span class="tool-head-row">' +
+			'<span class="tool-glyph"><span class="tool-icon">' +
+			COMPACTION_ICON +
+			'</span><span class="tool-chev">' +
+			CHEVRON_ICON +
+			'</span></span>' +
+			'<span class="tool-title">Conversation summarized</span>' +
+			'<span class="tool-summary">' +
+			esc(
+				folded +
+					' earlier message' +
+					(folded === 1 ? '' : 's') +
+					' · ' +
+					formatTokens(before) +
+					' → ' +
+					formatTokens(after) +
+					' tokens · ' +
+					share +
+					'% of the ' +
+					formatTokens(window) +
+					' window',
+			) +
+			'</span></span>';
+
+		const body = document.createElement('div');
+		body.className = 'tool-body compaction-body';
+
+		let filled = false;
+		const fill = () => {
+			if (filled) {
+				return;
+			}
+			filled = true;
+			const stats = document.createElement('div');
+			stats.className = 'compaction-stats';
+			for (const [value, label] of [
+				[String(folded), folded === 1 ? 'message folded' : 'messages folded'],
+				[formatTokens(after), 'tokens now (was ' + formatTokens(before) + ')'],
+				[share + '%', 'of the ' + formatTokens(window) + ' window'],
+			]) {
+				const item = document.createElement('span');
+				item.className = 'compaction-stat';
+				const strong = document.createElement('b');
+				strong.textContent = value;
+				item.append(strong, document.createTextNode(' ' + label));
+				stats.appendChild(item);
+			}
+			const summary = document.createElement('div');
+			summary.className = 'compaction-summary body md';
+			summary.innerHTML = md(String(note.summary || ''));
+			const keep = document.createElement('p');
+			keep.className = 'compaction-keep';
+			keep.textContent =
+				'The chat itself is unchanged: the first ' +
+				covers +
+				' messages are represented by this summary; the latest ' +
+				Math.max(0, anchor - covers) +
+				' stayed in full.';
+			body.append(stats, summary, keep);
+		};
+
+		details.addEventListener('toggle', () => {
+			step._open = details.open;
+			if (details.open) {
+				fill();
+			}
+		});
+		if (details.open) {
+			fill();
+		}
+		details.append(head, body);
+		card.appendChild(details);
+		step._card = card;
+		step._details = details;
+		return card;
+	}
+
 	/** One element for one step; the single place a thought, a text block or a call is drawn. */
 	function stepEl(step, busy) {
 		if (step.kind === 'thought') {
@@ -1957,6 +2082,9 @@
 		}
 		if (step.kind === 'tool') {
 			return toolCard(step);
+		}
+		if (step.kind === 'note') {
+			return compactionCard(step);
 		}
 		// The markdown body is re-rendered on every text delta, so the duration sits beside it in a
 		// wrapper rather than inside — otherwise the streaming repaint would wipe its own timer.
@@ -2964,6 +3092,40 @@
 		tick();
 		// A new call is not a reason to move a reader who scrolled away: the transcript follows the
 		// end only while they are at it, exactly as it does for streamed text.
+		scroll();
+	}
+
+	/**
+	 * A fold that finished mid-turn belongs after the step that was current, inside the same turn:
+	 * exactly where a replay's `turnsOf` puts it. Freezing the open buffers follows `toolStart` —
+	 * a fold only happens between requests, but the invariant is cheap to keep.
+	 */
+	function appendCompaction(message) {
+		const note = message.note;
+		if (!note || typeof note !== 'object') {
+			return;
+		}
+		if (!live) {
+			requestResync();
+			return;
+		}
+		if (live.turn.sessionId && message.sessionId && live.turn.sessionId !== message.sessionId) {
+			return;
+		}
+		// A reload or resync may already have drawn this fold from the persisted transcript. The id
+		// is the same on both sides, so an arriving event never doubles the card.
+		const id = 'compaction:' + note.version + ':' + note.anchor;
+		if (live.turn.steps.some((step) => step.kind === 'note' && step.id === id)) {
+			return;
+		}
+		flushOpen();
+		freeze(live.thought);
+		freeze(live.text);
+		live.thought = null;
+		live.text = null;
+		const step = appendStep(live.turn, { kind: 'note', id, note, at: note.at }, false);
+		live.turn.steps.push(step);
+		tick();
 		scroll();
 	}
 
@@ -4028,6 +4190,13 @@
 				break;
 			case 'notice':
 				addNotice(message.text);
+				break;
+			case 'compaction':
+				// The card belongs to the turn that folded; another chat's late fold is ignored.
+				if (state && message.sessionId && message.sessionId !== state.sessionId) {
+					break;
+				}
+				appendCompaction(message);
 				break;
 			case 'turn-start':
 				acceptPendingSend();

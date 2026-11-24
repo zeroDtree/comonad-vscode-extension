@@ -191,6 +191,33 @@ suite('Cancellation', () => {
 		}
 	});
 
+	test('stopping a swipe puts its fold markers back too', async () => {
+		const kernel = await createTestKernel();
+		try {
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'swipe-notes');
+			session.transcript = [
+				{ role: 'user', content: 'hello', at: 1 },
+				{ role: 'assistant', content: 'hi', at: 2, swipes: ['hi'], swipeId: 0 },
+			];
+			session.notes = [{ anchor: 2, at: 3, version: 1, folded: 1, covers: 1, before: 100, after: 50, window: 1_000, summary: 'S' }];
+			kernel.ctx.sessions.save(session);
+			const turn = kernel.ctx.agent.runTurn({
+				text: '',
+				trigger: 'swipe',
+				sessionId: 'swipe-notes',
+				surface: 'test',
+			});
+			assert.strictEqual(kernel.ctx.agent.stop(), true, 'the turn is owned as soon as runTurn starts');
+			const result = await within(turn);
+			assert.strictEqual(result.stopped, true);
+			const after = kernel.ctx.sessions.require('swipe-notes');
+			assert.deepStrictEqual(after.transcript.map((message) => message.content), ['hello', 'hi'], 'the exchange is back');
+			assert.deepStrictEqual(after.notes?.map((note) => note.anchor), [2], 'and so is the marker recorded inside it');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('turn-start names the prompt that opened the turn', async () => {
 		const kernel = await createTestKernel();
 		try {
