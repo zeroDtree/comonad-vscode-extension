@@ -1631,6 +1631,9 @@ export class Agent extends Service {
 				// Summarizing is not reasoning: the chat's Max effort belongs to the answer, not to
 				// folding old turns, and a thinking summary can sit for minutes before emitting text.
 				reasoningEffort: 'none',
+				// A thinking-only reply from a profile that cannot switch thinking off must not look
+				// like a silently empty summary.
+				rejectReasoningOnly: true,
 				maxTokens: SUMMARY_MAX_TOKENS,
 				timeoutMs: SUMMARY_TIMEOUT_MS,
 			},

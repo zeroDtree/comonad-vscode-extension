@@ -808,7 +808,7 @@
               "contextWindow": 1048576
             }
           ],
-          "markdownDescription": "OpenAI-compatible endpoints to chat with. The model menu is read from each endpoint (`GET /models`), so a new model needs no configuration; a profile's `model` is what a bare profile id selects. Empty uses the shipped profiles (DeepSeek Flash first, so **Auto** runs on it). A key stored with **Comonad: Configure Model Provider** belongs to the endpoint and every profile with the same normalized `base` shares it; without a stored key, the variables in `keyEnv` are tried in order.",
+          "markdownDescription": "OpenAI-compatible endpoints to chat with. The model menu is read from each endpoint (`GET /models`), so a new model needs no configuration; a profile's `model` is what a bare profile id selects. Empty uses the shipped profiles (DeepSeek Flash first, so **Auto** runs on it). A key stored with **Comonad: Configure Model Provider** belongs to the endpoint and every profile with the same normalized `base` shares it; without a stored key, the variables in `keyEnv` are tried in order. Fields a profile omits are inherited from the shipped profile for the same normalized `base`; model facts (`label`, `contextWindow`, pricing and samplers) are inherited only from a shipped profile with the same `model` too. An explicitly set field always wins.",
           "items": {
             "type": "object",
             "required": ["id", "model"],

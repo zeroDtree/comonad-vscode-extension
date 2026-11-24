@@ -48,7 +48,9 @@ still cannot fit the reply-reserved window, and only then let the endpoint's ref
 shrink and retry. Subagent requests are not foldable from the chat record, so they only elide. A
 successful fold reports the before/after size once; a trimmed request
 reports at most once per turn. A summary is a short, non-thinking call and is attempted at most four
-times per turn; one that fails is reported once and the turn continues.
+times per turn; one that fails is reported once and the turn continues. A profile that cannot turn
+thinking off reports that the summarizer produced only reasoning, rather than pretending it returned
+an empty summary.
 
 The chat shows the summary as a card. Turns the summary covers are kept in the canonical record and
 are folded under **Show original messages** (closed by default); **Load older messages** pages

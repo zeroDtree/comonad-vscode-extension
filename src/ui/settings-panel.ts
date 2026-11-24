@@ -690,6 +690,8 @@ export async function configureModel(ctx: Context): Promise<void> {
 	}
 	// A profile on an endpoint that is already configured inherits the provider-level facts; the
 	// per-model ones (pricing, window, samplers) are copied later only if it declares the same model.
+	// Hand-written profiles get the same completion from `inheritProfileDefaults` (services/settings.ts):
+	// keep the two field groups in sync.
 	const identity = normalizeEndpoint(base);
 	const match = ctx.settings.get().profiles.find((profile) => identity && normalizeEndpoint(profile.base) === identity);
 	const keyEnvAnswer = await vscode.window.showInputBox({

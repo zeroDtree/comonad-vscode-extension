@@ -232,6 +232,8 @@ export class Llm extends Service {
 			onUsage?: (usage: CompletionUsage) => void;
 			reasoningEffort?: string;
 			maxTokens?: number;
+			/** Throw instead of returning '' when the model spent the reply reasoning and emitted no text. */
+			rejectReasoningOnly?: boolean;
 		} = {},
 	): Promise<string> {
 		const timeout = AbortSignal.timeout(options.timeoutMs ?? 180_000);
@@ -255,7 +257,13 @@ export class Llm extends Service {
 		if (result.usage) {
 			options.onUsage?.(result.usage);
 		}
-		return result.message.content.trim();
+		const text = result.message.content.trim();
+		// A profile that cannot turn thinking off may spend the whole reply reasoning. Returning ''
+		// would make that look like an empty answer; name the cause while usage is still counted.
+		if (!text && options.rejectReasoningOnly && result.message.reasoning?.trim()) {
+			throw new Error('the summarizer produced only reasoning; its profile cannot turn thinking off (set thinkingOff on it)');
+		}
+		return text;
 	}
 
 	async choose(

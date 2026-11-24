@@ -112,11 +112,14 @@ import {
 	DEFAULT_CONTEXT_WINDOW,
 	DEFAULT_PROFILES,
 	DEFAULT_SUBAGENT_GRANTS,
+	inheritProfileDefaults,
 	normalizeAgentPatch,
 	profileKeyEnvs,
 	sanitizeSubagentGrants,
 	subagentGrant,
+	type Profile,
 } from '../services/settings';
+import { openaiAdapter } from '../llm/openai';
 import { mergeBudget, normalizeBudget, resolveSubagentBudget, RunBudget, sealPartial } from '../lib/budget';
 import { toolset } from '../services/tools';
 import { askTools } from '../tools/misc';
@@ -5073,6 +5076,48 @@ suite('Cordis kernel', () => {
 		}
 	});
 
+	test('a reasoning-only summary is reported as reasoning, not as an empty summary', async () => {
+		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000 } });
+		try {
+			const notices: string[] = [];
+			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request) {
+					if (request.reasoningEffort === 'none') {
+						return { message: { role: 'assistant', content: '', reasoning: 'thinking hard' }, toolCalls: [], usage: { input: 10, output: 5 } };
+					}
+					return { message: { role: 'assistant', content: 'still answered' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			// The opt-in flag names the cause; without it a completion is still just empty text.
+			await assert.rejects(
+				kernel.ctx.llm.complete('auto', 'sys', 'user', { reasoningEffort: 'none', rejectReasoningOnly: true }),
+				/only reasoning/,
+			);
+			assert.strictEqual(await kernel.ctx.llm.complete('auto', 'sys', 'user', { reasoningEffort: 'none' }), '');
+
+			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'reasoning-only');
+			session.contextWindow = 40_000;
+			session.policy.maxTokens = 500;
+			for (let turn = 0; turn < 5; turn += 1) {
+				session.transcript.push(
+					{ role: 'user', content: `old ask ${turn} ${'a'.repeat(8_000)}` },
+					{ role: 'assistant', content: `old answer ${turn} ${'b'.repeat(8_000)}` },
+				);
+			}
+			kernel.ctx.sessions.save(session);
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'the newest ask', sessionId: 'reasoning-only' });
+
+			assert.strictEqual(result.text, 'still answered', 'the turn continues');
+			assert.strictEqual(notices.filter((text) => text.includes('only reasoning')).length, 1, 'the cause is named once');
+			assert.strictEqual(kernel.ctx.sessions.require('reasoning-only').modelContext, undefined, 'nothing was recorded');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
 	test('a hand-edited session cannot feed the compaction trigger', async () => {
 		const kernel = await createTestKernel();
 		try {
@@ -5775,6 +5820,129 @@ suite('Cordis kernel', () => {
 			await kernel.ctx.settings.update('profiles', []);
 			assert.deepStrictEqual(kernel.ctx.settings.get().profiles.map((profile) => profile.id), ['deepseek', 'deepseek-pro', 'gemini']);
 		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a configured profile inherits the facts it omits from the shipped profile for its endpoint', async () => {
+		const kernel = await createTestKernel({
+			config: {
+				profiles: [
+					{
+						id: 'deepseek',
+						base: 'https://api.deepseek.com',
+						model: 'deepseek-flash',
+						keyEnv: ['DEEPSEEK_API_KEY'],
+						includeUsage: true,
+					},
+				],
+			},
+		});
+		try {
+			const profiles = () => kernel.ctx.settings.get().profiles;
+			const first = profiles()[0]!;
+			assert.strictEqual(first.thinkingOff, 'thinking', 'the summarizer can switch thinking off');
+			assert.strictEqual(first.topEffort, 'max');
+			assert.strictEqual(first.contextWindow, 1_048_576);
+			assert.strictEqual(first.label, 'DeepSeek Flash');
+			assert.deepStrictEqual([first.pricingIn, first.pricingCachedIn, first.pricingOut], [0.3, 0.006, 1.2]);
+			assert.strictEqual(first.id, 'deepseek');
+			assert.strictEqual(first.base, 'https://api.deepseek.com');
+			assert.strictEqual(first.model, 'deepseek-flash');
+
+			// Explicit values win; a sibling fact that is still missing inherits.
+			await kernel.ctx.settings.update('profiles', [
+				{
+					id: 'mine',
+					base: 'https://api.deepseek.com',
+					model: 'deepseek-flash',
+					label: 'Mine',
+					thinkingOff: 'effort',
+					topEffort: 'high',
+					contextWindow: 32_000,
+					pricingIn: 9,
+					keyEnv: 'MINE_KEY',
+					includeUsage: false,
+				},
+			]);
+			const mine = profiles()[0]!;
+			assert.strictEqual(mine.label, 'Mine');
+			assert.strictEqual(mine.thinkingOff, 'effort');
+			assert.strictEqual(mine.topEffort, 'high');
+			assert.strictEqual(mine.contextWindow, 32_000);
+			assert.strictEqual(mine.pricingIn, 9);
+			assert.strictEqual(mine.pricingOut, 1.2, 'an omitted price still inherits');
+			assert.deepStrictEqual(mine.keyEnv, 'MINE_KEY');
+			assert.strictEqual(mine.includeUsage, false);
+
+			// Another endpoint is not the shipped one: nothing is inherited.
+			await kernel.ctx.settings.update('profiles', [{ id: 'other', base: 'https://example.invalid', model: 'deepseek-flash' }]);
+			assert.deepStrictEqual(profiles()[0], { id: 'other', base: 'https://example.invalid', model: 'deepseek-flash' });
+
+			// The same endpoint with another model: endpoint facts, and that model's own facts.
+			await kernel.ctx.settings.update('profiles', [{ id: 'pro', base: 'https://api.deepseek.com/', model: 'deepseek-v4-pro' }]);
+			const pro = profiles()[0]!;
+			assert.strictEqual(pro.thinkingOff, 'thinking');
+			assert.strictEqual(pro.keyEnv, 'DEEPSEEK_API_KEY');
+			assert.strictEqual(pro.includeUsage, true);
+			assert.strictEqual(pro.label, 'DeepSeek V4 Pro');
+			assert.strictEqual(pro.contextWindow, 1_048_576);
+			assert.deepStrictEqual([pro.pricingIn, pro.pricingCachedIn, pro.pricingOut], [1.32, 0.044, 3.96]);
+			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-deepseek';
+			assert.strictEqual(await kernel.ctx.llm.resolveKey(profiles()[0]!), 'sk-deepseek', 'the endpoint key name is inherited');
+
+			// An unknown model on a known endpoint gets the endpoint facts and no model facts.
+			await kernel.ctx.settings.update('profiles', [{ id: 'unknown', base: 'https://api.deepseek.com', model: 'deepseek-v9' }]);
+			const unknown = profiles()[0]!;
+			assert.strictEqual(unknown.thinkingOff, 'thinking');
+			assert.strictEqual(unknown.contextWindow, undefined);
+			assert.strictEqual(unknown.pricingIn, undefined);
+			assert.strictEqual(unknown.label, undefined);
+
+			// No base: no inheritance, so the adapter's loud "no API base URL" error stays.
+			await kernel.ctx.settings.update('profiles', [{ id: 'nobase', model: 'deepseek-flash' }]);
+			assert.deepStrictEqual(profiles()[0], { id: 'nobase', model: 'deepseek-flash' });
+
+			// An empty list still yields the shipped profiles.
+			await kernel.ctx.settings.update('profiles', []);
+			assert.deepStrictEqual(profiles().map((profile) => profile.id), ['deepseek', 'deepseek-pro', 'gemini']);
+
+			// Pure: a fresh object, the input untouched, the shipped defaults unmodified; null is absent.
+			const before = JSON.stringify(DEFAULT_PROFILES);
+			const partial = { id: 'literal', base: 'https://api.deepseek.com', model: 'deepseek-flash', thinkingOff: null } as unknown as Profile;
+			const filled = inheritProfileDefaults(partial);
+			assert.notStrictEqual(filled, partial);
+			assert.strictEqual(partial.thinkingOff, null);
+			assert.strictEqual(filled.thinkingOff, 'thinking');
+			assert.strictEqual(JSON.stringify(DEFAULT_PROFILES), before);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a completed profile turns thinking off for a summary request', async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const original = globalThis.fetch;
+		globalThis.fetch = (async (_url: string, init: { body: string }): Promise<Response> => {
+			bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+			return new Response(new ReadableStream({ start: (c) => c.close() }), { status: 200 });
+		}) as unknown as typeof fetch;
+		const kernel = await createTestKernel({
+			config: {
+				profiles: [{ id: 'deepseek', base: 'https://api.deepseek.com', model: 'deepseek-flash', keyEnv: ['DEEPSEEK_API_KEY'], includeUsage: true }],
+			},
+		});
+		try {
+			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-deepseek';
+			kernel.ctx.llm.use(openaiAdapter);
+			await kernel.ctx.llm.chat('auto', [{ role: 'user', content: 'hi' }], [], {}, new AbortController().signal, {
+				reasoningEffort: 'none',
+				maxTokens: 3_072,
+			});
+			assert.deepStrictEqual(bodies[0]!.thinking, { type: 'disabled' }, 'the summary asks the endpoint to stop thinking');
+			assert.ok(!('reasoning_effort' in bodies[0]!), 'DeepSeek takes its own field, not the generic one');
+		} finally {
+			globalThis.fetch = original;
 			await kernel.dispose();
 		}
 	});

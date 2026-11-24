@@ -31,7 +31,7 @@ JSON files hold the same names.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `model` | `auto` | `auto` for the first profile, a profile id for its default model, or `profile:model` |
-| `profiles` | shipped DeepSeek/Gemini profiles | OpenAI-compatible endpoints; see [Chat](/guide/chat) |
+| `profiles` | shipped DeepSeek/Gemini profiles | OpenAI-compatible endpoints; a profile that omits fields inherits them from the shipped profile for the same normalized `base` (model facts such as window and pricing also need the same `model`), and explicit values win. See [Chat](/guide/chat) |
 | `reasoningEffort` | `auto` | Thinking effort: `auto`, `none` (Off), `low`, `medium`, `high` or `max`; a profile's `topEffort` caps it |
 | `contextWindow` | `0` | Override the model's input window; `0` uses the profile |
 

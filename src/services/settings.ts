@@ -2,6 +2,7 @@
 import { Service, type Context } from 'cordis';
 import { BUILTIN_ROLES, READ_ONLY_GRANT, type AgentRole, type SubagentGrant } from '../lib/agents';
 import { normalizeBudget, type BudgetLimits, type SubagentBudgetMode } from '../lib/budget';
+import { normalizeEndpoint } from '../lib/endpoint';
 import type { EffortTop } from '../lib/effort';
 import { asApproval, asApprovalResponse, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
 import {
@@ -519,7 +520,9 @@ export class Settings extends Service {
 			subagentBudgetMode: oneOf('subagentBudgetMode', SUBAGENT_BUDGET_MODES, DEFAULT_SUBAGENT_BUDGET_MODE),
 			model: typeof raw.model === 'string' ? raw.model : 'auto',
 			// An empty list means "nothing configured", which would leave the chat without a model, so
-			// the built-in DeepSeek profiles stand in for it.
+			// the built-in DeepSeek profiles stand in for it. A configured entry is completed from the
+			// shipped profile for its endpoint, so a hand-written one cannot silently lose thinkingOff,
+			// its window or its prices.
 			profiles: withDefaults(Array.isArray(profiles) ? profiles : []),
 			mcpServers: raw.mcpServers && typeof raw.mcpServers === 'object' ? (raw.mcpServers as Record<string, McpServerSettings>) : {},
 			permissions:
@@ -623,9 +626,88 @@ export class Settings extends Service {
 
 export const settingsPlugin = Settings;
 
-/** Configured profiles, or the built-in DeepSeek ones when nothing is configured. */
+/** Facts an endpoint supplies to every model it serves. */
+const ENDPOINT_PROFILE_FACTS = [
+	'provider',
+	'modelPrefix',
+	'modelSkip',
+	'thinkingOff',
+	'topEffort',
+	'keyEnv',
+	'includeUsage',
+] as const satisfies readonly (keyof Profile)[];
+
+/** Facts that belong to one exact model: its name, window, samplers and prices. */
+const MODEL_PROFILE_FACTS = [
+	'label',
+	'topEffort',
+	'contextWindow',
+	'pricingIn',
+	'pricingCachedIn',
+	'pricingOut',
+	'temperature',
+	'topP',
+	'maxTokens',
+] as const satisfies readonly (keyof Profile)[];
+
+/**
+ * Fill only the facts a configured profile left out, from the shipped profile for its endpoint —
+ * the same policy Configure Model Provider applies when it adds a profile. Endpoint facts come
+ * from the first shipped profile on the same normalized base; model facts need the same base and
+ * the exact model. Endpoint facts are written first, then model facts may replace them for fields
+ * the user did not set, so a model-specific ceiling beats an endpoint default. `id`, `base` and
+ * `model` are identity and are never inherited. Null counts as absent; the input and
+ * `DEFAULT_PROFILES` are never mutated.
+ */
+export function inheritProfileDefaults(profile: Profile): Profile {
+	const next: Profile = { ...profile };
+	// A missing or malformed base identifies no endpoint; the adapter keeps its loud "no base" error.
+	const identity = typeof next.base === 'string' ? normalizeEndpoint(next.base) : '';
+	if (!identity) {
+		return next;
+	}
+	const present = new Set<keyof Profile>();
+	for (const field of [...ENDPOINT_PROFILE_FACTS, ...MODEL_PROFILE_FACTS]) {
+		if (next[field] !== undefined && next[field] !== null) {
+			present.add(field);
+		}
+	}
+	copyProfileFacts(
+		next,
+		DEFAULT_PROFILES.find((defaults) => normalizeEndpoint(defaults.base) === identity),
+		ENDPOINT_PROFILE_FACTS,
+		present,
+	);
+	copyProfileFacts(
+		next,
+		DEFAULT_PROFILES.find((defaults) => normalizeEndpoint(defaults.base) === identity && defaults.model === next.model),
+		MODEL_PROFILE_FACTS,
+		present,
+	);
+	return next;
+}
+
+function copyProfileFacts<K extends keyof Profile>(
+	target: Profile,
+	source: Profile | undefined,
+	fields: readonly K[],
+	present: ReadonlySet<keyof Profile>,
+): void {
+	if (!source) {
+		return;
+	}
+	for (const field of fields) {
+		const value = source[field];
+		// Skip absent source values too, so a completed profile gains no `field: undefined` keys.
+		if (!present.has(field) && value !== undefined && value !== null) {
+			target[field] = value;
+		}
+	}
+}
+
+/** Configured profiles, completed from the shipped facts, or the built-ins when nothing is configured. */
 function withDefaults(profiles: Profile[]): Profile[] {
-	return profiles.length ? profiles : DEFAULT_PROFILES;
+	return profiles.length ? profiles.map(inheritProfileDefaults) : DEFAULT_PROFILES;
 }
 
 /** The remaining value sets a `get()` may fall back within — a settings file is untrusted input. */
