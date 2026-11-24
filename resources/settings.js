@@ -88,7 +88,6 @@
 		path.title = file ? 'Open ' + file + ' in the editor' : '';
 		path.disabled = !file;
 		$('scope-hint').textContent = scopeAvailable(scope) ? SCOPE_HINTS[scope] : unavailable;
-		syncSave();
 	}
 
 	for (const button of document.querySelectorAll('#scope-tabs .scope-tab')) {

@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { issueAuthorization } from '../lib/authorization';
 import { parsePlanResult, planPathForRecorded, planTargetFor } from '../lib/plan-files';
 import { compileGraphs, runGraph, type GraphRuntime } from '../lib/graph';
@@ -4198,6 +4199,57 @@ suite('Cordis kernel', () => {
 			panel.dispose();
 			await kernel.dispose();
 		}
+	});
+
+	test('the settings guest boots against its document and asks the host for state', () => {
+		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
+		const posted: Array<{ type?: string }> = [];
+		const element = () => ({
+			addEventListener() {},
+			classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+			style: {},
+			dataset: {},
+			setAttribute() {},
+			removeAttribute() {},
+			append() {},
+			appendChild() {},
+			textContent: '',
+			title: '',
+			disabled: false,
+			value: '',
+			checked: false,
+			hidden: false,
+			getBoundingClientRect: () => ({ left: 0 }),
+		});
+		const document = {
+			getElementById: element,
+			querySelector: () => null,
+			querySelectorAll: () => [],
+			createElement: element,
+			createTextNode: () => ({}),
+			body: element(),
+			activeElement: null,
+			addEventListener() {},
+		};
+		const vscode = {
+			postMessage: (message: { type?: string }) => posted.push(message),
+			getState: () => ({}),
+			setState() {},
+		};
+		const sandbox = {
+			document,
+			window: { addEventListener() {} },
+			acquireVsCodeApi: () => vscode,
+			setTimeout,
+			clearTimeout,
+			console,
+		};
+		// The guest opens with the scope selector and then wires every tab. An undefined call during
+		// boot kills the whole script before it registers its message listener, which is how the panel
+		// once came up as static HTML: no tab clicks, an empty model menu and blank fields.
+		runInNewContext(guest, sandbox, { filename: 'settings.js' });
+		assert.strictEqual(posted.length, 1, 'the guest sends exactly its opening request');
+		assert.strictEqual(posted[0]!.type, 'ready', 'and it is the request for the first state');
 	});
 
 	test('turns group a transcript into prompts with ordered steps', () => {
