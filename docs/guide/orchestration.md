@@ -124,9 +124,9 @@ Command criteria run against a read-only workspace with only the scratch tree wr
 commands that pass there (a no-emit typecheck, or a test whose caches go to `$COMONAD_SCRATCH`); for
 a check that must write build artifacts, use a `review` criterion instead. If the exact command fails
 only because the workspace is read-only, the tester may run it in a byte-identical copy under
-`$COMONAD_SCRATCH`; the runtime harvests that run's real exit code and recognizes the `cd <copy> &&
-<command>` wrapper. A failed command can never be reported as exit 0, and a rejection reason names
-the criterion command and the command/exit code the tester actually observed.
+`$COMONAD_SCRATCH`; the runtime harvests that run's real exit code and recognizes the
+`cd <copy> && <command>` wrapper. A failed command can never be reported as exit 0, and a rejection
+reason names the criterion command and the command/exit code the tester actually observed.
 
 A write task must have at least one `review` or `command` criterion. The model has no tool that can
 mark a task accepted. A rejected node carries a code and reason; revise the graph within the attempt
