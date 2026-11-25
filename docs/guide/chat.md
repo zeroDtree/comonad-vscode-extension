@@ -24,7 +24,8 @@ description and argument hint. `Enter` sends; `Shift+Enter` adds a line.
 Paste or drop images to attach them (up to six per message, 4 MiB each, 12 MiB total). A text paste
 of 20,000 characters or more becomes a **Pasted text** chip above the input and travels as a text
 attachment (a single paste keeps up to 200,000 characters), so the composer stays small and typing
-stays fast; removing the chip drops the block.
+stays fast; removing the chip drops the block. After the message is sent, its **Pasted text** chip
+opens the stored block in a read-only tab.
 
 The model pill opens one menu with three controls:
 
@@ -148,6 +149,10 @@ the file. Ask the agent to use `read_file` when you want the current contents.
 
 A file token can name an image or a PDF too. Images become image content; PDFs become page-marked
 text when the optional **PDF documents** plugin is installed (see [Images and PDFs](#images-and-pdfs)).
+
+Resolved reference chips under a sent message — and the `@` tokens in its text — are clickable: a
+file or symbol reference opens in the editor with its line range selected. Folder and PDF chips stay
+read-only.
 
 ## Summary and full history
 

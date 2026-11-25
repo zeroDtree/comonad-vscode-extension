@@ -805,6 +805,23 @@ button.chat.is-active {
 	background: color-mix(in srgb, var(--vscode-errorForeground, #f44336) 22%, transparent);
 }
 
+/* A file or pasted-text chip opens on click; the dataset is what the click handler reads. */
+.msg.user .ref[data-ref-path],
+.msg.user .ref[data-paste-turn] {
+	cursor: pointer;
+}
+
+.msg.user .ref[data-ref-path]:hover,
+.msg.user .ref[data-paste-turn]:hover {
+	background: color-mix(in srgb, var(--vscode-button-foreground) 28%, transparent);
+}
+
+.msg.user .ref[data-ref-path]:focus-visible,
+.msg.user .ref[data-paste-turn]:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, #007fd4);
+	outline-offset: 1px;
+}
+
 /* Editing a prompt in place: the bubble becomes the composer for one message. */
 .msg.user .bubble.editing {
 	max-width: 100%;
@@ -2461,6 +2478,21 @@ footer {
 	background: rgba(127, 127, 127, 0.28);
 	font-family: var(--vscode-editor-font-family, monospace);
 	font-size: 0.92em;
+}
+
+/* The painter marks every token as a link; the host decides whether its target can open. */
+.ref-token[role="link"] {
+	cursor: pointer;
+}
+
+.ref-token[role="link"]:hover {
+	background: rgba(127, 127, 127, 0.42);
+	text-decoration: underline;
+}
+
+.ref-token[role="link"]:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, #007fd4);
+	outline-offset: 1px;
 }
 
 /* Images the composer is holding, before they are sent. */

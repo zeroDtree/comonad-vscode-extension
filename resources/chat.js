@@ -1384,17 +1384,20 @@
 		return button;
 	}
 
-	/** Resolved text and document references, as compact chips beside the prompt. */
-	function referenceChips(parts) {
-		const refs = Array.isArray(parts) ? parts.filter((part) => part.kind === 'text' || part.kind === 'document') : [];
+	/** Resolved text references, as compact chips beside the prompt; file and paste chips open on click. */
+	function referenceChips(parts, turn) {
+		const refs = Array.isArray(parts)
+			? parts.map((part, index) => ({ part, index })).filter(({ part }) => part.kind === 'text' || part.kind === 'document')
+			: [];
 		if (!refs.length) {
 			return null;
 		}
 		const box = document.createElement('div');
 		box.className = 'refs';
-		for (const part of refs) {
+		for (const { part, index } of refs) {
 			const chip = document.createElement('span');
 			chip.className = 'ref' + (part.form === 'error' ? ' error' : '');
+			const source = part.source || {};
 			if (part.kind === 'document') {
 				const pages = part.pages ? ' · p.' + part.pages.start + (part.pages.end === part.pages.start ? '' : '-' + part.pages.end) : '';
 				const total = part.pageCount ? '/' + part.pageCount : '';
@@ -1403,12 +1406,41 @@
 				// A composer paste: its name, never its (possibly very long) body.
 				chip.textContent = '📋 ' + part.name;
 			} else {
-				const source = part.source || {};
 				const range = source.range ? ':' + source.range.start + (source.range.end === source.range.start ? '' : '-' + source.range.end) : '';
 				chip.textContent = (part.form === 'folder' ? '📁 ' : part.form === 'symbol' ? 'ƒ ' : '') + (source.symbol || source.path || part.form) + range;
 			}
+			// Only a resolved file/symbol and a composer paste carry a target; folders, PDFs and
+			// error notes stay inert. The dataset is the click handler's only input.
+			const isFileRef = part.kind === 'text' && part.origin === 'reference'
+				&& typeof source.path === 'string' && source.path
+				&& (part.form === 'file' || part.form === 'symbol');
+			const canPaste = part.kind === 'text' && part.origin === 'user' && part.form === 'note' && Boolean(turn);
+			if (isFileRef) {
+				chip.dataset.refPath = source.path;
+				if (source.range && source.range.unit === 'line') {
+					chip.dataset.refStart = String(source.range.start);
+					chip.dataset.refEnd = String(source.range.end);
+				}
+				chip.tabIndex = 0;
+				chip.setAttribute('role', 'link');
+			} else if (canPaste) {
+				chip.dataset.pasteTurn = String(turn.index);
+				chip.dataset.pasteIndex = String(index);
+				chip.dataset.pasteSession = turn.sessionId || (state && state.sessionId) || '';
+				chip.tabIndex = 0;
+				chip.setAttribute('role', 'link');
+			}
 			if (part.text) {
-				chip.title = part.text.slice(0, 2_000);
+				const preview = part.text.slice(0, 2_000);
+				chip.title = isFileRef
+					? 'Open in the editor\n\n' + preview
+					: canPaste
+						? 'Open the full pasted text\n\n' + preview
+						: preview;
+			} else if (isFileRef) {
+				chip.title = 'Open in the editor';
+			} else if (canPaste) {
+				chip.title = 'Open the full pasted text';
 			}
 			box.appendChild(chip);
 		}
@@ -1423,7 +1455,7 @@
 		if (old) {
 			old.remove();
 		}
-		const chips = referenceChips(turn.promptAttachments);
+		const chips = referenceChips(turn.promptAttachments, turn);
 		if (chips) {
 			turn._bubble.appendChild(chips);
 		}
@@ -3913,8 +3945,59 @@
 		}, 700);
 	}
 
+	/** Ask the host to open a reference chip or an inline token. */
+	function openReference(element) {
+		if (element.classList.contains('ref-token')) {
+			// The painted token is exactly what the host parser reads; no second grammar here.
+			vscode.postMessage({
+				type: 'openReference',
+				token: element.textContent || '',
+				sessionId: (state && state.sessionId) || undefined,
+			});
+			return;
+		}
+		if (element.dataset.pasteTurn !== undefined) {
+			vscode.postMessage({
+				type: 'openPastedText',
+				sessionId: element.dataset.pasteSession || (state && state.sessionId) || undefined,
+				turn: Number(element.dataset.pasteTurn),
+				index: Number(element.dataset.pasteIndex),
+			});
+			return;
+		}
+		vscode.postMessage({
+			type: 'openReference',
+			path: element.dataset.refPath,
+			start: element.dataset.refStart ? Number(element.dataset.refStart) : undefined,
+			end: element.dataset.refEnd ? Number(element.dataset.refEnd) : undefined,
+			sessionId: (state && state.sessionId) || undefined,
+		});
+	}
+
+	/** Enter or Space on a focused reference is a click. */
+	function referenceKey(event) {
+		if (event.key !== 'Enter' && event.key !== ' ') {
+			return;
+		}
+		const ref = event.target.closest('.ref[data-ref-path], .ref[data-paste-turn], .ref-token');
+		if (!ref) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		openReference(ref);
+	}
+
 	/** The interactive bits a transcript and the subagent overlay share: links, copies, tool menus. */
 	function handleRichClick(event) {
+		const ref = event.target.closest('.ref[data-ref-path], .ref[data-paste-turn], .ref-token');
+		if (ref) {
+			event.preventDefault();
+			event.stopPropagation();
+			closeToolMenus();
+			openReference(ref);
+			return true;
+		}
 		const openSub = event.target.closest('button.tool-open-subagent');
 		if (openSub) {
 			event.preventDefault();
@@ -4021,6 +4104,8 @@
 		}
 	});
 
+	messagesEl.addEventListener('keydown', referenceKey);
+
 	// Enter and Escape belong to the open question, not to the global Stop shortcut.
 	messagesEl.addEventListener('keydown', (event) => {
 		const card = event.target.closest('.question');
@@ -4085,6 +4170,7 @@
 	const subagentMessagesEl = $('subagent-messages');
 	if (subagentMessagesEl) {
 		subagentMessagesEl.addEventListener('click', handleRichClick);
+		subagentMessagesEl.addEventListener('keydown', referenceKey);
 		subagentMessagesEl.addEventListener(
 			'scroll',
 			() => {
@@ -5196,7 +5282,7 @@
 			const tail = tailPattern.exec(token);
 			const tailText = tail ? tail[0] : '';
 			const body = tailText ? token.slice(0, -tailText.length) : token;
-			out += '<span class="ref-token">' + esc(body) + '</span>' + esc(tailText);
+			out += '<span class="ref-token" role="link" tabindex="0" title="Open this reference">' + esc(body) + '</span>' + esc(tailText);
 			last = start + token.length;
 		}
 		out += esc(source.slice(last));

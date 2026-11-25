@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as vscode from 'vscode';
@@ -18,7 +18,7 @@ import { APPROVAL_LABELS, MODE_LABELS, SANDBOX_LABELS } from '../lib/policy';
 import { reviewedPaths } from '../lib/review-model';
 import { turnsOf, type Step, type Turn } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
-import type { Approval, ApprovalDecision, AttachmentPart, Message, SandboxMode, WorkMode } from '../lib/types';
+import type { Approval, ApprovalDecision, AttachmentPart, Message, SandboxMode, TextAttachment, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
 import { DirtyEditorError, type JournalApi } from '../lib/journal';
 import {
@@ -32,8 +32,8 @@ import {
 	planTargetFor,
 	type PlanTarget,
 } from '../lib/plan-files';
-import { formatReference } from '../lib/references';
-import { guardPath, isInside, sandboxAllowsWrites } from '../lib/sandbox';
+import { formatReference, looksLikePath, parseReferences } from '../lib/references';
+import { PathEscapeError, guardPath, isInside, sandboxAllowsWrites } from '../lib/sandbox';
 import {
 	taskChildrenOf,
 	taskGraphViewOf,
@@ -146,6 +146,51 @@ const MARKDOWN_PREVIEW_VIEW_TYPE = 'vscode.markdown.preview.editor';
  */
 export function rightmostEditorColumn(columns: readonly vscode.ViewColumn[]): vscode.ViewColumn {
 	return columns.length ? (Math.max(...columns) as vscode.ViewColumn) : vscode.ViewColumn.Active;
+}
+
+const REFERENCE_TOKEN_MAX = 2_048;
+const REFERENCE_PATH_MAX = 4_096;
+
+/** What a clicked transcript chip or inline token opens. */
+export interface ReferenceTarget {
+	path: string;
+	start?: number;
+	end?: number;
+	/** Whether a missing file is worth a notice: a prose-shaped token is not. */
+	reportMissing: boolean;
+}
+
+/** One inline token must be exactly one whole reference; prose, several refs and folders are not. */
+export function referenceFromToken(token: unknown): ReferenceTarget | undefined {
+	if (typeof token !== 'string') {
+		return undefined;
+	}
+	const text = token.trim();
+	if (!text || text.length > REFERENCE_TOKEN_MAX) {
+		return undefined;
+	}
+	const refs = parseReferences(text);
+	if (refs.length !== 1) {
+		return undefined;
+	}
+	const ref = refs[0]!;
+	if (ref.start !== 0 || ref.end !== text.length || ref.kind === 'folder') {
+		return undefined;
+	}
+	return {
+		path: ref.path,
+		...(ref.range ? { start: ref.range.start, end: ref.range.end } : {}),
+		reportMissing: looksLikePath(ref),
+	};
+}
+
+/** 1-based inclusive lines to 0-based document lines; an invalid or empty range opens at the top. */
+export function clampLineRange(start: number, end: number, lineCount: number): { start: number; end: number } | undefined {
+	if (lineCount < 1 || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) {
+		return undefined;
+	}
+	const first = Math.min(start - 1, lineCount - 1);
+	return { start: first, end: Math.max(first, Math.min(end - 1, lineCount - 1)) };
 }
 
 /** The chat: a webview view in the Secondary Side Bar, plus an optional editor window. */
@@ -2150,6 +2195,12 @@ export function chatPanel(ctx: Context): void {
 				case 'openUrl':
 					await openLink(String(message.url ?? ''));
 					break;
+				case 'openReference':
+					await openReference(message, source);
+					break;
+				case 'openPastedText':
+					await openPastedText(message, source);
+					break;
 				case 'copy':
 					await vscode.env.clipboard.writeText(String(message.text ?? ''));
 					break;
@@ -2304,6 +2355,184 @@ export function chatPanel(ctx: Context): void {
 			}
 		} catch {
 			post({ type: 'notice', text: `Could not open ${url}` });
+		}
+	};
+
+	/** Where a clicked reference opens: beside the chat tab when it is an editor, else the rightmost group. */
+	const referenceColumn = (source: vscode.Webview): vscode.ViewColumn =>
+		panel && panel.webview === source
+			? vscode.ViewColumn.Beside
+			: rightmostEditorColumn(vscode.window.tabGroups.all.map((group) => group.viewColumn));
+
+	/** Open the file a transcript chip or token names. The webview is never trusted. */
+	const openReference = async (message: Record<string, unknown>, source: vscode.Webview): Promise<void> => {
+		const session = ctx.sessions.active();
+		if (!session) {
+			return;
+		}
+		// A stale render from a chat the user already left must not open against the new workspace.
+		if (typeof message.sessionId === 'string' && message.sessionId && message.sessionId !== session.id) {
+			post({ type: 'notice', text: 'This chat changed — click the reference again.' }, source);
+			return;
+		}
+		const start = typeof message.start === 'number' && Number.isSafeInteger(message.start) ? message.start : undefined;
+		const end = typeof message.end === 'number' && Number.isSafeInteger(message.end) ? message.end : start;
+		const target: ReferenceTarget | undefined =
+			typeof message.token === 'string'
+				? referenceFromToken(message.token)
+				: typeof message.path === 'string' && message.path && message.path.length <= REFERENCE_PATH_MAX
+					? { path: message.path, ...(start !== undefined ? { start, end } : {}), reportMissing: true }
+					: undefined;
+		if (!target) {
+			return;
+		}
+		const workspace = session.policy.workingDirectory;
+		if (!workspace.trim()) {
+			post({ type: 'notice', text: 'This chat has no working directory.' }, source);
+			return;
+		}
+		try {
+			const absolute = await guardPath(workspace, target.path, {
+				access: 'read',
+				sandboxMode: session.policy.sandboxMode,
+				denyReadPaths: session.policy.denyReadPaths,
+			});
+			if (!existsSync(absolute)) {
+				if (target.reportMissing) {
+					post({ type: 'notice', text: `${target.path} is no longer on disk.` }, source);
+				}
+				return;
+			}
+			// Folders and PDFs are not click targets; an inline token can still name one.
+			if (statSync(absolute).isDirectory() || /\.pdf$/i.test(absolute)) {
+				return;
+			}
+			const document = await vscode.workspace.openTextDocument(vscode.Uri.file(absolute));
+			const editor = await vscode.window.showTextDocument(document, {
+				preview: true,
+				viewColumn: referenceColumn(source),
+			});
+			const lines =
+				target.start !== undefined && target.end !== undefined
+					? clampLineRange(target.start, target.end, document.lineCount)
+					: undefined;
+			if (lines) {
+				const range = new vscode.Range(lines.start, 0, lines.end, document.lineAt(lines.end).text.length);
+				editor.selection = new vscode.Selection(range.start, range.end);
+				editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+			} else {
+				const top = new vscode.Position(0, 0);
+				editor.selection = new vscode.Selection(top, top);
+				editor.revealRange(new vscode.Range(top, top), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+			}
+		} catch (error) {
+			ctx.log.message(`open reference failed: ${describe(error)}`);
+			post(
+				{
+					type: 'notice',
+					text:
+						error instanceof PathEscapeError
+							? 'That reference is outside what this chat may read.'
+							: `Could not open ${target.path}.`,
+				},
+				source,
+			);
+		}
+	};
+
+	/** The read-only document a sent pasted-text chip opens. */
+	const PASTE_SCHEME = 'comonad-paste';
+	interface PastedTarget {
+		sessionId: string;
+		turn: number;
+		index: number;
+	}
+
+	/**
+	 * The paste attachment of one turn. A prompt accepted by the composer but not yet committed by
+	 * `runTurn` lives only in `pendingPrompt`, so the live turn's index is recomputed the same way
+	 * `history()` does (see 574-583).
+	 */
+	const pastedPart = (session: Session, turn: number, index: number): TextAttachment | undefined => {
+		const stored = turnsOf(session.transcript, 0, session.notes ?? []).find((candidate) => candidate.index === turn);
+		let parts = stored?.promptAttachments;
+		if (!parts && pendingPrompt?.sessionId === session.id) {
+			const pending: Message = {
+				role: 'user',
+				content: pendingPrompt.text,
+				attachments: pendingPrompt.attachments,
+				at: pendingPrompt.at,
+			};
+			const last = turnsOf([...session.transcript, pending], 0, session.notes ?? []).at(-1);
+			if (last?.index === turn) {
+				parts = pendingPrompt.attachments;
+			}
+		}
+		const part = parts?.[index];
+		return part?.kind === 'text' && part.origin === 'user' && part.form === 'note' ? part : undefined;
+	};
+
+	const pastedTargetOf = (uri: vscode.Uri): PastedTarget | undefined => {
+		if (uri.scheme !== PASTE_SCHEME) {
+			return undefined;
+		}
+		try {
+			const params = JSON.parse(decodeURIComponent(uri.query)) as Record<string, unknown>;
+			if (typeof params.sessionId !== 'string' || typeof params.turn !== 'number' || typeof params.index !== 'number') {
+				return undefined;
+			}
+			if (!Number.isInteger(params.turn) || !Number.isInteger(params.index)) {
+				return undefined;
+			}
+			return { sessionId: params.sessionId, turn: params.turn, index: params.index };
+		} catch {
+			return undefined;
+		}
+	};
+
+	const pastedUri = (target: PastedTarget, name?: string): vscode.Uri =>
+		vscode.Uri.from({
+			scheme: PASTE_SCHEME,
+			path: '/' + (name || 'pasted text').replace(/[/\\]/g, '_'),
+			query: encodeURIComponent(JSON.stringify(target)),
+		});
+
+	ctx.effect(() => {
+		const disposable = vscode.workspace.registerTextDocumentContentProvider(PASTE_SCHEME, {
+			provideTextDocumentContent: (uri) => {
+				const target = pastedTargetOf(uri);
+				const session = target ? ctx.sessions.get(target.sessionId) : undefined;
+				return (
+					(target && session && pastedPart(session, target.turn, target.index)?.text) ??
+					'[This pasted text is no longer available.]'
+				);
+			},
+		});
+		return () => disposable.dispose();
+	});
+
+	const openPastedText = async (message: Record<string, unknown>, source: vscode.Webview): Promise<void> => {
+		const id = typeof message.sessionId === 'string' ? message.sessionId : '';
+		const session = (id ? ctx.sessions.get(id) : undefined) ?? ctx.sessions.active();
+		const turn = typeof message.turn === 'number' ? message.turn : NaN;
+		const index = typeof message.index === 'number' ? message.index : NaN;
+		if (!session || !Number.isInteger(turn) || !Number.isInteger(index)) {
+			return;
+		}
+		const part = pastedPart(session, turn, index);
+		if (!part) {
+			post({ type: 'notice', text: 'That pasted text is no longer available.' }, source);
+			return;
+		}
+		try {
+			const document = await vscode.workspace.openTextDocument(pastedUri({ sessionId: session.id, turn, index }, part.name));
+			await vscode.window.showTextDocument(document, {
+				preview: true,
+				viewColumn: referenceColumn(source),
+			});
+		} catch (error) {
+			ctx.log.message(`open pasted text failed: ${describe(error)}`);
+			post({ type: 'notice', text: 'Could not open that pasted text.' }, source);
 		}
 	};
 

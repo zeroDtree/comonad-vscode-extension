@@ -141,7 +141,14 @@ const MATH_PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-mat
 const MATH_RESOURCES = join(MATH_PACKAGE, 'resources');
 import mathEntry from 'comonad-plugin-math';
 import { ChatWebviewAssets } from '../services/chat-assets';
-import { MAX_ANSWER_CHARS, chatDocument, sanitizeQuestionAnswers, statusDetail } from '../ui/chat-panel';
+import {
+	MAX_ANSWER_CHARS,
+	chatDocument,
+	clampLineRange,
+	referenceFromToken,
+	sanitizeQuestionAnswers,
+	statusDetail,
+} from '../ui/chat-panel';
 import { settingsDocument, settingsPanel } from '../ui/settings-panel';
 import { applyFileReviewChanges, fileReviewDocument } from '../ui/file-review-editor';
 import { reviewDocument } from '../ui/review-panel';
@@ -8500,6 +8507,41 @@ suite('Explicit references', () => {
 		}
 	});
 
+	test('a clicked token must be exactly one whole reference', () => {
+		assert.deepStrictEqual(referenceFromToken('@src/a.ts:2-3'), {
+			path: 'src/a.ts',
+			start: 2,
+			end: 3,
+			reportMissing: true,
+		});
+		assert.deepStrictEqual(referenceFromToken('@"content/机器学习/a b.md":9'), {
+			path: 'content/机器学习/a b.md',
+			start: 9,
+			end: 9,
+			reportMissing: true,
+		});
+		assert.deepStrictEqual(referenceFromToken('@symbol:src/auth.ts:Auth.signIn'), {
+			path: 'src/auth.ts',
+			reportMissing: true,
+		});
+		assert.strictEqual(referenceFromToken('see @src/a.ts'), undefined, 'a token is the whole text, not prose around one');
+		assert.strictEqual(referenceFromToken('@a.ts then @b.ts'), undefined, 'one click opens one reference');
+		assert.strictEqual(referenceFromToken('@src/lib/'), undefined, 'folders are not click targets');
+		assert.strictEqual(referenceFromToken('@'), undefined);
+		assert.strictEqual(referenceFromToken('@' + 'x'.repeat(4_096)), undefined, 'the token length is bounded');
+		assert.strictEqual(referenceFromToken('@foo')?.reportMissing, false, 'a prose fragment fails quietly');
+	});
+
+	test('a clicked line range is clamped to the document', () => {
+		assert.deepStrictEqual(clampLineRange(2, 3, 10), { start: 1, end: 2 });
+		assert.deepStrictEqual(clampLineRange(2, 130, 10), { start: 1, end: 9 });
+		assert.deepStrictEqual(clampLineRange(99, 130, 10), { start: 9, end: 9 });
+		assert.deepStrictEqual(clampLineRange(1, 1, 1), { start: 0, end: 0 });
+		assert.strictEqual(clampLineRange(0, 3, 10), undefined);
+		assert.strictEqual(clampLineRange(3, 2, 10), undefined);
+		assert.strictEqual(clampLineRange(1, 2, 0), undefined);
+	});
+
 	test('a reference inside inline code or a fence stays literal', () => {
 		// The real bug: a plan body says ``不写 `[@...]` 引用`` and the placeholder was stat'ed.
 		assert.deepStrictEqual(parseReferences('write `[@...]` here'), []);
@@ -8985,6 +9027,34 @@ suite('Explicit references', () => {
 		assert.ok(panel.includes('sandbox: ctx.host.sandboxKind()'), 'the state carries the sandbox kind');
 		assert.ok(js.includes("state.sandbox === 'none'") && js.includes('remote · no sandbox'), 'the guest renders it');
 		assert.ok(css.includes('#environment'), 'and it is styled');
+	});
+
+	test('a reference chip and an inline token open their source', () => {
+		const root = join(__dirname, '..', '..');
+		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const chips = js.slice(js.indexOf('function referenceChips'), js.indexOf('function renderPromptAttachments'));
+		for (const needle of ["dataset.refPath", "dataset.pasteTurn", "part.origin === 'reference'", 'part.text.slice(0, 2_000)']) {
+			assert.ok(chips.includes(needle), needle);
+		}
+		assert.ok(js.includes('class="ref-token" role="link" tabindex="0"'), 'inline tokens are focusable links');
+		assert.ok(js.includes("type: 'openReference'") && js.includes("type: 'openPastedText'"), 'both chip kinds ask the host');
+		assert.ok(js.includes('function openReference') && js.includes('function referenceKey'), 'click and keyboard share one activation');
+		assert.ok(css.includes('.msg.user .ref[data-ref-path]') && css.includes('.ref-token[role="link"]'));
+		assert.ok(css.includes('cursor: pointer') && css.includes(':focus-visible'));
+		for (const needle of [
+			"case 'openReference'",
+			"case 'openPastedText'",
+			'PASTE_SCHEME',
+			'registerTextDocumentContentProvider',
+			'parseReferences',
+			'clampLineRange',
+			'InCenterIfOutsideViewport',
+		]) {
+			assert.ok(panel.includes(needle), needle);
+		}
+		assert.match(panel, /guardPath\(workspace, target\.path/, 'the path is guarded before opening');
 	});
 });
 
