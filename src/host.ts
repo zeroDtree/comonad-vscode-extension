@@ -25,7 +25,7 @@ export interface HostConfig {
 
 /** Every `comonad.*` key the manifest declares, kernel and plugin keys alike: what an import reads. */
 function declaredKeys(): string[] {
-	const manifest = vscode.extensions.getExtension('comonad.comonad')?.packageJSON as
+	const manifest = vscode.extensions.getExtension('zeroDtree.comonad')?.packageJSON as
 		| { contributes?: { configuration?: { properties?: Record<string, unknown> } } }
 		| undefined;
 	const properties = manifest?.contributes?.configuration?.properties ?? {};

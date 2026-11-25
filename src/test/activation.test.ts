@@ -4,7 +4,7 @@ import * as vscode from 'vscode';
 
 suite('Comonad extension', () => {
 	test('activates and registers commands', async () => {
-		const extension = vscode.extensions.getExtension('comonad.comonad');
+		const extension = vscode.extensions.getExtension('zeroDtree.comonad');
 		assert.ok(extension, 'extension is installed');
 		await extension!.activate();
 		assert.ok(extension!.isActive, 'extension is active');

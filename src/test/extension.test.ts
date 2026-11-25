@@ -9253,7 +9253,7 @@ suite('Markdown math plugin', () => {
 	});
 
 	test('the plugin ships as an installable row with its built Math bundle', async () => {
-		const extension = vscode.extensions.getExtension('comonad.comonad');
+		const extension = vscode.extensions.getExtension('zeroDtree.comonad');
 		assert.ok(extension, 'the extension is installed in the test host');
 		const source = join(extension!.extensionUri.fsPath, 'packages', 'comonad-plugin-math');
 		assert.ok(existsSync(join(source, 'dist', 'index.js')), 'the plugin bundle is built beside the extension');
