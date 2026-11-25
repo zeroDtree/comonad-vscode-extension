@@ -2,7 +2,7 @@
   "name": "comonad",
   "displayName": "Comonad Agent",
   "description": "Local-first, auditable coding agent: graph-orchestrated tool loop, sandboxed shell, checkpoints, hooks, subagents and MCP.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "zeroDtree",
   "icon": "resources/icon.png",
   "license": "AGPL-3.0-only",

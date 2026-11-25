@@ -4,9 +4,17 @@ All notable changes to the "comonad" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
-## [Unreleased]
+## [0.2.2] — 2026-11-25
 
-The next release turns the transcript into a readable record and closes the remaining safety gaps.
+- Reference chips under a sent message, and the `@` tokens in its text, are now clickable: a file
+  or symbol reference opens in the editor with its line range selected. Folder and PDF chips stay
+  read-only.
+- A sent message's **Pasted text** chip opens the stored block in a read-only tab.
+- Added host tests for single-token reference parsing, line-range clamping and the chip wiring.
+
+## [0.2.1] — 2026-11-25
+
+This release turns the transcript into a readable record and closes the remaining safety gaps.
 Highlights are below; the full implementation notes are linked at the end. The user guide lives at
 <https://zeroDtree.github.io/comonad-vscode-extension/>.
 
