@@ -117,6 +117,7 @@ import {
 	normalizeAgentPatch,
 	profileKeyEnvs,
 	sanitizeSubagentGrants,
+	Settings,
 	subagentGrant,
 	type Profile,
 } from '../services/settings';
@@ -1089,6 +1090,7 @@ suite('Comonad domain', () => {
 			compactionHeadroom: 20_000,
 			compactionRetainPercent: 20,
 			questionNotification: true,
+			excludeComonadFromReview: true,
 			network: false,
 			sandboxMode: 'workspace-write' as const,
 			workingDirectory: '/ws',
@@ -1108,6 +1110,12 @@ suite('Comonad domain', () => {
 		assert.deepStrictEqual(normalizeAgentPatch({ toolCard: 'nonsense' }, current), { toolCard: 'collapsed' });
 		assert.deepStrictEqual(normalizeAgentPatch({ questionNotification: false }, current), { questionNotification: false });
 		assert.deepStrictEqual(normalizeAgentPatch({ questionNotification: true }, current), { questionNotification: true });
+		assert.deepStrictEqual(normalizeAgentPatch({ excludeComonadFromReview: false }, current), {
+			excludeComonadFromReview: false,
+		});
+		assert.deepStrictEqual(normalizeAgentPatch({ excludeComonadFromReview: 'nonsense' }, current), {
+			excludeComonadFromReview: true,
+		});
 		assert.deepStrictEqual(normalizeAgentPatch({ compactionHeadroom: -5 }, current), { compactionHeadroom: 0 });
 		assert.deepStrictEqual(normalizeAgentPatch({ compactionHeadroom: '45000' }, current), { compactionHeadroom: 45_000 });
 		assert.deepStrictEqual(normalizeAgentPatch({ compactionHeadroom: 9_000_000 }, current), { compactionHeadroom: 2_000_000 });
@@ -1146,6 +1154,7 @@ suite('Comonad domain', () => {
 				'compactionHeadroom',
 				'compactionRetainPercent',
 				'questionNotification',
+				'excludeComonadFromReview',
 				'network',
 				'sandboxMode',
 				'workingDirectory',
@@ -2805,6 +2814,24 @@ suite('Comonad domain', () => {
 		assert.match(guest, /checked\('question-notification', config\.questionNotification\)/, 'the guest renders it');
 	});
 
+	test('the UI tab carries the .comonad review exclusion switch', () => {
+		const panel = readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		assert.match(panel, /id="exclude-comonad"[^>]*data-key="excludeComonadFromReview"/, 'the switch is a live UI-tab control');
+		assert.match(
+			panel,
+			/excludeComonadFromReview: config\.excludeComonadFromReview/,
+			'its state is pushed with the rest of the config',
+		);
+		assert.match(panel, /<h2 class="group-title">Review<\/h2>/, 'it has its own review group');
+		const guest = readFileSync(join(__dirname, '..', '..', 'resources', 'settings.js'), 'utf8');
+		assert.match(guest, /checked\('exclude-comonad', config\.excludeComonadFromReview\)/, 'the guest renders it');
+		assert.match(
+			readFileSync(join(__dirname, '..', '..', 'src', 'ui', 'file-review-editor.ts'), 'utf8'),
+			/includeExcluded: true/,
+			'an explicit file open still asks for the hidden file',
+		);
+	});
+
 	test('a write without a scope follows the layer that already owns the key', async () => {
 		const kernel = await createTestKernel();
 		try {
@@ -2917,6 +2944,11 @@ suite('Comonad domain', () => {
 			manifest.contributes.configuration.properties['comonad.compactionRetainPercent']?.default,
 			DEFAULT_COMPACTION_RETAIN_PERCENT,
 			'the manifest default tracks the code default',
+		);
+		assert.strictEqual(
+			manifest.contributes.configuration.properties['comonad.excludeComonadFromReview']?.default,
+			true,
+			'the review filter is on by default',
 		);
 	});
 
@@ -4443,6 +4475,17 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(kernel.ctx.settings.get().questionNotification, true);
 			await kernel.ctx.settings.update('questionNotification', false);
 			assert.strictEqual(kernel.ctx.settings.get().questionNotification, false);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('the .comonad review exclusion defaults on and can be turned off', async () => {
+		const kernel = await createTestKernel();
+		try {
+			assert.strictEqual(kernel.ctx.settings.get().excludeComonadFromReview, true);
+			await kernel.ctx.settings.update('excludeComonadFromReview', false);
+			assert.strictEqual(kernel.ctx.settings.get().excludeComonadFromReview, false);
 		} finally {
 			await kernel.dispose();
 		}
@@ -7173,6 +7216,8 @@ interface Harness {
 	root: string;
 	work: string;
 	checkpoints: Checkpoints;
+	/** Change the raw settings store between reads; `Settings.get()` reads it each time. */
+	setConfig(patch: Record<string, unknown>): void;
 	dispose(): void;
 }
 
@@ -7180,13 +7225,14 @@ async function harness(): Promise<Harness> {
 	const root = mkdtempSync(join(tmpdir(), 'comonad-journal-'));
 	const work = join(root, 'ws');
 	mkdirSync(work, { recursive: true });
+	const values: Record<string, unknown> = {};
 	const host = {
 		storage: hostStorage(join(root, 'storage')),
 		extensionUri: undefined,
 		home: () => root,
 		workspace: () => work,
 		trusted: () => true,
-		config: () => ({}),
+		config: () => values,
 		update: async () => undefined,
 		secret: async () => undefined,
 		setSecret: async () => undefined,
@@ -7198,11 +7244,10 @@ async function harness(): Promise<Harness> {
 	} as unknown as Host;
 	const ctx = new Context();
 	ctx.provide('host', host);
-	const fiber = ctx.plugin(
-		function journal(child: Context) {
-			child.plugin(Checkpoints);
-		},
-	);
+	const fiber = ctx.plugin(async function journal(child: Context) {
+		await child.plugin(Settings);
+		await child.plugin(Checkpoints);
+	});
 	await fiber;
 	const checkpoints = ctx.checkpoints;
 	return {
@@ -7210,6 +7255,9 @@ async function harness(): Promise<Harness> {
 		root,
 		work,
 		checkpoints,
+		setConfig(patch) {
+			Object.assign(values, patch);
+		},
 		dispose() {
 			rmSync(root, { recursive: true, force: true });
 		},
@@ -7246,6 +7294,38 @@ suite('Per-file checkpoints', () => {
 			assert.strictEqual(pending.files[0]!.additions, 1);
 			assert.strictEqual(pending.files[0]!.deletions, 0);
 			assert.strictEqual(pending.files[0]!.created, false);
+		} finally {
+			h.dispose();
+		}
+	});
+
+	test('the .comonad folder is hidden from review by default and stays pending', async () => {
+		const h = await harness();
+		try {
+			await agentWrite(h, 's', 1, '.comonad/plans/chat.md', 'plan\n');
+			await agentWrite(h, 's', 1, 'src/a.ts', 'one\n');
+
+			assert.deepStrictEqual(
+				(await h.checkpoints.pending(h.work, 's')).files.map((file) => file.path),
+				['src/a.ts'],
+				'listings see only the project file',
+			);
+			assert.deepStrictEqual(
+				(await h.checkpoints.pending(h.work, 's', undefined, { includeExcluded: true })).files.map((file) => file.path),
+				['.comonad/plans/chat.md', 'src/a.ts'],
+				'an explicit file open still sees the hidden file',
+			);
+
+			// Keep All's list is pending(): keeping it leaves the hidden file pending in the journal.
+			await h.checkpoints.keep(h.work, 's', ['src/a.ts']);
+			assert.deepStrictEqual((await h.checkpoints.pending(h.work, 's')).files, []);
+
+			// Off is exactly the old behavior.
+			h.setConfig({ excludeComonadFromReview: false });
+			assert.deepStrictEqual(
+				(await h.checkpoints.pending(h.work, 's')).files.map((file) => file.path),
+				['.comonad/plans/chat.md'],
+			);
 		} finally {
 			h.dispose();
 		}

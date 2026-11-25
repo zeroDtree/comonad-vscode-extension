@@ -25,6 +25,12 @@ and press `Cmd/Ctrl+S` like any other file; the tab carries VS Code's own dirty 
 reviewed, the list stays on screen as a **reviewed** list, newest decision first. A new pending
 change switches it back to the pending files.
 
+Files under the workspace's `.comonad` folder — plans, scratch and Comonad's own bookkeeping — are
+left out of the pending list, the Review tab and Keep All / Undo All by default. They stay pending in
+the journal, so the **Hide .comonad files from review** switch in Settings → UI → Review brings them
+back. `Comonad: Review Changed File` still opens one explicitly, and a custom `planDirectory` outside
+`.comonad` is not hidden.
+
 - **Keep** accepts a file or hunk.
 - **Undo** restores the content from before the agent wrote it.
 - **Review** opens the **Review Changes** tab: a file list with `+N −M` counts, the selected file's

@@ -368,7 +368,11 @@ export class FileReviewEditor {
 		}
 		let pending: Awaited<ReturnType<typeof this.ctx.checkpoints.pending>>;
 		try {
-			pending = await this.ctx.checkpoints.pending(target.scope.workspace, target.scope.sessionId, unsavedPaths(target.scope.workspace), { diff: false });
+			pending = await this.ctx.checkpoints.pending(target.scope.workspace, target.scope.sessionId, unsavedPaths(target.scope.workspace), {
+				diff: false,
+				// The user named this file; the review setting trims listings, not an explicit open.
+				includeExcluded: true,
+			});
 		} catch (error) {
 			if (run !== this.generation || this.disposed) {
 				return this.state ?? fallback;

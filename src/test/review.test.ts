@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
-import type { FileChange, JournalFile } from '../lib/journal';
+import { isComonadPath, type FileChange, type JournalEntry, type JournalFile } from '../lib/journal';
 import { diffLines, hunkKey, sameDocumentText } from '../lib/line-diff';
 import { fileReviewBlocked, fileReviewIdle, fileReviewState, hunkAnchorLine, hunkViews } from '../lib/file-review-model';
-import { fileSummary, findHunk, reviewBlocks, reviewState } from '../lib/review-model';
+import { fileSummary, findHunk, reviewBlocks, reviewedPaths, reviewState } from '../lib/review-model';
 import type { ReviewBlock } from '../lib/review-protocol';
 
 function changeOf(path: string, baseline: string, current: string, extra: Partial<FileChange> = {}): FileChange {
@@ -292,5 +292,30 @@ suite('File review view model', () => {
 		assert.strictEqual(idle.reason, 'no-pending');
 		assert.strictEqual(idle.message, 'No pending changes for this file.');
 		assert.strictEqual(idle.blockedReason, 'Nothing pending');
+	});
+
+	test('only the workspace .comonad folder is an internal path', () => {
+		for (const path of ['.comonad', '.comonad/plans/x.md', '.comonad\\scratch\\x', './.comonad/x']) {
+			assert.strictEqual(isComonadPath(path), true, path);
+		}
+		for (const path of ['', '.comonadx/x', 'src/.comonad/x', 'a.comonad/x', 'src/a.ts']) {
+			assert.strictEqual(isComonadPath(path), false, path);
+		}
+	});
+
+	test('the reviewed list hides .comonad entries when asked', () => {
+		const entry = (path: string, acceptedAt: number): JournalEntry => ({
+			path,
+			turn: 1,
+			before: null,
+			after: 'x',
+			at: acceptedAt,
+			accepted: true,
+			acceptedAt,
+		});
+		const entries = [entry('.comonad/plans/a.md', 10), entry('src/a.ts', 20), entry('src/b.ts', 30)];
+
+		assert.deepStrictEqual(reviewedPaths(entries), ['src/b.ts', 'src/a.ts', '.comonad/plans/a.md']);
+		assert.deepStrictEqual(reviewedPaths(entries, { excludeComonad: true }), ['src/b.ts', 'src/a.ts']);
 	});
 });

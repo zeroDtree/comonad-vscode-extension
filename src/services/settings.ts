@@ -248,6 +248,8 @@ export interface Config {
 	skills: boolean;
 	memory: boolean;
 	checkpoints: boolean;
+	/** Leave files under the workspace's `.comonad` folder out of the review listings. */
+	excludeComonadFromReview: boolean;
 	chatWindow: boolean;
 	/** Show a VS Code notification when a question waits and no chat webview is attached. */
 	questionNotification: boolean;
@@ -302,6 +304,7 @@ export const CONFIG_KEYS = [
 	'skills',
 	'memory',
 	'checkpoints',
+	'excludeComonadFromReview',
 	'chatWindow',
 	'questionNotification',
 	'contextForm',
@@ -331,6 +334,7 @@ export const AGENT_KEYS = [
 	'compactionHeadroom',
 	'compactionRetainPercent',
 	'questionNotification',
+	'excludeComonadFromReview',
 	'network',
 	'sandboxMode',
 	'workingDirectory',
@@ -416,6 +420,9 @@ export function normalizeAgentPatch(
 	}
 	if (has('questionNotification')) {
 		next.questionNotification = Boolean(patch.questionNotification);
+	}
+	if (has('excludeComonadFromReview')) {
+		next.excludeComonadFromReview = Boolean(patch.excludeComonadFromReview);
 	}
 	if (has('network')) {
 		next.network = Boolean(patch.network);
@@ -538,6 +545,7 @@ export class Settings extends Service {
 			skills: flag('skills', true),
 			memory: flag('memory', true),
 			checkpoints: flag('checkpoints', true),
+			excludeComonadFromReview: flag('excludeComonadFromReview', true),
 			chatWindow: flag('chatWindow', false),
 			questionNotification: flag('questionNotification', true),
 			contextForm: oneOf('contextForm', CONTEXT_FORMS, 'rendered'),

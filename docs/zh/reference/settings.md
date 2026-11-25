@@ -123,6 +123,12 @@ partial transcript；子任务进入 `paused`。`resume` 用新的分段预算�
 
 日志是插件树里的一行；关掉它会连同审查命令一起移除。见[检查点](/zh/guide/checkpoints)。
 
+## 审查
+
+| 键 | 默认值 | 用途 |
+| --- | --- | --- |
+| `excludeComonadFromReview` | `true` | 工作区 `.comonad` 目录下的文件不出现在待处理列表、Review 标签页和 Keep All / Undo All 中。它们仍留在日志里保持待处理，关掉此开关即恢复；`Comonad: Review Changed File` 仍可显式打开单个文件。自定义到 `.comonad` 之外的 `planDirectory` 不会被隐藏 |
+
 ## 分词器
 
 | 键 | 默认值 | 用途 |

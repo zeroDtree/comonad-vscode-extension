@@ -15,11 +15,12 @@ import {
 import { asReasoningEffort } from '../lib/effort';
 import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES } from '../lib/images';
 import { APPROVAL_LABELS, MODE_LABELS, SANDBOX_LABELS } from '../lib/policy';
+import { reviewedPaths } from '../lib/review-model';
 import { turnsOf, type Step, type Turn } from '../lib/turns';
 import { clip, describe, preview } from '../lib/util';
 import type { Approval, ApprovalDecision, AttachmentPart, Message, SandboxMode, WorkMode } from '../lib/types';
 import { GENERATION_LABELS, GENERATION_TRIGGERS, generationTrigger, type GenerationTrigger } from '../lib/generations';
-import { DirtyEditorError, type JournalApi, type JournalEntry } from '../lib/journal';
+import { DirtyEditorError, type JournalApi } from '../lib/journal';
 import {
 	asBuildMode,
 	buildPlanPrompt,
@@ -951,14 +952,9 @@ export function chatPanel(ctx: Context): void {
 		let reviewed: string[] = [];
 		if (!files.length && session && workspace && journal) {
 			try {
-				const latest = new Map<string, JournalEntry>();
-				for (const entry of await journal.entries(workspace, session.id)) {
-					latest.set(entry.path, entry);
-				}
-				reviewed = [...latest.values()]
-					.filter((entry) => entry.accepted)
-					.sort((left, right) => (right.acceptedAt ?? right.at) - (left.acceptedAt ?? left.at) || left.path.localeCompare(right.path))
-					.map((entry) => entry.path);
+				reviewed = reviewedPaths(await journal.entries(workspace, session.id), {
+					excludeComonad: ctx.settings.get().excludeComonadFromReview,
+				});
 			} catch {
 				reviewed = [];
 			}

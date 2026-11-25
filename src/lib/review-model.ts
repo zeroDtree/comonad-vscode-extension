@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import type { FileChange, JournalFile } from './journal';
+import { isComonadPath, type FileChange, type JournalEntry, type JournalFile } from './journal';
 import { hunkKey, splitLines, stripEol, type LineHunk } from './line-diff';
 import type { ReviewBlock, ReviewFileSummary, ReviewFileView, ReviewRow, ReviewState } from './review-protocol';
 
 /**
- * The Review tab's view model. It turns the journal's two shapes — the per-file listing and one
- * file's line change — into the plain rows a webview can draw. Pure: no `vscode`, no `node:*`.
+ * The review surfaces' shared view model. It turns the journal's two shapes — the per-file listing
+ * and one file's line change — into the plain rows a webview can draw, and derives the chat's
+ * reviewed list from journal entries. Pure: no `vscode`, no `node:*`.
  *
  * Context is three lines, with a `gap` block where more was omitted. The algorithm walks both sides
  * by line number instead of trusting array positions, so CRLF, a missing final newline, a pure
@@ -27,6 +28,24 @@ export function fileSummary(file: JournalFile): ReviewFileSummary {
 		changedOutside: file.changedOutside,
 		dirty: file.dirty,
 	};
+}
+
+/**
+ * The chat's reviewed list: the latest entry per path, accepted and newest decision first. A path
+ * the review setting hides is left out, like the pending list it alternates with.
+ */
+export function reviewedPaths(entries: JournalEntry[], options: { excludeComonad?: boolean } = {}): string[] {
+	const latest = new Map<string, JournalEntry>();
+	for (const entry of entries) {
+		if (options.excludeComonad && isComonadPath(entry.path)) {
+			continue;
+		}
+		latest.set(entry.path, entry);
+	}
+	return [...latest.values()]
+		.filter((entry) => entry.accepted)
+		.sort((left, right) => (right.acceptedAt ?? right.at) - (left.acceptedAt ?? left.at) || left.path.localeCompare(right.path))
+		.map((entry) => entry.path);
 }
 
 /** The hunk a key names, or `undefined` when the file no longer has that block. */

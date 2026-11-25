@@ -10,6 +10,7 @@ import { applyHunk, diffLines, hunkKey, type LineHunk } from '../lib/line-diff';
 import {
 	ChangedOutsideError,
 	DirtyEditorError,
+	isComonadPath,
 	type Blob,
 	type FileChange,
 	type JournalApi,
@@ -17,6 +18,7 @@ import {
 	type KeepHunkOptions,
 	type Overwrite,
 	type Pending,
+	type PendingOptions,
 	type RevertReport,
 } from '../lib/journal';
 import { changeDiff } from '../ui/change-diff';
@@ -85,7 +87,7 @@ declare module 'cordis' {
 }
 
 export class Checkpoints extends Service implements JournalApi {
-	static inject = ['host'];
+	static inject = ['host', 'settings'];
 
 	constructor(ctx: Context) {
 		super(ctx, 'checkpoints');
@@ -197,13 +199,20 @@ export class Checkpoints extends Service implements JournalApi {
 	 * current bytes are hashed in one process, and their diffs come from one `git diff` against a
 	 * temporary index that lists only them.
 	 */
-	async pending(workspace: string, sessionId: string, dirty: (path: string) => boolean = () => false, options: { diff?: boolean } = {}): Promise<Pending> {
+	async pending(workspace: string, sessionId: string, dirty: (path: string) => boolean = () => false, options: PendingOptions = {}): Promise<Pending> {
 		if (!(await this.hasSession(workspace, sessionId))) {
 			return { available: false, files: [] };
 		}
 		const repo = await this.open(workspace, sessionId);
 		const doc = await this.load(repo);
-		const paths = [...new Set(doc.entries.map((entry) => entry.path))].filter((path) => working(doc.entries, path).length > 0);
+		// One policy for every review surface: the chat panel, the Review tab, the file picker and
+		// Keep All / Undo All all read this list. The entries stay in the journal, so a hidden file
+		// remains pending and comes back when the setting is off. A named file (`includeExcluded`) is
+		// read as usual: the setting trims listings, not an explicit open.
+		const hide = options.includeExcluded !== true && this.ctx.settings.get().excludeComonadFromReview;
+		const paths = [...new Set(doc.entries.map((entry) => entry.path))].filter(
+			(path) => (!hide || !isComonadPath(path)) && working(doc.entries, path).length > 0,
+		);
 		if (paths.length === 0) {
 			return { available: true, files: [] };
 		}

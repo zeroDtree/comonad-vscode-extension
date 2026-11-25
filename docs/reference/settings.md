@@ -139,6 +139,12 @@ child unlimited; set a finite root budget if you want a cap.
 The journal is a row of the plugin tree; turning it off removes the review commands with it. See
 [Checkpoints](/guide/checkpoints).
 
+## Review
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `excludeComonadFromReview` | `true` | Leave files under the workspace's `.comonad` folder out of the pending list, the Review tab and Keep All / Undo All. They stay pending in the journal and come back when this is off; `Comonad: Review Changed File` still opens one explicitly. A custom `planDirectory` outside `.comonad` is not hidden |
+
 ## Tokenizers
 
 | Key | Default | Purpose |

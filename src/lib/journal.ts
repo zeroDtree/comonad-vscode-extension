@@ -48,6 +48,24 @@ export interface Pending {
 	files: JournalFile[];
 }
 
+/** Options for `JournalApi.pending`. */
+export interface PendingOptions {
+	/** Skip counts and hunks; a listing-only surface fills them when it opens a file. */
+	diff?: boolean;
+	/** Keep files the review setting hides (`.comonad/**`). Only an explicit per-file open asks. */
+	includeExcluded?: boolean;
+}
+
+/**
+ * Whether a workspace-relative path is inside the workspace's own `.comonad` folder. Journal paths
+ * are already forward-slash and stripped of `./`; the normalization keeps a caller holding a native
+ * path honest. Only the top-level folder matches — `src/.comonad/x` is an ordinary project file.
+ */
+export function isComonadPath(path: string): boolean {
+	const clean = path.replaceAll('\\', '/').replace(/^\.\//, '');
+	return clean === '.comonad' || clean.startsWith('.comonad/');
+}
+
 /**
  * One path's change as the review surfaces read it: the accepted baseline against the file on disk.
  * `hunks` are line diff blocks, so `Keep`/`Undo` can act on one block at a time.
@@ -115,8 +133,9 @@ export interface JournalApi {
 	/** Every entry the journal holds for a session, oldest first. */
 	entries(workspace: string, sessionId: string): Promise<JournalEntry[]>;
 	/** What the agent wrote and the user has not accepted or undone. `diff: false` skips the counts
-	 *  and hunks — a surface that only lists pending files asks for a file's blocks when it opens it. */
-	pending(workspace: string, sessionId: string, dirty?: (path: string) => boolean, options?: { diff?: boolean }): Promise<Pending>;
+	 *  and hunks — a surface that only lists pending files asks for a file's blocks when it opens it.
+	 *  Files the review setting hides are left out unless `includeExcluded` asks. */
+	pending(workspace: string, sessionId: string, dirty?: (path: string) => boolean, options?: PendingOptions): Promise<Pending>;
 	/** Accepts the current content of these paths as the baseline. */
 	keep(workspace: string, sessionId: string, paths: string[]): Promise<void>;
 	/** One path's change, block by block, against the accepted baseline. */

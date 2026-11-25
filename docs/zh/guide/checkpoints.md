@@ -22,6 +22,11 @@ flowchart LR
 圆点和关闭提示；需要语言服务时点 **Open in Editor** 用 VS Code 自己的编辑器打开。全部审查完后，列表
 会保留为 **reviewed** 列表，按最近决定排序；一旦有新的待处理变更，就切回只显示待处理文件。
 
+工作区 `.comonad` 目录下的文件（plan、scratch 以及 Comonad 自己的簿记文件）默认不出现在待处理列表、
+Review 标签页和 Keep All / Undo All 中。它们仍留在日志里保持待处理；关闭 Settings → UI → Review 中的
+**Hide .comonad files from review** 开关即可恢复。`Comonad: Review Changed File` 仍可显式打开单个文件；
+自定义到 `.comonad` 之外的 `planDirectory` 不会被隐藏。
+
 - **Keep** 接受一个文件或 hunk。
 - **Undo** 恢复 agent 写入之前的内容。
 - **Review** 打开 **Review Changes** 标签页：左侧是带 `+N −M` 的文件列表，右侧是选中文件的

@@ -299,6 +299,7 @@ export function settingsPanel(ctx: Context): void {
 				compactionHeadroom: config.compactionHeadroom,
 				compactionRetainPercent: config.compactionRetainPercent,
 				questionNotification: config.questionNotification,
+				excludeComonadFromReview: config.excludeComonadFromReview,
 				model: config.model,
 				permissions: config.permissions,
 			},
@@ -1047,6 +1048,14 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
         <label for="question-notification">Question notification</label>
         <p class="hint">Show a VS Code notification when a question waits for an answer and the chat panel is closed.</p>
         <label class="check"><input type="checkbox" id="question-notification" data-key="questionNotification" /></label>
+      </div>
+    </div>
+    <h2 class="group-title">Review</h2>
+    <div class="group">
+      <div class="field">
+        <label for="exclude-comonad">Hide <code>.comonad</code> files from review</label>
+        <p class="hint">Leave files under the workspace's <code>.comonad</code> folder — plans, scratch and Comonad's own bookkeeping — out of the pending list and the Review tab, and out of Keep All / Undo All. They stay pending and come back when this is off; <strong>Review Changed File</strong> still opens one explicitly.</p>
+        <label class="check"><input type="checkbox" id="exclude-comonad" data-key="excludeComonadFromReview" /></label>
       </div>
     </div>
   </section>

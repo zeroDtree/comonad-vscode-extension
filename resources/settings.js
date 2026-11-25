@@ -397,6 +397,7 @@
 		put($('timeout'), String(config.commandTimeout));
 		checked('timeout-override', config.commandTimeoutOverride);
 		checked('question-notification', config.questionNotification);
+		checked('exclude-comonad', config.excludeComonadFromReview);
 		put($('plans'), config.planDirectory);
 		renderBudget('', config.budget);
 		put($('deny'), (config.denyReadPaths || []).join('\n'));
