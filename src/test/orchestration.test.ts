@@ -6,7 +6,7 @@ import { createTestKernel } from './harness';
 import { BUILTIN_ROLES } from '../lib/agents';
 import { COMONAD_BLOCK } from '../lib/blocks';
 import { clampResumeBudget } from '../lib/budget';
-import { reconcileTaskGraph, taskChildrenOf } from '../lib/task-graph';
+import { reconcileTaskGraph, taskChildrenOf, type TaskBoard } from '../lib/task-graph';
 import { fsTools } from '../tools/fs';
 import { messageTools } from '../tools/message';
 import { orchestrateTools } from '../tools/orchestrate';
@@ -411,6 +411,107 @@ suite('Orchestrator task loop', () => {
 			messages.push(...mailbox.map((record) => record.text));
 			assert.strictEqual(messages.length, 2);
 		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a finished worker is recorded while its batch peer still runs', async () => {
+		const kernel = await createTestKernel();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		try {
+			kernel.ctx.llm.use({
+				name: 'settle-early',
+				async chat(request) {
+					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
+					if (system.includes('You are the explorer subagent of Comonad')) {
+						const prompt = request.messages.find((message) => message.role === 'user')?.content ?? '';
+						if (prompt.includes('# Task beta')) {
+							await gate;
+						}
+						return reply(
+							JSON.stringify({
+								status: 'ok',
+								summary: 'read the facts',
+								evidence: [{ kind: 'note', text: 'read' }],
+								acceptance: [{ id: 'a1', met: true }],
+							}),
+						);
+					}
+					const last = rootStep(request);
+					if (!last) {
+						return reply('', [
+							graphCall([
+								{
+									id: 'alpha',
+									title: 'Read alpha',
+									role: 'explorer',
+									objective: 'Read alpha.',
+									acceptance: [{ id: 'a1', description: 'alpha is read', check: 'evidence' }],
+								},
+								{
+									id: 'beta',
+									title: 'Read beta',
+									role: 'explorer',
+									objective: 'Read beta.',
+									acceptance: [{ id: 'a1', description: 'beta is read', check: 'evidence' }],
+								},
+							]),
+						]);
+					}
+					if (last === 'task_graph') {
+						return reply('', [delegateCall(['alpha', 'beta'])]);
+					}
+					return reply('done');
+				},
+			});
+			await kernel.ctx.plugin(fsTools);
+			await kernel.ctx.plugin(orchestrateTools);
+
+			let intermediate: TaskBoard | undefined;
+			let observe!: () => void;
+			const seen = new Promise<void>((resolve) => {
+				observe = resolve;
+			});
+			kernel.ctx.on('orchestrator/changed', (_id, board) => {
+				if (!board) {
+					return;
+				}
+				const alpha = board.nodes.find((task) => task.id === 'alpha');
+				const beta = board.nodes.find((task) => task.id === 'beta');
+				if (alpha?.status === 'accepted' && alpha.finishedAt !== undefined && beta?.status === 'running') {
+					intermediate = board;
+					observe();
+				}
+			});
+			let timer: NodeJS.Timeout | undefined;
+			const timeout = new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error('alpha was not recorded while beta still ran')), 1_500);
+			});
+			const turn = kernel.ctx.agent.runTurn({ text: 'read both', surface: 'test' });
+			try {
+				await Promise.race([seen, timeout]);
+			} finally {
+				clearTimeout(timer);
+				release();
+			}
+			await turn;
+			assert.ok(intermediate, 'the board saw alpha accepted before beta settled');
+			const final = kernel.ctx.sessions.active()!.taskGraph!;
+			assert.deepStrictEqual(
+				final.nodes.map((task) => [task.id, task.status]),
+				[
+					['alpha', 'accepted'],
+					['beta', 'accepted'],
+				],
+			);
+			for (const task of final.nodes) {
+				assert.ok(task.subagentSessionId, `${task.id} has a child session`);
+			}
+		} finally {
+			release();
 			await kernel.dispose();
 		}
 	});

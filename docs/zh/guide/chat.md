@@ -71,14 +71,18 @@ Network 在 **Policies**（或使用 **Comonad: Toggle Network** 命令）。修
   以及输出预览或完整命令与输出。悬停 `…` 菜单可复制命令/参数或输出。失败调用使用错误色描边。
 - **步骤计时** 运行时实时增长，结束后落在扩展测量的时长上。
 - **回合页脚** 显示 *Worked for 12s · 3 tools* 或 *Working…* / *Stopped*，以及复制、fork 和重新生成操作。
-- **任务板**在任务图有节点时位于输入框上方：accepted/总数、每个节点的角色与状态、最近协作消息数量，以及
-  每个子会话的 **Open**。运行中由 `orchestrator/changed` 事件实时更新。
+- **Task Graph** 在聊天有任务图时显示为模型选择器旁的胶囊：accepted/总数加一个状态圆点。点击打开
+  Agent Map 风格的 **Task Graph** 弹窗——聊天/编排器作为根卡片，每个任务一张卡片，显示状态（被拒绝的
+  任务直接显示 rejection code，如 `stopped`）、耗时和 token 总量；每个 worker/verifier 子会话是一枚
+  带各自耗时与 token 的 chip。点击 chip 打开对应的只读子会话，**← Back** 回到任务图。胶囊与弹窗都随
+  `orchestrator/changed` 实时更新。
 - `write_plan` 调用渲染一张 **Plan ready** 卡片；`edit_plan` 调用渲染 **Plan updated** 卡片。两者都带
   **Preview** 与 **Build plan**。Build plan 把聊天切到 Semi-Write 或 Full Access，归档研究任务图并发送
   新的实现轮次；新轮次从空任务图开始，以计划文件作为交接物。
-- **委派可以打开子会话。** 单任务批次的 `delegate` 工具卡带 **Open session**；多任务批次从任务板打开每个
-  子会话。点开后是只读覆盖层，显示子 Agent 的提示词、步骤和工具结果，并随执行过程更新；**← Back** 回到原聊天，
-  原聊天不受影响。
+- **委派可以打开子会话。** `delegate`/`resume` 工具卡带任务状态、按 worker 角色命名的 **Open**（例如
+  **Open coder**）和指向当前 verifier 的 **Verify**；也可以从 Task Graph 里每个子会话的 chip 打开。
+  点开后是只读覆盖层，显示子 Agent 的提示词、步骤和工具结果，并随执行过程更新；**← Back** 回到任务图
+  （若它仍然打开）或原聊天，原聊天不受影响。
 - **Display**（设置 → UI）切换整个转录：**Rendered** 折叠思考并绘制工具卡，**Token** 只显示 assistant 文本和调用数，
   **Raw** 以纯文本显示完整记录。
 

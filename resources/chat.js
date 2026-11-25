@@ -488,6 +488,11 @@
 	const subagentOpen = new Map();
 	/** The overlay always renders the full work process, whatever the chat's display form is. */
 	let subagentRendering = false;
+	/** The Task Graph payload on screen, and whether its modal is open or requested. */
+	let taskGraphView = null;
+	let taskGraphWanted = false;
+	let taskGraphShown = false;
+	let taskGraphTick = 0;
 
 	/* ------------------------------------------------------------------ markdown */
 
@@ -1005,8 +1010,14 @@
 					: '';
 				const verify =
 					verifier && verifier !== task.subagentSessionId ? taskButton(verifier, 'Verify', 'Open the verifier session') : '';
-				const count = task.status === 'verifying' ? (task.verificationSessionIds || []).length : 0;
-				const label = taskStateLabel(task) + (count ? ' · ' + count + (count === 1 ? ' verifier' : ' verifiers') : '');
+				const verifiers = task.status === 'verifying' ? (task.verificationSessionIds || []).length : 0;
+				const label =
+					taskStateLabel(task) +
+					(task.status === 'verifying'
+						? verifiers
+							? ' · ' + verifiers + (verifiers === 1 ? ' verifier' : ' verifiers')
+							: ' · awaiting verifier'
+						: '');
 				return (
 					'<span class="delegation ' +
 					esc(task.status) +
@@ -2887,13 +2898,15 @@
 
 	/* ------------------------------------------------------------- subagent overlay */
 
-	/** The chat behind the overlay is present but not reachable: the overlay is a modal dialog. */
-	function setSubagentOpen(open) {
+	/**
+	 * Only the topmost open dialog stays interactive. The subagent overlay sits above the Task
+	 * Graph, so closing a child view returns to the map instead of unlocking the whole chat.
+	 */
+	function syncInert() {
 		closePlanMenu(false);
+		const active = subagentView ? 'subagent-view' : taskGraphShown ? 'task-graph-view' : null;
 		for (const node of document.body.children) {
-			if (node.id !== 'subagent-view') {
-				node.inert = open;
-			}
+			node.inert = active !== null && node.id !== active;
 		}
 	}
 
@@ -2962,7 +2975,7 @@
 		}
 		const wasHidden = view.hidden;
 		view.hidden = false;
-		setSubagentOpen(true);
+		syncInert();
 		if (wasHidden) {
 			$('subagent-close')?.focus();
 		}
@@ -3037,11 +3050,222 @@
 		if (view) {
 			view.hidden = true;
 		}
-		setSubagentOpen(false);
-		if (input) {
+		syncInert();
+		// Back goes to the map if it is still open underneath, otherwise to the composer.
+		const mapClose = taskGraphShown ? $('task-graph-close') : null;
+		if (mapClose) {
+			mapClose.focus();
+		} else if (input) {
 			input.focus();
 		}
 		vscode.postMessage({ type: 'closeSubagent' });
+	}
+
+	/* ------------------------------------------------------------- task graph modal */
+
+	/** Opens the Task Graph modal for the active chat; the payload arrives from the host. */
+	function openTaskGraphView() {
+		if (!state || !state.taskBoard || !Array.isArray(state.taskBoard.nodes) || !state.taskBoard.nodes.length) {
+			return;
+		}
+		taskGraphWanted = true;
+		vscode.postMessage({ type: 'openTaskGraph' });
+	}
+
+	function closeTaskGraphView() {
+		if (!taskGraphShown && !taskGraphWanted) {
+			return;
+		}
+		taskGraphShown = false;
+		taskGraphWanted = false;
+		taskGraphView = null;
+		const view = $('task-graph-view');
+		if (view) {
+			view.hidden = true;
+		}
+		if (taskGraphTick) {
+			clearInterval(taskGraphTick);
+			taskGraphTick = 0;
+		}
+		syncInert();
+		const pill = $('task-graph-pill');
+		const wrap = $('task-graph-wrap');
+		if (pill && wrap && !wrap.hidden) {
+			pill.focus();
+		} else if (input) {
+			input.focus();
+		}
+		vscode.postMessage({ type: 'closeTaskGraph' });
+	}
+
+	/** A duration span whose text the modal's ticker keeps current. */
+	function taskGraphTimeHtml(start, end) {
+		if (!start) {
+			return '';
+		}
+		return '<span class="tg-time" data-start="' + esc(start) + '" data-end="' + esc(end || '') + '"></span>';
+	}
+
+	/** The root card: the chat/orchestrator, its state, context line and the graph objective. */
+	function taskGraphRootHtml(root, view) {
+		const working = running && (!runningSession || (state && runningSession === state.sessionId));
+		const counts = (view && view.counts) || {};
+		const tasks = view && Array.isArray(view.tasks) ? view.tasks : [];
+		const accepted = counts.accepted || 0;
+		return (
+			'<div class="tg-card tg-root-card">' +
+			'<div class="tg-task-head"><span class="tg-dot ' +
+			(working ? 'running' : 'idle') +
+			'"></span><span class="tg-task-title">' +
+			esc((root && root.title) || 'Orchestrator') +
+			'</span></div>' +
+			'<div class="tg-task-meta"><span class="tg-state">' +
+			esc('Orchestrator · ' + (working ? 'working' : 'idle')) +
+			'</span><span class="tg-tokens">' +
+			esc(accepted + '/' + tasks.length + ' accepted') +
+			'</span></div>' +
+			(root && root.detail ? '<div class="tg-detail" data-tip="' + esc(root.detail) + '">' + esc(root.detail) + '</div>' : '') +
+			(view && view.objective
+				? '<div class="tg-objective" data-tip="' + esc(view.objective) + '">' + esc(view.objective) + '</div>'
+				: '') +
+			'</div>'
+		);
+	}
+
+	function taskGraphChildrenHtml(children) {
+		if (!Array.isArray(children) || !children.length) {
+			return '';
+		}
+		return (
+			'<div class="tg-children">' +
+			children
+				.map((child) => {
+					const label =
+						'<span class="tg-dot ' +
+						(child.done ? 'done' : 'working') +
+						'"></span><span class="tg-agent-role">' +
+						esc(child.role) +
+						'</span>' +
+						taskGraphTimeHtml(child.startedAt, child.finishedAt) +
+						(child.tokens ? '<span class="tg-tokens">' + esc(formatTokens(child.tokens)) + ' tokens</span>' : '');
+					return (
+						'<button type="button" class="tool-open-subagent tg-agent" data-subagent="' +
+						esc(child.id) +
+						'" data-tip="Open the ' +
+						esc(child.role) +
+						' session">' +
+						label +
+						'</button>'
+					);
+				})
+				.join('') +
+			'</div>'
+		);
+	}
+
+	function taskGraphTaskHtml(task) {
+		const after = Array.isArray(task.dependsOn) && task.dependsOn.length
+			? '<div class="tg-after">after ' + esc(task.dependsOn.join(', ')) + '</div>'
+			: '';
+		const rejection = task.rejection
+			? '<div class="tg-rejection">' + esc(task.rejection.code + ': ' + task.rejection.reason) + '</div>'
+			: '';
+		const tokens = task.tokens ? '<span class="tg-tokens">' + esc(formatTokens(task.tokens)) + ' tokens</span>' : '';
+		return (
+			'<div class="tg-card tg-task ' +
+			esc(task.status) +
+			'" data-tip="' +
+			esc(taskTip(task)) +
+			'">' +
+			'<div class="tg-task-head"><span class="tg-dot ' +
+			esc(task.status) +
+			'"></span><span class="tg-task-title">' +
+			esc(task.title || task.id) +
+			'</span><span class="tg-role">' +
+			esc(task.role) +
+			'</span></div>' +
+			'<div class="tg-task-meta"><span class="tg-state ' +
+			esc(task.status) +
+			'">' +
+			esc(task.stateLabel) +
+			'</span>' +
+			taskGraphTimeHtml(task.startedAt, task.finishedAt) +
+			tokens +
+			'</div>' +
+			after +
+			rejection +
+			taskGraphChildrenHtml(task.children) +
+			'</div>'
+		);
+	}
+
+	/** Paints the running clocks without rebuilding the cards. */
+	function paintTaskGraphTimes() {
+		for (const el of document.querySelectorAll('#task-graph-view .tg-time')) {
+			const start = Number(el.dataset.start);
+			if (!start) {
+				continue;
+			}
+			const end = Number(el.dataset.end) || Date.now();
+			el.textContent = formatDuration(Math.max(0, end - start));
+		}
+	}
+
+	/** Repaints only the root card, whose working dot follows the guest's live turn state. */
+	function paintTaskGraphRoot() {
+		const box = $('task-graph-root');
+		if (!taskGraphShown || !box || !taskGraphView) {
+			return;
+		}
+		box.innerHTML = taskGraphRootHtml(taskGraphView.root, taskGraphView.view);
+	}
+
+	/** Draws the Task Graph payload; a null view closes the modal. */
+	function renderTaskGraph(message) {
+		if (!message || !message.view) {
+			closeTaskGraphView();
+			return;
+		}
+		if (state && message.sessionId && state.sessionId && message.sessionId !== state.sessionId) {
+			return;
+		}
+		if (!taskGraphWanted && !taskGraphShown) {
+			return;
+		}
+		const view = $('task-graph-view');
+		if (!view) {
+			return;
+		}
+		taskGraphView = message;
+		taskGraphWanted = true;
+		const wasHidden = view.hidden;
+		taskGraphShown = true;
+		view.hidden = false;
+		const graph = message.view;
+		const tasks = Array.isArray(graph.tasks) ? graph.tasks : [];
+		const agents = tasks.reduce((sum, task) => sum + (Array.isArray(task.children) ? task.children.length : 0), 0);
+		const subtitle = [
+			tasks.length + (tasks.length === 1 ? ' task' : ' tasks'),
+			agents + (agents === 1 ? ' agent' : ' agents'),
+			graph.notes ? graph.notes + (graph.notes === 1 ? ' note' : ' notes') : '',
+			'click an agent for details',
+		]
+			.filter(Boolean)
+			.join(' · ');
+		const subtitleEl = $('task-graph-subtitle');
+		if (subtitleEl) {
+			subtitleEl.textContent = subtitle;
+		}
+		$('task-graph-root').innerHTML = taskGraphRootHtml(message.root, graph);
+		$('task-graph-tasks').innerHTML = tasks.map(taskGraphTaskHtml).join('');
+		paintTaskGraphTimes();
+		if (!taskGraphTick) {
+			taskGraphTick = setInterval(paintTaskGraphTimes, 1000);
+		}
+		syncInert();
+		if (wasHidden) {
+			$('task-graph-close')?.focus();
+		}
 	}
 
 	/* ------------------------------------------------------------------ streaming */
@@ -3834,10 +4058,23 @@
 		syncSend(area.closest('.question'));
 	});
 
-	// The task board's Open buttons use the same rich-click handling as a transcript card.
-	const tasksEl = $('tasks');
-	if (tasksEl) {
-		tasksEl.addEventListener('click', handleRichClick);
+	// The composer pill opens the Task Graph; its child chips use the rich-click handler.
+	const taskGraphPill = $('task-graph-pill');
+	if (taskGraphPill) {
+		taskGraphPill.addEventListener('click', openTaskGraphView);
+	}
+	const taskGraphViewEl = $('task-graph-view');
+	if (taskGraphViewEl) {
+		taskGraphViewEl.addEventListener('click', handleRichClick);
+		taskGraphViewEl.addEventListener('click', (event) => {
+			if (event.target === taskGraphViewEl) {
+				closeTaskGraphView();
+			}
+		});
+	}
+	const taskGraphClose = $('task-graph-close');
+	if (taskGraphClose) {
+		taskGraphClose.addEventListener('click', () => closeTaskGraphView());
 	}
 
 	const subagentChildrenEl = $('subagent-children');
@@ -3873,12 +4110,6 @@
 	if (subagentClose) {
 		subagentClose.addEventListener('click', () => closeSubagentView());
 	}
-	document.addEventListener('keydown', (event) => {
-		if (event.key === 'Escape' && subagentView) {
-			event.preventDefault();
-			closeSubagentView();
-		}
-	});
 
 	/* ------------------------------------------------------------------ state & history */
 
@@ -3906,6 +4137,10 @@
 		// keyless selected model's Build disabled once the turn is over.
 		syncPlanCards();
 		refreshActions();
+		// The Task Graph's root card follows the turn without waiting for a host payload.
+		if (taskGraphShown) {
+			paintTaskGraphRoot();
+		}
 	}
 
 	/** Stop is acknowledged by the host, but it behaves like a command: one click, then waiting. */
@@ -4081,8 +4316,9 @@
 			shownSession = state.sessionId;
 			closeMention();
 			closePlanMenu(false);
-			// The overlay belongs to the chat it was opened from; a chat switch leaves it.
+			// The overlay and the task graph belong to the chat they were opened from.
 			closeSubagentView();
+			closeTaskGraphView();
 		}
 		renderChats();
 		fillPill(modePill, state.modes, state.mode, 'Work mode — what the agent may do');
@@ -4131,7 +4367,7 @@
 			: '';
 		refreshTip();
 		renderStatus();
-		renderTasks();
+		renderTaskGraphPill();
 		syncDelegations();
 		renderTodos();
 		// The snapshot is authoritative about what runs: an idle one drops a session id left over from
@@ -4205,61 +4441,49 @@
 		}
 	}
 
-	function renderTasks() {
-		const board = state && state.taskBoard;
-		const list = board && Array.isArray(board.nodes) ? board.nodes : [];
-		const node = $('tasks');
-		if (!list.length) {
-			node.hidden = true;
-			node.innerHTML = '';
+	/** The most active state across the graph, for the pill's dot. */
+	function taskGraphStatus(nodes) {
+		if (nodes.some((task) => task.status === 'rejected')) {
+			return 'rejected';
+		}
+		if (nodes.some((task) => task.status === 'running')) {
+			return 'running';
+		}
+		if (nodes.some((task) => task.status === 'verifying')) {
+			return 'verifying';
+		}
+		if (nodes.some((task) => task.status === 'paused')) {
+			return 'paused';
+		}
+		return nodes.length && nodes.every((task) => task.status === 'accepted') ? 'accepted' : 'pending';
+	}
+
+	/** The composer pill that opens the Task Graph; hidden until the chat has a graph. */
+	function renderTaskGraphPill() {
+		const wrap = $('task-graph-wrap');
+		if (!wrap) {
 			return;
 		}
-		const counts = board.counts || {};
-		const notes = Array.isArray(board.messages) ? board.messages.length : 0;
-		node.hidden = false;
-		node.innerHTML =
-			'<span class="task-head">Tasks ' +
-			(counts.accepted || 0) +
-			'/' +
-			list.length +
-			(notes ? ' · ' + notes + ' note' + (notes === 1 ? '' : 's') : '') +
-			'</span>' +
-			list
-				.slice(0, 8)
-				.map((task) => {
-					const tip = taskTip(task);
-					const open = task.subagentSessionId
-						? '<button type="button" class="tool-open-subagent" data-subagent="' +
-							esc(task.subagentSessionId) +
-							'" data-tip="Open the task session">Open</button>'
-						: '';
-					const verifier =
-						Array.isArray(task.verificationSessionIds) && task.verificationSessionIds.length
-							? task.verificationSessionIds[task.verificationSessionIds.length - 1]
-							: '';
-					const openVerifier =
-						verifier && verifier !== task.subagentSessionId
-							? '<button type="button" class="tool-open-subagent" data-subagent="' +
-								esc(verifier) +
-								'" data-tip="Open the verifier session">Verify</button>'
-							: '';
-					return (
-						'<span class="task ' +
-						esc(task.status) +
-						'" data-tip="' +
-						esc(tip) +
-						'">' +
-						taskGlyph(task.status) +
-						' ' +
-						esc(task.id) +
-						' · ' +
-						esc(taskStateLabel(task)) +
-						open +
-						openVerifier +
-						'</span>'
-					);
-				})
-				.join('');
+		const board = state && state.taskBoard;
+		const list = board && Array.isArray(board.nodes) ? board.nodes : [];
+		wrap.hidden = !list.length;
+		if (!list.length) {
+			return;
+		}
+		const accepted = (board.counts && board.counts.accepted) || 0;
+		const count = $('task-graph-count');
+		if (count) {
+			count.textContent = accepted + '/' + list.length;
+		}
+		const dot = $('task-graph-dot');
+		if (dot) {
+			dot.dataset.status = taskGraphStatus(list);
+		}
+		const button = $('task-graph-pill');
+		if (button) {
+			button.dataset.tip = 'Open the Task Graph — ' + accepted + '/' + list.length + ' accepted';
+			button.setAttribute('aria-label', 'Open the Task Graph (' + accepted + ' of ' + list.length + ' tasks accepted)');
+		}
 	}
 
 	function renderTodos() {
@@ -4327,7 +4551,7 @@
 			case 'task-board':
 				if (state) {
 					state.taskBoard = message.board || null;
-					renderTasks();
+					renderTaskGraphPill();
 					syncDelegations();
 				}
 				break;
@@ -4476,6 +4700,9 @@
 					subagentView.children = Array.isArray(message.children) ? message.children : [];
 					renderSubagentChildren(subagentView);
 				}
+				break;
+			case 'task-graph':
+				renderTaskGraph(message);
 				break;
 			case 'attachment':
 				attachmentReply(message);
@@ -5515,6 +5742,18 @@
 		}
 		if (chatsOpen) {
 			closeChats();
+			return;
+		}
+		// A dialog owns Escape while it is open; it comes before Stop so closing the map or a
+		// child's transcript never also interrupts the turn behind it.
+		if (subagentView) {
+			event.preventDefault();
+			closeSubagentView();
+			return;
+		}
+		if (taskGraphShown) {
+			event.preventDefault();
+			closeTaskGraphView();
 			return;
 		}
 		// Escape only stops a running turn; with nothing running it must not poison the next one.

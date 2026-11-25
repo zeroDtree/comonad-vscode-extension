@@ -82,7 +82,9 @@ worker 在汇报前就 pause。触顶时任务进入 `paused` 而不是 `rejecte
 `delegate` 接收 1–8 个任务 id。任务必须 `pending` 且依赖全部 `accepted`；批次内不得互相依赖。读任务与
 写任务可以同批并行；超过 4 个活跃子代理时运行时排队。
 
-worker 批次结束后，运行时对成功节点做验收：
+worker 子代理一结束就立即记录结果——accepted、rejected、paused，或暂时没有验证者会话的 `verifying`
+（worker 已完成，等待验收）——因此 Task Graph 能在同批其他 worker 仍在运行时先显示它的完成状态。
+验收仍然等待整个批次结束，然后运行时对成功节点做验收：
 
 1. `evidence` 标准由 worker 的 JSON envelope 判定。
 2. `review` 标准派生一个**固定内置 `reviewer`** 子代理。

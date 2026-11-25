@@ -11,8 +11,10 @@ import {
 	sanitizeTaskGraph,
 	satisfiesAcceptance,
 	taskChildrenOf,
+	taskGraphViewOf,
 	taskNodeOfChild,
 	type AcceptanceCriterion,
+	type TaskGraphChildMeta,
 	type TaskGraph,
 	type TaskNode,
 	type TaskNodeInput,
@@ -428,5 +430,91 @@ suite('Task graph persistence helpers', () => {
 			taskChildrenOf(task, (id) => (id === 'w' ? { subagent: 'coder', subagentDone: true } : undefined)),
 			[{ id: 'w', role: 'coder', done: true }],
 		);
+	});
+
+	test('the view names starting, awaiting verification and rejection codes', () => {
+		const graph = graphOf(
+			node({ id: 'queued' }),
+			node({ id: 'starting' }),
+			node({ id: 'working' }),
+			node({ id: 'awaiting' }),
+			node({ id: 'verifying' }),
+			node({ id: 'stopped' }),
+			node({ id: 'accepted' }),
+			node({ id: 'paused' }),
+		);
+		const byId = new Map(graph.nodes.map((task) => [task.id, task]));
+		byId.get('starting')!.status = 'running';
+		byId.get('working')!.status = 'running';
+		byId.get('working')!.subagentSessionId = 'w-working';
+		byId.get('awaiting')!.status = 'verifying';
+		byId.get('verifying')!.status = 'verifying';
+		byId.get('verifying')!.verificationSessionIds = ['v-review'];
+		byId.get('stopped')!.status = 'rejected';
+		byId.get('stopped')!.rejection = { code: 'stopped', reason: 'the user stopped it', at: 5 };
+		byId.get('accepted')!.status = 'accepted';
+		byId.get('paused')!.status = 'paused';
+		const view = taskGraphViewOf(boardOf(graph), (id) => {
+			if (id === 'w-working') {
+				return { subagent: 'coder', subagentDone: false, createdAt: 10, updatedAt: 20 };
+			}
+			if (id === 'v-review') {
+				return { subagent: 'reviewer', subagentDone: false, createdAt: 30, updatedAt: 40 };
+			}
+			return undefined;
+		});
+		const labels = new Map(view.tasks.map((task) => [task.id, task.stateLabel]));
+		assert.strictEqual(labels.get('queued'), 'queued');
+		assert.strictEqual(labels.get('starting'), 'starting');
+		assert.strictEqual(labels.get('working'), 'working');
+		assert.strictEqual(labels.get('awaiting'), 'worker done · awaiting verification');
+		assert.strictEqual(labels.get('verifying'), 'verifying');
+		assert.strictEqual(labels.get('stopped'), 'stopped');
+		assert.strictEqual(labels.get('accepted'), 'accepted');
+		assert.strictEqual(labels.get('paused'), 'paused');
+	});
+
+	test('the view keeps worker-first order, segment timing and summed tokens', () => {
+		const graph = graphOf(node());
+		const task = graph.nodes[0]!;
+		task.status = 'verifying';
+		task.startedAt = 100;
+		task.subagentSessionId = 'w';
+		task.verificationSessionIds = ['r', 't'];
+		const meta: Record<string, TaskGraphChildMeta> = {
+			// The worker session predates this segment; the node's clock wins, its usage is cumulative.
+			w: { subagent: 'coder', subagentDone: true, createdAt: 50, updatedAt: 400, usage: { inputTokens: 600, outputTokens: 400 } },
+			r: { subagent: 'reviewer', subagentDone: true, createdAt: 420, updatedAt: 500, usage: { inputTokens: 100, outputTokens: 50 } },
+			t: { subagent: 'tester', subagentDone: false, createdAt: 500, updatedAt: 520, usage: { inputTokens: 20, outputTokens: 10 } },
+		};
+		const view = taskGraphViewOf(boardOf(graph), (id) => meta[id]);
+		const viewTask = view.tasks[0]!;
+		assert.deepStrictEqual(viewTask.children, [
+			{ id: 'w', role: 'coder', done: true, startedAt: 100, finishedAt: 400, tokens: 1000 },
+			{ id: 'r', role: 'reviewer', done: true, startedAt: 420, finishedAt: 500, tokens: 150 },
+			{ id: 't', role: 'tester', done: false, startedAt: 500, finishedAt: undefined, tokens: 30 },
+		]);
+		assert.strictEqual(viewTask.tokens, 1180);
+		assert.strictEqual(viewTask.startedAt, 100);
+		assert.strictEqual(viewTask.stateLabel, 'verifying');
+	});
+
+	test('the view skips a vanished child and keeps the rest', () => {
+		const graph = graphOf(node());
+		const task = graph.nodes[0]!;
+		task.status = 'verifying';
+		task.subagentSessionId = 'w';
+		task.verificationSessionIds = ['gone', 'r'];
+		const view = taskGraphViewOf(boardOf(graph), (id) => {
+			if (id === 'w') {
+				return { subagent: 'coder', subagentDone: true, createdAt: 10, updatedAt: 20, usage: { inputTokens: 1, outputTokens: 1 } };
+			}
+			if (id === 'r') {
+				return { subagent: 'reviewer', subagentDone: true, createdAt: 30, updatedAt: 40, usage: { inputTokens: 2, outputTokens: 2 } };
+			}
+			return undefined;
+		});
+		assert.deepStrictEqual(view.tasks[0]!.children.map((child) => child.id), ['w', 'r']);
+		assert.strictEqual(view.tasks[0]!.tokens, 6);
 	});
 });

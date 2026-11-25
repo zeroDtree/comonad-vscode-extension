@@ -96,7 +96,10 @@ default; a paused node can be resumed up to `maxResumes` (three by default).
 batch may not contain a dependency inside itself. Read and write tasks may run together. The runtime
 queues children beyond four active subagents.
 
-After the worker batch finishes, the runtime verifies the successful nodes:
+Each worker's outcome is recorded as soon as its child settles — accepted, rejected, paused, or
+`verifying` with no verifier session yet (worker done, awaiting verification) — so the Task Graph
+can show it finished while its batch peers still run. Verification still waits for the whole batch,
+then the runtime verifies the successful nodes:
 
 1. `evidence` criteria are checked against the worker's JSON envelope.
 2. A `review` criterion derives a **pinned built-in `reviewer`** child.

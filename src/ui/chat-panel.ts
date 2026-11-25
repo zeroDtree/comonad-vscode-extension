@@ -33,7 +33,16 @@ import {
 } from '../lib/plan-files';
 import { formatReference } from '../lib/references';
 import { guardPath, isInside, sandboxAllowsWrites } from '../lib/sandbox';
-import { taskChildrenOf, taskNodeOfChild, type TaskBoardNode, type TaskGraph, type TaskNode } from '../lib/task-graph';
+import {
+	taskChildrenOf,
+	taskGraphViewOf,
+	taskNodeOfChild,
+	type TaskBoard,
+	type TaskBoardNode,
+	type TaskGraph,
+	type TaskGraphChildMeta,
+	type TaskNode,
+} from '../lib/task-graph';
 import { workspaceFirstScope, type SettingsScope } from '../lib/settings-file';
 import { countRaw, formatTokens } from '../lib/tokens';
 import { ChatWebviewAssets, type ChatAssetSpec } from '../services/chat-assets';
@@ -197,6 +206,13 @@ export function chatPanel(ctx: Context): void {
 	const questions = new Map<string, PendingQuestion>();
 	/** The subagent conversation each guest has open over the chat, if any. */
 	const subagentViews = new Map<vscode.Webview, string>();
+	/** The Task Graph modal each guest has open, with the chat it belongs to. */
+	const taskGraphViews = new Map<vscode.Webview, string>();
+	/** The last board a chat emitted, reused by the throttled child update. */
+	let lastTaskBoard: { sessionId: string; board: TaskBoard } | undefined;
+	/** Child-session metadata for the Task Graph; a finished child is immutable until a resume. */
+	const childMetaCache = new Map<string, { meta: TaskGraphChildMeta; terminal: boolean }>();
+	let taskGraphTimer: NodeJS.Timeout | undefined;
 	/**
 	 * The latest provisional prompt size per chat, painted until a provider reports a real count. A
 	 * snapshot reads the chat back from disk, where a live first request's measurement has not landed,
@@ -309,6 +325,11 @@ export function chatPanel(ctx: Context): void {
 		readyClients.delete(webview);
 		focusedClients.delete(webview);
 		subagentViews.delete(webview);
+		taskGraphViews.delete(webview);
+		if (!taskGraphViews.size && taskGraphTimer) {
+			clearTimeout(taskGraphTimer);
+			taskGraphTimer = undefined;
+		}
 		published.delete(webview);
 		syncFocus();
 		listeners.get(webview)?.dispose();
@@ -669,6 +690,83 @@ export function chatPanel(ctx: Context): void {
 		};
 	};
 
+	/** One child's Task Graph metadata, cached while finished; a resume drops the entry. */
+	const childMetaOf = (id: string): TaskGraphChildMeta | undefined => {
+		const cached = childMetaCache.get(id);
+		if (cached?.terminal) {
+			return cached.meta;
+		}
+		const session = ctx.sessions.get(id);
+		if (!session) {
+			childMetaCache.delete(id);
+			return undefined;
+		}
+		const meta: TaskGraphChildMeta = {
+			subagent: session.subagent,
+			subagentDone: session.subagentDone === true,
+			createdAt: session.createdAt,
+			updatedAt: session.updatedAt,
+			usage: session.usage,
+		};
+		childMetaCache.set(id, { meta, terminal: session.subagentDone === true });
+		return meta;
+	};
+
+	/** The Task Graph modal's payload for one chat. */
+	const taskGraphPayload = (session: Session, board?: TaskBoard): Record<string, unknown> => {
+		const current = board ?? ctx.orchestrator.board(session);
+		if (!current) {
+			return { type: 'task-graph', sessionId: session.id, view: null };
+		}
+		// The view asks for a child twice (once for the chip, once for its clock/tokens); one read
+		// per child per payload is enough.
+		const memo = new Map<string, TaskGraphChildMeta | undefined>();
+		const lookup = (id: string): TaskGraphChildMeta | undefined => {
+			if (!memo.has(id)) {
+				memo.set(id, childMetaOf(id));
+			}
+			return memo.get(id);
+		};
+		return {
+			type: 'task-graph',
+			sessionId: session.id,
+			view: taskGraphViewOf(current, lookup),
+			root: {
+				title: session.title,
+				detail: statusDetail(session, ctx.agent.windowFor(session)),
+			},
+		};
+	};
+
+	/** Posts the Task Graph to the guests whose map belongs to this chat. */
+	const publishTaskGraph = (session: Session | undefined, board?: TaskBoard): void => {
+		if (!session || !taskGraphViews.size) {
+			return;
+		}
+		const payload = taskGraphPayload(session, board);
+		for (const [client, sessionId] of taskGraphViews) {
+			if (sessionId === session.id) {
+				post(payload, client);
+			}
+		}
+	};
+
+	/** Child steps are frequent; coalesce the map's token/timer refresh into one trailing post. */
+	const scheduleTaskGraph = (): void => {
+		if (!taskGraphViews.size || taskGraphTimer) {
+			return;
+		}
+		taskGraphTimer = setTimeout(() => {
+			taskGraphTimer = undefined;
+			const session = ctx.sessions.active();
+			if (!session) {
+				return;
+			}
+			const board = lastTaskBoard?.sessionId === session.id ? lastTaskBoard.board : ctx.orchestrator.board(session);
+			publishTaskGraph(session, board);
+		}, 750);
+	};
+
 	// A contribution changes the document itself (scripts/styles), and a webview's HTML cannot be
 	// amended in place: reload it and let the ready handshake replay state and turns. A live turn is
 	// left alone so its stream survives; the next refresh after it ends reloads.
@@ -971,6 +1069,7 @@ export function chatPanel(ctx: Context): void {
 			return;
 		}
 		post({ type: 'task-board', board: board ?? null });
+		lastTaskBoard = board ? { sessionId: id, board } : undefined;
 		// An open overlay follows the task's chip row: a verifier attaching, a status flipping, or
 		// the graph going away all arrive here without redrawing the child's transcript.
 		for (const [client, viewed] of subagentViews) {
@@ -979,10 +1078,15 @@ export function chatPanel(ctx: Context): void {
 			);
 			post({ type: 'subagent-children', id: viewed, ...(node ? taskHeaderOf(node) : { task: undefined, children: [] }) }, client);
 		}
+		// The Task Graph follows the same event; a missing board closes the map.
+		publishTaskGraph(ctx.sessions.active(), board);
 	});
 	// A watched subagent gained a step, finished or failed: repaint the open overlay only.
 	ctx.on('subagent/changed', (id) => {
+		// A resumed child reuses its session, so the finished metadata cached for it is stale.
+		childMetaCache.delete(id);
 		if (!subagentViews.size) {
+			scheduleTaskGraph();
 			return;
 		}
 		// One root lookup per event even when several overlays are open.
@@ -1013,6 +1117,7 @@ export function chatPanel(ctx: Context): void {
 			}
 			post({ type: 'subagent-children', id: viewed, ...taskHeaderOf(node) }, client);
 		}
+		scheduleTaskGraph();
 	});
 	// One refresh answers a burst of events: a settings save moves `settings/changed` and the tools it
 	// writes through move `tools/changed` a moment later — the panel needs one repaint, not two.
@@ -1874,6 +1979,8 @@ export function chatPanel(ctx: Context): void {
 							subagentViews.delete(source);
 						}
 					}
+					// The Task Graph modal is transient: a reloaded guest starts with it closed.
+					taskGraphViews.delete(source);
 					break;
 				case 'resync': {
 					// The guest lost the live stream (a dropped message, a race with a reload) and
@@ -1965,6 +2072,24 @@ export function chatPanel(ctx: Context): void {
 				}
 				case 'closeSubagent':
 					subagentViews.delete(source);
+					break;
+				case 'openTaskGraph': {
+					const session = ctx.sessions.active();
+					const board = session ? ctx.orchestrator.board(session) : undefined;
+					if (!session || !board) {
+						post({ type: 'task-graph', sessionId: session?.id ?? null, view: null }, source);
+						break;
+					}
+					taskGraphViews.set(source, session.id);
+					post(taskGraphPayload(session, board), source);
+					break;
+				}
+				case 'closeTaskGraph':
+					taskGraphViews.delete(source);
+					if (!taskGraphViews.size && taskGraphTimer) {
+						clearTimeout(taskGraphTimer);
+						taskGraphTimer = undefined;
+					}
 					break;
 				case 'search': {
 					const query = String(message.query ?? '');
@@ -2416,11 +2541,26 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 	<div id="subagent-children" hidden role="group" aria-label="Task sessions"></div>
 	<div id="subagent-messages"></div>
 </div>
+<!-- The whole task graph: a root card and one card per task, with every child session. -->
+<div id="task-graph-view" hidden role="dialog" aria-modal="true" aria-label="Task graph">
+	<div id="task-graph-panel">
+		<div id="task-graph-head">
+			<div id="task-graph-heading">
+				<span id="task-graph-title">Task Graph</span>
+				<span id="task-graph-subtitle"></span>
+			</div>
+			<button id="task-graph-close" type="button" class="ghost" aria-label="Close the task graph" data-tip="Close the task graph">✕</button>
+		</div>
+		<div id="task-graph-body">
+			<div id="task-graph-root"></div>
+			<div id="task-graph-tasks"></div>
+		</div>
+	</div>
+</div>
 <footer>
 	<!-- Floats at the bottom of the transcript, above every footer row, whenever the reader has
 	     scrolled away from the newest message. -->
 	<button id="jump-latest" type="button" hidden data-tip="Jump to the newest message">↓ Latest</button>
-	<div id="tasks" hidden></div>
 	<div id="todos" hidden></div>
 	<div id="changes-panel" hidden>
 		<div id="changes-head">
@@ -2446,6 +2586,14 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 			<div class="pill" data-control="model">
 				<button class="pill-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="pill-label"></span><span class="chev">▾</span></button>
 				<div class="pill-menu" hidden></div>
+			</div>
+			<div class="pill" id="task-graph-wrap" data-control="tasks" hidden>
+				<button id="task-graph-pill" class="pill-trigger" type="button" data-tip="Open the Task Graph">
+					<span class="tg-pill-icon"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1.5"/><circle cx="13" cy="3.5" r="1.5"/><circle cx="13" cy="8" r="1.5"/><circle cx="13" cy="12.5" r="1.5"/><path d="M4.5 8h3.5M8 8l3.5-4.5M8 8h3.5M8 8l3.5 4.5"/></svg></span>
+					<span class="pill-label">Task Graph</span>
+					<span id="task-graph-count" class="tg-pill-count"></span>
+					<span id="task-graph-dot" class="tg-pill-dot"></span>
+				</button>
 			</div>
 			<!-- What belongs at the right edge of the box: the chips, the generation menu and Send. -->
 			<div id="sendbar">

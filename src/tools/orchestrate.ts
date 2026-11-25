@@ -18,10 +18,11 @@ import {
 	type TaskGraphAccess,
 	type TaskNode,
 	type TaskNodeInput,
+	type TaskRejection,
 	type TaskResult,
 	type TaskVerificationCheck,
 } from '../lib/task-graph';
-import { objectSchema, type ToolContext } from '../lib/types';
+import { objectSchema, type AgentSpawnOutcome, type ToolContext } from '../lib/types';
 
 /** The Orchestrator's task tools and the shared coordination mailbox. */
 
@@ -122,6 +123,88 @@ const nodeSchema = {
 };
 
 export function orchestrateTools(ctx: Context): void {
+	interface PendingVerification {
+		node: TaskNode;
+		report: string;
+		writes: string[];
+	}
+
+	interface SettleResult {
+		pending?: PendingVerification;
+		warnings: string[];
+	}
+
+	/**
+	 * Applies one settled worker to the graph as soon as its child ends. It runs inside the
+	 * delegate's `orchestrator.run` lock, so the mutators are called directly: the KeyedMutex is not
+	 * reentrant and a nested `run` would deadlock. Warnings are returned per worker so sibling
+	 * settlements cannot interleave them.
+	 */
+	function settleWorker(
+		access: TaskGraphAccess,
+		node: TaskNode,
+		outcome: AgentSpawnOutcome,
+		writes: string[],
+		failedCode: (settled: AgentSpawnOutcome) => TaskRejection['code'],
+	): SettleResult {
+		const warnings: string[] = [];
+		if (outcome.paused) {
+			ctx.orchestrator.pause(
+				access,
+				node.id,
+				outcome.budget ?? {
+					limits: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
+					usage: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
+				},
+				outcome.report,
+				outcome.lastTool,
+				writes,
+			);
+			return { warnings };
+		}
+		if (!outcome.ok) {
+			ctx.orchestrator.reject(access, node.id, {
+				code: failedCode(outcome),
+				reason: outcome.error ?? outcome.report ?? 'the worker failed',
+				at: Date.now(),
+			});
+			return { warnings };
+		}
+		const parsed = parseAgentEnvelope(outcome.report);
+		if (!parsed.ok) {
+			ctx.orchestrator.reject(access, node.id, {
+				code: 'invalid_output',
+				reason: `${outcome.contractError ?? parsed.reason}${attemptAdvice(node)}`,
+				at: Date.now(),
+			});
+			return { warnings };
+		}
+		warnings.push(...parsed.warnings);
+		const envelope = parsed.value;
+		const merged = mergeEvidence(envelope.evidence, outcome.observedCommands);
+		warnings.push(...merged.warnings);
+		const result: TaskResult = {
+			status: envelope.status === 'blocked' || envelope.status === 'failed' ? envelope.status : 'ok',
+			summary: envelope.summary,
+			evidence: merged.items,
+			criteria: envelope.acceptance ?? [],
+			writes,
+			...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
+			at: Date.now(),
+		};
+		ctx.orchestrator.recordWorker(access, node.id, result);
+		if (result.status !== 'ok' || node.acceptance.every((criterion) => criterion.check === 'evidence')) {
+			ctx.orchestrator.finish(access, node.id);
+			return { warnings };
+		}
+		return { pending: { node, report: outcome.report, writes }, warnings };
+	}
+
+	const delegateFailure = (outcome: AgentSpawnOutcome): TaskRejection['code'] =>
+		outcome.stopped ? 'stopped' : 'worker_failed';
+	const resumeFailure = (outcome: AgentSpawnOutcome): TaskRejection['code'] =>
+		outcome.error?.startsWith('cannot resume') ? 'resume_unavailable' : outcome.stopped ? 'stopped' : 'worker_failed';
+
 	ctx.tools.register({
 		name: 'task_graph',
 		description:
@@ -224,8 +307,10 @@ export function orchestrateTools(ctx: Context): void {
 						runs
 							.filter((run) => run.node.id !== self)
 							.map((run) => ({ id: run.node.id, role: run.role.id, writes: run.node.writes ?? [] }));
-					const settled = await Promise.all(
-						runs.map(async (run) => {
+					const outcomes: Array<SettleResult | undefined> = new Array(runs.length);
+					let firstError: unknown;
+					await Promise.all(
+						runs.map(async (run, index) => {
 							const node = run.node;
 							const outcome = await toolCtx.spawnAgent({
 								prompt: buildWorkerTaskPrompt({
@@ -249,68 +334,21 @@ export function orchestrateTools(ctx: Context): void {
 								checkReport: parseCheck,
 								signal: toolCtx.signal,
 							});
-							return { run, outcome };
+							try {
+								outcomes[index] = settleWorker(access, node, outcome, outcome.writes, delegateFailure);
+							} catch (error) {
+								firstError ??= error;
+							}
 						}),
 					);
-					const pendingVerification: Array<{ node: TaskNode; report: string; writes: string[] }> = [];
-					const warnings: string[] = [];
-					for (const { run, outcome } of settled) {
-						const node = run.node;
-						if (outcome.paused) {
-							ctx.orchestrator.pause(
-								access,
-								node.id,
-								outcome.budget ?? {
-									limits: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
-									usage: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
-								},
-								outcome.report,
-								outcome.lastTool,
-								outcome.writes,
-							);
-							continue;
-						}
-						if (!outcome.ok) {
-							ctx.orchestrator.reject(access, node.id, {
-								code: outcome.stopped ? 'stopped' : 'worker_failed',
-								reason: outcome.error ?? outcome.report ?? 'the worker failed',
-								at: Date.now(),
-							});
-							continue;
-						}
-						const parsed = parseAgentEnvelope(outcome.report);
-						if (!parsed.ok) {
-							ctx.orchestrator.reject(access, node.id, {
-								code: 'invalid_output',
-								reason: `${outcome.contractError ?? parsed.reason}${attemptAdvice(node)}`,
-								at: Date.now(),
-							});
-							continue;
-						}
-						warnings.push(...parsed.warnings);
-						const envelope = parsed.value;
-						const merged = mergeEvidence(envelope.evidence, outcome.observedCommands);
-						warnings.push(...merged.warnings);
-						const result: TaskResult = {
-							status: envelope.status === 'blocked' || envelope.status === 'failed' ? envelope.status : 'ok',
-							summary: envelope.summary,
-							evidence: merged.items,
-							criteria: envelope.acceptance ?? [],
-							writes: outcome.writes,
-							...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
-							at: Date.now(),
-						};
-						ctx.orchestrator.recordWorker(access, node.id, result);
-						if (result.status !== 'ok') {
-							ctx.orchestrator.finish(access, node.id);
-							continue;
-						}
-						if (node.acceptance.every((criterion) => criterion.check === 'evidence')) {
-							ctx.orchestrator.finish(access, node.id);
-							continue;
-						}
-						pendingVerification.push({ node, report: outcome.report, writes: outcome.writes });
+					if (firstError) {
+						throw firstError;
 					}
+					const settledOutcomes = outcomes.filter((settled): settled is SettleResult => settled !== undefined);
+					const pendingVerification = settledOutcomes
+						.map((settled) => settled.pending)
+						.filter((item): item is PendingVerification => item !== undefined);
+					const warnings = settledOutcomes.flatMap((settled) => settled.warnings);
 					// Review verifiers run in parallel; command verifiers run one at a time so two test
 					// processes cannot fight over the same scratch or build outputs.
 					const review = pendingVerification.filter((item) => item.node.acceptance.some((criterion) => criterion.check === 'review'));
@@ -441,8 +479,10 @@ export function orchestrateTools(ctx: Context): void {
 						}
 					}
 					const runs = ctx.orchestrator.resume(access, tasks);
-					const settled = await Promise.all(
-						runs.map(async (run) => {
+					const outcomes: Array<SettleResult | undefined> = new Array(runs.length);
+					let firstError: unknown;
+					await Promise.all(
+						runs.map(async (run, index) => {
 							const node = run.node;
 							const outcome = await toolCtx.spawnAgent({
 								prompt: buildWorkerTaskPrompt({
@@ -466,73 +506,22 @@ export function orchestrateTools(ctx: Context): void {
 								checkReport: parseCheck,
 								signal: toolCtx.signal,
 							});
-							return { run, outcome, prior: priorWrites.get(node.id) ?? [] };
+							try {
+								const writes = [...new Set([...(priorWrites.get(node.id) ?? []), ...outcome.writes])];
+								outcomes[index] = settleWorker(access, node, outcome, writes, resumeFailure);
+							} catch (error) {
+								firstError ??= error;
+							}
 						}),
 					);
-					const pendingVerification: Array<{ node: TaskNode; report: string; writes: string[] }> = [];
-					const warnings: string[] = [];
-					for (const { run, outcome, prior } of settled) {
-						const node = run.node;
-						if (outcome.paused) {
-							ctx.orchestrator.pause(
-								access,
-								node.id,
-								outcome.budget ?? {
-									limits: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
-									usage: { turns: 0, tools: 0, tokens: 0, milliseconds: 0 },
-								},
-								outcome.report,
-								outcome.lastTool,
-								[...new Set([...prior, ...outcome.writes])],
-							);
-							continue;
-						}
-						if (!outcome.ok) {
-							ctx.orchestrator.reject(access, node.id, {
-								code: outcome.error?.startsWith('cannot resume')
-									? 'resume_unavailable'
-									: outcome.stopped
-										? 'stopped'
-										: 'worker_failed',
-								reason: outcome.error ?? outcome.report ?? 'the worker failed',
-								at: Date.now(),
-							});
-							continue;
-						}
-						const parsed = parseAgentEnvelope(outcome.report);
-						if (!parsed.ok) {
-							ctx.orchestrator.reject(access, node.id, {
-								code: 'invalid_output',
-								reason: `${outcome.contractError ?? parsed.reason}${attemptAdvice(node)}`,
-								at: Date.now(),
-							});
-							continue;
-						}
-						warnings.push(...parsed.warnings);
-						const envelope = parsed.value;
-						const merged = mergeEvidence(envelope.evidence, outcome.observedCommands);
-						warnings.push(...merged.warnings);
-						const writes = [...new Set([...prior, ...outcome.writes])];
-						const result: TaskResult = {
-							status: envelope.status === 'blocked' || envelope.status === 'failed' ? envelope.status : 'ok',
-							summary: envelope.summary,
-							evidence: merged.items,
-							criteria: envelope.acceptance ?? [],
-							writes,
-							...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
-							at: Date.now(),
-						};
-						ctx.orchestrator.recordWorker(access, node.id, result);
-						if (result.status !== 'ok') {
-							ctx.orchestrator.finish(access, node.id);
-							continue;
-						}
-						if (node.acceptance.every((criterion) => criterion.check === 'evidence')) {
-							ctx.orchestrator.finish(access, node.id);
-							continue;
-						}
-						pendingVerification.push({ node, report: outcome.report, writes });
+					if (firstError) {
+						throw firstError;
 					}
+					const settledOutcomes = outcomes.filter((settled): settled is SettleResult => settled !== undefined);
+					const pendingVerification = settledOutcomes
+						.map((settled) => settled.pending)
+						.filter((item): item is PendingVerification => item !== undefined);
+					const warnings = settledOutcomes.flatMap((settled) => settled.warnings);
 					const review = pendingVerification.filter((item) => item.node.acceptance.some((criterion) => criterion.check === 'review'));
 					await Promise.all(review.map((item) => runVerifier(ctx, toolCtx, access, item, 'reviewer', warnings)));
 					for (const item of pendingVerification.filter((entry) => entry.node.acceptance.some((criterion) => criterion.check === 'command'))) {

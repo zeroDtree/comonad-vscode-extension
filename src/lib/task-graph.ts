@@ -182,6 +182,9 @@ export interface TaskBoardNode {
 	subagentSessionId?: string;
 	verificationSessionIds?: string[];
 	rejection?: TaskRejection;
+	/** The current segment's clock, so the Task Graph can show how long a task has been running. */
+	startedAt?: number;
+	finishedAt?: number;
 }
 
 export interface TaskBoard {
@@ -234,6 +237,117 @@ export function taskChildrenOf(
 		});
 	}
 	return children;
+}
+
+/** One child session as the Task Graph modal draws it: role, state, segment clock and tokens. */
+export interface TaskGraphChildView {
+	id: string;
+	role: string;
+	done: boolean;
+	startedAt?: number;
+	finishedAt?: number;
+	tokens: number;
+}
+
+/** One task node as the Task Graph modal draws it. */
+export interface TaskGraphTaskView {
+	id: string;
+	title: string;
+	role: string;
+	status: TaskStatus;
+	stateLabel: string;
+	rejection?: TaskRejection;
+	dependsOn: string[];
+	writes: string[];
+	startedAt?: number;
+	finishedAt?: number;
+	/** The sum of the children's token counts. */
+	tokens: number;
+	children: TaskGraphChildView[];
+}
+
+/** The whole graph as the Task Graph modal draws it. */
+export interface TaskGraphView {
+	objective: string;
+	counts: Record<TaskStatus, number>;
+	notes: number;
+	tasks: TaskGraphTaskView[];
+}
+
+/** What the host knows about one child session; structural, so this module stays service-free. */
+export interface TaskGraphChildMeta {
+	subagent?: string;
+	subagentDone?: boolean;
+	createdAt?: number;
+	updatedAt?: number;
+	usage?: { inputTokens: number; outputTokens: number };
+}
+
+/**
+ * The word beside a task in the Task Graph. A running node without a child session is still
+ * waiting for a subagent slot, and a verifying node without a verifier session has finished its
+ * worker but is waiting for the batch's verification stage.
+ */
+function taskGraphStateLabel(node: TaskBoardNode): string {
+	if (node.status === 'rejected') {
+		return node.rejection?.code ?? 'rejected';
+	}
+	if (node.status === 'pending') {
+		return 'queued';
+	}
+	if (node.status === 'running') {
+		return node.subagentSessionId ? 'working' : 'starting';
+	}
+	if (node.status === 'verifying' && !node.verificationSessionIds?.length) {
+		return 'worker done · awaiting verification';
+	}
+	return node.status;
+}
+
+/**
+ * The Task Graph modal's data, derived from the live board and the child sessions. `lookup` is
+ * called once per child id in the ideal case; the host memoizes it per snapshot.
+ */
+export function taskGraphViewOf(
+	board: TaskBoard,
+	lookup: (id: string) => TaskGraphChildMeta | undefined,
+): TaskGraphView {
+	const tasks = board.nodes.map((node): TaskGraphTaskView => {
+		const children = taskChildrenOf(node, lookup).map((child): TaskGraphChildView => {
+			const meta = lookup(child.id);
+			const worker = child.id === node.subagentSessionId;
+			return {
+				id: child.id,
+				role: child.role,
+				done: child.done,
+				// A resumed worker's child session predates this segment; the node's clock is the
+				// current segment, while its tokens stay cumulative.
+				startedAt: worker ? (node.startedAt ?? meta?.createdAt) : meta?.createdAt,
+				finishedAt: child.done ? meta?.updatedAt : undefined,
+				tokens: meta?.usage ? meta.usage.inputTokens + meta.usage.outputTokens : 0,
+			};
+		});
+		return {
+			id: node.id,
+			title: node.title,
+			role: node.role,
+			status: node.status,
+			stateLabel: taskGraphStateLabel(node),
+			...(node.rejection ? { rejection: node.rejection } : {}),
+			dependsOn: [...node.dependsOn],
+			writes: [...(node.writes ?? [])],
+			...(node.startedAt !== undefined ? { startedAt: node.startedAt } : {}),
+			...(node.finishedAt !== undefined ? { finishedAt: node.finishedAt } : {}),
+			tokens: children.reduce((sum, child) => sum + child.tokens, 0),
+			children,
+		};
+	});
+	return {
+		objective: board.objective,
+		counts: board.counts,
+		notes: board.messages?.length ?? 0,
+		tasks,
+	};
 }
 
 export interface GraphCheck {
@@ -849,6 +963,8 @@ export function boardOf(graph: TaskGraph, messages?: readonly TaskBoardMessage[]
 			...(node.subagentSessionId ? { subagentSessionId: node.subagentSessionId } : {}),
 			...(node.verificationSessionIds?.length ? { verificationSessionIds: [...node.verificationSessionIds] } : {}),
 			...(node.rejection ? { rejection: node.rejection } : {}),
+			...(node.startedAt !== undefined ? { startedAt: node.startedAt } : {}),
+			...(node.finishedAt !== undefined ? { finishedAt: node.finishedAt } : {}),
 		})),
 		ready: readyNodes(graph).map((node) => node.id),
 		...(messages?.length ? { messages: messages.map((message) => ({ ...message })) } : {}),

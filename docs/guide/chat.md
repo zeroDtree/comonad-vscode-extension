@@ -79,10 +79,12 @@ its shape.
 - **Step timers** climb live and settle on the duration the extension measured.
 - **Turn footer** shows *Worked for 12s · 3 tools*, or *Working…* / *Stopped*, plus copy, fork and
   regenerate actions.
-- **The task board** sits above the composer while the task graph has nodes: accepted/total, one chip
-  per node with its state (a rejected node names the rejection code, e.g. `stopped`), the recent
-  coordination-note count, and **Open** for every child session. It updates from the
-  `orchestrator/changed` event while the turn runs.
+- **The Task Graph** is a pill beside the model picker whenever the chat has a graph: accepted/total
+  plus a status dot. Clicking it opens the Agent-Map-style **Task Graph** modal — the chat/orchestrator
+  as the root card, one card per task with its state (a rejected node names the rejection code, e.g.
+  `stopped`), duration and token total, and a chip for every worker/verifier child with its own
+  duration and tokens. A child chip opens that read-only session; **← Back** returns to the map.
+  The pill and the map follow `orchestrator/changed` while the turn runs.
 - A `write_plan` call renders a **Plan ready** card; an `edit_plan` call renders a **Plan updated**
   card. Both carry **Preview** and **Build plan**. Build plan switches the chat to Semi-Write or Full
   Access, archives the research task graph and sends a new implementation turn; the build turn starts

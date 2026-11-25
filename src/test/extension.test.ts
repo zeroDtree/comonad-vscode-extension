@@ -4911,12 +4911,12 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('the webview carries the orchestrator task board and delegation seams', () => {
+	test('the webview carries the Task Graph pill, modal and delegation seams', () => {
 		const root = join(__dirname, '..', '..');
 		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
 		for (const needle of [
-			'function renderTasks(',
 			"case 'task-board'",
+			"case 'task-graph'",
 			"delegate: 'Delegate tasks'",
 			"task_graph: 'Record task graph'",
 			"task_status: 'Task status'",
@@ -4925,27 +4925,39 @@ suite('Cordis kernel', () => {
 			'data-subagent',
 			'verificationSessionIds',
 			'Open the verifier session',
-			'tasksEl.addEventListener',
 			'syncDelegations',
 			'data-task-ids',
 			'tool-delegation',
 			'taskStateLabel',
+			'renderTaskGraphPill',
+			'renderTaskGraph',
+			'openTaskGraph',
+			'closeTaskGraph',
+			'syncInert',
 		]) {
 			assert.ok(js.includes(needle), needle);
 		}
-		const renderTasks = js.slice(js.indexOf('function renderTasks('), js.indexOf('\n\t}', js.indexOf('function renderTasks(')));
-		assert.ok(renderTasks.includes('taskStateLabel'), 'a task chip names its state');
-		assert.ok(!renderTasks.includes('esc(task.role)'), 'a rejected task is not labelled by its role');
+		assert.ok(!js.includes('renderTasks'), 'the footer task bar renderer is gone');
 		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		for (const needle of [
-			'id="tasks"',
+			'id="task-graph-pill"',
+			'id="task-graph-view"',
+			'id="task-graph-close"',
+			'aria-modal="true" aria-label="Task graph"',
 			"ctx.on('orchestrator/changed'",
 			'taskBoard: session ? ctx.orchestrator.board(session) : undefined',
+			"type: 'task-graph'",
+			"case 'openTaskGraph'",
+			"case 'closeTaskGraph'",
+			'taskGraphViewOf',
 		]) {
 			assert.ok(panel.includes(needle), needle);
 		}
 		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
-		assert.ok(css.includes('#tasks') && css.includes('.task.rejected'));
+		for (const needle of ['#task-graph-view', '#task-graph-pill', '.tg-card', '.tg-dot', '.task.rejected']) {
+			assert.ok(css.includes(needle), needle);
+		}
+		assert.ok(!css.includes('#tasks'), 'the footer task bar style is gone');
 	});
 
 	test('chat only runs a turn without offering the model any tool', async () => {
