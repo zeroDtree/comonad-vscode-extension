@@ -10,6 +10,8 @@ import {
 	reconcileTaskGraph,
 	sanitizeTaskGraph,
 	satisfiesAcceptance,
+	taskChildrenOf,
+	taskNodeOfChild,
 	type AcceptanceCriterion,
 	type TaskGraph,
 	type TaskNode,
@@ -386,5 +388,45 @@ suite('Task graph persistence helpers', () => {
 		assert.match(text, /Goal: ship it/);
 		assert.match(text, /0\/1 accepted/);
 		assert.match(text, /verification_failed: no/);
+	});
+
+	test('a task lists its worker and verifier sessions in start order', () => {
+		const graph = graphOf(node());
+		const task = graph.nodes[0]!;
+		task.subagentSessionId = 'w';
+		task.verificationSessionIds = ['r', 't', 'w'];
+		const sessions: Record<string, { subagent: string; subagentDone: boolean }> = {
+			w: { subagent: 'coder', subagentDone: true },
+			r: { subagent: 'reviewer', subagentDone: true },
+			t: { subagent: 'tester', subagentDone: false },
+		};
+		assert.deepStrictEqual(taskChildrenOf(task, (id) => sessions[id]), [
+			{ id: 'w', role: 'coder', done: true },
+			{ id: 'r', role: 'reviewer', done: true },
+			{ id: 't', role: 'tester', done: false },
+		]);
+		assert.strictEqual(taskNodeOfChild(graph, 't')?.id, 'code');
+		assert.strictEqual(taskNodeOfChild(graph, 'missing'), undefined);
+	});
+
+	test('a running worker stays unfinished after a resume', () => {
+		const graph = graphOf(node());
+		const task = graph.nodes[0]!;
+		task.status = 'running';
+		task.subagentSessionId = 'w';
+		assert.deepStrictEqual(taskChildrenOf(task, () => ({ subagent: 'coder', subagentDone: true })), [
+			{ id: 'w', role: 'coder', done: false },
+		]);
+	});
+
+	test('a child session that is gone is skipped', () => {
+		const graph = graphOf(node());
+		const task = graph.nodes[0]!;
+		task.subagentSessionId = 'w';
+		task.verificationSessionIds = ['gone'];
+		assert.deepStrictEqual(
+			taskChildrenOf(task, (id) => (id === 'w' ? { subagent: 'coder', subagentDone: true } : undefined)),
+			[{ id: 'w', role: 'coder', done: true }],
+		);
 	});
 });

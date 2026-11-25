@@ -268,6 +268,34 @@ button.chat.is-active {
 	font-size: 11px;
 }
 
+/* The overlay's task chip row: the whole delegation, not just the child being read. */
+#subagent-children {
+	display: flex;
+	flex: none;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 10px;
+	padding: 6px 12px;
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	font-size: 11px;
+}
+
+#subagent-children[hidden] {
+	display: none !important;
+}
+
+#subagent-children .subagent-child {
+	flex: none;
+	margin-left: 0;
+	color: var(--vscode-descriptionForeground);
+}
+
+#subagent-children .subagent-child.active {
+	color: var(--vscode-foreground);
+	font-weight: 600;
+	opacity: 0.85;
+}
+
 #subagent-messages {
 	flex: 1;
 	overflow-y: auto;
@@ -997,6 +1025,56 @@ details.thinking summary::before {
 
 .tool-open-subagent:hover {
 	text-decoration: underline;
+}
+
+/* A delegation card's task state: the node, its worker session and the active verifier. The
+   whole batch shares one right-aligned group so several chips cannot scatter across the header. */
+.tool-delegation {
+	display: inline-flex;
+	flex: 0 1 auto;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	margin-left: auto;
+	overflow: hidden;
+	font-size: 11px;
+	white-space: nowrap;
+}
+
+.tool-delegation .tool-open-subagent {
+	margin-left: 0;
+}
+
+.tool-delegation .delegation {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	color: var(--vscode-descriptionForeground);
+}
+
+.tool-delegation .delegation-name {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.tool-delegation .delegation.rejected {
+	color: var(--vscode-errorForeground);
+}
+
+.tool-delegation .delegation.running,
+.tool-delegation .delegation.verifying {
+	color: var(--vscode-textLink-foreground);
+}
+
+.tool-delegation .delegation.accepted {
+	opacity: 0.6;
+}
+
+.tool-delegation .delegation-more {
+	flex: none;
+	color: var(--vscode-descriptionForeground);
 }
 
 /* A finished plan: a card of its own, not a tool row. The green accent reads as "ready";

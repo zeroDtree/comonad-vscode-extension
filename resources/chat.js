@@ -921,6 +921,137 @@
 		}
 	}
 
+	/* ------------------------------------------------------------------ delegation cards */
+
+	/** The task ids a delegate/resume call named, read back from its (possibly clipped) args. */
+	function taskIdsOf(step) {
+		const parsed = toolArgs(step);
+		return parsed && Array.isArray(parsed.tasks)
+			? parsed.tasks.filter((id) => typeof id === 'string' && id.trim() !== '').map((id) => id.trim())
+			: [];
+	}
+
+	/** The board glyph for a task status; the same mapping drives the footer and a card. */
+	function taskGlyph(status) {
+		return status === 'accepted'
+			? '✔'
+			: status === 'rejected'
+				? '✕'
+				: status === 'running'
+					? '◐'
+					: status === 'verifying'
+						? '◑'
+						: status === 'paused'
+							? '⏸'
+							: '○';
+	}
+
+	/** The word after a task id: the rejection code when one exists, so `stopped` is not `coder`. */
+	function taskStateLabel(task) {
+		if (!task) {
+			return '';
+		}
+		if (task.status === 'rejected') {
+			return (task.rejection && task.rejection.code) || 'rejected';
+		}
+		return task.status;
+	}
+
+	/** A task chip's tooltip: title, role/status, writes and the exact rejection. */
+	function taskTip(task) {
+		if (!task) {
+			return '';
+		}
+		return [
+			task.title,
+			task.role + ' · ' + task.status,
+			task.writes && task.writes.length ? 'writes: ' + task.writes.join(', ') : '',
+			task.rejection ? task.rejection.code + ': ' + task.rejection.reason : '',
+		]
+			.filter(Boolean)
+			.join('\n');
+	}
+
+	function taskButton(id, label, tip) {
+		return (
+			'<button type="button" class="tool-open-subagent" data-subagent="' +
+			esc(id) +
+			'" data-tip="' +
+			esc(tip) +
+			'">' +
+			esc(label) +
+			'</button>'
+		);
+	}
+
+	/**
+	 * The task state a delegate/resume card carries: its node, the worker's session and the last
+	 * verifier. The worker finishing is not the delegation finishing, so the node's own status is
+	 * the headline, not the child's `finished` flag.
+	 */
+	function delegationBadges(ids, fallbackId) {
+		const board = state && state.taskBoard && Array.isArray(state.taskBoard.nodes) ? state.taskBoard.nodes : [];
+		const nodes = ids.map((id) => board.find((node) => node.id === id)).filter(Boolean);
+		if (!nodes.length) {
+			return fallbackId ? taskButton(fallbackId, 'Open session', 'Open the subagent session') : '';
+		}
+		const shown = nodes.slice(0, 3);
+		const hidden = nodes.length - shown.length;
+		const badges = shown
+			.map((task) => {
+				const verifier = (task.verificationSessionIds || []).slice(-1)[0];
+				const worker = task.subagentSessionId
+					? taskButton(task.subagentSessionId, 'Open ' + task.role, 'Open the ' + task.role + ' session')
+					: '';
+				const verify =
+					verifier && verifier !== task.subagentSessionId ? taskButton(verifier, 'Verify', 'Open the verifier session') : '';
+				const count = task.status === 'verifying' ? (task.verificationSessionIds || []).length : 0;
+				const label = taskStateLabel(task) + (count ? ' · ' + count + (count === 1 ? ' verifier' : ' verifiers') : '');
+				return (
+					'<span class="delegation ' +
+					esc(task.status) +
+					'" data-tip="' +
+					esc(taskTip(task)) +
+					'">' +
+					taskGlyph(task.status) +
+					' <span class="delegation-name">' +
+					esc(task.id) +
+					' · ' +
+					esc(label) +
+					'</span>' +
+					worker +
+					verify +
+					'</span>'
+				);
+			})
+			.join('');
+		return hidden > 0
+			? badges +
+					'<span class="delegation-more" data-tip="' +
+					esc(nodes.map((task) => task.id).join('\n')) +
+					'">+' +
+					hidden +
+					' more</span>'
+			: badges;
+	}
+
+	/** Repaints every delegation card already on screen from the live board. */
+	function syncDelegations() {
+		for (const card of document.querySelectorAll('#messages .tool-card[data-task-ids]')) {
+			const box = card.querySelector('.tool-delegation');
+			if (!box) {
+				continue;
+			}
+			const ids = String(card.dataset.taskIds || '')
+				.split(',')
+				.filter(Boolean);
+			const html = delegationBadges(ids, card.dataset.subagent);
+			if (box.innerHTML !== html) {
+				box.innerHTML = html;
+			}
+		}
+	}
+
 	/** A shell step's command: sent whole by the host, or read back from the (clipped) args. */
 	function shellCommandOf(step) {
 		if (step.command) {
@@ -1818,8 +1949,14 @@
 		const state = step.result === undefined ? 'running' : failed ? 'error' : 'ok';
 		const title = shell ? oneLine(shellDescriptionOf(step), 120) || humanToolName(step.name) : humanToolName(step.name);
 		const summary = shell ? shellUtilities(command) || oneLine(command, 100) : argSummary(step, parsed);
+		// A delegation card names the whole task, not just the one worker child it may link.
+		const delegation = step.name === 'delegate' || step.name === 'resume';
+		const delegationIds = delegation ? taskIdsOf(step) : [];
+		const delegationHtml = delegation
+			? '<span class="tool-delegation">' + delegationBadges(delegationIds, step.subagentId) + '</span>'
+			: '';
 		const openSubagent =
-			(step.name === 'agent' || step.name === 'delegate') && step.subagentId
+			!delegation && step.name === 'agent' && step.subagentId
 				? '<button type="button" class="tool-open-subagent" data-subagent="' + esc(step.subagentId) + '" data-tip="Open the subagent session">Open session</button>'
 				: '';
 		const mode = toolCardMode();
@@ -1834,6 +1971,12 @@
 		}
 		if (step.id) {
 			card.dataset.callId = step.id;
+		}
+		if (delegation && delegationIds.length) {
+			card.dataset.taskIds = delegationIds.join(',');
+		}
+		if (delegation && step.subagentId) {
+			card.dataset.subagent = step.subagentId;
 		}
 
 		const details = document.createElement('details');
@@ -1855,7 +1998,7 @@
 			esc(title) +
 			'</span>' +
 			(summary ? '<span class="tool-summary">' + esc(summary) + '</span>' : '') +
-			openSubagent +
+			(openSubagent || delegationHtml) +
 			'<span class="timer tool-time"></span></span>' +
 			(preview ? '<span class="tool-preview"></span>' : '');
 		if (preview) {
@@ -2644,6 +2787,7 @@
 		for (const messageEl of messagesEl.querySelectorAll('.msg')) {
 			messageEl.classList.add('no-anim');
 		}
+		syncDelegations();
 		if (pinned) {
 			scroll(true);
 		} else {
@@ -2689,6 +2833,7 @@
 		for (const message of messagesEl.querySelectorAll('.msg')) {
 			message.classList.add('no-anim');
 		}
+		syncDelegations();
 		pinned = true;
 		scroll(true);
 		// A reload or a resync while a turn runs: the transcript the host persisted ends at the last
@@ -2752,6 +2897,52 @@
 		}
 	}
 
+	/**
+	 * The open overlay's task chip and one chip per child session. A finished worker is only one
+	 * step of a delegation: the verifier chips keep the whole batch visible without leaving it.
+	 */
+	function renderSubagentChildren(message) {
+		const box = $('subagent-children');
+		if (!box) {
+			return;
+		}
+		const task = message && message.task;
+		const children = message && Array.isArray(message.children) ? message.children : [];
+		if (!subagentView || !message || message.id !== subagentView.id || !task || !children.length) {
+			box.hidden = true;
+			box.innerHTML = '';
+			return;
+		}
+		const taskChip =
+			'<span class="task ' +
+			esc(task.status) +
+			'" data-tip="' +
+			esc(taskTip(task)) +
+			'">' +
+			taskGlyph(task.status) +
+			' ' +
+			esc(task.id) +
+			' · ' +
+			esc(taskStateLabel(task)) +
+			'</span>';
+		const chips = children
+			.map((child) => {
+				const label = (child.done ? '✔ ' : '◐ ') + child.role;
+				return child.id === message.id
+					? '<span class="subagent-child active" aria-current="true">' + esc(label) + '</span>'
+					: '<button type="button" class="tool-open-subagent subagent-child" data-subagent="' +
+							esc(child.id) +
+							'" data-tip="Open the ' +
+							esc(child.role) +
+							' session">' +
+							esc(label) +
+							'</button>';
+			})
+			.join('');
+		box.innerHTML = taskChip + chips;
+		box.hidden = false;
+	}
+
 	/** A subagent's conversation, read-only: the parent chat keeps its place underneath. */
 	function renderSubagentTurns(message) {
 		if (!message || !message.id) {
@@ -2777,6 +2968,7 @@
 		}
 		$('subagent-title').textContent = message.title || 'Subagent session';
 		$('subagent-status').textContent = message.done ? 'finished' : 'working…';
+		renderSubagentChildren(message);
 		const root = $('subagent-messages');
 		const atBottom = root.scrollTop + root.clientHeight >= root.scrollHeight - 24;
 		const keepScroll = root.scrollTop;
@@ -2820,7 +3012,8 @@
 		}
 		const card = [...document.querySelectorAll('#messages .tool-card')].find((item) => item.dataset.callId === callId);
 		const head = card && card.querySelector('.tool-head-row');
-		if (!head || head.querySelector('.tool-open-subagent')) {
+		// A delegation card owns its links (worker + verifier); never add a second, stale one.
+		if (!head || card.dataset.taskIds || card.querySelector('.tool-delegation') || head.querySelector('.tool-open-subagent')) {
 			return;
 		}
 		const button = document.createElement('button');
@@ -3152,6 +3345,7 @@
 			closePlanMenu(false);
 		}
 		card.replaceWith(toolCard(step));
+		syncDelegations();
 		paintTimer(step, false, Date.now());
 		scroll();
 	}
@@ -3646,6 +3840,11 @@
 		tasksEl.addEventListener('click', handleRichClick);
 	}
 
+	const subagentChildrenEl = $('subagent-children');
+	if (subagentChildrenEl) {
+		subagentChildrenEl.addEventListener('click', handleRichClick);
+	}
+
 	const subagentMessagesEl = $('subagent-messages');
 	if (subagentMessagesEl) {
 		subagentMessagesEl.addEventListener('click', handleRichClick);
@@ -3933,6 +4132,7 @@
 		refreshTip();
 		renderStatus();
 		renderTasks();
+		syncDelegations();
 		renderTodos();
 		// The snapshot is authoritative about what runs: an idle one drops a session id left over from
 		// a turn whose end this guest never saw.
@@ -4015,8 +4215,6 @@
 			return;
 		}
 		const counts = board.counts || {};
-		const glyph = (status) =>
-			status === 'accepted' ? '✔' : status === 'rejected' ? '✕' : status === 'running' ? '◐' : status === 'verifying' ? '◑' : status === 'paused' ? '⏸' : '○';
 		const notes = Array.isArray(board.messages) ? board.messages.length : 0;
 		node.hidden = false;
 		node.innerHTML =
@@ -4029,14 +4227,7 @@
 			list
 				.slice(0, 8)
 				.map((task) => {
-					const tip = [
-						task.title,
-						task.role + ' · ' + task.status,
-						task.writes && task.writes.length ? 'writes: ' + task.writes.join(', ') : '',
-						task.rejection ? task.rejection.code + ': ' + task.rejection.reason : '',
-					]
-						.filter(Boolean)
-						.join('\n');
+					const tip = taskTip(task);
 					const open = task.subagentSessionId
 						? '<button type="button" class="tool-open-subagent" data-subagent="' +
 							esc(task.subagentSessionId) +
@@ -4058,11 +4249,11 @@
 						'" data-tip="' +
 						esc(tip) +
 						'">' +
-						glyph(task.status) +
+						taskGlyph(task.status) +
 						' ' +
 						esc(task.id) +
 						' · ' +
-						esc(task.role) +
+						esc(taskStateLabel(task)) +
 						open +
 						openVerifier +
 						'</span>'
@@ -4137,6 +4328,7 @@
 				if (state) {
 					state.taskBoard = message.board || null;
 					renderTasks();
+					syncDelegations();
 				}
 				break;
 			case 'turns':
@@ -4262,6 +4454,7 @@
 					if (card) {
 						step._open = (step._details && step._details.open) || step._open === true;
 						card.replaceWith(toolCard(step));
+						syncDelegations();
 					}
 				} else {
 					attachSubagentLink(message.callId, message.id);
@@ -4275,6 +4468,14 @@
 				break;
 			case 'subagent':
 				renderSubagentTurns(message);
+				break;
+			case 'subagent-children':
+				// A sibling started or finished: only the chip row moves, never the transcript.
+				if (subagentView && message.id === subagentView.id) {
+					subagentView.task = message.task;
+					subagentView.children = Array.isArray(message.children) ? message.children : [];
+					renderSubagentChildren(subagentView);
+				}
 				break;
 			case 'attachment':
 				attachmentReply(message);

@@ -4926,9 +4926,16 @@ suite('Cordis kernel', () => {
 			'verificationSessionIds',
 			'Open the verifier session',
 			'tasksEl.addEventListener',
+			'syncDelegations',
+			'data-task-ids',
+			'tool-delegation',
+			'taskStateLabel',
 		]) {
 			assert.ok(js.includes(needle), needle);
 		}
+		const renderTasks = js.slice(js.indexOf('function renderTasks('), js.indexOf('\n\t}', js.indexOf('function renderTasks(')));
+		assert.ok(renderTasks.includes('taskStateLabel'), 'a task chip names its state');
+		assert.ok(!renderTasks.includes('esc(task.role)'), 'a rejected task is not labelled by its role');
 		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		for (const needle of [
 			'id="tasks"',
@@ -8842,14 +8849,40 @@ suite('Explicit references', () => {
 		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
 		const js = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
-		for (const id of ['subagent-view', 'subagent-head', 'subagent-title', 'subagent-status', 'subagent-messages', 'subagent-close']) {
+		for (const id of [
+			'subagent-view',
+			'subagent-head',
+			'subagent-title',
+			'subagent-status',
+			'subagent-children',
+			'subagent-messages',
+			'subagent-close',
+		]) {
 			assert.ok(panel.includes(`id="${id}"`), `the overlay has ${id}`);
 		}
-		for (const needle of ['renderSubagentTurns', 'openSubagent', 'closeSubagent', 'tool-open-subagent', 'subagent-start', 'subagentWanted']) {
+		for (const needle of [
+			'renderSubagentTurns',
+			'renderSubagentChildren',
+			'openSubagent',
+			'closeSubagent',
+			'tool-open-subagent',
+			'subagent-start',
+			'subagentWanted',
+			"case 'subagent-children'",
+		]) {
 			assert.ok(js.includes(needle), needle);
 		}
-		assert.ok(css.includes('#subagent-view') && css.includes('.tool-open-subagent'), 'the overlay and its link are styled');
-		assert.ok(panel.includes("type: 'subagent'") && panel.includes("'subagent/changed'"), 'the host sends snapshots and follows the child');
+		assert.ok(
+			css.includes('#subagent-view') &&
+				css.includes('.tool-open-subagent') &&
+				css.includes('#subagent-children') &&
+				css.includes('.tool-delegation'),
+			'the overlay, its link and the delegation badges are styled',
+		);
+		assert.ok(
+			panel.includes("type: 'subagent'") && panel.includes("'subagent/changed'") && panel.includes("type: 'subagent-children'"),
+			'the host sends snapshots and follows the child and its siblings',
+		);
 	});
 
 	test('the chat carries the remote and no-sandbox state', () => {

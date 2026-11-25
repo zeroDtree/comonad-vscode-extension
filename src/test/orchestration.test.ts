@@ -6,7 +6,7 @@ import { createTestKernel } from './harness';
 import { BUILTIN_ROLES } from '../lib/agents';
 import { COMONAD_BLOCK } from '../lib/blocks';
 import { clampResumeBudget } from '../lib/budget';
-import { reconcileTaskGraph } from '../lib/task-graph';
+import { reconcileTaskGraph, taskChildrenOf } from '../lib/task-graph';
 import { fsTools } from '../tools/fs';
 import { messageTools } from '../tools/message';
 import { orchestrateTools } from '../tools/orchestrate';
@@ -136,6 +136,14 @@ suite('Orchestrator task loop', () => {
 			const verifierId = node.verificationSessionIds?.[0];
 			assert.ok(verifierId, 'the reviewer has a hidden session');
 			assert.strictEqual(kernel.ctx.sessions.require(verifierId).subagent, 'reviewer');
+			assert.deepStrictEqual(
+				taskChildrenOf(node, (id) => kernel.ctx.sessions.get(id)),
+				[
+					{ id: childId, role: 'coder', done: true },
+					{ id: verifierId, role: 'reviewer', done: true },
+				],
+				'the overlay lists the worker and its verifier',
+			);
 			assert.deepStrictEqual(
 				starts.map((start) => start.name),
 				['coder', 'reviewer'],

@@ -33,6 +33,7 @@ import {
 } from '../lib/plan-files';
 import { formatReference } from '../lib/references';
 import { guardPath, isInside, sandboxAllowsWrites } from '../lib/sandbox';
+import { taskChildrenOf, taskNodeOfChild, type TaskBoardNode, type TaskGraph, type TaskNode } from '../lib/task-graph';
 import { workspaceFirstScope, type SettingsScope } from '../lib/settings-file';
 import { countRaw, formatTokens } from '../lib/tokens';
 import { ChatWebviewAssets, type ChatAssetSpec } from '../services/chat-assets';
@@ -634,18 +635,36 @@ export function chatPanel(ctx: Context): void {
 		);
 	};
 
+	/**
+	 * The task a viewed child belongs to, plus every session that task spawned. The overlay's
+	 * chip row reads this, so a finished worker cannot be mistaken for a finished delegation.
+	 */
+	const taskHeaderOf = (node: TaskNode | TaskBoardNode): { task: Record<string, unknown>; children: ReturnType<typeof taskChildrenOf> } => ({
+		task: {
+			id: node.id,
+			title: node.title,
+			status: node.status,
+			role: node.role,
+			...(node.rejection ? { rejection: { code: node.rejection.code, reason: node.rejection.reason } } : {}),
+		},
+		children: taskChildrenOf(node, (childId) => ctx.sessions.get(childId)),
+	});
+
 	/** A subagent's conversation as the overlay draws it; `undefined` when it is gone. */
 	const subagentSnapshot = (id: string): Record<string, unknown> | undefined => {
 		const session = ctx.sessions.get(id);
 		if (!session?.parentId) {
 			return undefined;
 		}
+		const root = ctx.sessions.get(session.parentId);
+		const node = root?.taskGraph ? taskNodeOfChild(root.taskGraph, id) : undefined;
 		return {
 			type: 'subagent',
 			id,
 			title: session.title,
 			subagent: session.subagent,
 			done: session.subagentDone === true,
+			...(node ? taskHeaderOf(node) : {}),
 			turns: history(session).turns,
 		};
 	};
@@ -948,20 +967,51 @@ export function chatPanel(ctx: Context): void {
 	});
 	// The task board belongs to the root chat; a child's events never repaint the parent's overview.
 	ctx.on('orchestrator/changed', (id, board) => {
-		if (ctx.sessions.active()?.id === id) {
-			post({ type: 'task-board', board: board ?? null });
+		if (ctx.sessions.active()?.id !== id) {
+			return;
+		}
+		post({ type: 'task-board', board: board ?? null });
+		// An open overlay follows the task's chip row: a verifier attaching, a status flipping, or
+		// the graph going away all arrive here without redrawing the child's transcript.
+		for (const [client, viewed] of subagentViews) {
+			const node = board?.nodes.find(
+				(candidate) => candidate.subagentSessionId === viewed || (candidate.verificationSessionIds ?? []).includes(viewed),
+			);
+			post({ type: 'subagent-children', id: viewed, ...(node ? taskHeaderOf(node) : { task: undefined, children: [] }) }, client);
 		}
 	});
 	// A watched subagent gained a step, finished or failed: repaint the open overlay only.
 	ctx.on('subagent/changed', (id) => {
+		if (!subagentViews.size) {
+			return;
+		}
+		// One root lookup per event even when several overlays are open.
+		const graphs = new Map<string, TaskGraph | undefined>();
+		const graphOf = (rootId: string): TaskGraph | undefined => {
+			if (!graphs.has(rootId)) {
+				graphs.set(rootId, ctx.sessions.get(rootId)?.taskGraph);
+			}
+			return graphs.get(rootId);
+		};
 		for (const [client, viewed] of subagentViews) {
-			if (viewed !== id) {
+			if (viewed === id) {
+				const snapshot = subagentSnapshot(id);
+				if (snapshot) {
+					post(snapshot, client);
+				}
 				continue;
 			}
-			const snapshot = subagentSnapshot(id);
-			if (snapshot) {
-				post(snapshot, client);
+			// A sibling changed: only the chip row moves. Its own transcript stays where it is.
+			const session = ctx.sessions.get(viewed);
+			const graph = session?.parentId ? graphOf(session.parentId) : undefined;
+			const node = graph ? taskNodeOfChild(graph, viewed) : undefined;
+			if (!node) {
+				continue;
 			}
+			if (node.subagentSessionId !== id && !(node.verificationSessionIds ?? []).includes(id)) {
+				continue;
+			}
+			post({ type: 'subagent-children', id: viewed, ...taskHeaderOf(node) }, client);
 		}
 	});
 	// One refresh answers a burst of events: a settings save moves `settings/changed` and the tools it
@@ -2363,6 +2413,7 @@ ${assetStyles.map((src) => `<link rel="stylesheet" href="${escapeAttribute(src)}
 		<span id="subagent-title"></span>
 		<span id="subagent-status" aria-live="polite"></span>
 	</div>
+	<div id="subagent-children" hidden role="group" aria-label="Task sessions"></div>
 	<div id="subagent-messages"></div>
 </div>
 <footer>

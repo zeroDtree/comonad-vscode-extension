@@ -192,6 +192,50 @@ export interface TaskBoard {
 	messages?: TaskBoardMessage[];
 }
 
+/** A task's child session as the UI lists it: the worker first, then the verifiers in start order. */
+export interface TaskChildSession {
+	id: string;
+	role: string;
+	done: boolean;
+}
+
+/** The task node that owns a child session, if the graph still names it. */
+export function taskNodeOfChild(graph: TaskGraph, childId: string): TaskNode | undefined {
+	return graph.nodes.find(
+		(node) => node.subagentSessionId === childId || (node.verificationSessionIds ?? []).includes(childId),
+	);
+}
+
+/**
+ * A task's child sessions, with the role each one ran as. A session that is gone is skipped: an
+ * overlay chip would have nothing to open. A resumed worker keeps its old `subagentDone: true`
+ * until its first step, so a running node wins over the stored flag.
+ */
+export function taskChildrenOf(
+	source: Pick<TaskNode, 'role' | 'status' | 'subagentSessionId' | 'verificationSessionIds'>,
+	lookup: (id: string) => { subagent?: string; subagentDone?: boolean } | undefined,
+): TaskChildSession[] {
+	const children: TaskChildSession[] = [];
+	const seen = new Set<string>();
+	for (const id of [source.subagentSessionId, ...(source.verificationSessionIds ?? [])]) {
+		if (!id || seen.has(id)) {
+			continue;
+		}
+		seen.add(id);
+		const session = lookup(id);
+		if (!session) {
+			continue;
+		}
+		const worker = id === source.subagentSessionId;
+		children.push({
+			id,
+			role: session.subagent ?? (worker ? source.role : 'verifier'),
+			done: session.subagentDone === true && !(worker && source.status === 'running'),
+		});
+	}
+	return children;
+}
+
 export interface GraphCheck {
 	errors: string[];
 	warnings: string[];
