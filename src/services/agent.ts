@@ -78,6 +78,7 @@ import type {
 	AgentSpawnOutcome,
 	AgentSpawnRequest,
 	AttachmentPart,
+	Capability,
 	CompletionUsage,
 	ImageAttachment,
 	Message,
@@ -284,10 +285,29 @@ interface RunState {
 
 /** What a continue says as the user when there is a reply to carry on. */
 /**
- * The generation types that write nothing into the chat and run no tools: an impersonation streams into the
- * composer, and a quiet turn is the caller's alone. Neither is a turn the chat has taken.
+ * The generation types that write nothing into the chat: an impersonation streams into the composer, and a
+ * quiet turn is the caller's alone. Neither is a turn the chat has taken.
  */
 const SILENT_TRIGGERS: ReadonlySet<GenerationTrigger> = new Set<GenerationTrigger>(['impersonate', 'quiet']);
+
+/** The generation types that are offered no tools at all: an impersonation only writes the user's next message. */
+const TOOLLESS_TRIGGERS: ReadonlySet<GenerationTrigger> = new Set<GenerationTrigger>(['impersonate']);
+
+/** The capabilities a quiet turn may use: read a file, read-only shell, read a plan. */
+const QUIET_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>(['ro', 'shell_ro', 'ro_plan']);
+
+/**
+ * Read-capabilities a quiet turn is still not offered: they change shared state or wait on a person, and a
+ * quiet turn has no transcript to resume if it stopped to ask.
+ */
+const QUIET_EXCLUDED_TOOLS: ReadonlySet<string> = new Set([
+	'ask_user', // waits on an answer; a quiet turn never opens a question card
+	'message', // writes the shared mailbox
+	'memory', // appends project memory
+	'todo_write', // edits the chat's todo list
+	'delegate', // a subagent may write files under the session policy
+	'resume', // continues a subagent's write work
+]);
 
 const CONTINUE_ASK = 'Continue the last message exactly where it stops. Do not repeat any of it, and do not start over.';
 
@@ -729,8 +749,9 @@ export class Agent extends Service {
 			// The context budget and every counter in the panels read the same counter, so the model's own
 			// tokenizer is made exact before anything is measured with it.
 			await abortable(turn.signal, this.ctx.tokenizers.warm(this.ctx.llm.modelName(session.policy.model)));
-			// A silent generation is offered no tools, so its budget is measured without them.
-			const tools = SILENT_TRIGGERS.has(trigger) ? [] : this.ctx.tools.visible(session.policy);
+			// The budget measures exactly the tools the turn offers: none for an impersonation, the read-only
+			// set for a quiet turn.
+			const tools = this.offeredTools(trigger, session.policy);
 			const budget = this.budgetFor(session.policy, session.contextWindow, system, tools);
 			const room = this.roomFor(budget);
 			const toolCost = this.toolTokens(tools);
@@ -1851,6 +1872,17 @@ export class Agent extends Service {
 					return { status: 'done', state, step: outcome.step };
 				}
 				const calls = Array.isArray(outcome.payload) ? (outcome.payload as ToolCall[]) : [];
+				if (state.trigger === 'quiet') {
+					// A quiet turn never opens an approval: it keeps no transcript, so a suspended turn would have
+					// nothing to resume. The call is denied instead and the model is told why.
+					cursor = {
+						node: outcome.node,
+						value: { allowed: false, reason: 'a quiet turn runs read-only tools without asking for approval' },
+						payload: outcome.payload,
+						step: outcome.step,
+					};
+					continue;
+				}
 				// The suspension is where a turn can sit for a long time: write down everything it has
 				// done first, so the chat shows the work while the approval question is open.
 				this.persistTranscript(session, state);
@@ -2102,11 +2134,11 @@ export class Agent extends Service {
 				return { ...state, stop: exhausted, toolCalls: [], traces: undefined };
 			}
 			// A subagent is shown only the read-only tools on its list; the model never learns of a write tool.
-			// A silent generation (an impersonation or a quiet turn) writes nothing down and is offered no
-			// tools at all: a tool it called would run for real, and its reply is thrown away afterwards.
+			// A quiet turn is offered the chat's read-only tools and an impersonation none: a tool the
+			// impersonation called would run for real, and its reply is thrown away afterwards.
 			// A turn whose Tools block is off offers none either, for the whole turn.
-			const offered = this.ctx.tools.visible(state.policy).filter((tool) => this.subagentToolAllowed(state, tool));
-			const visible = SILENT_TRIGGERS.has(state.trigger) || state.toolsEnabled === false ? [] : offered;
+			const offered = this.offeredTools(state.trigger, state.policy).filter((tool) => this.subagentToolAllowed(state, tool));
+			const visible = state.toolsEnabled === false ? [] : offered;
 			const live = this.turnSession(state.sessionId) ?? this.subagentSessions.get(state.sessionId);
 			const session = live ?? this.ctx.sessions.get(state.sessionId);
 			// A long turn grows by its own tool results, so the request is checked here as well as at the
@@ -2498,6 +2530,12 @@ export class Agent extends Service {
 				},
 				toolsEnabled: state.toolsEnabled !== false,
 				toolEnabled: (name) => this.ctx.tools.isEnabled(name),
+				// A quiet turn is held to exactly what its request offered, so a hallucinated write tool is
+				// rejected here instead of running under the session's policy.
+				offered:
+					state.trigger === 'quiet'
+						? new Set(this.offeredTools('quiet', state.policy).map((tool) => tool.name))
+						: undefined,
 				delegated: state.filter ? (tool) => this.subagentToolAllowed(state, tool) : undefined,
 			});
 			// The first pass opens one chain per call; the resumed pass reuses them and appends the
@@ -2554,10 +2592,11 @@ export class Agent extends Service {
 			}
 			// The call is revalidated against a parent that may have tightened during the request.
 			this.refreshSubagentPolicy(state);
-			// A silent generation is offered no tools, so a call it makes anyway is dropped with its
-			// turn: the reply is what it wrote, and nothing is run on its behalf. Its transcript is
-			// discarded afterwards, so the unanswered calls never reach the chat record.
-			if (SILENT_TRIGGERS.has(state.trigger)) {
+			// A toolless generation (an impersonation) is offered no tools, so a call it makes anyway is
+			// dropped with its turn: the reply is what it wrote, and nothing is run on its behalf. Its
+			// transcript is discarded afterwards, so the unanswered calls never reach the chat record.
+			// A quiet turn is offered read-only tools, so its calls go on to the gate instead.
+			if (TOOLLESS_TRIGGERS.has(state.trigger)) {
 				const rules = state.policy.rules ?? this.ctx.settings.rules();
 				this.denyWithoutGate(
 					state,
@@ -2730,6 +2769,22 @@ export class Agent extends Service {
 			this.notice(state.ref, `Dropped ${dropped} image(s) from ${call.name}: they could not be attached or exceeded limits.`);
 		}
 		return parts.length ? parts : undefined;
+	}
+
+	/**
+	 * The tools this turn actually offers the model: an impersonation none at all, a quiet turn the chat's
+	 * read-only tools minus the ones that change shared state or wait on a person, and every other trigger
+	 * exactly what the policy makes visible.
+	 */
+	private offeredTools(trigger: GenerationTrigger | undefined, policy: SessionPolicy): ToolSpec[] {
+		const visible = this.ctx.tools.visible(policy);
+		if (TOOLLESS_TRIGGERS.has(trigger ?? 'normal')) {
+			return [];
+		}
+		if (trigger !== 'quiet') {
+			return visible;
+		}
+		return visible.filter((tool) => QUIET_CAPABILITIES.has(tool.capability) && !QUIET_EXCLUDED_TOOLS.has(tool.name));
 	}
 
 	/** Whether a subagent's model may see or run this tool; the main agent is unfiltered here. */
@@ -3438,8 +3493,9 @@ export class Agent extends Service {
 	async promptBlocks(session: Session, contexts: string[] = [], trigger?: GenerationTrigger): Promise<PromptBlock[]> {
 		const config = this.ctx.settings.get();
 		const host = this.ctx.host;
-		// A silent generation is offered no tools, so the prompt must not advertise any either.
-		const visible = SILENT_TRIGGERS.has(trigger ?? 'normal') ? [] : this.ctx.tools.visible(session.policy);
+		// The prompt advertises exactly what the turn offers: the read-only set for a quiet turn, none for
+		// an impersonation, the policy's visible tools otherwise.
+		const visible = this.offeredTools(trigger, session.policy);
 		const has = (name: string): boolean => visible.some((tool) => tool.name === name);
 		const rules = planRules({ policy: session.policy, visible: new Set(visible.map((tool) => tool.name)) });
 		const setting = new Map(config.prompts.map((entry) => [entry.id, entry]));

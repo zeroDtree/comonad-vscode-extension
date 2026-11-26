@@ -3187,32 +3187,47 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('a quiet turn is offered no tools, runs none, and leaves the chat as it was', async () => {
+	test('a quiet turn is offered its read-only tools and leaves the chat as it was', async () => {
 		const kernel = await createTestKernel();
 		try {
-			let executed = 0;
+			let reads = 0;
+			let writes = 0;
 			kernel.ctx.tools.register({
 				name: 'read_file',
+				description: 'a read-only probe',
+				capability: 'ro',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: { type: 'object', properties: {}, required: [], additionalProperties: true },
+				execute: async () => {
+					reads += 1;
+					return 'body';
+				},
+			} as never);
+			kernel.ctx.tools.register({
+				name: 'write_file',
 				description: 'a write-capable probe',
 				capability: 'rw',
 				needsNetwork: false,
 				needsWorkspace: false,
 				parameters: { type: 'object', properties: {}, required: [], additionalProperties: true },
 				execute: async () => {
-					executed += 1;
-					return 'body';
+					writes += 1;
+					return 'written';
 				},
 			} as never);
-			const offered: number[] = [];
+			const offered: string[][] = [];
 			const replies: { content: string; toolCalls?: { id: string; name: string; arguments: string }[] }[] = [
 				{ content: 'hi.' },
-				// The model asks for the tool anyway: a quiet turn is not offered it, so the call is dropped.
-				{ content: '', toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{"path":"a.txt"}' }] },
+				// A quiet turn is offered the read-only tools and nothing that writes, so the call it
+				// makes is run — and the read is the only thing it can do.
+				{ content: '', toolCalls: [{ id: 'q1', name: 'read_file', arguments: '{"path":"a.txt"}' }] },
+				{ content: 'private answer' },
 			];
 			kernel.ctx.llm.use({
 				name: 'test',
 				async chat(request: AdapterRequest) {
-					offered.push(request.tools.length);
+					offered.push(request.tools.map((tool) => tool.name));
 					const reply = replies.shift() ?? { content: 'x' };
 					return { message: { role: 'assistant' as const, content: reply.content, toolCalls: reply.toolCalls }, toolCalls: reply.toolCalls ?? [], usage: { input: 1, output: 1 } };
 				},
@@ -3225,12 +3240,116 @@ suite('Cordis kernel', () => {
 			const turns = before.turnIndex;
 
 			const result = await kernel.ctx.agent.runTurn({ text: 'answer this privately', trigger: 'quiet', sessionId: 'quiet', policy });
-			assert.ok(offered[0]! > 0, 'a normal turn is still offered its tools');
-			assert.strictEqual(offered[1], 0, 'a quiet turn is offered no tools');
-			assert.strictEqual(executed, 0, 'and a tool call it makes anyway is not run');
-			assert.strictEqual(result.text, '', 'the turn ends on what it wrote, which is nothing here');
+			assert.ok(offered[0]!.length > 0, 'a normal turn is still offered its tools');
+			assert.ok(offered[1]!.includes('read_file'), 'a quiet turn is offered the read-only tools');
+			assert.ok(!offered[1]!.includes('write_file'), 'and never one that writes');
+			assert.strictEqual(reads, 1, 'the read-only call it made is run');
+			assert.strictEqual(writes, 0, 'and no write tool is ever run');
+			assert.strictEqual(result.text, 'private answer', 'the turn ends on what it wrote');
 			assert.deepStrictEqual(kernel.ctx.sessions.require('quiet').transcript, transcript, 'the transcript is left exactly as it was');
 			assert.strictEqual(kernel.ctx.sessions.require('quiet').turnIndex, turns, 'and it is not counted as a turn of the chat');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a quiet turn rejects a tool it was not offered', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let writes = 0;
+			kernel.ctx.tools.register({
+				name: 'write_file',
+				description: 'a write-capable probe',
+				capability: 'rw',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: { type: 'object', properties: {}, required: [], additionalProperties: true },
+				execute: async () => {
+					writes += 1;
+					return 'written';
+				},
+			} as never);
+			const seen: Message[][] = [];
+			const replies: { content: string; toolCalls?: { id: string; name: string; arguments: string }[] }[] = [
+				// The session policy would allow this call (sw + Accept all), but a quiet turn is not
+				// offered a write: the gate must refuse it and tell the model why.
+				{ content: '', toolCalls: [{ id: 'c1', name: 'write_file', arguments: '{"path":"a.txt","content":"x"}' }] },
+				{ content: 'no write here' },
+			];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request: AdapterRequest) {
+					seen.push(request.messages);
+					const reply = replies.shift() ?? { content: 'x' };
+					return { message: { role: 'assistant' as const, content: reply.content, toolCalls: reply.toolCalls }, toolCalls: reply.toolCalls ?? [], usage: { input: 1, output: 1 } };
+				},
+			});
+			const policy = { approval: 'universal_accept' as const, workMode: 'sw' as const };
+			kernel.ctx.sessions.save(kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'quiet'));
+			const transcript = kernel.ctx.sessions.require('quiet').transcript;
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'change a line', trigger: 'quiet', sessionId: 'quiet', policy });
+			assert.strictEqual(writes, 0, 'a tool the turn was not offered is never run');
+			assert.strictEqual(result.text, 'no write here', 'the turn still ends on the reply it wrote');
+			assert.deepStrictEqual(kernel.ctx.sessions.require('quiet').transcript, transcript, 'and nothing is written down');
+			const refused = (seen[1] ?? [])
+				.filter((message) => message.role === 'tool')
+				.map((message) => message.content);
+			assert.ok(
+				refused.some((content) => /not offered/.test(content)),
+				'the model is told the tool was not offered to this turn',
+			);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a quiet turn denies a call that would need approval without asking', async () => {
+		const kernel = await createTestKernel();
+		try {
+			let reads = 0;
+			let asks = 0;
+			kernel.ctx.tools.register({
+				name: 'read_file',
+				description: 'a read-only probe',
+				capability: 'ro',
+				needsNetwork: false,
+				needsWorkspace: false,
+				parameters: { type: 'object', properties: {}, required: [], additionalProperties: true },
+				execute: async () => {
+					reads += 1;
+					return 'body';
+				},
+			} as never);
+			kernel.ctx.on('approval/request', () => {
+				asks += 1;
+				return 'deny';
+			});
+			const replies: { content: string; toolCalls?: { id: string; name: string; arguments: string }[] }[] = [
+				{ content: '', toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{"path":"a.txt"}' }] },
+				{ content: 'private answer' },
+			];
+			kernel.ctx.llm.use({
+				name: 'test',
+				async chat(request: AdapterRequest) {
+					const reply = replies.shift() ?? { content: 'x' };
+					return { message: { role: 'assistant' as const, content: reply.content, toolCalls: reply.toolCalls }, toolCalls: reply.toolCalls ?? [], usage: { input: 1, output: 1 } };
+				},
+			});
+			// Manual approval makes every read-only call a confirmation — and a quiet turn has no
+			// transcript to resume, so it must be denied outright instead of parking at a card.
+			const policy = { approval: 'manual' as const, workMode: 'sw' as const };
+			kernel.ctx.sessions.save(kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'quiet'));
+			const transcript = kernel.ctx.sessions.require('quiet').transcript;
+			const turns = kernel.ctx.sessions.require('quiet').turnIndex;
+
+			const result = await kernel.ctx.agent.runTurn({ text: 'read it', trigger: 'quiet', sessionId: 'quiet', policy });
+			assert.strictEqual(asks, 0, 'a quiet turn never opens an approval card');
+			assert.strictEqual(reads, 0, 'and a call that would need one is not run');
+			assert.strictEqual(kernel.ctx.sessions.require('quiet').cursor, null, 'the turn is not parked, since there is nothing to resume');
+			assert.deepStrictEqual(kernel.ctx.sessions.require('quiet').transcript, transcript, 'the transcript is left exactly as it was');
+			assert.strictEqual(kernel.ctx.sessions.require('quiet').turnIndex, turns, 'and it is not counted as a turn of the chat');
+			assert.strictEqual(result.text, 'private answer', 'the reply still reaches the reader');
 		} finally {
 			await kernel.dispose();
 		}

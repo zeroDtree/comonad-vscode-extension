@@ -835,4 +835,50 @@ suite('Idle chat panel', () => {
 		assert.match(settled, /at\?: number/);
 		assert.match(settled, /at: last\.at/, 'turn-end carries the settled transcript boundary');
 	});
+
+	test('a quiet reply is a card that outlives the redraws', () => {
+		const root = join(__dirname, '..', '..');
+		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		// The reply is nowhere in the transcript, so it must be remembered per chat and drawn again
+		// after every repaint of #messages — the redraw is what used to erase it.
+		assert.ok(guest.includes('const quietReplies = new Map()'), 'each chat keeps its last quiet reply');
+		assert.match(guest, /function renderQuietReply\(sessionId\)/);
+		const render = guest.slice(guest.indexOf('function renderTurns('), guest.indexOf('/** Registers a drawn turn'));
+		assert.match(render, /renderQuietReply\(sessionId\)/, 'a transcript redraw draws the quiet card again');
+		assert.match(guest, /case 'quiet-reply':/);
+		// The quiet turn's bubble was never a turn of the chat: it is dropped, and no resync follows.
+		const end = guest.slice(guest.indexOf("case 'turn-end':"), guest.indexOf("case 'insertReference':"));
+		assert.match(end, /message\.quiet === true/);
+		assert.match(end, /dropQuietTurn\(\)/);
+		const drop = guest.slice(guest.indexOf('function dropQuietTurn('), guest.indexOf('function endTurn('));
+		assert.doesNotMatch(drop, /requestResync/);
+		assert.match(drop, /turns = turns\.filter\(/, 'the quiet bubble leaves no seat in the guest transcript');
+
+		// The bubble showed the process behind the answer — its thoughts and the tools it ran — but the
+		// transcript never holds either. They are harvested before it goes, and the card draws them.
+		assert.ok(guest.includes('const pendingQuiet = new Map()'), 'the steps of the dropped bubble wait for their reply');
+		assert.match(guest, /function keptQuietSteps\(/, 'a quiet turn keeps its thoughts and the calls it made');
+		assert.match(drop, /pendingQuiet\.set\(/, 'the bubble is harvested before it is dropped');
+		const card = guest.slice(guest.indexOf('function quietCard('), guest.indexOf('function renderQuietReply('));
+		assert.match(card, /stepEl\(step, false\)/, 'the card draws its steps with the turn renderer');
+		assert.match(card, /paintTimer\(step, false, now\)/, 'and settles their timers, since a card is a snapshot');
+		const quiet = guest.slice(guest.indexOf("case 'quiet-reply':"), guest.indexOf("case 'insertReference':"));
+		assert.match(quiet, /pendingQuiet\.get\(id\)/, 'the reply is drawn with the steps that produced it');
+
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		const deliver = panel.slice(panel.indexOf('const deliver ='), panel.indexOf('const refreshState ='));
+		assert.match(deliver, /trigger === 'quiet'[\s\S]*?type: 'quiet-reply'/);
+		const rewrote = panel.slice(panel.indexOf('const rewrote ='), panel.indexOf('const deliver ='));
+		assert.match(rewrote, /!== 'quiet'/, 'a quiet turn writes nothing, so it repaints nothing');
+		const history = panel.slice(panel.indexOf('const history = '), panel.indexOf('const settledTurn ='));
+		assert.match(history, /runningTrigger !== 'quiet'/, 'a redraw cannot re-arm a transcript turn for quiet');
+		assert.ok(
+			(panel.match(/quiet: true/g) || []).length >= 2,
+			'both runners tell the guest the turn-end belongs to a quiet turn',
+		);
+
+		const css = readFileSync(join(root, 'resources', 'chat.css'), 'utf8');
+		assert.ok(css.includes('.msg.quiet-reply'), 'the card has a style of its own');
+		assert.ok(css.includes('.msg.quiet-reply .quiet-steps'), 'and its steps are spaced like a turn');
+	});
 });

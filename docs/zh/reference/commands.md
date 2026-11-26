@@ -21,7 +21,7 @@
 | `/impersonate` | 替你写下一句话 |
 | `/swipe` | 为最后一条回复生成另一版 |
 | `/regenerate` | 重新生成最后一条回复 |
-| `/quiet [text]` | 生成回复但不写入转录 |
+| `/quiet [text]` | 生成回复但不写入转录；回复以可复制的卡片显示，附带思考过程与只读工具调用 |
 | `/init` | 创建 `COMONAD.md` 项目指令文件 |
 | `/export` | 把会话导出为 Markdown |
 | `/resume` | 恢复挂起（等待审批）的回合 |

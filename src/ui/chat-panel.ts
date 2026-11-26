@@ -216,6 +216,8 @@ export function chatPanel(ctx: Context): void {
 	let stopped = false;
 	/** The chat that owns the running turn, so Stop and turn-end target it even after a switch. */
 	let runningSessionId: string | null = null;
+	/** The generation type of the running turn: a quiet or impersonated stream belongs to no transcript turn. */
+	let runningTrigger: GenerationTrigger | null = null;
 	/** The panel's own stop for work before `runTurn` registers the agent's turn signal. */
 	let turnController: AbortController | null = null;
 	/**
@@ -630,7 +632,12 @@ export function chatPanel(ctx: Context): void {
 		const end = found < 0 ? all.length : found;
 		const page = Math.max(1, Math.min(limit, 200));
 		const start = Math.max(0, end - page);
-		const liveIndex = running && session.id === runningSessionId ? all[all.length - 1]?.index : undefined;
+		// A quiet turn streams into a bubble of its own and an impersonation into the composer: neither
+		// is a turn of the transcript, so a redraw must never re-arm the last persisted turn for them.
+		const liveIndex =
+			running && session.id === runningSessionId && runningTrigger !== 'quiet' && runningTrigger !== 'impersonate'
+				? all[all.length - 1]?.index
+				: undefined;
 		return {
 			turns: all.slice(start, end).map((turn) => ({
 				index: turn.index,
@@ -896,18 +903,23 @@ export function chatPanel(ctx: Context): void {
 
 	/**
 	 * A generation the transcript holds somewhere other than the turn that streamed it: a continue
-	 * grows the reply before it, an impersonation and a quiet turn are not written at all, and a swipe
-	 * keeps the reply as one variant among several. The panel has to be handed the transcript again, or
-	 * it keeps drawing a turn the session does not hold.
+	 * grows the reply before it, an impersonation is not written at all, and a swipe keeps the reply as
+	 * one variant among several. The panel has to be handed the transcript again, or it keeps drawing a
+	 * turn the session does not hold. A quiet turn writes nothing, so it is not one of these.
 	 */
-	const rewrote = (trigger: GenerationTrigger | undefined): boolean => trigger !== undefined && trigger !== 'normal';
+	const rewrote = (trigger: GenerationTrigger | undefined): boolean =>
+		trigger !== undefined && trigger !== 'normal' && trigger !== 'quiet';
 
 	/**
 	 * How a finished generation reaches the panel when it did not land where it streamed: an
-	 * impersonation is yours to send (the composer), a quiet turn is a notice — it is nowhere else —
-	 * and an error or an unstreamed reply is said outright. `null` means the streamed turn said it.
+	 * impersonation is yours to send (the composer), a quiet turn is a card of its own — it is
+	 * nowhere else — and an error or an unstreamed reply is said outright. `null` means the streamed
+	 * turn said it.
 	 */
-	const deliver = (trigger: GenerationTrigger, text: string): { type: 'notice' | 'command' | 'draft'; text: string } | null => {
+	const deliver = (
+		trigger: GenerationTrigger,
+		text: string,
+	): { type: 'notice' | 'command' | 'draft' | 'quiet-reply'; text: string } | null => {
 		if (text.startsWith('Error:') || text.startsWith('Blocked by hook')) {
 			return { type: 'notice', text };
 		}
@@ -915,7 +927,7 @@ export function chatPanel(ctx: Context): void {
 			return { type: 'draft', text };
 		}
 		if (trigger === 'quiet') {
-			return { type: 'notice', text: text || '(no reply)' };
+			return { type: 'quiet-reply', text: text || '(no reply)' };
 		}
 		return streamed ? null : { type: 'command', text: text || '(no reply)' };
 	};
@@ -1413,6 +1425,7 @@ export function chatPanel(ctx: Context): void {
 			return;
 		}
 		running = true;
+		runningTrigger = 'normal';
 		streamed = false;
 		stopped = false;
 		turnController = new AbortController();
@@ -1422,8 +1435,9 @@ export function chatPanel(ctx: Context): void {
 		let handledByCommand = false;
 		let rewrite = false;
 		let refused = false;
+		let quietTurn = false;
 		const restoreText = text.trim();
-		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
+		let settled: ReturnType<typeof deliver> = null;
 		try {
 			const input = text.trim();
 			const { attachments, problem } = await ingestAttachments(incoming);
@@ -1472,6 +1486,10 @@ export function chatPanel(ctx: Context): void {
 			const before = ctx.sessions.active()?.transcript.length ?? 0;
 			const beforeSummary = ctx.sessions.active()?.modelContext?.version;
 			const handled = await ctx.commands.handle(undefined, input, surface);
+			// `/quiet` reaches the panel as a slash command first: the type is only known now, and the
+			// transcript it leaves untouched must not be replayed to the panel as if a turn had landed.
+			runningTrigger = handled.trigger ?? 'normal';
+			quietTurn = runningTrigger === 'quiet';
 			// A Stop during command handling ends the turn here; the slash command itself is not
 			// cancellable, so the turn waits for it but never starts the model afterwards.
 			if (turnController.signal.aborted) {
@@ -1528,22 +1546,31 @@ export function chatPanel(ctx: Context): void {
 			pendingPrompt = null;
 			running = false;
 			runningSessionId = null;
+			runningTrigger = null;
 			turnController = null;
 			if (rewrite || refused) {
 				publishTurns(ctx.sessions.get(turnSession ?? '') ?? ctx.sessions.active());
 			}
 			if (started) {
 				const settledSession = ctx.sessions.get(turnSession ?? '') ?? ctx.sessions.active();
-				post({ type: 'turn-end', sessionId: settledSession?.id ?? turnSession, stopped, command: handledByCommand, ...settledTurn(settledSession) });
+				// A quiet turn streams into a bubble that is not a turn of the chat: the guest removes it
+				// on this flag, and the transcript steps sent with a normal turn-end do not apply to it.
+				post({
+					type: 'turn-end',
+					sessionId: settledSession?.id ?? turnSession,
+					stopped,
+					command: handledByCommand,
+					...(quietTurn ? { quiet: true } : settledTurn(settledSession)),
+				});
 			} else {
 				// Nothing was accepted (empty input, attachment failure, or a stop before turn-start):
 				// tell the guest its pending send is over; the text is still in the composer.
 				post({ type: 'send-refused' }, source);
 			}
 			stopped = false;
-			// After the redraw: a notice and a draft have nowhere else to be read.
+			// After the redraw: a notice, a quiet reply and a draft have nowhere else to be read.
 			if (settled) {
-				post(settled);
+				post(settled.type === 'quiet-reply' ? { ...settled, sessionId: turnSession } : settled);
 			}
 			if (refused && restoreText) {
 				post({ type: 'draft', text: restoreText });
@@ -1582,6 +1609,7 @@ export function chatPanel(ctx: Context): void {
 			return;
 		}
 		running = true;
+		runningTrigger = trigger;
 		runningSessionId = session.id;
 		streamed = false;
 		stopped = false;
@@ -1604,7 +1632,7 @@ export function chatPanel(ctx: Context): void {
 			// A swipe or a regenerate replaces the reply in place; the prompt's attachments stay with it.
 			attachments: ctx.attachments.publicAttachments(replaces !== undefined ? last?.promptAttachments : undefined),
 		});
-		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
+		let settled: ReturnType<typeof deliver> = null;
 		let refused = false;
 		try {
 			const result = await ctx.agent.runTurn({
@@ -1620,18 +1648,25 @@ export function chatPanel(ctx: Context): void {
 		} finally {
 			running = false;
 			runningSessionId = null;
+			runningTrigger = null;
 			turnController = null;
-			// A continue, an impersonation, a quiet turn and the swipes all rewrite what the panel is
-			// drawing — the streamed turn is not the transcript. Hand it the transcript instead, the
-			// same way a reload or a chat switch does.
+			// A continue, an impersonation and the swipes rewrite what the panel is drawing — the
+			// streamed turn is not the transcript. A quiet turn writes nothing at all, so there is
+			// nothing to hand over: its bubble is removed on the turn-end flag below.
 			if (rewrote(trigger)) {
 				publishTurns(ctx.sessions.active());
 			}
-			post({ type: 'turn-end', sessionId: session.id, stopped, ...settledTurn(session) });
+			post({
+				type: 'turn-end',
+				sessionId: session.id,
+				stopped,
+				// A quiet turn is not a turn of the chat: it must not settle the previous turn's steps.
+				...(trigger === 'quiet' ? { quiet: true } : settledTurn(session)),
+			});
 			stopped = false;
 			// After the redraw: a quiet reply, a draft and an error have nowhere else to be read.
 			if (settled) {
-				post(settled);
+				post(settled.type === 'quiet-reply' ? { ...settled, sessionId: session.id } : settled);
 			}
 			if (refused && trigger === 'quiet' && text) {
 				post({ type: 'draft', text });
@@ -1727,12 +1762,13 @@ export function chatPanel(ctx: Context): void {
 		const promptAt = turn.promptAt;
 		const journal = ctx.get('checkpoints') as JournalApi | undefined;
 		running = true;
+		runningTrigger = 'normal';
 		runningSessionId = session.id;
 		streamed = false;
 		stopped = false;
 		turnController = new AbortController();
 		let started = false;
-		let settled: { type: 'notice' | 'command' | 'draft'; text: string } | null = null;
+		let settled: ReturnType<typeof deliver> = null;
 		try {
 			// A resend is a prompt, not a new command: text that starts with `/` is sent literally.
 			const result = await ctx.agent.runTurn({
@@ -1788,6 +1824,7 @@ export function chatPanel(ctx: Context): void {
 		} finally {
 			running = false;
 			runningSessionId = null;
+			runningTrigger = null;
 			turnController = null;
 			if (started) {
 				// A turn can end with the panel on another chat: settle the one that was edited.
@@ -1809,6 +1846,7 @@ export function chatPanel(ctx: Context): void {
 			return;
 		}
 		running = true;
+		runningTrigger = 'normal';
 		runningSessionId = session.id;
 		streamed = false;
 		stopped = false;
@@ -1824,6 +1862,7 @@ export function chatPanel(ctx: Context): void {
 		} finally {
 			running = false;
 			runningSessionId = null;
+			runningTrigger = null;
 			turnController = null;
 			post({ type: 'turn-end', sessionId: session.id, stopped, ...settledTurn(session) });
 			stopped = false;

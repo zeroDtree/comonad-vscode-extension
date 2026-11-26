@@ -677,6 +677,9 @@ export interface PolicyInput {
 	toolsEnabled: boolean;
 	/** Whether a tool is switched on in Prompts. */
 	toolEnabled: (name: string) => boolean;
+	/** The tool names this turn actually offered the model; a call outside it is rejected even
+	 * when the policy would allow it. Absent means the turn did not restrict what it offered. */
+	offered?: ReadonlySet<string>;
 	/** A delegated agent's extra restriction; present only for a subagent. */
 	delegated?: (tool: ToolSpec) => boolean;
 }
@@ -702,6 +705,10 @@ export function evaluatePolicy(input: PolicyInput): PolicyResult {
 	const disabled = input.calls.find((call) => !input.toolEnabled(call.name));
 	if (disabled) {
 		return rejectAll(`tool ${disabled.name} is switched off in Prompts`, 'tool-switch');
+	}
+	const unoffered = input.offered ? input.calls.find((call) => !input.offered!.has(call.name)) : undefined;
+	if (unoffered) {
+		return rejectAll(`tool ${unoffered.name} was not offered to this turn`, 'offered');
 	}
 	const delegated = input.delegated;
 	if (delegated) {

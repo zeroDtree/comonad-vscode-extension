@@ -3,6 +3,25 @@
 > **Internal archive.** Implementation-level notes for the next release. User documentation lives
 > in `docs/`; the summary is in `CHANGELOG.md`.
 
+- **A quiet turn may read, and its card keeps what it did.** A quiet generation was offered no tools at
+  all, so the only trace of it was the final text. It is now offered the chat's read-only tools
+  (`ro`, `shell_ro`, `ro_plan`), minus the ones that ask or change shared state (`ask_user`, `message`,
+  `memory`, `todo_write`, `delegate`, `resume`); the gate rejects any call outside what the turn was
+  actually offered, and a call that would need approval is denied rather than suspending a turn with no
+  transcript to resume. The ephemeral bubble's thoughts and tool cards are harvested into the quiet
+  card before it is dropped, so the answer arrives with the process behind it. Impersonation remains
+  toolless.
+- **A quiet reply is a card that survives the redraw.** The panel delivered a quiet generation as a
+  `notice` inside `#messages`, and the same turn's end both repainted the transcript (a quiet turn
+  does not write one, but `rewrote()` asked for the repaint anyway) and — because the repaint had
+  already cleared the guest's `live` turn — made `endTurn` ask for a `resync`, which repainted again.
+  The reply was visible for one round trip. The host now marks the running trigger (`runningTrigger`,
+  excluded from `history()`'s live index so a redraw cannot re-arm the last persisted turn), keeps
+  quiet out of `rewrote()` and out of `settledTurn`, sends `turn-end` with `quiet: true`, and delivers
+  the text as `quiet-reply` with the chat's id. The guest drops the ephemeral streamed bubble (never a
+  turn of the chat, so it must not keep a seat in `turns`), and remembers the last reply per chat in
+  `quietReplies`: `renderTurns` draws it again after every repaint as a labelled card with Copy and
+  Dismiss. An empty chat's welcome card is no longer taken away with it.
 - **The tavern content layer, its pane framework and the remaining SillyTavern-only plumbing are
   removed.** Deleted `packages/comonad-plugin-tavern`, the eight `comonad.tavern*` commands and
   menus, the 36 tavern/persona/world-info settings, `services/panes.ts`, the settings-panel pane

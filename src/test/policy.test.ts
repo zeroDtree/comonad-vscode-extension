@@ -114,6 +114,21 @@ suite('Tool policy', () => {
 		assert.strictEqual(result.calls[0]?.traces.at(-1)?.matchedRule, 'subagent');
 	});
 
+	test('a turn that offered a list rejects a call outside it', () => {
+		// The offered set is what this turn actually handed the model: a call it never saw is refused
+		// even when the session policy would allow the tool.
+		assert.strictEqual(
+			evaluatePolicy(input({ calls: [call('c1', 'read_file')], offered: new Set(['read_file']) })).outcome,
+			'allow',
+			'a call the turn offered still passes the gate',
+		);
+		const rejected = evaluatePolicy(input({ calls: [call('c1', 'write_file')], offered: new Set(['read_file']) }));
+		assert.strictEqual(rejected.outcome, 'reject');
+		assert.strictEqual(rejected.calls[0]?.decision, 'reject');
+		assert.strictEqual(rejected.calls[0]?.traces.at(-1)?.matchedRule, 'offered');
+		assert.match(rejected.reason, /not offered/);
+	});
+
 	test('a delegated confirmation is denied without asking', () => {
 		const result = evaluatePolicy(
 			input({

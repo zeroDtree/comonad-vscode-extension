@@ -205,7 +205,7 @@
 		impersonate: 'write your next message for you',
 		swipe: 'another version of the last reply, keeping the one you are reading',
 		regenerate: 'the last reply again',
-		quiet: 'a reply that is never added to the chat',
+		quiet: 'a private reply with read-only tools, never added to the chat',
 	};
 	const generationPill = setupPill('generate', () => undefined);
 	const approvalPill = setupPill('approval', (approval) => vscode.postMessage({ type: 'setApproval', approval }));
@@ -680,6 +680,111 @@
 
 	function addNotice(text) {
 		add('notice', '<div class="line">' + esc(text) + '</div>');
+	}
+
+	/*
+	 * A quiet reply is never written to the transcript, so it cannot live in a turn: the host repaints
+	 * the transcript on its own (a resync, a chat switch, a display change) and `renderTurns` empties
+	 * `#messages`. The last reply of each chat is kept here instead, and drawn again after every
+	 * redraw until the reader copies or dismisses it.
+	 */
+	const quietReplies = new Map();
+
+	/**
+	 * The steps of the quiet turn that just streamed, keyed by chat, waiting for the `quiet-reply`
+	 * that carries its final text. The bubble is dropped at `turn-end` and the transcript never held
+	 * it, so this is the only place where the process behind a quiet answer survives.
+	 */
+	const pendingQuiet = new Map();
+
+	/**
+	 * What a quiet turn is worth keeping: its thoughts and the calls it really made. The final text
+	 * comes separately in `quiet-reply`, so a text step would only duplicate it; a compaction note is
+	 * not something the reader asked to see.
+	 */
+	function keptQuietSteps(turn) {
+		const kept = [];
+		for (const step of turn.steps || []) {
+			// A step still open here (the turn ended around it) has no settled duration yet: freeze it
+			// locally so the card shows a number rather than a blank.
+			if (step.kind === 'thought') {
+				freeze(step);
+				kept.push({
+					kind: 'thought',
+					text: step.text || '',
+					ms: step.ms,
+					tokens: step.tokens ?? estimateThoughtTokens(step.text || ''),
+				});
+			} else if (step.kind === 'tool') {
+				freeze(step);
+				kept.push({
+					kind: 'tool',
+					id: step.id,
+					name: step.name,
+					args: step.args,
+					command: step.command,
+					description: step.description,
+					result: step.result,
+					status: step.status,
+					images: step.images,
+					plan: step.plan,
+					subagentId: step.subagentId,
+					ms: step.ms,
+					tokens: step.tokens,
+				});
+			}
+		}
+		return kept;
+	}
+
+	function quietCard(id, entry) {
+		const el = document.createElement('div');
+		el.className = 'msg quiet-reply';
+		const label = document.createElement('div');
+		label.className = 'quiet-label';
+		label.textContent = 'Quiet · not added to the chat';
+		label.dataset.tip = 'A quiet reply is never written to the transcript. Copy it here if you want to keep it.';
+		// The thoughts and tool calls that led to the reply are the process behind it: they are drawn
+		// with the same builders a written turn uses, from the steps harvested before the bubble went.
+		// They are a snapshot, not a transcript, so they carry no live clock of their own.
+		const steps = document.createElement('div');
+		steps.className = 'steps quiet-steps';
+		const now = Date.now();
+		for (const step of entry.steps || []) {
+			steps.appendChild(stepEl(step, false));
+			paintTimer(step, false, now);
+		}
+		const body = document.createElement('div');
+		body.className = 'body md quiet-body';
+		body.innerHTML = md(entry.text || '(no reply)');
+		el.append(
+			label,
+			...(steps.children.length ? [steps] : []),
+			body,
+			actionRow([
+				{ key: 'copy', icon: 'copy', tip: 'Copy this reply', run: (button) => copyAction(button, entry.text) },
+				{
+					key: 'dismiss',
+					label: 'Dismiss',
+					tip: 'Forget this quiet reply',
+					run: () => {
+						quietReplies.delete(id);
+						el.remove();
+					},
+				},
+			]),
+		);
+		return el;
+	}
+
+	/** Draws the shown chat's quiet reply, if it has one: called after every transcript redraw. */
+	function renderQuietReply(sessionId) {
+		messagesEl.querySelector('.msg.quiet-reply')?.remove();
+		const id = String(sessionId || '');
+		const entry = id ? quietReplies.get(id) : undefined;
+		if (entry) {
+			messagesEl.appendChild(quietCard(id, entry));
+		}
 	}
 
 	/* ------------------------------------------------------------------ turns */
@@ -2500,8 +2605,9 @@
 			}
 		}
 		if (turn.prompt || (turn.promptAttachments && turn.promptAttachments.length)) {
-			// A continuation, an impersonation and a quiet turn have no prompt of their own —
-			// the host sends them with no text, and an empty bubble is not a message. An image-only
+			// A continuation and an impersonation have no prompt of their own — the host sends them with
+			// no text, and an empty bubble is not a message. A quiet turn does carry the prompt it was
+			// asked, in a bubble that is removed once the reply becomes a quiet card. An image-only
 			// prompt is a message even though its text is empty.
 			root.appendChild(prompt);
 		}
@@ -2661,7 +2767,7 @@
 
 	function welcome() {
 		const workspace = (state && state.workspace) || '';
-		add(
+		return add(
 			'welcome',
 			'<div class="welcome-head"><span class="welcome-mark" aria-hidden="true">◉</span><h2>Comonad</h2></div>' +
 				'<p class="welcome-lead">Ask for a change, a review or an explanation.</p>' +
@@ -2871,6 +2977,8 @@
 			updateSummaryDetails(summaryInfo);
 		}
 		renderLoadOlder();
+		// A quiet reply is nowhere else: the redraw that just emptied the transcript puts it back.
+		renderQuietReply(sessionId);
 		// The whole transcript is drawn at once on open and on a chat switch: the rise animation
 		// belongs to a message arriving during a turn, not to a replay of what was already there.
 		for (const message of messagesEl.querySelectorAll('.msg')) {
@@ -3306,6 +3414,13 @@
 	// that follows a tool call stays after it instead of being folded into one block.
 
 	function beginTurn(message) {
+		// A turn started anywhere means the last quiet turn's steps will never be consumed: its reply
+		// either already came or never will (a stop, a stream lost while hidden). Clear them so a
+		// later reply with the same chat id cannot attach a stale process to itself.
+		const sessionId = String(message.sessionId || (state && state.sessionId) || '');
+		if (sessionId) {
+			pendingQuiet.delete(sessionId);
+		}
 		// A turn started anywhere invalidates an editor that was open on an older prompt.
 		closeEdit();
 		// Only an impersonation streams into the composer. Every other start says so — a turn whose end
@@ -3349,9 +3464,9 @@
 			turns = turns.filter((turn) => turn !== replacing);
 			replacing._root?.remove();
 		}
-		if (messagesEl.querySelector('.msg.welcome')) {
-			messagesEl.innerHTML = '';
-		}
+		// Only the empty chat's card goes: a quiet reply lives in `#messages` too, and it is the only
+		// copy of itself, so the first prompt of the chat must not take it with the welcome page.
+		messagesEl.querySelector('.msg.welcome')?.remove();
 		const last = turns.length ? turns[turns.length - 1] : null;
 		const turn = {
 			index: from !== undefined && Number.isFinite(from) ? from : last ? last.index + 1 : 0,
@@ -3603,6 +3718,43 @@
 		card.replaceWith(toolCard(step));
 		syncDelegations();
 		paintTimer(step, false, Date.now());
+		scroll();
+	}
+
+	/**
+	 * A quiet turn is not a turn of the chat: its bubble existed only to show the stream, and the
+	 * transcript never held it. Remove it — and do not ask for a resync, which would repaint the
+	 * transcript and take the quiet card with it.
+	 */
+	function dropQuietTurn() {
+		clearInterval(ticker);
+		ticker = 0;
+		if (!live) {
+			return;
+		}
+		const turn = live.turn;
+		// The steps exist only in this bubble: the transcript never held them, so harvest what is
+		// worth keeping before it goes. The `quiet-reply` that follows paints them into the card; a
+		// reply that never comes (a stop) leaves them for `beginTurn` to clear.
+		const id = String(turn.sessionId || (state && state.sessionId) || '');
+		if (id) {
+			pendingQuiet.set(id, keptQuietSteps(turn));
+		}
+		for (const step of turn.steps || []) {
+			if (step.kind === 'tool' && step.id && toolCards.get(step.id) === step) {
+				// The bubble is gone: a late tool-result must not be told to settle a dead card.
+				toolCards.delete(step.id);
+			}
+		}
+		live = null;
+		turn._root?.remove();
+		// Leaving it in `turns` would make the guest number the next turn one past the transcript's.
+		turns = turns.filter((item) => item !== turn);
+		// The first quiet prompt of an empty chat took the welcome card away; the chat is empty again.
+		if (!turns.length && !messagesEl.querySelector('.msg.welcome') && !summaryInfo) {
+			messagesEl.insertBefore(welcome(), messagesEl.firstChild);
+		}
+		refreshActions();
 		scroll();
 	}
 
@@ -4693,6 +4845,23 @@
 			case 'notice':
 				addNotice(message.text);
 				break;
+			case 'quiet-reply': {
+				// The reply belongs to the chat that asked, which may no longer be the one on screen.
+				const id = typeof message.sessionId === 'string' && message.sessionId
+					? message.sessionId
+					: (state && state.sessionId) || '';
+				if (id) {
+					// The steps were harvested when the bubble was dropped: take them, so this reply
+					// carries the process behind it and a second reply cannot reuse them.
+					const steps = pendingQuiet.get(id);
+					pendingQuiet.delete(id);
+					quietReplies.set(id, { text: String(message.text || '(no reply)'), steps });
+					if (!state || id === state.sessionId) {
+						renderQuietReply(id);
+					}
+				}
+				break;
+			}
 			case 'compaction':
 				// The card belongs to the turn that folded; another chat's late fold is ignored.
 				if (state && message.sessionId && message.sessionId !== state.sessionId) {
@@ -4840,7 +5009,13 @@
 				);
 				if (mine) {
 					draft = false;
-					endTurn(message);
+					// A quiet turn never existed in the transcript: take its bubble out and leave the
+					// transcript alone — `endTurn` would ask for a resync that erased the reply card.
+					if (message.quiet === true) {
+						dropQuietTurn();
+					} else {
+						endTurn(message);
+					}
 				}
 				break;
 			}

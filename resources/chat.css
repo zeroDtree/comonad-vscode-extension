@@ -898,6 +898,31 @@ button.chat.is-active {
 	padding-left: 2px;
 }
 
+/* A quiet reply: the answer to a turn that is never written down. It is not a message of the
+   chat, so it is labelled, copyable and dismissible; every transcript redraw draws it again. */
+.msg.quiet-reply {
+	border-left: 3px solid var(--vscode-textBlockQuote-border, rgba(128, 128, 128, 0.4));
+	background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.08));
+	border-radius: 4px;
+	padding: 8px 12px 4px;
+}
+.msg.quiet-reply .quiet-label {
+	font-size: 11px;
+	opacity: 0.65;
+	margin-bottom: 4px;
+}
+/* The thoughts and tool calls behind a quiet answer: spaced like a written turn's step flow, but
+   inside the card, between its label and its body. */
+.msg.quiet-reply .quiet-steps {
+	margin: 6px 0 8px;
+}
+.msg.quiet-reply .quiet-steps > * {
+	margin-bottom: 6px;
+}
+.msg.quiet-reply .quiet-steps > *:last-child {
+	margin-bottom: 0;
+}
+
 /* The empty chat's card: what the agent is for, where it runs, and the two ways into more. */
 .msg.welcome {
 	display: flex;
