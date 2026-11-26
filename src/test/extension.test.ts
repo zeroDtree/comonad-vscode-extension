@@ -102,6 +102,7 @@ import {
 	SessionStore,
 	unusedChat,
 	type Mark,
+	type QuietReply,
 	type SessionUsage,
 } from '../services/sessions';
 import { deletionTargetsAreOwned } from '../lib/deletions';
@@ -3350,6 +3351,55 @@ suite('Cordis kernel', () => {
 			assert.deepStrictEqual(kernel.ctx.sessions.require('quiet').transcript, transcript, 'the transcript is left exactly as it was');
 			assert.strictEqual(kernel.ctx.sessions.require('quiet').turnIndex, turns, 'and it is not counted as a turn of the chat');
 			assert.strictEqual(result.text, 'private answer', 'the reply still reaches the reader');
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a quiet reply is kept beside the chat, not in it', async () => {
+		const kernel = await createTestKernel();
+		try {
+			kernel.ctx.sessions.save(kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'quiet-store'));
+			const before = kernel.ctx.sessions.require('quiet-store').transcript;
+			// A hand-edited or oversized card is untrusted input: the text step, the images, the unknown
+			// status and the over-long result must not survive the store.
+			const reply = {
+				text: 'private answer',
+				at: 1,
+				steps: [
+					{ kind: 'text', text: 'drop me' },
+					{ kind: 'thought', text: 'weighing it', ms: 2, images: [{ id: 'x' }] },
+					{ kind: 'tool', name: 'read_file', args: '{"path":"a.txt"}', result: 'x'.repeat(40_000), status: 'done' },
+				],
+			} as unknown as QuietReply;
+			kernel.ctx.sessions.setQuietReply('quiet-store', reply);
+
+			const stored = kernel.ctx.sessions.require('quiet-store');
+			assert.strictEqual(stored.quietReply?.text, 'private answer');
+			assert.deepStrictEqual(stored.quietReply?.steps?.map((step) => step.kind), ['thought', 'tool']);
+			assert.strictEqual(stored.quietReply?.steps?.[0]?.images, undefined, 'a card step does not carry images');
+			assert.strictEqual(stored.quietReply?.steps?.[1]?.result?.length, 30_000, 'a tool result is bounded');
+			assert.strictEqual(stored.quietReply?.steps?.[1]?.status, undefined, 'an unknown status is dropped');
+			assert.deepStrictEqual(stored.transcript, before, 'the quiet card is not a transcript message');
+
+			const seen: Message[][] = [];
+			kernel.ctx.llm.use({
+				name: 'quiet-store',
+				async chat(request: AdapterRequest) {
+					seen.push(request.messages);
+					return { message: { role: 'assistant' as const, content: 'next' }, toolCalls: [], usage: { input: 1, output: 1 } };
+				},
+			});
+			await kernel.ctx.agent.runTurn({ text: 'a normal turn', sessionId: 'quiet-store' });
+			assert.ok(!JSON.stringify(seen).includes('private answer'), 'the card never reaches the model');
+			assert.strictEqual(kernel.ctx.sessions.require('quiet-store').quietReply?.text, 'private answer', 'a normal turn leaves it in place');
+
+			kernel.ctx.sessions.setQuietReply('quiet-store', undefined);
+			assert.strictEqual(kernel.ctx.sessions.require('quiet-store').quietReply, undefined, 'Dismiss clears it');
+
+			kernel.ctx.sessions.setQuietReply('quiet-store', { text: 'source card', at: 2 });
+			const fork = kernel.ctx.sessions.fork('quiet-store');
+			assert.strictEqual(fork.quietReply, undefined, 'a fork starts without the source card');
 		} finally {
 			await kernel.dispose();
 		}

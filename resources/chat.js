@@ -685,15 +685,15 @@
 	/*
 	 * A quiet reply is never written to the transcript, so it cannot live in a turn: the host repaints
 	 * the transcript on its own (a resync, a chat switch, a display change) and `renderTurns` empties
-	 * `#messages`. The last reply of each chat is kept here instead, and drawn again after every
-	 * redraw until the reader copies or dismisses it.
+	 * `#messages`. The authoritative copy is the host's `session.quietReply`, replayed with every
+	 * `turns` payload; this map only keeps the cards of chats visited in this webview.
 	 */
 	const quietReplies = new Map();
 
 	/**
 	 * The steps of the quiet turn that just streamed, keyed by chat, waiting for the `quiet-reply`
-	 * that carries its final text. The bubble is dropped at `turn-end` and the transcript never held
-	 * it, so this is the only place where the process behind a quiet answer survives.
+	 * that carries its final text. The host also accumulates the turn and sends its own steps with
+	 * `quiet-reply`; this bubble harvest is the fallback when it does not.
 	 */
 	const pendingQuiet = new Map();
 
@@ -743,7 +743,7 @@
 		const label = document.createElement('div');
 		label.className = 'quiet-label';
 		label.textContent = 'Quiet · not added to the chat';
-		label.dataset.tip = 'A quiet reply is never written to the transcript. Copy it here if you want to keep it.';
+		label.dataset.tip = 'A quiet reply is never written to the transcript; it is kept beside the chat until you dismiss it.';
 		// The thoughts and tool calls that led to the reply are the process behind it: they are drawn
 		// with the same builders a written turn uses, from the steps harvested before the bubble went.
 		// They are a snapshot, not a transcript, so they carry no live clock of their own.
@@ -766,10 +766,12 @@
 				{
 					key: 'dismiss',
 					label: 'Dismiss',
-					tip: 'Forget this quiet reply',
+					tip: 'Delete this quiet reply from the chat',
 					run: () => {
 						quietReplies.delete(id);
 						el.remove();
+						// The host keeps the card on the session; only it can forget it for good.
+						vscode.postMessage({ type: 'quiet-dismiss', sessionId: id });
 					},
 				},
 			]),
@@ -4797,6 +4799,16 @@
 				if (message.prepend) {
 					prependTurns(message);
 				} else {
+					const id = String(message.sessionId || '');
+					if (id) {
+						// The host persists the last quiet card on the session; a reload, a chat switch or a
+						// hidden view gets it back with the transcript, not from this webview's memory alone.
+						if (message.quiet) {
+							quietReplies.set(id, message.quiet);
+						} else {
+							quietReplies.delete(id);
+						}
+					}
 					renderTurns(
 						message.turns || [],
 						message.sessionId,
@@ -4851,11 +4863,24 @@
 					? message.sessionId
 					: (state && state.sessionId) || '';
 				if (id) {
-					// The steps were harvested when the bubble was dropped: take them, so this reply
-					// carries the process behind it and a second reply cannot reuse them.
-					const steps = pendingQuiet.get(id);
+					// The host accumulated the turn's thoughts and calls, so a reload or a hidden view
+					// still gets the process; the bubble harvest is only the fallback.
+					const steps = Array.isArray(message.steps) && message.steps.length
+						? message.steps
+						: pendingQuiet.get(id);
 					pendingQuiet.delete(id);
 					quietReplies.set(id, { text: String(message.text || '(no reply)'), steps });
+					if (!state || id === state.sessionId) {
+						renderQuietReply(id);
+					}
+				}
+				break;
+			}
+			case 'quiet-dismissed': {
+				// Another panel (or this one's host round trip) deleted the persisted card.
+				const id = typeof message.sessionId === 'string' ? message.sessionId : '';
+				if (id) {
+					quietReplies.delete(id);
 					if (!state || id === state.sessionId) {
 						renderQuietReply(id);
 					}

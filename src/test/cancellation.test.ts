@@ -881,4 +881,35 @@ suite('Idle chat panel', () => {
 		assert.ok(css.includes('.msg.quiet-reply'), 'the card has a style of its own');
 		assert.ok(css.includes('.msg.quiet-reply .quiet-steps'), 'and its steps are spaced like a turn');
 	});
+
+	test('a quiet reply is stored on the session and rehydrated after a reload', () => {
+		const root = join(__dirname, '..', '..');
+		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		// The host's session holds the authoritative card; `turns` hands it back to a reloaded guest.
+		const turns = guest.slice(guest.indexOf("case 'turns':"), guest.indexOf("case 'summary':"));
+		assert.match(turns, /message\.quiet/, 'the transcript payload carries the persisted card');
+		assert.match(turns, /quietReplies\.set\(id, message\.quiet\)/, 'a reload draws it from the payload');
+		const quiet = guest.slice(guest.indexOf("case 'quiet-reply':"), guest.indexOf("case 'quiet-dismissed':"));
+		assert.match(quiet, /Array\.isArray\(message\.steps\)/, 'the host trace wins over the live harvest');
+		assert.match(quiet, /pendingQuiet\.get\(id\)/, 'and the bubble harvest stays as the fallback');
+		assert.match(guest, /type: 'quiet-dismiss'/, 'Dismiss asks the host to forget the stored card');
+		assert.match(guest, /case 'quiet-dismissed':/, 'and another panel follows the host broadcast');
+
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.match(panel, /let quietTrace: QuietTrace \| null/);
+		assert.match(panel, /const quietTraceFor = /);
+		assert.match(panel, /const finishQuietTrace = /);
+		assert.match(panel, /quiet: quietReplyPayload\(session\)/, 'publishTurns rehydrates the card');
+		assert.match(panel, /setQuietReply\(turnSession/, 'the send runner persists its reply');
+		assert.match(panel, /setQuietReply\(session\.id/, 'the generate runner persists its reply');
+		assert.match(panel, /steps: quietSteps\.map/, 'the live reply carries the host trace too');
+		assert.match(panel, /case 'quiet-dismiss':/, 'a dismiss clears the stored card');
+
+		const sessions = readFileSync(join(root, 'src', 'services', 'sessions.ts'), 'utf8');
+		assert.match(sessions, /quietReply\?: QuietReply/);
+		assert.match(sessions, /setQuietReply\(id: string/);
+		assert.match(sessions, /sanitizeQuietReply\(/);
+		assert.match(sessions, /quietReply: sanitizeQuietReply/, 'a stored card is sanitised on load');
+		assert.match(sessions, /quietReply: undefined/, 'a fork starts without the source card');
+	});
 });

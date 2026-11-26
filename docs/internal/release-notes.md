@@ -3,6 +3,18 @@
 > **Internal archive.** Implementation-level notes for the next release. User documentation lives
 > in `docs/`; the summary is in `CHANGELOG.md`.
 
+- **A quiet reply is persisted beside the chat, not in it.** The card existed only in the webview's
+  `quietReplies` map, so a reload, a reopened panel or a window restart lost it; a quiet turn that
+  finished while the view was hidden could not be recovered at all. The session now stores the last
+  quiet reply as `quietReply` (`text`, `at`, bounded `steps`), and every `turns` payload carries it,
+  so `renderTurns` rehydrates the guest after a reload or a chat switch. The panel accumulates the
+  turn's thoughts and tool calls from the agent events (`quietTrace`) and sends them with both the
+  persisted reply and the live `quiet-reply`; a hidden view or a webview reload mid-turn therefore
+  keeps the process, while the bubble harvest remains the fallback. `Sessions.setQuietReply()`
+  sanitises the card (200k text, 200 steps, 40k thought / 2k args / 30k result per step, no images),
+  Dismiss clears it and broadcasts `quiet-dismissed`, and a fork starts without one. `transcript`,
+  `turnIndex`, `modelContext`, export, search and `buildModelHistory` are untouched: the card is
+  presentation, never context.
 - **A quiet turn may read, and its card keeps what it did.** A quiet generation was offered no tools at
   all, so the only trace of it was the final text. It is now offered the chat's read-only tools
   (`ro`, `shell_ro`, `ro_plan`), minus the ones that ask or change shared state (`ask_user`, `message`,

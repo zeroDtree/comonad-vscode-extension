@@ -10,7 +10,7 @@ import { asApproval, asApprovalResponse, asCapabilities, asRuleSet, asWorkMode }
 import { asSandboxMode, DEFAULT_SANDBOX_MODE, isInside } from '../lib/sandbox';
 import { modelContextDigest, type ContextForm } from '../lib/prompt';
 import { sanitizeTaskGraph, type TaskGraph } from '../lib/task-graph';
-import { turnsOf } from '../lib/turns';
+import { turnsOf, type Step } from '../lib/turns';
 import type { AttachmentPart, Message, ModelContext, ReasoningEffort, SessionPolicy, SwipeInfo, TurnNote } from '../lib/types';
 
 /** Session persistence and the active-session pointer. One JSON document per chat. */
@@ -90,6 +90,17 @@ export function inWorkspace(session: Session, workspace: string): boolean {
 	return workspace ? home === workspace || isInside(workspace, home) : home === '';
 }
 
+/**
+ * The last quiet reply of a chat: a card the panel draws beside the transcript. Presentation only —
+ * never part of `transcript`, the model context, the turn index, export or search. `steps` is the
+ * bounded thought/tool trace the card showed; `text` is the answer.
+ */
+export interface QuietReply {
+	text: string;
+	at?: number;
+	steps?: Step[];
+}
+
 export interface Session {
 	id: string;
 	title: string;
@@ -121,6 +132,11 @@ export interface Session {
 	 * model context: compaction never edits the transcript. Absent in chats that never folded.
 	 */
 	notes?: TurnNote[];
+	/**
+	 * The last quiet reply of this chat: a card drawn beside the transcript. Presentation only, never
+	 * model context: `transcript` and `buildModelHistory` do not read it.
+	 */
+	quietReply?: QuietReply;
 	/**
 	 * Workspace-relative forward-slash paths this chat created: file-tool writes and conservatively
 	 * parsed shell creations. Bound to `createdRoot`; a different workspace discards them.
@@ -231,6 +247,13 @@ export function createdDirsInWorkspace(session: Session, workspace: string): Rea
 	return new Set(session.createdDirs ?? []);
 }
 
+/** A quiet card read back from disk: bound every field so the session stays a JSON file. */
+const MAX_QUIET_TEXT = 200_000;
+const MAX_QUIET_STEPS = 200;
+const MAX_QUIET_STEP_TEXT = 40_000;
+const MAX_QUIET_STEP_ARGS = 2_000;
+const MAX_QUIET_STEP_RESULT = 30_000;
+
 /** A parent's tool-call → child-session map, sanitised: it is read back from an untrusted JSON file. */
 const MAX_SUBAGENT_LINKS = 256;
 function sanitizeSubagentLinks(value: unknown): Record<string, string> | undefined {
@@ -275,7 +298,13 @@ export function forkBase(title: string): string {
  * character, its book and the greeting still in place.
  */
 export function unusedChat(session: Session): boolean {
-	return !session.transcript.length && !session.modelContext?.summary && !session.usage.requests && session.title === UNTITLED;
+	return (
+		!session.transcript.length &&
+		!session.modelContext?.summary &&
+		!session.usage.requests &&
+		session.title === UNTITLED &&
+		!session.quietReply
+	);
 }
 
 /** The newest message that mentions `needle`, as a one-line excerpt. */
@@ -447,6 +476,8 @@ export class SessionStore {
 			// A fork is a new chat: accepted tasks belong to the conversation it copied, not to it.
 			taskGraph: undefined,
 			archivedTaskGraphs: undefined,
+			// A fork is a new chat: the source chat's last quiet card is not its own.
+			quietReply: undefined,
 			usage: emptyUsage(),
 		};
 		this.save(session);
@@ -575,6 +606,8 @@ export class SessionStore {
 			lastEstimateTokens: storedCount(session.lastEstimateTokens),
 			lastInputModel: typeof session.lastInputModel === 'string' && session.lastInputModel ? session.lastInputModel : undefined,
 			instructions: session.instructions ?? [],
+			// The `...rest` above carried any raw value; this is the only one the panel may draw.
+			quietReply: sanitizeQuietReply((session as { quietReply?: unknown }).quietReply),
 		};
 	}
 }
@@ -605,6 +638,77 @@ function sanitizeMessages(messages: unknown): Message[] {
 		const { greeting: _greeting, ...clean } = message;
 		return { ...clean, attachments };
 	});
+}
+
+/** A quiet card read back from disk: only the two step kinds the card draws, every string bounded. */
+function sanitizeQuietReply(value: unknown): QuietReply | undefined {
+	if (!value || typeof value !== 'object') {
+		return undefined;
+	}
+	const raw = value as { text?: unknown; at?: unknown; steps?: unknown };
+	const text = typeof raw.text === 'string' ? raw.text.slice(0, MAX_QUIET_TEXT) : '';
+	const steps = sanitizeQuietSteps(raw.steps);
+	if (!text && !steps) {
+		return undefined;
+	}
+	return {
+		text,
+		at: typeof raw.at === 'number' && Number.isFinite(raw.at) ? raw.at : undefined,
+		steps,
+	};
+}
+
+function sanitizeQuietSteps(value: unknown): Step[] | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const steps: Step[] = [];
+	for (const entry of value.slice(0, MAX_QUIET_STEPS)) {
+		if (!entry || typeof entry !== 'object') {
+			continue;
+		}
+		const raw = entry as Partial<Step> & { kind?: unknown };
+		const kind = raw.kind === 'thought' || raw.kind === 'tool' ? raw.kind : undefined;
+		// `text` steps duplicate the card body; `note` is not a process step.
+		if (!kind) {
+			continue;
+		}
+		if (kind === 'thought' && (typeof raw.text !== 'string' || !raw.text.trim())) {
+			continue;
+		}
+		if (kind === 'tool' && (typeof raw.name !== 'string' || !raw.name)) {
+			continue;
+		}
+		const step: Step = { kind };
+		if (typeof raw.text === 'string') {
+			step.text = raw.text.slice(0, MAX_QUIET_STEP_TEXT);
+		}
+		if (typeof raw.id === 'string') {
+			step.id = raw.id.slice(0, 200);
+		}
+		if (typeof raw.name === 'string') {
+			step.name = raw.name.slice(0, 200);
+		}
+		if (typeof raw.args === 'string') {
+			step.args = raw.args.slice(0, MAX_QUIET_STEP_ARGS);
+		}
+		if (typeof raw.result === 'string') {
+			step.result = raw.result.slice(0, MAX_QUIET_STEP_RESULT);
+		}
+		if (raw.status === 'running' || raw.status === 'ok' || raw.status === 'error') {
+			step.status = raw.status;
+		}
+		if (typeof raw.ms === 'number' && Number.isFinite(raw.ms) && raw.ms >= 0) {
+			step.ms = raw.ms;
+		}
+		if (typeof raw.at === 'number' && Number.isFinite(raw.at)) {
+			step.at = raw.at;
+		}
+		// Images are deliberately not persisted: `read_file` output is text; a tool image would only
+		// bloat the session file. The live card still shows them.
+		steps.push(step);
+	}
+	return steps.length ? steps : undefined;
 }
 
 /** Stored fold markers are untrusted like every other field; anchors must be real positions. */
@@ -820,6 +924,25 @@ export class Sessions extends Service {
 		if (this._draft?.id === session.id) {
 			this._draft = null;
 		}
+	}
+
+	/**
+	 * Stores or clears the chat's quiet reply card. Sanitised here, so an oversized trace from a caller
+	 * cannot grow the session file; `transcript` is never touched.
+	 */
+	setQuietReply(id: string, reply: QuietReply | undefined): void {
+		const session = this.get(id);
+		if (!session) {
+			return;
+		}
+		const clean = reply ? sanitizeQuietReply(reply) : undefined;
+		if (clean) {
+			session.quietReply = clean;
+		} else {
+			delete session.quietReply;
+		}
+		this.save(session);
+		this.changed(id);
 	}
 
 	/**
