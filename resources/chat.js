@@ -685,8 +685,8 @@
 	/*
 	 * A quiet reply is never written to the transcript, so it cannot live in a turn: the host repaints
 	 * the transcript on its own (a resync, a chat switch, a display change) and `renderTurns` empties
-	 * `#messages`. The authoritative copy is the host's `session.quietReply`, replayed with every
-	 * `turns` payload; this map only keeps the cards of chats visited in this webview.
+	 * `#messages`. The authoritative copy is the host's `session.quietReplies`, replayed with every
+	 * `turns` payload; this map only keeps the cards of chats visited in this webview, oldest first.
 	 */
 	const quietReplies = new Map();
 
@@ -768,10 +768,11 @@
 					label: 'Dismiss',
 					tip: 'Delete this quiet reply from the chat',
 					run: () => {
-						quietReplies.delete(id);
+						const list = quietReplies.get(id) || [];
+						quietReplies.set(id, list.filter((item) => item.id !== entry.id));
 						el.remove();
-						// The host keeps the card on the session; only it can forget it for good.
-						vscode.postMessage({ type: 'quiet-dismiss', sessionId: id });
+						// The host keeps the cards on the session; only it can forget one for good.
+						vscode.postMessage({ type: 'quiet-dismiss', sessionId: id, id: entry.id });
 					},
 				},
 			]),
@@ -779,12 +780,11 @@
 		return el;
 	}
 
-	/** Draws the shown chat's quiet reply, if it has one: called after every transcript redraw. */
-	function renderQuietReply(sessionId) {
-		messagesEl.querySelector('.msg.quiet-reply')?.remove();
+	/** Draws the shown chat's quiet history, oldest first: called after every transcript redraw. */
+	function renderQuietReplies(sessionId) {
+		messagesEl.querySelectorAll('.msg.quiet-reply').forEach((el) => el.remove());
 		const id = String(sessionId || '');
-		const entry = id ? quietReplies.get(id) : undefined;
-		if (entry) {
+		for (const entry of (id && quietReplies.get(id)) || []) {
 			messagesEl.appendChild(quietCard(id, entry));
 		}
 	}
@@ -2979,8 +2979,8 @@
 			updateSummaryDetails(summaryInfo);
 		}
 		renderLoadOlder();
-		// A quiet reply is nowhere else: the redraw that just emptied the transcript puts it back.
-		renderQuietReply(sessionId);
+		// Quiet replies are nowhere else: the redraw that just emptied the transcript puts them back.
+		renderQuietReplies(sessionId);
 		// The whole transcript is drawn at once on open and on a chat switch: the rise animation
 		// belongs to a message arriving during a turn, not to a replay of what was already there.
 		for (const message of messagesEl.querySelectorAll('.msg')) {
@@ -4801,13 +4801,10 @@
 				} else {
 					const id = String(message.sessionId || '');
 					if (id) {
-						// The host persists the last quiet card on the session; a reload, a chat switch or a
+						// The host persists the quiet history on the session; a reload, a chat switch or a
 						// hidden view gets it back with the transcript, not from this webview's memory alone.
-						if (message.quiet) {
-							quietReplies.set(id, message.quiet);
-						} else {
-							quietReplies.delete(id);
-						}
+						// An empty array is authoritative too: dismissing every card must survive a reload.
+						quietReplies.set(id, Array.isArray(message.quietReplies) ? message.quietReplies : []);
 					}
 					renderTurns(
 						message.turns || [],
@@ -4862,27 +4859,36 @@
 				const id = typeof message.sessionId === 'string' && message.sessionId
 					? message.sessionId
 					: (state && state.sessionId) || '';
-				if (id) {
+				const replyId = typeof message.id === 'string' ? message.id : '';
+				if (id && replyId) {
 					// The host accumulated the turn's thoughts and calls, so a reload or a hidden view
 					// still gets the process; the bubble harvest is only the fallback.
 					const steps = Array.isArray(message.steps) && message.steps.length
 						? message.steps
 						: pendingQuiet.get(id);
 					pendingQuiet.delete(id);
-					quietReplies.set(id, { text: String(message.text || '(no reply)'), steps });
+					// A `turns` payload may already carry this card (the host persisted it first): replace
+					// by id instead of drawing a duplicate.
+					const list = quietReplies.get(id) || [];
+					quietReplies.set(id, [
+						...list.filter((entry) => entry.id !== replyId),
+						{ id: replyId, text: String(message.text || '(no reply)'), steps },
+					]);
 					if (!state || id === state.sessionId) {
-						renderQuietReply(id);
+						renderQuietReplies(id);
 					}
 				}
 				break;
 			}
 			case 'quiet-dismissed': {
-				// Another panel (or this one's host round trip) deleted the persisted card.
+				// Another panel (or this one's host round trip) deleted one persisted card.
 				const id = typeof message.sessionId === 'string' ? message.sessionId : '';
-				if (id) {
-					quietReplies.delete(id);
+				const replyId = typeof message.id === 'string' ? message.id : '';
+				if (id && replyId) {
+					const list = quietReplies.get(id) || [];
+					quietReplies.set(id, list.filter((entry) => entry.id !== replyId));
 					if (!state || id === state.sessionId) {
-						renderQuietReply(id);
+						renderQuietReplies(id);
 					}
 				}
 				break;

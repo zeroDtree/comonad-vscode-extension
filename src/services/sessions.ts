@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Service, type Context } from 'cordis';
-import { asAttachments, attachmentIdOf } from '../lib/attachments';
+import { asAttachments, attachmentIdOf, mimeFromAttachmentId } from '../lib/attachments';
 import { RunBudget } from '../lib/budget';
 import { asReasoningEffort } from '../lib/effort';
 import { asApproval, asApprovalResponse, asCapabilities, asRuleSet, asWorkMode } from '../lib/policy';
@@ -11,7 +11,7 @@ import { asSandboxMode, DEFAULT_SANDBOX_MODE, isInside } from '../lib/sandbox';
 import { modelContextDigest, type ContextForm } from '../lib/prompt';
 import { sanitizeTaskGraph, type TaskGraph } from '../lib/task-graph';
 import { turnsOf, type Step } from '../lib/turns';
-import type { AttachmentPart, Message, ModelContext, ReasoningEffort, SessionPolicy, SwipeInfo, TurnNote } from '../lib/types';
+import type { AttachmentPart, ImageMime, ImagePart, Message, ModelContext, ReasoningEffort, SessionPolicy, SwipeInfo, TurnNote } from '../lib/types';
 
 /** Session persistence and the active-session pointer. One JSON document per chat. */
 
@@ -91,11 +91,13 @@ export function inWorkspace(session: Session, workspace: string): boolean {
 }
 
 /**
- * The last quiet reply of a chat: a card the panel draws beside the transcript. Presentation only —
- * never part of `transcript`, the model context, the turn index, export or search. `steps` is the
- * bounded thought/tool trace the card showed; `text` is the answer.
+ * One quiet reply card: a card the panel draws beside the transcript. Presentation only — never part
+ * of `transcript`, the model context, the turn index, export or search. `steps` is the bounded
+ * thought/tool trace the card showed; `text` is the answer.
  */
 export interface QuietReply {
+	/** Stable within the chat, so one card can be dismissed without touching the others. */
+	id: string;
 	text: string;
 	at?: number;
 	steps?: Step[];
@@ -133,10 +135,10 @@ export interface Session {
 	 */
 	notes?: TurnNote[];
 	/**
-	 * The last quiet reply of this chat: a card drawn beside the transcript. Presentation only, never
-	 * model context: `transcript` and `buildModelHistory` do not read it.
+	 * Every quiet reply of this chat, oldest first. Presentation only, never model context:
+	 * `transcript` and `buildModelHistory` do not read it.
 	 */
-	quietReply?: QuietReply;
+	quietReplies?: QuietReply[];
 	/**
 	 * Workspace-relative forward-slash paths this chat created: file-tool writes and conservatively
 	 * parsed shell creations. Bound to `createdRoot`; a different workspace discards them.
@@ -248,11 +250,13 @@ export function createdDirsInWorkspace(session: Session, workspace: string): Rea
 }
 
 /** A quiet card read back from disk: bound every field so the session stays a JSON file. */
+const MAX_QUIET_REPLIES = 100;
 const MAX_QUIET_TEXT = 200_000;
 const MAX_QUIET_STEPS = 200;
 const MAX_QUIET_STEP_TEXT = 40_000;
 const MAX_QUIET_STEP_ARGS = 2_000;
 const MAX_QUIET_STEP_RESULT = 30_000;
+const MAX_QUIET_STEP_IMAGES = 8;
 
 /** A parent's tool-call → child-session map, sanitised: it is read back from an untrusted JSON file. */
 const MAX_SUBAGENT_LINKS = 256;
@@ -303,7 +307,7 @@ export function unusedChat(session: Session): boolean {
 		!session.modelContext?.summary &&
 		!session.usage.requests &&
 		session.title === UNTITLED &&
-		!session.quietReply
+		!session.quietReplies?.length
 	);
 }
 
@@ -476,8 +480,8 @@ export class SessionStore {
 			// A fork is a new chat: accepted tasks belong to the conversation it copied, not to it.
 			taskGraph: undefined,
 			archivedTaskGraphs: undefined,
-			// A fork is a new chat: the source chat's last quiet card is not its own.
-			quietReply: undefined,
+			// A fork is a new chat: the source chat's quiet history is not its own.
+			quietReplies: undefined,
 			usage: emptyUsage(),
 		};
 		this.save(session);
@@ -524,6 +528,8 @@ export class SessionStore {
 			tavernEffects: _tavernEffects,
 			tavernActivated: _tavernActivated,
 			tavernOverflow: _tavernOverflow,
+			// The single-card build's field: migrated into `quietReplies` below.
+			quietReply: _legacyQuiet,
 			...rest
 		} = session as Session & {
 			summary?: unknown;
@@ -537,6 +543,7 @@ export class SessionStore {
 			tavernEffects?: unknown;
 			tavernActivated?: unknown;
 			tavernOverflow?: unknown;
+			quietReply?: unknown;
 		};
 		// A delegated session fails closed on a missing or damaged capability/tool snapshot: falling
 		// back to the mode's full set would silently widen a child.
@@ -606,8 +613,8 @@ export class SessionStore {
 			lastEstimateTokens: storedCount(session.lastEstimateTokens),
 			lastInputModel: typeof session.lastInputModel === 'string' && session.lastInputModel ? session.lastInputModel : undefined,
 			instructions: session.instructions ?? [],
-			// The `...rest` above carried any raw value; this is the only one the panel may draw.
-			quietReply: sanitizeQuietReply((session as { quietReply?: unknown }).quietReply),
+			// The `...rest` above carried any raw value; this is the only quiet field the panel may draw.
+			quietReplies: sanitizeQuietReplies(session.quietReplies, _legacyQuiet),
 		};
 	}
 }
@@ -641,21 +648,78 @@ function sanitizeMessages(messages: unknown): Message[] {
 }
 
 /** A quiet card read back from disk: only the two step kinds the card draws, every string bounded. */
-function sanitizeQuietReply(value: unknown): QuietReply | undefined {
+function sanitizeQuietReply(value: unknown, fallbackId?: string): QuietReply | undefined {
 	if (!value || typeof value !== 'object') {
 		return undefined;
 	}
-	const raw = value as { text?: unknown; at?: unknown; steps?: unknown };
+	const raw = value as { id?: unknown; text?: unknown; at?: unknown; steps?: unknown };
 	const text = typeof raw.text === 'string' ? raw.text.slice(0, MAX_QUIET_TEXT) : '';
 	const steps = sanitizeQuietSteps(raw.steps);
 	if (!text && !steps) {
 		return undefined;
 	}
+	const id = typeof raw.id === 'string' && raw.id && raw.id.length <= 200 ? raw.id : fallbackId;
+	if (!id) {
+		return undefined;
+	}
 	return {
+		id,
 		text,
 		at: typeof raw.at === 'number' && Number.isFinite(raw.at) ? raw.at : undefined,
 		steps,
 	};
+}
+
+/** The cards of one chat, oldest first; a legacy single card becomes a history of one. */
+function sanitizeQuietReplies(value: unknown, legacy?: unknown): QuietReply[] | undefined {
+	const replies: QuietReply[] = [];
+	for (const entry of Array.isArray(value) ? value : []) {
+		const reply = sanitizeQuietReply(entry);
+		if (reply) {
+			replies.push(reply);
+		}
+	}
+	// Sessions written by the single-card build: migrate the one card into the history with a
+	// deterministic id, so dismissing it stays stable across reloads.
+	if (!replies.length && legacy) {
+		const at = (legacy as { at?: unknown }).at;
+		const reply = sanitizeQuietReply(legacy, `legacy-${typeof at === 'number' && Number.isFinite(at) ? at : 0}`);
+		if (reply) {
+			replies.push(reply);
+		}
+	}
+	return replies.length ? replies.slice(-MAX_QUIET_REPLIES) : undefined;
+}
+
+/** Image metadata only; the bytes stay in the content-addressed attachment store. */
+function sanitizeQuietImages(value: unknown): ImagePart[] | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const images: ImagePart[] = [];
+	for (const entry of value.slice(0, MAX_QUIET_STEP_IMAGES)) {
+		if (!entry || typeof entry !== 'object') {
+			continue;
+		}
+		const raw = entry as Partial<ImagePart>;
+		const id = typeof raw.id === 'string' ? raw.id : '';
+		const mime = mimeFromAttachmentId(id);
+		if (!mime || !mime.startsWith('image/')) {
+			continue;
+		}
+		const image: ImagePart = { id, mime: mime as ImageMime };
+		if (typeof raw.name === 'string' && raw.name.trim()) {
+			image.name = raw.name.trim().slice(0, 120);
+		}
+		if (typeof raw.width === 'number' && Number.isInteger(raw.width) && raw.width > 0) {
+			image.width = raw.width;
+		}
+		if (typeof raw.height === 'number' && Number.isInteger(raw.height) && raw.height > 0) {
+			image.height = raw.height;
+		}
+		images.push(image);
+	}
+	return images.length ? images : undefined;
 }
 
 function sanitizeQuietSteps(value: unknown): Step[] | undefined {
@@ -695,6 +759,11 @@ function sanitizeQuietSteps(value: unknown): Step[] | undefined {
 		if (typeof raw.result === 'string') {
 			step.result = raw.result.slice(0, MAX_QUIET_STEP_RESULT);
 		}
+		// Only metadata: `dataUrl` is never written, and the bytes stay content-addressed.
+		const images = sanitizeQuietImages(raw.images);
+		if (images) {
+			step.images = images;
+		}
 		if (raw.status === 'running' || raw.status === 'ok' || raw.status === 'error') {
 			step.status = raw.status;
 		}
@@ -704,8 +773,6 @@ function sanitizeQuietSteps(value: unknown): Step[] | undefined {
 		if (typeof raw.at === 'number' && Number.isFinite(raw.at)) {
 			step.at = raw.at;
 		}
-		// Images are deliberately not persisted: `read_file` output is text; a tool image would only
-		// bloat the session file. The live card still shows them.
 		steps.push(step);
 	}
 	return steps.length ? steps : undefined;
@@ -927,22 +994,44 @@ export class Sessions extends Service {
 	}
 
 	/**
-	 * Stores or clears the chat's quiet reply card. Sanitised here, so an oversized trace from a caller
-	 * cannot grow the session file; `transcript` is never touched.
+	 * Appends a quiet card. The service assigns its id; the panel draws the returned one. Sanitised
+	 * here, so an oversized trace from a caller cannot grow the session file; `transcript` is never
+	 * touched.
 	 */
-	setQuietReply(id: string, reply: QuietReply | undefined): void {
+	addQuietReply(id: string, reply: Omit<QuietReply, 'id'> & { id?: string }): QuietReply | undefined {
 		const session = this.get(id);
 		if (!session) {
-			return;
+			return undefined;
 		}
-		const clean = reply ? sanitizeQuietReply(reply) : undefined;
-		if (clean) {
-			session.quietReply = clean;
+		const clean = sanitizeQuietReply(reply, randomUUID());
+		if (!clean) {
+			return undefined;
+		}
+		session.quietReplies = [...(session.quietReplies ?? []), clean].slice(-MAX_QUIET_REPLIES);
+		this.save(session);
+		this.changed(id);
+		return clean;
+	}
+
+	/** Deletes one card by its stable id; returns whether the chat had it. */
+	dismissQuietReply(id: string, replyId: string): boolean {
+		const session = this.get(id);
+		const replies = session?.quietReplies;
+		if (!session || !replies?.length || !replyId) {
+			return false;
+		}
+		const next = replies.filter((reply) => reply.id !== replyId);
+		if (next.length === replies.length) {
+			return false;
+		}
+		if (next.length) {
+			session.quietReplies = next;
 		} else {
-			delete session.quietReply;
+			delete session.quietReplies;
 		}
 		this.save(session);
 		this.changed(id);
+		return true;
 	}
 
 	/**
@@ -1116,6 +1205,17 @@ export class Sessions extends Service {
 			const state = session.cursor?.state as { messages?: Message[]; transcript?: Message[] } | undefined;
 			collect(state?.messages);
 			collect(state?.transcript);
+			// Quiet cards are presentation, but their tool images are real attachment ids: the sweep
+			// must keep them until the card (or the chat) is dismissed.
+			for (const reply of session.quietReplies ?? []) {
+				for (const step of reply.steps ?? []) {
+					for (const image of step.images ?? []) {
+						if (image.id) {
+							ids.add(image.id);
+						}
+					}
+				}
+			}
 		}
 		return ids;
 	}

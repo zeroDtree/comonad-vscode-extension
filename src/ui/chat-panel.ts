@@ -588,14 +588,13 @@ export function chatPanel(ctx: Context): void {
 		at: step.at,
 	});
 
-	/** The session's quiet card in the webview's step shape; already bounded by `setQuietReply`. */
-	const quietReplyPayload = (session: Session | undefined): { text: string; steps: unknown[] } | undefined =>
-		session?.quietReply
-			? {
-					text: session.quietReply.text,
-					steps: (session.quietReply.steps ?? []).map((step) => stepPayload(step, session)),
-				}
-			: undefined;
+	/** The chat's quiet history in the webview's step shape; already bounded by `addQuietReply`. */
+	const quietRepliesPayload = (session: Session | undefined): unknown[] =>
+		(session?.quietReplies ?? []).map((reply) => ({
+			id: reply.id,
+			text: reply.text,
+			steps: (reply.steps ?? []).map((step) => stepPayload(step, session)),
+		}));
 
 	/** Whether editing this turn can offer to restore files: the journal knows a point at or after it. */
 	const restorePossible = (session: Session | undefined, turn: Turn | undefined): boolean =>
@@ -722,9 +721,9 @@ export function chatPanel(ctx: Context): void {
 			{
 				type: 'turns',
 				sessionId: session?.id,
-				// The persisted quiet card rides with the transcript, so a reload, a chat switch or a
+				// The persisted quiet history rides with the transcript, so a reload, a chat switch or a
 				// hidden view gets it back; the live turn still delivers its own `quiet-reply`.
-				quiet: quietReplyPayload(session),
+				quietReplies: quietRepliesPayload(session),
 				// Decided here, beside the transcript it describes: a redraw after a hidden view is shown
 				// may only re-attach a live stream to a turn the host is really running in this chat.
 				running: session !== undefined && running && runningSessionId === session.id,
@@ -1646,9 +1645,10 @@ export function chatPanel(ctx: Context): void {
 			const settledSession = ctx.sessions.get(turnSession ?? '') ?? ctx.sessions.active();
 			const quietSteps = settled?.type === 'quiet-reply' ? finishQuietTrace() : undefined;
 			// Persist before `turn-end`: a reload between the two messages must still find the card.
-			if (settled?.type === 'quiet-reply' && turnSession) {
-				ctx.sessions.setQuietReply(turnSession, { text: settled.text, at: Date.now(), steps: quietSteps });
-			}
+			const stored =
+				settled?.type === 'quiet-reply' && turnSession
+					? ctx.sessions.addQuietReply(turnSession, { text: settled.text, at: Date.now(), steps: quietSteps })
+					: undefined;
 			if (rewrite || refused) {
 				publishTurns(settledSession);
 			}
@@ -1676,7 +1676,9 @@ export function chatPanel(ctx: Context): void {
 					post({
 						...settled,
 						sessionId: turnSession,
-						...(quietSteps ? { steps: quietSteps.map((step) => stepPayload(step, settledSession)) } : {}),
+						...(stored
+							? { id: stored.id, steps: quietSteps?.map((step) => stepPayload(step, settledSession)) }
+							: {}),
 					});
 				} else {
 					post(settled);
@@ -1764,9 +1766,10 @@ export function chatPanel(ctx: Context): void {
 			turnController = null;
 			const quietSteps = settled?.type === 'quiet-reply' ? finishQuietTrace() : undefined;
 			// Persist before `turn-end`: a reload between the two messages must still find the card.
-			if (settled?.type === 'quiet-reply') {
-				ctx.sessions.setQuietReply(session.id, { text: settled.text, at: Date.now(), steps: quietSteps });
-			}
+			const stored =
+				settled?.type === 'quiet-reply'
+					? ctx.sessions.addQuietReply(session.id, { text: settled.text, at: Date.now(), steps: quietSteps })
+					: undefined;
 			// A continue, an impersonation and the swipes rewrite what the panel is drawing — the
 			// streamed turn is not the transcript. A quiet turn writes nothing at all, so there is
 			// nothing to hand over: its bubble is removed on the turn-end flag below.
@@ -1789,7 +1792,7 @@ export function chatPanel(ctx: Context): void {
 					post({
 						...settled,
 						sessionId: session.id,
-						...(quietSteps ? { steps: quietSteps.map((step) => stepPayload(step, session)) } : {}),
+						...(stored ? { id: stored.id, steps: quietSteps?.map((step) => stepPayload(step, session)) } : {}),
 					});
 				} else {
 					post(settled);
@@ -2202,12 +2205,13 @@ export function chatPanel(ctx: Context): void {
 					break;
 				}
 				case 'quiet-dismiss': {
-					// The card is persisted with the chat now: forgetting it locally would bring it back
-					// on the next reload, so the host clears the stored copy and tells every panel.
+					// The cards are persisted with the chat: forgetting one locally would bring it back on
+					// the next reload, so the host deletes that card and tells every panel which one.
 					const id = typeof message.sessionId === 'string' ? message.sessionId : '';
-					if (id) {
-						ctx.sessions.setQuietReply(id, undefined);
-						post({ type: 'quiet-dismissed', sessionId: id });
+					const replyId = typeof message.id === 'string' ? message.id : '';
+					if (id && replyId) {
+						ctx.sessions.dismissQuietReply(id, replyId);
+						post({ type: 'quiet-dismissed', sessionId: id, id: replyId });
 					}
 					break;
 				}

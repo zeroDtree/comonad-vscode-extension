@@ -116,7 +116,7 @@ The ▾ beside **Send** offers six generation types:
 | Impersonate | Write your next message into the composer |
 | Swipe | Add another version of the last reply |
 | Regenerate | Run the last prompt again |
-| Quiet | Generate without writing to the transcript; the reply, its thinking and its read-only tool calls show as a copyable card, kept with the chat until you dismiss it and across reloads |
+| Quiet | Generate without writing to the transcript; the reply, its thinking, read-only tool calls and tool images are saved as a copyable history beside the chat, each card dismissable on its own and kept across reloads |
 
 Replies with several versions show `‹ n/m ›` in the turn footer.
 

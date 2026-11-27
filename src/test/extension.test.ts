@@ -3356,31 +3356,74 @@ suite('Cordis kernel', () => {
 		}
 	});
 
-	test('a quiet reply is kept beside the chat, not in it', async () => {
+	test('quiet replies are kept as a history beside the chat, images included', async () => {
 		const kernel = await createTestKernel();
 		try {
 			kernel.ctx.sessions.save(kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'quiet-store'));
-			const before = kernel.ctx.sessions.require('quiet-store').transcript;
-			// A hand-edited or oversized card is untrusted input: the text step, the images, the unknown
-			// status and the over-long result must not survive the store.
-			const reply = {
-				text: 'private answer',
+			const before = kernel.ctx.sessions.require('quiet-store');
+			const transcript = before.transcript;
+			const turns = before.turnIndex;
+			const picture = await kernel.ctx.attachments.putImage(pngOf(3, 2), 'pic.png');
+			const other = await kernel.ctx.attachments.putImage(pngOf(4, 2), 'other.png');
+			// A hand-edited or oversized card is untrusted input: the text step, the image with an invalid
+			// id, the unknown status and the over-long result must not survive the store.
+			const first = kernel.ctx.sessions.addQuietReply('quiet-store', {
+				text: 'first',
 				at: 1,
 				steps: [
 					{ kind: 'text', text: 'drop me' },
 					{ kind: 'thought', text: 'weighing it', ms: 2, images: [{ id: 'x' }] },
-					{ kind: 'tool', name: 'read_file', args: '{"path":"a.txt"}', result: 'x'.repeat(40_000), status: 'done' },
+					{
+						kind: 'tool',
+						name: 'read_file',
+						args: '{"path":"a.txt"}',
+						result: 'x'.repeat(40_000),
+						status: 'done',
+						images: [
+							{
+								id: picture.id,
+								mime: picture.mime,
+								name: picture.name,
+								width: picture.width,
+								height: picture.height,
+								dataUrl: 'data:image/png;base64,AAAA',
+							},
+							{ id: 'not-an-attachment', mime: 'image/png' },
+						],
+					},
 				],
-			} as unknown as QuietReply;
-			kernel.ctx.sessions.setQuietReply('quiet-store', reply);
+			} as unknown as Omit<QuietReply, 'id'>);
+			const second = kernel.ctx.sessions.addQuietReply('quiet-store', {
+				text: 'second',
+				at: 2,
+				steps: [{ kind: 'tool', name: 'read_file', images: [{ id: other.id, mime: other.mime }] }],
+			});
 
+			assert.ok(first?.id, 'the service assigns an id');
+			assert.ok(second?.id && second.id !== first?.id, 'each card has its own id');
 			const stored = kernel.ctx.sessions.require('quiet-store');
-			assert.strictEqual(stored.quietReply?.text, 'private answer');
-			assert.deepStrictEqual(stored.quietReply?.steps?.map((step) => step.kind), ['thought', 'tool']);
-			assert.strictEqual(stored.quietReply?.steps?.[0]?.images, undefined, 'a card step does not carry images');
-			assert.strictEqual(stored.quietReply?.steps?.[1]?.result?.length, 30_000, 'a tool result is bounded');
-			assert.strictEqual(stored.quietReply?.steps?.[1]?.status, undefined, 'an unknown status is dropped');
-			assert.deepStrictEqual(stored.transcript, before, 'the quiet card is not a transcript message');
+			assert.deepStrictEqual(stored.quietReplies?.map((reply) => reply.text), ['first', 'second'], 'oldest first');
+			assert.deepStrictEqual(stored.quietReplies?.map((reply) => reply.id), [first?.id, second?.id]);
+			const card = stored.quietReplies?.[0];
+			assert.deepStrictEqual(card?.steps?.map((step) => step.kind), ['thought', 'tool']);
+			assert.strictEqual(card?.steps?.[0]?.images, undefined, 'an image with no real attachment id is dropped');
+			assert.strictEqual(card?.steps?.[1]?.images?.length, 1, 'the real tool image is kept');
+			assert.strictEqual(card?.steps?.[1]?.images?.[0]?.id, picture.id);
+			assert.strictEqual(card?.steps?.[1]?.images?.[0]?.dataUrl, undefined, 'the bytes are never written into the session');
+			assert.deepStrictEqual(
+				[card?.steps?.[1]?.images?.[0]?.mime, card?.steps?.[1]?.images?.[0]?.name, card?.steps?.[1]?.images?.[0]?.width, card?.steps?.[1]?.images?.[0]?.height],
+				['image/png', 'pic.png', 3, 2],
+			);
+			assert.strictEqual(card?.steps?.[1]?.result?.length, 30_000, 'a tool result is bounded');
+			assert.strictEqual(card?.steps?.[1]?.status, undefined, 'an unknown status is dropped');
+			assert.deepStrictEqual(stored.transcript, transcript, 'a quiet card is not a transcript message');
+			assert.strictEqual(stored.turnIndex, turns, 'and not a turn of the chat');
+
+			const ids = kernel.ctx.sessions.attachmentIds();
+			assert.ok(ids.has(picture.id) && ids.has(other.id), 'quiet images are references the sweep must keep');
+			kernel.ctx.attachments.sweep(ids, 0);
+			assert.ok(kernel.ctx.attachments.read(picture.id), 'the image survived the sweep');
+			assert.match(kernel.ctx.attachments.dataUrlById(picture.id) ?? '', /^data:image\/png;base64,/);
 
 			const seen: Message[][] = [];
 			kernel.ctx.llm.use({
@@ -3391,15 +3434,36 @@ suite('Cordis kernel', () => {
 				},
 			});
 			await kernel.ctx.agent.runTurn({ text: 'a normal turn', sessionId: 'quiet-store' });
-			assert.ok(!JSON.stringify(seen).includes('private answer'), 'the card never reaches the model');
-			assert.strictEqual(kernel.ctx.sessions.require('quiet-store').quietReply?.text, 'private answer', 'a normal turn leaves it in place');
+			assert.ok(!JSON.stringify(seen).includes('first') && !JSON.stringify(seen).includes('second'), 'the cards never reach the model');
+			assert.strictEqual(kernel.ctx.sessions.require('quiet-store').quietReplies?.length, 2, 'a normal turn leaves the history in place');
 
-			kernel.ctx.sessions.setQuietReply('quiet-store', undefined);
-			assert.strictEqual(kernel.ctx.sessions.require('quiet-store').quietReply, undefined, 'Dismiss clears it');
-
-			kernel.ctx.sessions.setQuietReply('quiet-store', { text: 'source card', at: 2 });
 			const fork = kernel.ctx.sessions.fork('quiet-store');
-			assert.strictEqual(fork.quietReply, undefined, 'a fork starts without the source card');
+			assert.strictEqual(fork.quietReplies, undefined, 'a fork starts without the source history');
+			assert.strictEqual(kernel.ctx.sessions.require('quiet-store').quietReplies?.length, 2, 'the source keeps it');
+
+			assert.strictEqual(kernel.ctx.sessions.dismissQuietReply('quiet-store', first!.id), true, 'the first card is dismissed');
+			assert.deepStrictEqual(kernel.ctx.sessions.require('quiet-store').quietReplies?.map((reply) => reply.text), ['second']);
+			assert.strictEqual(kernel.ctx.sessions.dismissQuietReply('quiet-store', second!.id), true);
+			assert.strictEqual(kernel.ctx.sessions.require('quiet-store').quietReplies, undefined, 'dismissing the last card clears the field');
+			assert.strictEqual(kernel.ctx.sessions.require('quiet-store').quietReplies, undefined, 'and a reload does not bring it back');
+			assert.strictEqual(kernel.ctx.sessions.dismissQuietReply('quiet-store', 'gone'), false, 'an unknown card is a no-op');
+
+			// A session written by the single-card build is migrated once, with a stable id; the old
+			// field is not carried into the normalised object or the next save.
+			const legacy = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'legacy-quiet');
+			// A title makes it a used chat, so `save` writes the raw object instead of keeping a draft.
+			legacy.title = 'legacy quiet card';
+			(legacy as unknown as { quietReply?: unknown }).quietReply = { text: 'old card', at: 42, steps: [{ kind: 'thought', text: 'old thought' }] };
+			kernel.ctx.sessions.save(legacy);
+			const migrated = kernel.ctx.sessions.require('legacy-quiet');
+			assert.strictEqual(migrated.quietReplies?.length, 1);
+			assert.strictEqual(migrated.quietReplies?.[0]?.text, 'old card');
+			assert.strictEqual(migrated.quietReplies?.[0]?.id, 'legacy-42', 'the migration id is deterministic');
+			assert.ok(!('quietReply' in migrated), 'the legacy field is dropped on load');
+			const reloaded = kernel.ctx.sessions.require('legacy-quiet');
+			assert.strictEqual(reloaded.quietReplies?.[0]?.id, 'legacy-42', 'and stays stable across reloads');
+			kernel.ctx.sessions.save(reloaded);
+			assert.ok(!('quietReply' in kernel.ctx.sessions.require('legacy-quiet')), 'the next save writes only the history');
 		} finally {
 			await kernel.dispose();
 		}

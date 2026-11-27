@@ -841,10 +841,10 @@ suite('Idle chat panel', () => {
 		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
 		// The reply is nowhere in the transcript, so it must be remembered per chat and drawn again
 		// after every repaint of #messages — the redraw is what used to erase it.
-		assert.ok(guest.includes('const quietReplies = new Map()'), 'each chat keeps its last quiet reply');
-		assert.match(guest, /function renderQuietReply\(sessionId\)/);
+		assert.ok(guest.includes('const quietReplies = new Map()'), 'each chat keeps its quiet history');
+		assert.match(guest, /function renderQuietReplies\(sessionId\)/);
 		const render = guest.slice(guest.indexOf('function renderTurns('), guest.indexOf('/** Registers a drawn turn'));
-		assert.match(render, /renderQuietReply\(sessionId\)/, 'a transcript redraw draws the quiet card again');
+		assert.match(render, /renderQuietReplies\(sessionId\)/, 'a transcript redraw draws the quiet history again');
 		assert.match(guest, /case 'quiet-reply':/);
 		// The quiet turn's bubble was never a turn of the chat: it is dropped, and no resync follows.
 		const end = guest.slice(guest.indexOf("case 'turn-end':"), guest.indexOf("case 'insertReference':"));
@@ -859,7 +859,7 @@ suite('Idle chat panel', () => {
 		assert.ok(guest.includes('const pendingQuiet = new Map()'), 'the steps of the dropped bubble wait for their reply');
 		assert.match(guest, /function keptQuietSteps\(/, 'a quiet turn keeps its thoughts and the calls it made');
 		assert.match(drop, /pendingQuiet\.set\(/, 'the bubble is harvested before it is dropped');
-		const card = guest.slice(guest.indexOf('function quietCard('), guest.indexOf('function renderQuietReply('));
+		const card = guest.slice(guest.indexOf('function quietCard('), guest.indexOf('function renderQuietReplies('));
 		assert.match(card, /stepEl\(step, false\)/, 'the card draws its steps with the turn renderer');
 		assert.match(card, /paintTimer\(step, false, now\)/, 'and settles their timers, since a card is a snapshot');
 		const quiet = guest.slice(guest.indexOf("case 'quiet-reply':"), guest.indexOf("case 'insertReference':"));
@@ -882,34 +882,47 @@ suite('Idle chat panel', () => {
 		assert.ok(css.includes('.msg.quiet-reply .quiet-steps'), 'and its steps are spaced like a turn');
 	});
 
-	test('a quiet reply is stored on the session and rehydrated after a reload', () => {
+	test('quiet replies are stored as a history on the session and rehydrated after a reload', () => {
 		const root = join(__dirname, '..', '..');
 		const guest = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
-		// The host's session holds the authoritative card; `turns` hands it back to a reloaded guest.
+		// The host's session holds the authoritative history; `turns` hands it back to a reloaded guest.
 		const turns = guest.slice(guest.indexOf("case 'turns':"), guest.indexOf("case 'summary':"));
-		assert.match(turns, /message\.quiet/, 'the transcript payload carries the persisted card');
-		assert.match(turns, /quietReplies\.set\(id, message\.quiet\)/, 'a reload draws it from the payload');
+		assert.match(turns, /message\.quietReplies/, 'the transcript payload carries the persisted history');
+		assert.match(turns, /quietReplies\.set\(id, Array\.isArray\(message\.quietReplies\)/, 'a reload draws it, empty history included');
 		const quiet = guest.slice(guest.indexOf("case 'quiet-reply':"), guest.indexOf("case 'quiet-dismissed':"));
 		assert.match(quiet, /Array\.isArray\(message\.steps\)/, 'the host trace wins over the live harvest');
 		assert.match(quiet, /pendingQuiet\.get\(id\)/, 'and the bubble harvest stays as the fallback');
-		assert.match(guest, /type: 'quiet-dismiss'/, 'Dismiss asks the host to forget the stored card');
-		assert.match(guest, /case 'quiet-dismissed':/, 'and another panel follows the host broadcast');
+		assert.match(quiet, /entry\.id !== replyId/, 'a card already carried by `turns` is replaced, not duplicated');
+		assert.match(quiet, /renderQuietReplies\(id\)/, 'the whole history is redrawn');
+		assert.match(guest, /type: 'quiet-dismiss', sessionId: id, id: entry\.id/, 'Dismiss asks the host to forget one stored card');
+		const dismissed = guest.slice(guest.indexOf("case 'quiet-dismissed':"), guest.indexOf("case 'compaction':"));
+		assert.match(dismissed, /message\.id/, 'the broadcast names the card it removed');
+		assert.match(dismissed, /renderQuietReplies\(id\)/);
 
 		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
 		assert.match(panel, /let quietTrace: QuietTrace \| null/);
 		assert.match(panel, /const quietTraceFor = /);
 		assert.match(panel, /const finishQuietTrace = /);
-		assert.match(panel, /quiet: quietReplyPayload\(session\)/, 'publishTurns rehydrates the card');
-		assert.match(panel, /setQuietReply\(turnSession/, 'the send runner persists its reply');
-		assert.match(panel, /setQuietReply\(session\.id/, 'the generate runner persists its reply');
-		assert.match(panel, /steps: quietSteps\.map/, 'the live reply carries the host trace too');
-		assert.match(panel, /case 'quiet-dismiss':/, 'a dismiss clears the stored card');
+		assert.match(panel, /quietReplies: quietRepliesPayload\(session\)/, 'publishTurns rehydrates the history');
+		assert.match(panel, /addQuietReply\(turnSession/, 'the send runner appends its reply');
+		assert.match(panel, /addQuietReply\(session\.id/, 'the generate runner appends its reply');
+		assert.match(panel, /steps: quietSteps\?\.map/, 'the live reply carries the host trace too');
+		assert.match(panel, /case 'quiet-dismiss':/, 'a dismiss deletes one stored card');
+		assert.match(panel, /dismissQuietReply\(id, replyId\)/);
+		assert.match(panel, /type: 'quiet-dismissed', sessionId: id, id: replyId/, 'the broadcast names the card');
 
 		const sessions = readFileSync(join(root, 'src', 'services', 'sessions.ts'), 'utf8');
-		assert.match(sessions, /quietReply\?: QuietReply/);
-		assert.match(sessions, /setQuietReply\(id: string/);
+		assert.match(sessions, /quietReplies\?: QuietReply\[\]/);
+		assert.match(sessions, /addQuietReply\(id: string/);
+		assert.match(sessions, /dismissQuietReply\(id: string, replyId: string\)/);
 		assert.match(sessions, /sanitizeQuietReply\(/);
-		assert.match(sessions, /quietReply: sanitizeQuietReply/, 'a stored card is sanitised on load');
-		assert.match(sessions, /quietReply: undefined/, 'a fork starts without the source card');
+		assert.match(sessions, /sanitizeQuietReplies\(/);
+		assert.match(sessions, /sanitizeQuietImages\(/);
+		assert.match(sessions, /quietReplies: sanitizeQuietReplies/, 'a stored history is sanitised on load');
+		assert.match(sessions, /quietReply: _legacyQuiet/, 'the single-card build is migrated');
+		assert.match(sessions, /quietReplies: undefined/, 'a fork starts without the source history');
+		const attachments = sessions.slice(sessions.indexOf('attachmentIds(): Set<string>'), sessions.indexOf('private sweepAttachments'));
+		assert.match(attachments, /session\.quietReplies/, 'quiet images are kept alive for the sweep');
+		assert.match(sessions, /MAX_QUIET_REPLIES/);
 	});
 });

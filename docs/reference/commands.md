@@ -28,7 +28,7 @@ a command — elsewhere it is ordinary text.
 | `/impersonate` | Write your next message for you |
 | `/swipe` | Generate another version of the last reply |
 | `/regenerate` | Generate the last reply again |
-| `/quiet [text]` | Generate a reply without adding it to the transcript; it shows as a copyable card with its thinking and read-only tool calls, kept with the chat until dismissed and across reloads |
+| `/quiet [text]` | Generate a reply without adding it to the transcript; it is saved beside the chat as a copyable history card with its thinking, read-only tool calls and tool images, each dismissable on its own and kept across reloads |
 | `/init` | Create a `COMONAD.md` project instruction file |
 | `/export` | Export the session as Markdown |
 | `/resume` | Resume a suspended (waiting for approval) turn |
