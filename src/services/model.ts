@@ -314,6 +314,27 @@ export class Model extends Service {
 		}
 	}
 
+	/**
+	 * Where an instance's key comes from: the endpoint's keychain entry, one of its
+	 * `keyEnv` variables (the first one set), or nowhere. A key the wizard saved and a
+	 * key the shell exports are not the same thing, and the status table shows which.
+	 */
+	async keyInfo(instanceId: string): Promise<{ source: 'stored' | 'env' | 'none'; envName?: string }> {
+		const resolved = await this.resolveInstance(instanceId).catch(() => undefined);
+		if (!resolved) {
+			return { source: 'none' };
+		}
+		if (resolved.provider.keySource === 'stored') {
+			return { source: 'stored' };
+		}
+		for (const name of resolved.provider.keyEnvNames) {
+			if (this.ctx.host.env(name)) {
+				return { source: 'env', envName: name };
+			}
+		}
+		return { source: 'none' };
+	}
+
 	instance(id: string): ProviderInstanceConfig | undefined {
 		return providersOf(this.ctx.settings.get()).find((entry) => entry.id === id);
 	}

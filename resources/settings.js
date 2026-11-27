@@ -1276,17 +1276,29 @@
 		const status = $('provider-status');
 		if (status) {
 			status.innerHTML = '';
-			table(status, ['provider', 'brand', 'base', 'model', 'key', 'listed', 'rules', 'fallback', 'error'], providerStatus.map((row) => [
-				{ text: row.id, mono: true },
-				{ text: row.brand },
-				{ text: row.base, mono: true },
-				{ text: row.model, mono: true },
-				{ text: row.keyReady ? '✓' : 'missing' },
-				{ text: String(row.listed) },
-				{ text: row.rules || '' },
-				{ text: row.fallback || '' },
-				{ text: row.error || '' },
-			]));
+			// Six fixed columns; what a fixed width cannot hold — the endpoint URL, the
+			// prefix/skip rules, the fallback chain — rides in the row's hover note.
+			table(
+				status,
+				['provider', 'brand', 'model', 'key', 'listed', 'error'],
+				providerStatus.map((row) => ({
+					title: [
+						row.base,
+						row.rules ? `rules: ${row.rules}` : '',
+						row.fallback ? `fallback: ${row.fallback}` : '',
+					]
+						.filter(Boolean)
+						.join('\n'),
+					cells: [
+						{ text: row.id, mono: true },
+						{ text: row.brand },
+						{ text: row.model, mono: true },
+						{ text: row.key, mono: row.key.startsWith('env ') },
+						{ text: String(row.listed) },
+						{ text: row.error || '' },
+					],
+				})),
+			);
 		}
 	}
 

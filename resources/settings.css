@@ -399,6 +399,14 @@ body.resizing {
 	max-width: 480px;
 }
 
+/* The three model routes share the line with their save button: equal fields, never a stack. */
+#route-compaction,
+#route-softRoute,
+#route-hook {
+	flex: 1 1 140px;
+	min-width: 0;
+}
+
 .group input.control[type='number'] {
 	width: auto;
 	min-width: 96px;
@@ -1295,6 +1303,49 @@ th {
 	letter-spacing: 0.05em;
 	color: var(--st-muted);
 	border-bottom-color: var(--st-border);
+}
+
+/* The Models status table: fixed columns, so a long base URL or model id can never drag
+   the layout out; overflow truncates and the row's hover note carries the full text. */
+#provider-status {
+	table-layout: fixed;
+}
+
+#provider-status th,
+#provider-status td {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#provider-status th:nth-child(1),
+#provider-status td:nth-child(1) {
+	width: 16%; /* provider */
+}
+
+#provider-status th:nth-child(2),
+#provider-status td:nth-child(2) {
+	width: 12%; /* brand */
+}
+
+#provider-status th:nth-child(3),
+#provider-status td:nth-child(3) {
+	width: 24%; /* model */
+}
+
+#provider-status th:nth-child(4),
+#provider-status td:nth-child(4) {
+	width: 24%; /* key */
+}
+
+#provider-status th:nth-child(5),
+#provider-status td:nth-child(5) {
+	width: 8%; /* listed */
+}
+
+#provider-status th:nth-child(6),
+#provider-status td:nth-child(6) {
+	width: 16%; /* error */
 }
 
 /* Rows are appended to the table directly (no tbody), so a `tbody` selector would never match. */

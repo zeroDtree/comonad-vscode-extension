@@ -487,14 +487,19 @@ export function settingsPanel(ctx: Context): void {
 		}
 		const rows: Record<string, unknown>[] = [];
 		for (const instance of providersOf(ctx.settings.get())) {
-			const keyReady = await ctx.model.keyReady(instance.id);
+			const info = await ctx.model.keyInfo(instance.id);
 			const probe = await ctx.model.probeModels(instance.id);
 			rows.push({
 				id: instance.id,
 				brand: instance.brand,
 				base: instance.base,
 				model: instance.model ?? '',
-				keyReady,
+				key:
+					info.source === 'stored'
+						? 'keychain'
+						: info.source === 'env'
+							? `env ${info.envName ?? ''}`.trim()
+							: 'missing',
 				listed: probe.ids.length,
 				rules: instance.modelRules ? `${instance.modelRules.prefix ?? ''} ${instance.modelRules.skip ?? ''}`.trim() : '',
 				fallback: (instance.fallback ?? []).join(' → '),
@@ -1039,7 +1044,7 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       </div>
       <div class="field">
         <label>Status</label>
-        <p class="hint">What each effective instance resolves to, and what its endpoint lists.</p>
+        <p class="hint">What each effective instance resolves to, and what its endpoint lists. Key: <code>keychain</code> = saved for this endpoint, <code>env NAME</code> = read from the provider's <code>keyEnv</code>, <code>missing</code> = none set. Hover a row for its base URL, model rules and fallback chain.</p>
         <table id="provider-status"></table>
       </div>
       <div class="field">
