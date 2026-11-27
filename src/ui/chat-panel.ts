@@ -13,6 +13,12 @@ import {
 	publicImages,
 } from '../lib/attachments';
 import { asReasoningEffort } from '../lib/effort';
+import { isPriced } from '@comonad/model';
+
+/** Whether the model a status line describes has prices; an unpriced zero cost shows `—`. */
+function pricedFor(ctx: Context, model: string | undefined): boolean {
+	return isPriced(ctx.model.modelInfo(model ?? ctx.settings.get().model)?.pricing);
+}
 import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, MAX_TOTAL_IMAGE_BYTES } from '../lib/images';
 import { APPROVAL_LABELS, MODE_LABELS, SANDBOX_LABELS } from '../lib/policy';
 import { reviewedPaths } from '../lib/review-model';
@@ -113,7 +119,8 @@ function cacheDetail(usage: SessionUsage | undefined): string {
 		return '';
 	}
 	const share = Math.min(100, Math.round((usage.cachedTokens / usage.inputTokens) * 100));
-	return `cache ${formatTokens(usage.cachedTokens)} (${share}%)`;
+	const written = usage.cacheWriteTokens ? ` · write ${formatTokens(usage.cacheWriteTokens)}` : '';
+	return `cache ${formatTokens(usage.cachedTokens)} (${share}%)${written}`;
 }
 
 /**
@@ -124,11 +131,14 @@ export function statusDetail(
 	session: Pick<Session, 'usage' | 'turnIndex' | 'lastInputTokens'> | undefined,
 	window: number,
 	estimated = false,
+	/** False when the running model has no price: a zero cost shows `—`, never `$0.000`. */
+	priced = true,
 ): string {
 	const usage = session?.usage;
 	const total = usage ? usage.inputTokens + usage.outputTokens : 0;
+	const cost = usage && usage.cost > 0 ? `$${usage.cost.toFixed(3)}` : priced ? '$0.000' : '—';
 	return [
-		usage && usage.requests ? `${formatTokens(total)} tokens · $${usage.cost.toFixed(3)}` : '',
+		usage && usage.requests ? `${formatTokens(total)} tokens · ${cost}` : '',
 		cacheDetail(usage),
 		session ? `turn ${session.turnIndex}` : '',
 		contextUsage(session, window, estimated),
@@ -432,6 +442,7 @@ export function chatPanel(ctx: Context): void {
 				measured,
 				estimate ? estimate.window : session ? ctx.agent.windowFor(session) : 0,
 				estimate !== undefined,
+				pricedFor(ctx, session?.policy.model),
 			),
 			suspended: Boolean(session?.cursor),
 			running,
@@ -449,7 +460,7 @@ export function chatPanel(ctx: Context): void {
 			reasoningEffort: effort,
 			// What the endpoint will actually run, when its ceiling is below the pick: the menu reads
 			// `Max → high` rather than claiming a level the provider does not have.
-			reasoningEffortResolved: ctx.llm.effortFor(config.model, effort),
+			reasoningEffortResolved: ctx.model.effortFor(config.model, effort),
 			contextWindow: session?.contextWindow ?? config.contextWindow,
 			// The window this chat's requests are measured against, which is what the model menu's
 			// `Auto (…)` reads out.
@@ -461,7 +472,7 @@ export function chatPanel(ctx: Context): void {
 			// The composer's `/` menu: what `commands.handle()` would resolve, custom files included.
 			commands: ctx.commands.suggestions(),
 			model: config.model,
-			modelLabel: ctx.llm.describe(config.model),
+			modelLabel: ctx.model.describe(config.model),
 			// The list of models to pick from is not part of this snapshot: `refreshModels()` posts it
 			// on its own message, so a slow endpoint can never delay state.
 			historyScope,
@@ -810,7 +821,7 @@ export function chatPanel(ctx: Context): void {
 			view: taskGraphViewOf(current, lookup),
 			root: {
 				title: session.title,
-				detail: statusDetail(session, ctx.agent.windowFor(session)),
+				detail: statusDetail(session, ctx.agent.windowFor(session), false, pricedFor(ctx, session.policy.model)),
 			},
 		};
 	};
@@ -869,7 +880,7 @@ export function chatPanel(ctx: Context): void {
 	 * must never stall a snapshot. `Llm` caches the lists, so a read per refresh is cheap; a request
 	 * that lands while one is in flight folds into one more pass, so only the newest list is posted.
 	 */
-	let lastModels: Awaited<ReturnType<typeof ctx.llm.availableModels>> | null = null;
+	let lastModels: Awaited<ReturnType<typeof ctx.model.availableModels>> | null = null;
 	let modelsInFlight: Promise<void> | null = null;
 	let modelsDirty = false;
 
@@ -893,7 +904,7 @@ export function chatPanel(ctx: Context): void {
 			try {
 				do {
 					modelsDirty = false;
-					lastModels = await ctx.llm.availableModels();
+					lastModels = await ctx.model.availableModels();
 				} while (modelsDirty);
 				postModels();
 			} catch (error) {
@@ -1192,6 +1203,7 @@ export function chatPanel(ctx: Context): void {
 				{ usage: estimated.usage, turnIndex: estimated.turnIndex, lastInputTokens: estimated.estimateTokens },
 				estimated.window,
 				true,
+				pricedFor(ctx, ctx.sessions.get(ref.sessionId)?.policy.model),
 			),
 		});
 	});
@@ -1201,7 +1213,11 @@ export function chatPanel(ctx: Context): void {
 	ctx.on('agent/usage', (ref, measured) => {
 		// The provider's count is authoritative from now on; the provisional line is obsolete.
 		estimates.delete(ref.sessionId);
-		post({ type: 'status', sessionId: ref.sessionId, detail: statusDetail(measured, measured.window) });
+		post({
+			type: 'status',
+			sessionId: ref.sessionId,
+			detail: statusDetail(measured, measured.window, false, pricedFor(ctx, ctx.sessions.get(ref.sessionId)?.policy.model)),
+		});
 	});
 	// The card gains its "Open session" link as soon as the child exists, while the call still runs.
 	ctx.on('agent/subagent-start', (ref, info) => {
@@ -2133,9 +2149,9 @@ export function chatPanel(ctx: Context): void {
 			return;
 		}
 		const modelPick = typeof model === 'string' && model.trim() ? model.trim() : undefined;
-		if (modelPick && !(await ctx.llm.keyReady(modelPick))) {
+		if (modelPick && !(await ctx.model.keyReady(modelPick))) {
 			post(
-				{ type: 'notice', text: `${ctx.llm.describe(modelPick)} has no API key — choose another model in the plan card.` },
+				{ type: 'notice', text: `${ctx.model.describe(modelPick)} has no API key — choose another model in the plan card.` },
 				source,
 			);
 			return;
@@ -2469,9 +2485,9 @@ export function chatPanel(ctx: Context): void {
 				}
 				case 'setModel': {
 					const model = String(message.model ?? 'auto');
-					if (!(await ctx.llm.keyReady(model))) {
+					if (!(await ctx.model.keyReady(model))) {
 						const action = await vscode.window.showWarningMessage(
-							`Comonad: ${ctx.llm.describe(model)} has no API key for its endpoint.`,
+							`Comonad: ${ctx.model.describe(model)} has no API key for its endpoint.`,
 							'Configure provider…',
 						);
 						if (action) {
@@ -2890,7 +2906,7 @@ export function chatPanel(ctx: Context): void {
 	// The title-bar icons are commands; the chat list itself lives in the webview.
 	registerCommand(ctx, 'comonad.toggleHistory', () => post({ type: 'toggleHistory' }));
 }
-chatPanel.inject = ['sessions', 'agent', 'orchestrator', 'attachments', 'references', 'settings', 'llm', 'usage', 'commands', 'log', 'host'];
+chatPanel.inject = ['sessions', 'agent', 'orchestrator', 'attachments', 'references', 'settings', 'model', 'usage', 'commands', 'log', 'host'];
 
 function splitChoices(labels: Record<string, string>): { id: string; label: string; description: string }[] {
 	return Object.entries(labels).map(([id, label]) => {

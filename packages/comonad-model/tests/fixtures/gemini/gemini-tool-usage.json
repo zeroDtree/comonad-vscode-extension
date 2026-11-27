@@ -1,0 +1,17 @@
+{
+	"name": "gemini text + tool call + cache usage",
+	"meta": {
+		"protocol": "gemini",
+		"brand": "google",
+		"status": 200,
+		"note": "Hand-written shape of a streamGenerateContent stream: two text parts, one whole functionCall, cache-split usageMetadata. The call carries a thought signature natively."
+	},
+	"request": {
+		"model": "gemini-3.8-flash",
+		"messages": [{ "role": "user", "content": "read a.ts" }]
+	},
+	"sse": [
+		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi \"},{\"text\":\"there\"}],\"role\":\"model\"}}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":3,\"thoughtsTokenCount\":0,\"cachedContentTokenCount\":2}}\n\n",
+		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read_file\",\"args\":{\"path\":\"a.ts\"},\"thoughtSignature\":\"sig-1\"}}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5,\"thoughtsTokenCount\":0,\"cachedContentTokenCount\":2}}\n\n"
+	]
+}

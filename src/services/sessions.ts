@@ -32,6 +32,8 @@ export interface SessionUsage {
 	 * cache statistics. Absent means no request ever reported them; 0 is a report of zero hits.
 	 */
 	cachedTokens?: number;
+	/** Tokens written into the prompt cache, summed over requests that reported cache creation. */
+	cacheWriteTokens?: number;
 }
 
 /** A restore point: the journal position and the transcript prompt index at one turn. */

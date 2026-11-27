@@ -2,7 +2,7 @@
 import * as assert from 'node:assert';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createTestKernel } from './harness';
+import { createTestKernel, useFakeModel } from './harness';
 import { BUILTIN_ROLES } from '../lib/agents';
 import { COMONAD_BLOCK } from '../lib/blocks';
 import { clampResumeBudget } from '../lib/budget';
@@ -50,7 +50,7 @@ suite('Orchestrator task loop', () => {
 			const workspace = kernel.host.workspace();
 			let coderOffered: string[] = [];
 			let coderApproval: string | undefined;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'orchestrator',
 				async chat(request) {
 					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
@@ -163,7 +163,7 @@ suite('Orchestrator task loop', () => {
 			const workspace = kernel.host.workspace();
 			let childCalls = 0;
 			const childSystems: string[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'budget-orchestrator',
 				async chat(request) {
 					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
@@ -265,7 +265,7 @@ suite('Orchestrator task loop', () => {
 		});
 		try {
 			let childSystem = '';
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'inherit-budget',
 				async chat(request) {
 					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
@@ -316,7 +316,7 @@ suite('Orchestrator task loop', () => {
 		try {
 			const workspace = kernel.host.workspace();
 			const messages: string[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'parallel',
 				async chat(request) {
 					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
@@ -422,7 +422,7 @@ suite('Orchestrator task loop', () => {
 			release = resolve;
 		});
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'settle-early',
 				async chat(request) {
 					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
@@ -672,7 +672,7 @@ suite('Orchestrator task loop', () => {
 	test('Plan mode refuses a write task when the plan is recorded', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'plan-refusal',
 				async chat(request) {
 					const last = rootStep(request);
@@ -717,7 +717,7 @@ suite('Orchestrator task loop', () => {
 		try {
 			const workspace = kernel.host.workspace();
 			let plannerOffered: string[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'plan-orchestrator',
 				async chat(request) {
 					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
@@ -797,7 +797,7 @@ suite('Orchestrator task loop', () => {
 		const kernel = await createTestKernel({ config: { mode: 'plan' } });
 		try {
 			const workspace = kernel.host.workspace();
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'plan-revision',
 				async chat(request) {
 					const last = rootStep(request);
@@ -878,7 +878,7 @@ suite('Orchestrator task loop', () => {
 
 			const starts: string[] = [];
 			kernel.ctx.on('agent/subagent-start', (_ref, info) => starts.push(info.name));
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'delegate-refusal',
 				async chat(request) {
 					const last = rootStep(request);
@@ -932,7 +932,7 @@ suite('Verifier acceptance mapping', () => {
 		repair?: { acceptance: unknown[]; evidence: unknown[] };
 	}) {
 		const kernel = await createTestKernel();
-		kernel.ctx.llm.use({
+		useFakeModel(kernel, {
 			name: `command-orchestrator-${Math.random()}`,
 			async chat(request) {
 				const system = request.messages.find((message) => message.role === 'system')?.content ?? '';
@@ -1119,7 +1119,7 @@ suite('Context compaction', () => {
 			kernel.ctx.sessions.save(session);
 			let sawPrompt = false;
 			let summaryRequest: { reasoningEffort?: string; maxTokens?: number } | undefined;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'compaction-fake',
 				async chat(request) {
 					const system = request.messages.find((message) => message.role === 'system')?.content ?? '';

@@ -4,10 +4,9 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gateCall, parseRules } from '../lib/policy';
 import { policyRevision, policySnapshot, type PolicySnapshot } from '../lib/trace';
-import type { Completion } from '../lib/openai';
 import { objectSchema, type Message, type SessionPolicy, type ToolCall, type ToolSpec } from '../lib/types';
 import { auditText } from '../ui/slash';
-import { createTestKernel } from './harness';
+import { createTestKernel, useFakeModel } from './harness';
 
 const readTool: ToolSpec = {
 	name: 'probe_read',
@@ -212,7 +211,7 @@ suite('Decision trace service', () => {
 suite('Decision trace in a turn', () => {
 	const answer =
 		(calls: ToolCall[] | null) =>
-		async (request: { messages: Message[] }): Promise<Completion> => {
+		async (request: { messages: Message[] }): Promise<{ message: Message; toolCalls: ToolCall[] }> => {
 			const hasTool = request.messages.some((message) => message.role === 'tool');
 			if (!hasTool && calls) {
 				return { message: { role: 'assistant', content: 'working', toolCalls: calls }, toolCalls: calls };
@@ -234,7 +233,7 @@ suite('Decision trace in a turn', () => {
 		const kernel = await createTestKernel({ config: { approval: 'universal_accept', mode: 'aw' } });
 		try {
 			kernel.ctx.tools.register(probe());
-			kernel.ctx.llm.use({ name: 'test', chat: answer([call('probe_read')]) });
+			useFakeModel(kernel, { name: 'test', chat: answer([call('probe_read')]) });
 			await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
 			const event = kernel.ctx.decisions.recent(10).find((entry) => entry.tool_name === 'probe_read');
 			assert.ok(event);
@@ -256,7 +255,7 @@ suite('Decision trace in a turn', () => {
 		const kernel = await createTestKernel({ config: { approval: 'universal_accept', mode: 'aw' } });
 		try {
 			kernel.ctx.tools.register(probe());
-			kernel.ctx.llm.use({ name: 'test', chat: answer([call('probe_read')]) });
+			useFakeModel(kernel, { name: 'test', chat: answer([call('probe_read')]) });
 			kernel.ctx.on('tools/pre-execute', (exec, next) => (exec.name === 'probe_read' ? { kind: 'deny', reason: 'plugin says no' } : next()));
 			await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
 			const event = kernel.ctx.decisions.recent(10).find((entry) => entry.tool_name === 'probe_read');
@@ -277,7 +276,7 @@ suite('Decision trace in a turn', () => {
 		const kernel = await createTestKernel({ config: { approval: 'universal_accept', approvalResponse: 'never', mode: 'aw' } });
 		try {
 			kernel.ctx.tools.register(probe());
-			kernel.ctx.llm.use({ name: 'test', chat: answer([call('probe_read')]) });
+			useFakeModel(kernel, { name: 'test', chat: answer([call('probe_read')]) });
 			kernel.ctx.on('tools/pre-execute', (exec, next) => (exec.name === 'probe_read' ? { kind: 'ask', reason: 'plugin asks' } : next()));
 			let asked = 0;
 			kernel.ctx.on('approval/request', (request, next) => {
@@ -303,7 +302,7 @@ suite('Decision trace in a turn', () => {
 		const kernel = await createTestKernel({ config: { approval: 'manual', mode: 'aw' } });
 		try {
 			kernel.ctx.tools.register(probe());
-			kernel.ctx.llm.use({ name: 'test', chat: answer([call('probe_read')]) });
+			useFakeModel(kernel, { name: 'test', chat: answer([call('probe_read')]) });
 			kernel.ctx.on('approval/request', (request, next) => (request.surface === 'test' ? 'deny' : next()));
 			await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
 			const event = kernel.ctx.decisions.recent(10).find((entry) => entry.tool_name === 'probe_read');
@@ -328,7 +327,7 @@ suite('Decision trace in a turn', () => {
 		const kernel = await createTestKernel({ config: { approval: 'manual', approvalResponse: 'never', mode: 'aw' } });
 		try {
 			kernel.ctx.tools.register(probe());
-			kernel.ctx.llm.use({ name: 'test', chat: answer([call('probe_read')]) });
+			useFakeModel(kernel, { name: 'test', chat: answer([call('probe_read')]) });
 			let asked = 0;
 			kernel.ctx.on('approval/request', (request, next) => {
 				asked += 1;
@@ -352,7 +351,7 @@ suite('Decision trace in a turn', () => {
 		const kernel = await createTestKernel({ config: { approval: 'manual', mode: 'aw', permissions: { allow: ['probe_read'], ask: [], deny: [] } } });
 		try {
 			kernel.ctx.tools.register(probe());
-			kernel.ctx.llm.use({ name: 'test', chat: answer([call('probe_read')]) });
+			useFakeModel(kernel, { name: 'test', chat: answer([call('probe_read')]) });
 			await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
 			const event = kernel.ctx.decisions.recent(10).find((entry) => entry.tool_name === 'probe_read');
 			assert.ok(event);
@@ -374,7 +373,7 @@ suite('Decision trace in a turn', () => {
 		try {
 			kernel.ctx.tools.register(probe('probe_keep'));
 			kernel.ctx.tools.register(probe('probe_deny'));
-			kernel.ctx.llm.use({ name: 'test', chat: answer([call('probe_keep'), call('probe_deny')]) });
+			useFakeModel(kernel, { name: 'test', chat: answer([call('probe_keep'), call('probe_deny')]) });
 			await kernel.ctx.agent.runTurn({ text: 'go', surface: 'test' });
 			const events = kernel.ctx.decisions.recent(10).filter((entry) => entry.tool_name === 'probe_keep' || entry.tool_name === 'probe_deny');
 			assert.strictEqual(events.length, 2);

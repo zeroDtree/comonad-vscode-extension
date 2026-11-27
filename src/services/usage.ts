@@ -9,6 +9,8 @@ export interface UsageDay {
 	input: number;
 	output: number;
 	requests: number;
+	/** Tokens written into the prompt cache by providers that report cache creation. */
+	cacheWrite?: number;
 }
 
 export function dayKey(now = new Date()): string {
@@ -18,7 +20,8 @@ export function dayKey(now = new Date()): string {
 
 export function formatUsage(day: UsageDay): string {
 	const total = day.input + day.output;
-	return `${day.requests} requests · ${total} tokens (${day.input} in / ${day.output} out)`;
+	const written = day.cacheWrite ? ` · ${day.cacheWrite} cache-write` : '';
+	return `${day.requests} requests · ${total} tokens (${day.input} in / ${day.output} out)${written}`;
 }
 
 declare module 'cordis' {

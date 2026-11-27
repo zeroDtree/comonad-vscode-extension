@@ -1,24 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 /**
- * A stable identity for a provider endpoint: two profiles that name the same base in different
- * spellings (`HTTPS://API.DEEPSEEK.COM/`, `https://api.deepseek.com`) are the same provider, so a
- * key stored for one works for the other. The path keeps its case (paths are case-sensitive), a
- * query is kept (it can select an account), and a fragment never identifies anything.
+ * A stable identity for a provider endpoint: two providers that name the same base in different
+ * spellings are the same connection, so a key stored for one works for the other. The one
+ * implementation lives in @comonad/model — this module re-exports it for host callers.
  */
-export function normalizeEndpoint(base: string | undefined): string {
-	const raw = (base ?? '').trim();
-	if (!raw) {
-		return '';
-	}
-	try {
-		const url = new URL(raw);
-		url.hash = '';
-		return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, '')}${url.search}`;
-	} catch {
-		return raw.replace(/\/+$/, '');
-	}
-}
+export { normalizeEndpoint } from '@comonad/model';
 
 /**
  * Whether a provider base URL points at the loopback interface of the machine that runs the

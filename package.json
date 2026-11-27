@@ -759,143 +759,17 @@
         "comonad.model": {
           "type": "string",
           "default": "auto",
-          "description": "`auto` for the first profile, a profile id for its default model, or `profile:model` for a model the endpoint lists."
+          "description": "`auto` for the first provider, a provider id for its default model, or `provider:model` for a model the endpoint lists."
         },
-        "comonad.profiles": {
-          "type": "array",
-          "default": [
-            {
-              "id": "deepseek",
-              "label": "DeepSeek Flash",
-              "base": "https://api.deepseek.com",
-              "model": "deepseek-flash",
-              "keyEnv": "DEEPSEEK_API_KEY",
-              "thinkingOff": "thinking",
-              "topEffort": "max",
-              "includeUsage": true,
-              "contextWindow": 1048576,
-              "pricingIn": 0.3,
-              "pricingCachedIn": 0.006,
-              "pricingOut": 1.2
-            },
-            {
-              "id": "deepseek-pro",
-              "label": "DeepSeek V4 Pro",
-              "base": "https://api.deepseek.com",
-              "model": "deepseek-v4-pro",
-              "keyEnv": "DEEPSEEK_API_KEY",
-              "thinkingOff": "thinking",
-              "topEffort": "max",
-              "includeUsage": true,
-              "contextWindow": 1048576,
-              "pricingIn": 1.32,
-              "pricingCachedIn": 0.044,
-              "pricingOut": 3.96
-            },
-            {
-              "id": "gemini",
-              "label": "Gemini 3.8 Flash",
-              "base": "https://generativelanguage.googleapis.com/v1beta/openai",
-              "model": "gemini-3.8-flash",
-              "modelPrefix": "models/",
-              "modelSkip": "computer-use|deep-research|antigravity|aqa|-image|imagen|veo|embedding|-tts|live",
-              "keyEnv": [
-                "GEMINI_API_KEY",
-                "GOOGLE_API_KEY"
-              ],
-              "thinkingOff": "effort",
-              "topEffort": "high",
-              "includeUsage": true,
-              "contextWindow": 1048576
-            }
-          ],
-          "markdownDescription": "OpenAI-compatible endpoints to chat with. The model menu is read from each endpoint (`GET /models`), so a new model needs no configuration; a profile's `model` is what a bare profile id selects. Empty uses the shipped profiles (DeepSeek Flash first, so **Auto** runs on it). A key stored with **Comonad: Configure Model Provider** belongs to the endpoint and every profile with the same normalized `base` shares it; without a stored key, the variables in `keyEnv` are tried in order. Fields a profile omits are inherited from the shipped profile for the same normalized `base`; model facts (`label`, `contextWindow`, pricing and samplers) are inherited only from a shipped profile with the same `model` too. An explicitly set field always wins.",
-          "items": {
-            "type": "object",
-            "required": ["id", "model"],
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "label": {
-                "type": "string"
-              },
-              "provider": {
-                "type": "string",
-                "description": "Model adapter to run this profile; `openai` is the built-in one."
-              },
-              "base": {
-                "type": "string",
-                "description": "OpenAI-compatible base URL."
-              },
-              "model": {
-                "type": "string",
-                "description": "The model a bare profile id selects; the menu itself lists what the endpoint reports."
-              },
-              "modelPrefix": {
-                "type": "string",
-                "description": "Prefix the endpoint puts on the ids it reports, stripped so the menu and requests use the plain name (Gemini: `models/`)."
-              },
-              "modelSkip": {
-                "type": "string",
-                "description": "Regex of reported model ids to leave out of the menu — providers list models that cannot run a chat turn."
-              },
-              "keyEnv": {
-                "type": [
-                  "string",
-                  "array"
-                ],
-                "items": {
-                  "type": "string"
-                },
-                "description": "Environment variable(s) holding the API key, in order, when no key is stored for this endpoint."
-              },
-              "thinkingOff": {
-                "type": "string",
-                "enum": [
-                  "thinking",
-                  "effort"
-                ],
-                "description": "How this endpoint turns thinking off for the `none` reasoning effort: DeepSeek's `thinking` field, or `reasoning_effort: \"none\"` (`effort`)."
-              },
-              "topEffort": {
-                "type": "string",
-                "enum": [
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh",
-                  "max"
-                ],
-                "description": "The deepest thinking level this endpoint accepts. A pick above it runs at this level; leave it unset to send the pick unchanged."
-              },
-              "temperature": {
-                "type": "number"
-              },
-              "maxTokens": {
-                "type": "number"
-              },
-              "includeUsage": {
-                "type": "boolean"
-              },
-              "contextWindow": {
-                "type": "number",
-                "description": "The provider's input window in tokens, used for the chat's context budget and the model menu's `Auto (…)`."
-              },
-              "pricingIn": {
-                "type": "number",
-                "description": "USD per million input tokens (cache miss), for /cost estimates."
-              },
-              "pricingCachedIn": {
-                "type": "number",
-                "description": "USD per million input tokens served from the provider's prompt cache."
-              },
-              "pricingOut": {
-                "type": "number",
-                "description": "USD per million output tokens, for /cost estimates."
-              }
-            }
-          }
+        "comonad.modelRoutes": {
+          "type": "object",
+          "default": {},
+          "description": "Per-purpose model overrides ({compaction, softRoute, hook}, each a `provider[:model]` id). Absent uses the chat's own model."
+        },
+        "comonad.providers": {
+          "type": "object",
+          "default": {},
+          "description": "Provider instances: one connection per entry ({brand, base, model, keyEnv, options, models, …}). Empty uses the shipped instances (DeepSeek Flash, DeepSeek V4 Pro, Gemini 3.8 Flash); their model facts come from the brand at resolve time."
         },
         "comonad.mcpServers": {
           "type": "object",

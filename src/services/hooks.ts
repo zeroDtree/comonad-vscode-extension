@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { makeCtx } from '../lib/invocation';
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -63,11 +64,19 @@ export interface HookOutcome {
 
 const DEFAULT_TIMEOUT = 30_000;
 
+/** The turn a hook fires for, so a prompt hook's model call joins the turn's invocation context. */
+export interface HookMeta {
+	sessionId?: string;
+	turn?: number;
+	signal?: AbortSignal;
+}
+
 interface HookContext {
 	event: string;
 	matchValue: string | undefined;
 	input: object;
 	cwd: string;
+	meta?: HookMeta;
 }
 
 declare module 'cordis' {
@@ -77,7 +86,7 @@ declare module 'cordis' {
 }
 
 export class Hooks extends Service {
-	static inject = ['settings', 'llm', 'host', 'log'];
+	static inject = ['settings', 'model', 'host', 'log'];
 
 	private queued: string[] = [];
 
@@ -92,14 +101,14 @@ export class Hooks extends Service {
 		return contexts;
 	}
 
-	async fire(event: string, matchValue: string | undefined, input: object): Promise<HookOutcome> {
+	async fire(event: string, matchValue: string | undefined, input: object, meta?: HookMeta): Promise<HookOutcome> {
 		const config = this.load();
 		const groups = (config[event] ?? []).filter((group) => matcherMatches(group.matcher, matchValue));
 		const handlers = groups.flatMap((group) => group.hooks ?? []);
 		if (handlers.length === 0) {
 			return { contexts: [] };
 		}
-		const context: HookContext = { event, matchValue, input, cwd: this.ctx.host.workspace() };
+		const context: HookContext = { event, matchValue, input, cwd: this.ctx.host.workspace(), meta };
 		const outcomes = await Promise.all(handlers.map((handler) => this.run(handler, context)));
 		const merged: HookOutcome = { contexts: [] };
 		for (const outcome of outcomes) {
@@ -257,12 +266,18 @@ export class Hooks extends Service {
 		const prompt = handler.prompt.includes('$ARGUMENTS')
 			? handler.prompt.replaceAll('$ARGUMENTS', JSON.stringify(context.input))
 			: `${handler.prompt}\n\n${JSON.stringify(context.input)}`;
-		const text = await this.ctx.llm.complete(
-			handler.model ?? this.ctx.settings.get().model,
-			'You are a policy evaluator for a coding agent. Reply with JSON {"ok": true} or {"ok": false, "reason": "..."} only.',
+		// The call joins the firing turn's context when there is one — its Stop cancels the
+		// evaluation instead of leaving it running detached.
+		const ctx = makeCtx(context.meta?.sessionId ?? 'hooks', context.meta?.turn ?? 0, 'hook', context.meta?.signal, {
+			event: context.event,
+		});
+		const text = await this.ctx.model.complete({
+			model: handler.model ?? this.ctx.settings.get().modelRoutes.hook ?? this.ctx.settings.get().model,
+			system: 'You are a policy evaluator for a coding agent. Reply with JSON {"ok": true} or {"ok": false, "reason": "..."} only.',
 			prompt,
-			{ timeoutMs: 60_000 },
-		);
+			ctx,
+			timeoutMs: 60_000,
+		});
 		const parsed = parseHookJson(text);
 		if (parsed && parsed.ok === false) {
 			outcome.blocked = true;

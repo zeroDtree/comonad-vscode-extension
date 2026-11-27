@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Context, Plugin } from 'cordis';
 import { host, type HostConfig } from './host';
-import { openaiPlugin } from './llm/openai';
 import { reactions } from './plugins/reactions';
 import { harnessCompat } from './plugins/harness';
 import { agentPlugin } from './services/agent';
@@ -14,7 +13,7 @@ import { commandsPlugin } from './services/commands';
 import { decisionsPlugin } from './services/decisions';
 import { graphPlugin } from './services/graph';
 import { hooksPlugin } from './services/hooks';
-import { llmPlugin } from './services/llm';
+import { modelPlugin } from './services/model';
 import { logPlugin } from './services/log';
 import { mailboxPlugin } from './services/mailbox';
 import { mcpPlugin } from './services/mcp';
@@ -84,7 +83,7 @@ export const PLUGINS: Record<string, Plugin> = {
 	tools: toolsPlugin,
 	catalog: catalogPlugin,
 	tokenizers: tokenizersPlugin,
-	llm: llmPlugin,
+	model: modelPlugin,
 	hooks: hooksPlugin,
 	mcp: mcpPlugin,
 	approval: approvalPlugin,
@@ -93,7 +92,6 @@ export const PLUGINS: Record<string, Plugin> = {
 	mailbox: mailboxPlugin,
 	orchestrator: orchestratorPlugin,
 	agent: agentPlugin,
-	'provider-openai': openaiPlugin,
 	'tools-fs': fsTools,
 	'tools-shell': shellTools,
 	'tools-plan': planTools,
@@ -147,7 +145,7 @@ export const ROWS: PluginRow[] = [
 	{ id: 'tools', group: 'kernel' },
 	{ id: 'catalog', group: 'kernel' },
 	{ id: 'tokenizers', group: 'kernel' },
-	{ id: 'llm', group: 'kernel' },
+	{ id: 'model', group: 'kernel' },
 	{ id: 'hooks', group: 'kernel' },
 	{ id: 'mcp', group: 'kernel' },
 	{ id: 'approval', group: 'kernel' },
@@ -159,9 +157,6 @@ export const ROWS: PluginRow[] = [
 	{ id: 'mailbox', group: 'kernel' },
 	{ id: 'orchestrator', group: 'kernel' },
 	{ id: 'agent', group: 'kernel' },
-
-	// The model adapter: every profile is an OpenAI-compatible endpoint (DeepSeek by default).
-	{ id: 'provider-openai', group: 'model' },
 
 	// Tool providers.
 	{ id: 'tools-fs', group: 'tools' },

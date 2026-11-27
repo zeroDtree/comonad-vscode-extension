@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Domain types shared by the agent kernel. This module must not import `vscode` or `cordis`. */
 
+import type {
+	AttachmentPart,
+	DocumentAttachment,
+	ImageAttachment,
+	ImageMime,
+	JsonSchema,
+	SourceRange,
+	TextAttachment,
+	ToolCall,
+	ToolDeclaration,
+	UsageRecord,
+} from '@comonad/model';
 import type { ToolAuthorization } from './authorization';
 import type { BudgetInput, BudgetLimits, BudgetReport } from './budget';
 import type { PolicyStep, RuleSet } from './policy';
@@ -8,6 +20,27 @@ import type { SandboxMode, SandboxOptions } from './sandbox';
 import type { AgentEvidence, TaskGraphAccess } from './task-graph';
 
 export type { SandboxMode } from './sandbox';
+
+// The conversation message model is the model runtime's vocabulary; @comonad/model owns it
+// and this module re-exports it for the kernel and the plugins that import `@comonad/lib/types`.
+export type {
+	AttachmentPart,
+	DocumentAttachment,
+	ImageAttachment,
+	ImageMime,
+	ImagePart,
+	JsonSchema,
+	Message,
+	ReasoningEffort,
+	SourceRange,
+	SwipeInfo,
+	TextAttachment,
+	ToolCall,
+	UsageRecord,
+} from '@comonad/model';
+
+/** The pre-rename name for {@link UsageRecord}; swept when the old LLM layer goes. */
+export type CompletionUsage = UsageRecord;
 
 /** Work modes, least capable first: chat only, then reads, writes and a full shell, then plan files. */
 export type WorkMode = 'chat' | 'ro' | 'sw' | 'aw' | 'plan';
@@ -18,84 +51,9 @@ export type Approval = 'manual' | 'universal_reject' | 'blacklist_reject' | 'whi
 /** The approval response policy: who answers the requests the approval policy raised. */
 export type ApprovalResponse = 'ask' | 'never';
 
-/**
- * The thinking levels a chat can ask for. `auto` leaves the provider default alone; `none` turns
- * thinking off where the model allows it; `max` is the deepest level the endpoint offers.
- */
-export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'max';
-
 export type Capability = 'ro' | 'ro_plan' | 'rw' | 'rw_plan' | 'shell_ro' | 'shell_test' | 'shell_rw';
 
-export interface ToolCall {
-	id: string;
-	name: string;
-	arguments: string;
-	/**
-	 * What an endpoint wants sent back *with* this call, verbatim. Google's OpenAI-compatible layer
-	 * puts the thought signature of its thinking models in `extra_content.google.thought_signature`, and
-	 * Gemini 3 refuses the next request without it; no other endpoint reads the field at all.
-	 */
-	extraContent?: Record<string, unknown>;
-}
-
-/** The image formats the readers and the OpenAI-compatible wire understand. */
-export type ImageMime = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 export type AttachmentMime = ImageMime | 'application/pdf';
-
-/**
- * An image attached to a message. The bytes live in the content-addressed attachment store, named
- * `<sha256>.<ext>`; only that metadata is persisted. `dataUrl` is filled on a request copy and never
- * written down.
- */
-export interface ImagePart {
-	id: string;
-	mime: ImageMime;
-	name?: string;
-	width?: number;
-	height?: number;
-	dataUrl?: string;
-}
-
-/** A line range for text, or a page range for a document. */
-export interface SourceRange {
-	start: number;
-	end: number;
-	unit: 'line' | 'page';
-}
-
-/** Text resolved from a reference. `origin` decides whether an edit re-resolves it. */
-export interface TextAttachment {
-	kind: 'text';
-	origin: 'user' | 'reference';
-	form: 'file' | 'folder' | 'symbol' | 'note' | 'error';
-	/** A display name for a composer paste; resolved references leave it empty. */
-	name?: string;
-	source: { path?: string; range?: SourceRange; symbol?: string; hash?: string };
-	text: string;
-	truncated?: boolean;
-}
-
-/** An image attachment: composer input (`user`), an `@` reference, or a tool result. */
-export interface ImageAttachment extends ImagePart {
-	kind: 'image';
-	origin: 'user' | 'reference' | 'tool';
-}
-
-/** PDF bytes with the text extracted for the selected pages. */
-export interface DocumentAttachment {
-	kind: 'document';
-	origin: 'user' | 'reference';
-	id: string;
-	mime: 'application/pdf';
-	name?: string;
-	pageCount?: number;
-	pages?: SourceRange;
-	text?: string;
-	textUnavailable?: boolean;
-	truncated?: boolean;
-}
-
-export type AttachmentPart = TextAttachment | ImageAttachment | DocumentAttachment;
 
 /**
  * The model-facing view of a compacted conversation. It never lives in the canonical transcript:
@@ -163,40 +121,6 @@ export interface ToolImage {
 export interface ToolResult {
 	content: string;
 	images?: ToolImage[];
-}
-
-export interface Message {
-	role: 'system' | 'user' | 'assistant' | 'tool';
-	content: string;
-	/** Typed context the message carries: resolved references, prompt images, or tool images. */
-	attachments?: AttachmentPart[];
-	reasoning?: string;
-	toolCalls?: ToolCall[];
-	toolCallId?: string;
-	/** When the message was recorded; the UI groups messages into turns with it. */
-	at?: number;
-	/** When the request that produced this message was sent, so the step can report its duration. */
-	startedAt?: number;
-	/** A derived model-context summary; it never lives in the canonical transcript. */
-	summarized?: true;
-	/** A reply that continues the one before it (`/continue`) rather than answering a new prompt. */
-	continued?: true;
-	/**
-	 * Every variant of this reply: `content` is the active one, so the wire format and the scan read
-	 * the same text the reader sees. Absent until something is swiped.
-	 */
-	swipes?: string[];
-	swipeId?: number;
-	/** One record per variant (only the fields a transcript can know). */
-	swipeInfo?: SwipeInfo[];
-}
-
-/** What produced one swipe. */
-export interface SwipeInfo {
-	send_date?: string;
-	gen_started?: number | null;
-	gen_finished?: number | null;
-	extra?: { gen_id?: number; api?: string; model?: string };
 }
 
 export interface SessionPolicy {
@@ -363,17 +287,7 @@ export interface ToolContext {
 	traceDispatch?(reason: string): void;
 }
 
-export interface JsonSchema {
-	type: 'object';
-	properties: Record<string, unknown>;
-	required?: string[];
-	additionalProperties?: boolean;
-}
-
-export interface ToolSpec {
-	name: string;
-	description: string;
-	parameters: JsonSchema;
+export interface ToolSpec extends ToolDeclaration {
 	capability: Capability;
 	needsNetwork: boolean;
 	needsWorkspace: boolean;
@@ -399,16 +313,6 @@ export function objectSchema(properties: Record<string, unknown>, required: stri
 
 export function hasWorkspace(policy: Pick<SessionPolicy, 'workingDirectory'>): boolean {
 	return policy.workingDirectory.trim() !== '';
-}
-
-export interface CompletionUsage {
-	input: number;
-	output: number;
-	/**
-	 * Input tokens the provider served from its prompt cache, billed at a lower rate. Undefined
-	 * means the provider reported no cache statistics; 0 is a report of zero hits.
-	 */
-	cached?: number;
 }
 
 /** A chat surface that can answer approvals: the panel, the participant, or the default modal. */

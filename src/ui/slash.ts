@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
+import { isPriced } from '@comonad/model';
 import { isLoopbackBase } from '../lib/endpoint';
 import { APPROVAL_LABELS, APPROVAL_RESPONSE_LABELS, MODE_CAPS, MODE_LABELS, SANDBOX_LABELS } from '../lib/policy';
 import type { CommandSpec } from '../services/commands';
+import { providersOf } from '../services/settings';
 import { formatUsage } from '../services/usage';
 import { sandboxStatus } from '../tools/shell';
 
@@ -119,8 +121,14 @@ export function slashCommands(ctx: Context): void {
 		const session = ctx.sessions.active();
 		const lines = [`**Today:** ${formatUsage(ctx.usage.today())}`];
 		if (session) {
+			const usage = session.usage;
+			// An unpriced model has no cost to name: "—", never a fake $0.000.
+			const priced = isPriced(ctx.model.modelInfo(session.policy.model)?.pricing);
+			const cost = usage.cost > 0 ? `$${usage.cost.toFixed(3)}` : priced ? '$0.000' : '—';
+			const cache = usage.cachedTokens !== undefined ? ` · ${usage.cachedTokens} cached` : '';
+			const written = usage.cacheWriteTokens ? ` · ${usage.cacheWriteTokens} cache-write` : '';
 			lines.push(
-				`**This session:** ${session.usage.requests} requests · ${session.usage.inputTokens + session.usage.outputTokens} tokens (${session.usage.inputTokens} in / ${session.usage.outputTokens} out)`,
+				`**This session:** ${usage.requests} requests · ${usage.inputTokens + usage.outputTokens} tokens (${usage.inputTokens} in / ${usage.outputTokens} out)${cache}${written} · ${cost}`,
 			);
 		}
 		surface.markdown(lines.join('\n\n'));
@@ -159,7 +167,7 @@ export function slashCommands(ctx: Context): void {
 
 	register('model', 'Switch the active model', async (_args, surface) => {
 		await vscode.commands.executeCommand('comonad.pickModel');
-		surface.markdown(`Model: **${ctx.llm.describe(ctx.settings.get().model)}**`);
+		surface.markdown(`Model: **${ctx.model.describe(ctx.settings.get().model)}**`);
 		return { done: true };
 	});
 
@@ -204,7 +212,7 @@ export function slashCommands(ctx: Context): void {
 	register('quiet', 'Generate a reply without adding it to the transcript', (args) => ({ done: false, text: args, trigger: 'quiet' }), '[text]');
 
 }
-slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'llm', 'usage', 'host', 'tools', 'decisions'];
+slashCommands.inject = ['commands', 'agent', 'settings', 'sessions', 'model', 'usage', 'host', 'tools', 'decisions'];
 
 /** `/audit`: recent terminal events, or one call's path from its terminal back to the root. */
 export function auditText(ctx: Context, callId: string): string {
@@ -277,7 +285,7 @@ async function statusText(ctx: Context): Promise<string> {
 	const lines = [
 		'**Comonad status**',
 		'',
-		`- Model: ${ctx.llm.describe(config.model)}`,
+		`- Model: ${ctx.model.describe(config.model)}`,
 		`- Mode: ${config.mode} · tool approval: ${config.approval} · approval response: ${config.approvalResponse} · network: ${config.network ? 'on' : 'off'}`,
 		`- Host: ${remote ? `remote (${remote})` : 'local'} · ${sandboxStatus(config.sandboxMode, sandbox)}`,
 		`- Workspace: ${config.workingDirectory || '(none)'}`,
@@ -291,7 +299,11 @@ async function statusText(ctx: Context): Promise<string> {
 				: '- No OS sandbox: shell commands are refused; use danger-full-access with network access on to run them unconfined.',
 		);
 	}
-	const loopback = remote ? config.profiles.filter((profile) => isLoopbackBase(profile.base)).map((profile) => profile.id) : [];
+	const loopback = remote
+		? providersOf(config)
+				.filter((instance) => isLoopbackBase(instance.base))
+				.map((instance) => instance.id)
+		: [];
 	if (loopback.length) {
 		lines.push(`- Loopback endpoint(s) ${loopback.join(', ')} resolve on the remote machine, not yours.`);
 	}

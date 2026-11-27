@@ -204,6 +204,8 @@ export interface MigrationState {
 	version: 1;
 	user: boolean;
 	workspaces: string[];
+	/** The legacy `profiles` → `providers` rewrite has run. */
+	providers?: boolean;
 }
 
 export interface MigrateInput {
@@ -222,7 +224,7 @@ export function readMigrationState(file: string): MigrationState {
 	const workspaces = Array.isArray(data.workspaces)
 		? data.workspaces.filter((item): item is string => typeof item === 'string')
 		: [];
-	return { version: 1, user: data.user === true, workspaces };
+	return { version: 1, user: data.user === true, workspaces, providers: data.providers === true };
 }
 
 /**
@@ -256,7 +258,178 @@ export function migrateLegacySettings(input: MigrateInput): MigrationState {
 	}
 
 	if (changed) {
-		writeSettings(input.markerFile, { version: 1, user: state.user, workspaces: state.workspaces });
+		writeSettings(input.markerFile, {
+			version: 1,
+			user: state.user,
+			workspaces: state.workspaces,
+			providers: state.providers === true ? true : undefined,
+		});
 	}
 	return state;
+}
+
+/** A legacy model profile, as builds before the Model Runtime wrote it. Only the migration reads this shape. */
+interface LegacyProfile {
+	id?: unknown;
+	base?: unknown;
+	model?: unknown;
+	modelPrefix?: unknown;
+	modelSkip?: unknown;
+	keyEnv?: unknown;
+	thinkingOff?: unknown;
+	topEffort?: unknown;
+	temperature?: unknown;
+	topP?: unknown;
+	maxTokens?: unknown;
+	contextWindow?: unknown;
+	includeUsage?: unknown;
+	pricingIn?: unknown;
+	pricingCachedIn?: unknown;
+	pricingOut?: unknown;
+}
+
+export interface ProfileMigrationInput {
+	markerFile: string;
+	/** The settings files to rewrite, in order; a file with `providers` already is left alone. */
+	files: string[];
+	/** Reads a legacy per-profile secret (`comonad.key.<profileId>`). */
+	readLegacyKey(profileId: string): Promise<string | undefined>;
+	/** Whether the provider-scoped secret for this base already has a key; one is never overwritten. */
+	providerKeyStored(base: string): Promise<boolean>;
+	writeProviderKey(base: string, key: string): Promise<void>;
+}
+
+/** The brand a legacy profile's endpoint speaks. Facts live on the brand now, not in the config. */
+function brandOf(profile: LegacyProfile): string {
+	const base = typeof profile.base === 'string' ? profile.base.toLowerCase() : '';
+	if (base.includes('deepseek')) {
+		return 'deepseek';
+	}
+	if (base.includes('googleapis.com') || base.includes('generativelanguage')) {
+		return 'google';
+	}
+	if (base.includes('opencode')) {
+		return 'opencode-go';
+	}
+	if (base.includes('openai.com')) {
+		return 'openai';
+	}
+	return 'custom';
+}
+
+function asNumber(value: unknown): number | undefined {
+	return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** One legacy profile to one provider instance: identity, options, and per-model facts. */
+function toProviderInstance(profile: LegacyProfile): Record<string, unknown> | undefined {
+	const base = typeof profile.base === 'string' ? profile.base.trim() : '';
+	const model = typeof profile.model === 'string' ? profile.model.trim() : '';
+	if (!base || !model) {
+		return undefined;
+	}
+	const instance: Record<string, unknown> = { brand: brandOf(profile), base, model };
+	if (profile.keyEnv !== undefined) {
+		instance.keyEnv = profile.keyEnv;
+	}
+	if (profile.modelPrefix !== undefined || profile.modelSkip !== undefined) {
+		instance.modelRules = {
+			prefix: typeof profile.modelPrefix === 'string' ? profile.modelPrefix : undefined,
+			skip: typeof profile.modelSkip === 'string' ? profile.modelSkip : undefined,
+		};
+	}
+	const options: Record<string, unknown> = {};
+	if (typeof profile.thinkingOff === 'string') {
+		options.thinkingOff = profile.thinkingOff;
+	}
+	if (typeof profile.topEffort === 'string') {
+		options.topEffort = profile.topEffort;
+	}
+	if (profile.includeUsage !== undefined) {
+		options.includeUsage = Boolean(profile.includeUsage);
+	}
+	const sampler: Record<string, unknown> = {
+		temperature: asNumber(profile.temperature),
+		topP: asNumber(profile.topP),
+		maxTokens: asNumber(profile.maxTokens),
+	};
+	for (const [key, value] of Object.entries(sampler)) {
+		if (value !== undefined) {
+			options[key] = value;
+		}
+	}
+	if (Object.keys(options).length > 0) {
+		instance.options = options;
+	}
+	const facts: Record<string, unknown> = {};
+	const contextWindow = asNumber(profile.contextWindow);
+	if (contextWindow !== undefined) {
+		facts.contextWindow = contextWindow;
+	}
+	const pricing: Record<string, unknown> = {
+		inPerM: asNumber(profile.pricingIn),
+		cachedInPerM: asNumber(profile.pricingCachedIn),
+		outPerM: asNumber(profile.pricingOut),
+	};
+	const priced = Object.fromEntries(Object.entries(pricing).filter(([, value]) => value !== undefined));
+	if (Object.keys(priced).length > 0) {
+		facts.pricing = priced;
+	}
+	if (Object.keys(facts).length > 0) {
+		instance.models = { [model]: facts };
+	}
+	return instance;
+}
+
+/**
+ * Rewrites legacy `profiles` settings into `providers`, once. Each file with `profiles` and
+ * without `providers` gains the converted map; `profiles` stays in the file so a rollback can
+ * read it. Legacy per-profile secrets move to the provider-scoped id — which every profile on
+ * the same endpoint shares — when nothing is stored there yet. Marker-gated; reruns are no-ops.
+ */
+export async function migrateProfilesToProviders(input: ProfileMigrationInput): Promise<void> {
+	const state = readMigrationState(input.markerFile);
+	if (state.providers) {
+		return;
+	}
+	for (const file of input.files) {
+		if (!file || !existsSync(file)) {
+			continue;
+		}
+		const { data } = readSettings(file);
+		if (data.providers !== undefined || data.profiles === undefined) {
+			continue;
+		}
+		const profiles = Array.isArray(data.profiles) ? (data.profiles as LegacyProfile[]) : [];
+		const providers: Record<string, unknown> = {};
+		for (const raw of profiles.slice(0, 64)) {
+			if (!raw || typeof raw !== 'object') {
+				continue;
+			}
+			const id = typeof raw.id === 'string' ? raw.id.trim().toLowerCase() : '';
+			if (!id || UNSAFE_KEYS.has(id)) {
+				continue;
+			}
+			const instance = toProviderInstance(raw);
+			if (instance) {
+				providers[id] = instance;
+			}
+			if (typeof raw.base === 'string' && raw.base.trim()) {
+				const key = await input.readLegacyKey(id);
+				if (key && !(await input.providerKeyStored(raw.base.trim()))) {
+					await input.writeProviderKey(raw.base.trim(), key);
+				}
+			}
+		}
+		if (Object.keys(providers).length > 0) {
+			writeSettings(file, { ...data, providers });
+		}
+	}
+	state.providers = true;
+	writeSettings(input.markerFile, {
+		version: 1,
+		user: state.user,
+		workspaces: state.workspaces,
+		providers: true,
+	});
 }

@@ -14,8 +14,16 @@
             "mocha"
         ],
         /* Plugin packages live in `packages/` and import the host's shared vocabulary, so one
-           project covers both: `@comonad/*` is what a plugin calls the host by. */
+           project covers both: `@comonad/*` is what a plugin calls the host by.
+           `@comonad/model` is the exception: the publishable model runtime package, matched
+           explicitly (and first) so it does not fall through the host wildcard. */
         "paths": {
+            "@comonad/model": [
+                "./packages/comonad-model/src/index.ts"
+            ],
+            "@comonad/model/*": [
+                "./packages/comonad-model/src/*"
+            ],
             "@comonad/*": [
                 "./src/*"
             ],
@@ -35,6 +43,7 @@
         "sourceMap": true,
         "strict": true,
         "esModuleInterop": true,
+        "resolveJsonModule": true,
         "skipLibCheck": true,
         "noEmit": true
     },

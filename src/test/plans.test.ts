@@ -122,7 +122,7 @@ suite('Plan paths', () => {
 		assert.match(panel, /const buildMode = asBuildMode\(mode\)/);
 		assert.match(panel, /buildPlanPrompt\(target\.relative, content, buildMode\)/);
 		assert.match(panel, /isPlanWriterTool/);
-		assert.match(panel, /ctx\.llm\.keyReady\(modelPick\)/);
+		assert.match(panel, /ctx\.model\.keyReady\(modelPick\)/);
 		assert.match(panel, /ctx\.settings\.update\('model', modelPick, composerScope\(\)\)/);
 		assert.match(panel, /applyPolicy\(\{ mode: buildMode \}, composerScope\(\)\)/);
 		const css = readFileSync(join(__dirname, '..', '..', 'resources', 'chat.css'), 'utf8');

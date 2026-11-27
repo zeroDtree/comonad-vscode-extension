@@ -1,0 +1,13 @@
+{
+	"name": "@comonad/model",
+	"displayName": "Comonad Model Runtime",
+	"description": "Protocol-driven, brand-extensible model runtime: resolve · stream · retry · fallback · usage · cost over pluggable wire protocols and provider brands.",
+	"version": "0.1.0",
+	"license": "AGPL-3.0-only",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist",
+		"src"
+	]
+}

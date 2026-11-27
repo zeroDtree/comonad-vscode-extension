@@ -8,6 +8,8 @@
 	const post = (message) => vscode.postMessage(message);
 
 	let state = null;
+	// The Models tab's probe rows: kept beside state so a wholesale state push never wipes them.
+	let providerStatus = [];
 	let ready = false;
 	let activeTab = (vscode.getState() || {}).tab || 'agent';
 	// The Inspect tab's own sub-tab: the tool policy flow, or the plugin dependency view.
@@ -146,6 +148,10 @@
 			// is never a blank page.
 			renderPrompts();
 			post({ type: 'prompts' });
+		}
+		if (name === 'models') {
+			// Fresh rows on entry — the render itself must not post; it runs on every state push.
+			post({ type: 'probeProviders' });
 		}
 		// Only the tab on screen is drawn — the pushes that landed while it was hidden are cached, and
 		// this is where the cache is spent.
@@ -1073,6 +1079,20 @@
 
 	$('mcp-save').addEventListener('click', () => post({ type: 'saveMcp', json: $('mcp').value, scope: activeScope }));
 	$('mcp-reload').addEventListener('click', () => post({ type: 'reloadMcp' }));
+	$('providers-save').addEventListener('click', () => post({ type: 'saveProviders', json: $('providers').value, scope: activeScope }));
+	$('providers-add').addEventListener('click', () => post({ type: 'configureModel' }));
+	$('providers-probe').addEventListener('click', () => post({ type: 'probeProviders' }));
+	$('routes-save').addEventListener('click', () =>
+		post({
+			type: 'saveRoutes',
+			routes: {
+				compaction: $('route-compaction').value,
+				softRoute: $('route-softRoute').value,
+				hook: $('route-hook').value,
+			},
+			scope: activeScope,
+		}),
+	);
 	$('plugins-reload').addEventListener('click', () => post({ type: 'plugins', action: 'reload' }));
 	$('plugins-install').addEventListener('click', () => post({ type: 'plugins', action: 'install' }));
 
@@ -1235,6 +1255,38 @@
 			}
 			tr.append(actions);
 			node.append(tr);
+		}
+	}
+
+	/** The Models tab: the provider map as JSON (the MCP idiom), its status, and the routes. */
+	function renderModels() {
+		const providers = $('providers');
+		if (providers && document.activeElement !== providers) {
+			const text = JSON.stringify(state.config?.providers || {}, null, 2);
+			if (providers.value !== text) {
+				providers.value = text;
+			}
+		}
+		for (const key of ['compaction', 'softRoute', 'hook']) {
+			const input = $('route-' + key);
+			if (input && document.activeElement !== input) {
+				input.value = (state.config?.modelRoutes || {})[key] || '';
+			}
+		}
+		const status = $('provider-status');
+		if (status) {
+			status.innerHTML = '';
+			table(status, ['provider', 'brand', 'base', 'model', 'key', 'listed', 'rules', 'fallback', 'error'], providerStatus.map((row) => [
+				{ text: row.id, mono: true },
+				{ text: row.brand },
+				{ text: row.base, mono: true },
+				{ text: row.model, mono: true },
+				{ text: row.keyReady ? '✓' : 'missing' },
+				{ text: String(row.listed) },
+				{ text: row.rules || '' },
+				{ text: row.fallback || '' },
+				{ text: row.error || '' },
+			]));
 		}
 	}
 
@@ -1676,6 +1728,11 @@
 			case 'tools':
 				renderReadOnly();
 				break;
+			case 'models':
+				// Rendering must stay pure: a probe here would round-trip inside the render path
+				// of the very state push its completion schedules.
+				renderModels();
+				break;
 			case 'plugins':
 				renderPlugins();
 				break;
@@ -1690,6 +1747,12 @@
 	window.addEventListener('message', (event) => {
 		const message = event.data;
 		switch (message.type) {
+			case 'providerStatus':
+				providerStatus = message.rows;
+				if (activeTab === 'models') {
+					renderModels();
+				}
+				break;
 			case 'pluginTree': {
 				const wrap = $('pg-detail-wrap');
 				$('pg-detail-title').textContent = 'Dependency tree — ' + message.id;

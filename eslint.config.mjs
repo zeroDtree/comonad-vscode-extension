@@ -28,4 +28,23 @@ export default [{
         "no-throw-literal": "warn",
         semi: "warn",
     },
+}, {
+    // The model runtime package is publishable on its own, so its sources must stay
+    // host-free: no `src/` host modules (any relative escape resolves through a `src`
+    // segment), no `vscode`/`cordis`, and no `@comonad/*` host namespace (the
+    // `@comonad/model` alias included — internals import each other relatively).
+    files: ["packages/comonad-model/src/**/*.ts"],
+    rules: {
+        "no-restricted-imports": ["error", {
+            paths: [
+                { name: "vscode", message: "@comonad/model must not depend on the VS Code API." },
+                { name: "cordis", message: "@comonad/model must not depend on the host's service container." },
+                { name: "schemastery", message: "@comonad/model must not depend on the host's config framework." },
+            ],
+            patterns: [{
+                group: ["@comonad/*", "**/src/**", "**/src"],
+                message: "@comonad/model must stay host-free: import package-internal modules relatively.",
+            }],
+        }],
+    },
 }];

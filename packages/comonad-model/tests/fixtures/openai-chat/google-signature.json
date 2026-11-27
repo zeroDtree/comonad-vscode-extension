@@ -1,0 +1,19 @@
+{
+	"name": "google thought signature round-trip",
+	"meta": {
+		"protocol": "openai-chat",
+		"brand": "google",
+		"status": 200,
+		"note": "A thinking model's call carries extra_content.google.thought_signature; the call must keep it so the next request hands it back."
+	},
+	"request": {
+		"model": "gemini-3.8-flash",
+		"messages": [{ "role": "user", "content": "search" }]
+	},
+	"sse": [
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_sig\",\"function\":{\"name\":\"search\",\"arguments\":\"\"},\"extra_content\":{\"google\":{\"thought_signature\":\"sig-123\"}}}]}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+		"data: [DONE]\n\n"
+	]
+}

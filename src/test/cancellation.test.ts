@@ -9,7 +9,7 @@ import { runProcess } from '../lib/sandbox';
 import { objectSchema, type Message, type ToolCall, type ToolContext } from '../lib/types';
 import { shellTools } from '../tools/shell';
 import { todoTools } from '../tools/todo';
-import { createTestKernel } from './harness';
+import { createTestKernel, useFakeModel } from './harness';
 
 /** Waits for a condition, so a test never depends on a fixed sleep. */
 async function until(check: () => boolean, ms = 4_000): Promise<void> {
@@ -103,7 +103,7 @@ suite('Cancellation', () => {
 		const kernel = await createTestKernel();
 		try {
 			let chats = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'cancel-test',
 				async chat() {
 					chats += 1;
@@ -124,7 +124,7 @@ suite('Cancellation', () => {
 		const kernel = await createTestKernel();
 		try {
 			let chats = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'cancel-test',
 				async chat() {
 					chats += 1;
@@ -221,7 +221,7 @@ suite('Cancellation', () => {
 	test('turn-start names the prompt that opened the turn', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'cancel-test',
 				async chat() {
 					return { message: { role: 'assistant', content: 'reply' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -302,7 +302,7 @@ suite('Cancellation', () => {
 					return 'never';
 				},
 			});
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'cancel-test',
 				async chat() {
 					const call = { id: 'c1', name: 'hang', arguments: '{}' };
@@ -340,7 +340,7 @@ suite('Cancellation', () => {
 				parameters: objectSchema({}, []),
 				execute: async () => 'ran',
 			});
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'cancel-test',
 				async chat() {
 					const call = { id: 'c1', name: 'probe', arguments: '{}' };
@@ -379,7 +379,7 @@ suite('Cancellation', () => {
 				parameters: objectSchema({}, []),
 				execute: async () => 'ran',
 			});
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'cancel-test',
 				async chat() {
 					const call = { id: 'call_0', name: 'probe', arguments: '{}' };
@@ -566,7 +566,7 @@ suite('Cancellation', () => {
 		const listener = panel.slice(panel.indexOf("ctx.on('agent/usage'"), panel.indexOf("ctx.on('agent/subagent-start'"));
 		assert.match(listener, /type: 'status'/);
 		assert.match(listener, /sessionId: ref\.sessionId/);
-		assert.match(listener, /statusDetail\(measured, measured\.window\)/);
+		assert.match(listener, /statusDetail\(measured, measured\.window/);
 		assert.match(listener, /estimates\.delete\(ref\.sessionId\)/, 'a measurement retires the estimate');
 		assert.ok(!listener.includes('refreshState'), 'the update is not a full refresh');
 		assert.ok(!listener.includes('sessions.active'), 'the update does not read the chat back from disk');
@@ -671,7 +671,7 @@ suite('Cancellation', () => {
 			const session = kernel.ctx.sessions.ensureActive(kernel.ctx.agent.policyFor());
 			assert.strictEqual(kernel.ctx.sessions.active()?.id, session.id, 'the draft is the active chat');
 			assert.strictEqual(kernel.ctx.sessions.list().length, 0, 'an unused draft is not history');
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'draft-test',
 				async chat() {
 					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -707,7 +707,7 @@ suite('Turn settlement', () => {
 		try {
 			await kernel.ctx.plugin(todoTools);
 			const requests: Message[][] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'todo-reminder',
 				async chat(request) {
 					requests.push(request.messages);
@@ -748,7 +748,7 @@ suite('Turn settlement', () => {
 		try {
 			await kernel.ctx.plugin(todoTools);
 			let requests = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'todo-reminder-ignored',
 				async chat() {
 					requests += 1;
@@ -773,7 +773,7 @@ suite('Turn settlement', () => {
 		try {
 			await kernel.ctx.plugin(todoTools);
 			let requests = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'todo-reminder-quiet',
 				async chat() {
 					requests += 1;

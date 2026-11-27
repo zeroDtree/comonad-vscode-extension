@@ -1,0 +1,21 @@
+{
+	"name": "deepseek text + reasoning + cache usage",
+	"meta": {
+		"protocol": "openai-chat",
+		"brand": "deepseek",
+		"status": 200,
+		"note": "Hand-written shape of a DeepSeek chat stream: reasoning first, two content deltas, cache-split usage, [DONE]."
+	},
+	"request": {
+		"model": "deepseek-chat",
+		"messages": [{ "role": "user", "content": "hi" }]
+	},
+	"sse": [
+		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking \"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hard\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"prompt_cache_hit_tokens\":40}}\n\n",
+		"data: [DONE]\n\n"
+	]
+}

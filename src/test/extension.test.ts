@@ -48,7 +48,7 @@ import {
 	resolveCompactionLimits,
 	stripImageAttachments,
 } from '../lib/prompt';
-import { isContextOverflow, isImageUnsupported, isTransportFailure, ModelRequestError, toOpenAiMessages } from '../lib/openai';
+import { ModelError, isContextOverflow, isImageUnsupported, isTransportFailure, modelHttpError, toOpenAiMessages } from '@comonad/model';
 import { MAX_IMAGE_BYTES, estimateImageTokens, sniffImage } from '../lib/images';
 import {
 	MAX_PASTED_TEXTS,
@@ -76,7 +76,6 @@ import {
 } from '../lib/sandbox';
 import { parseFrontmatter } from '../lib/frontmatter';
 import { applyHunk, diffLines, editForHunk, hunkKey, revertHunk } from '../lib/line-diff';
-import { listEndpointModels, openAiChat } from '../lib/openai';
 import type { ApprovalDecision, ApprovalRequest, ImageAttachment, ImagePart, Message, ModelContext, NoticeDetail, QuestionRequest, SessionPolicy, ToolCall, ToolSpec, TurnNote, WorkMode } from '../lib/types';
 import { objectSchema } from '../lib/types';
 import { turnsOf } from '../lib/turns';
@@ -107,22 +106,21 @@ import {
 } from '../services/sessions';
 import { deletionTargetsAreOwned } from '../lib/deletions';
 import { creationTargets, directoryTargets, rmInvocations, rmTargets } from '../lib/shell';
-import { formatModelId, parseModelId, shapeModels, type AdapterRequest } from '../services/llm';
+import { parseModelRef, shapeModelIds } from '@comonad/model';
+import { formatModelId } from '../services/model';
+import type { FakeModelCall } from './harness';
+import { makeCtx } from '../lib/invocation';
 import {
 	AGENT_KEYS,
 	CONFIG_KEYS,
 	DEFAULT_CONTEXT_WINDOW,
-	DEFAULT_PROFILES,
 	DEFAULT_SUBAGENT_GRANTS,
-	inheritProfileDefaults,
 	normalizeAgentPatch,
-	profileKeyEnvs,
+	providersOf,
 	sanitizeSubagentGrants,
 	Settings,
 	subagentGrant,
-	type Profile,
 } from '../services/settings';
-import { openaiAdapter } from '../llm/openai';
 import { mergeBudget, normalizeBudget, resolveSubagentBudget, RunBudget, sealPartial } from '../lib/budget';
 import { toolset } from '../services/tools';
 import { askTools } from '../tools/misc';
@@ -154,7 +152,7 @@ import { settingsDocument, settingsPanel } from '../ui/settings-panel';
 import { applyFileReviewChanges, fileReviewDocument } from '../ui/file-review-editor';
 import { reviewDocument } from '../ui/review-panel';
 import { keepHunkAction, undoHunkAction } from '../ui/hunk-actions';
-import { createTestKernel } from './harness';
+import { createTestKernel, useFakeModel } from './harness';
 import { McpConnection } from '../services/mcp';
 import { BYTES_PER_TOKEN, TOKENS_PER_MESSAGE, TOKENS_PADDING, estimateMessages, messageTokens, countRaw, estimateTokens, encodingForModel, formatTokens, guesstimate, setEncoder } from '../lib/tokens';
 
@@ -536,7 +534,7 @@ suite('Comonad domain', () => {
 				name: 'probe',
 				arguments: JSON.stringify({ value: id }),
 			});
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'tool-budget',
 				async chat() {
 					requests += 1;
@@ -583,7 +581,7 @@ suite('Comonad domain', () => {
 		try {
 			let requests = 0;
 			let executed = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'turn-budget',
 				async chat() {
 					requests += 1;
@@ -626,7 +624,7 @@ suite('Comonad domain', () => {
 		try {
 			let requests = 0;
 			let executed = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'token-budget',
 				async chat() {
 					requests += 1;
@@ -672,7 +670,7 @@ suite('Comonad domain', () => {
 			config: { budget: { turns: 0, tools: 0, tokens: 0, milliseconds: 5 } },
 		});
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'time-budget',
 				async chat() {
 					await new Promise((resolve) => setTimeout(resolve, 40));
@@ -1867,7 +1865,7 @@ suite('Comonad domain', () => {
 				},
 			});
 			let calls = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'created-delete',
 				async chat(request) {
 					const last = request.messages[request.messages.length - 1];
@@ -1908,7 +1906,7 @@ suite('Comonad domain', () => {
 					return 'ok';
 				},
 			});
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'same-command',
 				async chat(request) {
 					if (request.messages[request.messages.length - 1]?.role === 'tool') {
@@ -1945,7 +1943,7 @@ suite('Comonad domain', () => {
 					return 'ok';
 				},
 			});
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'backfill',
 				async chat(request) {
 					if (request.messages[request.messages.length - 1]?.role === 'tool') {
@@ -2147,312 +2145,42 @@ suite('Comonad domain', () => {
 		assert.ok(!isProtectedPath('/tmp/ws', '/tmp/ws/src/git.ts'));
 	});
 
-	test('the chain of thought is captured and passed back with the tools', async () => {
-		const bodies: Record<string, unknown>[] = [];
-		const original = globalThis.fetch;
-		globalThis.fetch = (async (_url: string, init: { body: string }): Promise<Response> => {
-			bodies.push(JSON.parse(init.body) as Record<string, unknown>);
-			const sse = [
-				'data: {"choices":[{"delta":{"reasoning_content":"thinking hard"}}]}',
-				'data: {"choices":[{"delta":{"content":"the answer"}}]}',
-				'data: {"choices":[{"delta":{}}]}',
-				'data: [DONE]',
-				'',
-			].join('\n\n');
-			return new Response(
-				new ReadableStream({
-					start(controller) {
-						controller.enqueue(new TextEncoder().encode(sse));
-						controller.close();
-					},
-				}),
-				{ status: 200 },
-			);
-		}) as unknown as typeof fetch;
-		try {
-			const first = await openAiChat({
-				base: 'https://api.example.com/v1',
-				key: 'k',
-				model: 'm',
-				messages: [{ role: 'user', content: 'hi' }],
-				tools: [],
-				signal: new AbortController().signal,
-			});
-			assert.strictEqual(first.message.reasoning, 'thinking hard', 'the reasoning is kept for the transcript');
-			assert.strictEqual(first.message.content, 'the answer');
-
-			// The next round of the tool loop carries that assistant message back. DeepSeek demands the
-			// `reasoning_content` of every earlier turn when the request carries tools (400 otherwise),
-			// and endpoints that do not know the field ignore it.
-			await openAiChat({
-				base: 'https://api.example.com/v1',
-				key: 'k',
-				model: 'm',
-				messages: [{ role: 'user', content: 'hi' }, first.message],
-				tools: [],
-				signal: new AbortController().signal,
-			});
-			const sent = (bodies[1]!.messages as Record<string, unknown>[])[1]!;
-			assert.strictEqual(sent.role, 'assistant');
-			assert.strictEqual(sent.content, 'the answer');
-			assert.strictEqual(sent.reasoning_content, 'thinking hard', 'thinking mode with tools requires it back');
-		} finally {
-			globalThis.fetch = original;
-		}
-	});
-
-	test('the stream parser keeps an unreported cache field undefined', async () => {
-		const stream = (usage: string): Response => {
-			const sse = [
-				`data: {"choices":[{"delta":{"content":"ok"}}],"usage":${usage}}`,
-				'data: [DONE]',
-				'',
-			].join('\n\n');
-			return new Response(
-				new ReadableStream({
-					start(controller) {
-						controller.enqueue(new TextEncoder().encode(sse));
-						controller.close();
-					},
-				}),
-				{ status: 200 },
-			);
-		};
-		const responses = [
-			stream('{"prompt_tokens":100,"completion_tokens":10,"prompt_cache_hit_tokens":60}'),
-			stream('{"prompt_tokens":100,"completion_tokens":10}'),
-			stream('{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":40}}'),
-		];
-		const original = globalThis.fetch;
-		let index = 0;
-		globalThis.fetch = (async () => responses[index++]!) as unknown as typeof fetch;
-		try {
-			const chat = () =>
-				openAiChat({
-					base: 'https://api.example.com/v1',
-					key: 'k',
-					model: 'm',
-					messages: [{ role: 'user', content: 'hi' }],
-					tools: [],
-					signal: new AbortController().signal,
-				});
-			const reported = await chat();
-			assert.strictEqual(reported.usage?.cached, 60);
-			const silent = await chat();
-			assert.strictEqual(silent.usage?.cached, undefined, 'a missing field is not a reported zero');
-			assert.ok(silent.usage && !('cached' in silent.usage));
-			const standard = await chat();
-			assert.strictEqual(standard.usage?.cached, 40, "the standard OpenAI shape is read too");
-		} finally {
-			globalThis.fetch = original;
-		}
-	});
-
-	test('a thinking model\u2019s function-call signature is kept and sent back with the call', async () => {
-		const bodies: Record<string, unknown>[] = [];
-		const original = globalThis.fetch;
-		globalThis.fetch = (async (_url: string, init: { body: string }): Promise<Response> => {
-			bodies.push(JSON.parse(init.body) as Record<string, unknown>);
-			// Gemini hands the signature over with the function call, in `extra_content` — and often in an
-			// earlier chunk than the call's own name and arguments.
-			const sse = [
-				'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","extra_content":{"google":{"thought_signature":"SIG-1"}}}]}}]}',
-				'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"run_shell_readonly","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}',
-				'data: [DONE]',
-				'',
-			].join('\n\n');
-			return new Response(
-				new ReadableStream({
-					start(controller) {
-						controller.enqueue(new TextEncoder().encode(sse));
-						controller.close();
-					},
-				}),
-				{ status: 200 },
-			);
-		}) as unknown as typeof fetch;
-		const request = (messages: Message[]): Parameters<typeof openAiChat>[0] => ({
-			base: 'https://generativelanguage.googleapis.com/v1beta/openai',
-			key: 'k',
-			model: 'gemini-3.8-flash',
-			messages,
-			tools: [],
-			signal: new AbortController().signal,
-		});
-		const sentCalls = (index: number): Record<string, unknown>[] =>
-			((bodies[index]!.messages as Record<string, unknown>[])[1]!.tool_calls ?? []) as Record<string, unknown>[];
-		try {
-			const first = await openAiChat(request([{ role: 'user', content: 'ls it' }]));
-			assert.strictEqual(first.toolCalls[0]?.name, 'run_shell_readonly');
-			assert.deepStrictEqual(
-				first.toolCalls[0]?.extraContent,
-				{ google: { thought_signature: 'SIG-1' } },
-				'the signature stays with the call it came on',
-			);
-
-			// The tool result goes back with that assistant turn, and the signature goes with it: without
-			// it Gemini 3 fails the whole turn with "Function call is missing a thought_signature".
-			await openAiChat(
-				request([
-					{ role: 'user', content: 'ls it' },
-					{ role: 'assistant', content: '', toolCalls: first.toolCalls },
-					{ role: 'tool', toolCallId: 'call_1', content: 'a.txt' },
-				]),
-			);
-			assert.deepStrictEqual(sentCalls(1)[0]!.extra_content, { google: { thought_signature: 'SIG-1' } }, 'sent back the way it came');
-
-			// A call that never had one — an older transcript, or one another provider wrote — carries
-			// Google's own bypass rather than losing the turn.
-			await openAiChat(
-				request([
-					{ role: 'user', content: 'ls it' },
-					{ role: 'assistant', content: '', toolCalls: [{ id: 'c9', name: 'run_shell_readonly', arguments: '{}' }] },
-					{ role: 'tool', toolCallId: 'c9', content: 'a.txt' },
-				]),
-			);
-			assert.deepStrictEqual(sentCalls(2)[0]!.extra_content, { google: { thought_signature: 'skip_thought_signature_validator' } });
-
-			// A model that does not demand one is never sent the bypass, and keeps what it was given.
-			await openAiChat({
-				...request([{ role: 'user', content: 'hi' }]),
-				base: 'https://api.deepseek.com',
-				model: 'deepseek-flash',
-				messages: [
-					{ role: 'user', content: 'ls it' },
-					{ role: 'assistant', content: '', toolCalls: [{ id: 'c9', name: 'run_shell_readonly', arguments: '{}' }] },
-					{ role: 'tool', toolCallId: 'c9', content: 'a.txt' },
-				],
-			});
-			assert.ok(!('extra_content' in sentCalls(3)[0]!), 'no signature demanded, none invented');
-		} finally {
-			globalThis.fetch = original;
-		}
-	});
-
-	test('the reasoning effort maps onto each provider\u2019s thinking switch', async () => {
-		const bodies: Record<string, unknown>[] = [];
-		const original = globalThis.fetch;
-		globalThis.fetch = (async (_url: string, init: { body: string }): Promise<Response> => {
-			bodies.push(JSON.parse(init.body) as Record<string, unknown>);
-			return new Response(new ReadableStream({ start: (c) => c.close() }), { status: 200 });
-		}) as unknown as typeof fetch;
-		const request = (effort: string, thinkingOff?: 'thinking' | 'effort'): Parameters<typeof openAiChat>[0] => ({
-			base: 'https://api.deepseek.com',
-			key: 'k',
-			model: 'deepseek-flash',
-			messages: [{ role: 'user', content: 'hi' }],
-			tools: [],
-			reasoningEffort: effort,
-			thinkingOff,
-			signal: new AbortController().signal,
-		});
-		try {
-			await openAiChat(request('auto', 'thinking'));
-			assert.ok(!('reasoning_effort' in bodies[0]!) && !('thinking' in bodies[0]!), 'auto leaves the provider default');
-			await openAiChat(request('high', 'thinking'));
-			assert.strictEqual(bodies[1]!.reasoning_effort, 'high');
-			// DeepSeek enables thinking by default; only its own field turns it off.
-			await openAiChat(request('none', 'thinking'));
-			assert.deepStrictEqual(bodies[2]!.thinking, { type: 'disabled' });
-			assert.ok(!('reasoning_effort' in bodies[2]!));
-			// Gemini takes `reasoning_effort: "none"` instead.
-			await openAiChat(request('none', 'effort'));
-			assert.strictEqual(bodies[3]!.reasoning_effort, 'none');
-			assert.ok(!('thinking' in bodies[3]!));
-			// A provider that declares neither is left alone rather than sent a field it may reject.
-			await openAiChat(request('none'));
-			assert.ok(!('thinking' in bodies[4]!) && !('reasoning_effort' in bodies[4]!));
-		} finally {
-			globalThis.fetch = original;
-		}
-	});
-
 	test('a thinking level above the endpoint ceiling runs at the ceiling', async () => {
 		const kernel = await createTestKernel();
 		try {
-			// The shipped profiles declare how deep their provider goes: DeepSeek reaches max, Gemini
+			// The shipped brands declare how deep their provider goes: DeepSeek reaches max, Gemini
 			// stops at high (Gemini 3 has no xhigh or max).
-			assert.strictEqual(kernel.ctx.llm.effortFor('deepseek', 'max'), 'max');
-			assert.strictEqual(kernel.ctx.llm.effortFor('gemini', 'max'), 'high');
-			assert.strictEqual(kernel.ctx.llm.effortFor('gemini', 'medium'), 'medium');
+			assert.strictEqual(kernel.ctx.model.effortFor('deepseek', 'max'), 'max');
+			assert.strictEqual(kernel.ctx.model.effortFor('gemini', 'max'), 'high');
+			assert.strictEqual(kernel.ctx.model.effortFor('gemini', 'medium'), 'medium');
 			// `auto` and `none` are modes, not depths: no ceiling applies to either.
-			assert.strictEqual(kernel.ctx.llm.effortFor('gemini', 'auto'), 'auto');
-			assert.strictEqual(kernel.ctx.llm.effortFor('gemini', 'none'), 'none');
+			assert.strictEqual(kernel.ctx.model.effortFor('gemini', 'auto'), 'auto');
+			assert.strictEqual(kernel.ctx.model.effortFor('gemini', 'none'), 'none');
 			// A profile between high and max keeps its own ceiling, and no ceiling sends the pick as-is.
 			assert.strictEqual(limitEffort('max', 'xhigh'), 'xhigh');
 			assert.strictEqual(limitEffort('high', 'xhigh'), 'high');
 			assert.strictEqual(limitEffort('max', undefined), 'max');
 
 			let seen: string | undefined;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					seen = request.reasoningEffort;
 					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
 				},
 			});
-			// The adapter is handed the resolved level, so no endpoint ever sees a value above its top.
-			await kernel.ctx.llm.chat('gemini', [{ role: 'user', content: 'hi' }], [], {}, new AbortController().signal, {
-				reasoningEffort: 'max',
+			// The caller resolves the level before the call, so no endpoint ever sees a value above its top.
+			await kernel.ctx.model.chat({
+				model: 'gemini',
+				messages: [{ role: 'user', content: 'hi' }],
+				tools: [],
+				ctx: makeCtx('test', 0, 'chat', new AbortController().signal),
+				options: { reasoningEffort: kernel.ctx.model.effortFor('gemini', 'max') },
 			});
 			assert.strictEqual(seen, 'high');
 		} finally {
 			await kernel.dispose();
 		}
-	});
-
-	test('the endpoint model list is read in either shape', async () => {
-		const original = globalThis.fetch;
-		const calls: string[] = [];
-		let payload: unknown = { object: 'list', data: [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro' }, { id: 'deepseek-flash' }] };
-		globalThis.fetch = (async (url: string, init: { method?: string; headers?: Record<string, string> }) => {
-			calls.push(`${init.method} ${url} ${init.headers?.authorization ?? ''}`);
-			return new Response(JSON.stringify(payload), { status: 200 });
-		}) as unknown as typeof fetch;
-		try {
-			// OpenAI and Gemini wrap the ids in `data`; some compatible servers return a bare array.
-			const wrapped = await listEndpointModels({ base: 'https://api.deepseek.com/', key: 'k', signal: new AbortController().signal });
-			assert.deepStrictEqual(wrapped, ['deepseek-flash', 'deepseek-v4-pro'], 'sorted, without the duplicate');
-			assert.strictEqual(calls[0], 'GET https://api.deepseek.com/models Bearer k');
-			payload = [{ id: 'a' }, 'b'];
-			assert.deepStrictEqual(await listEndpointModels({ base: 'http://localhost:11434/v1', key: '', signal: new AbortController().signal }), ['a', 'b']);
-			assert.strictEqual(calls[1], 'GET http://localhost:11434/v1/models ', 'no key, no authorization header');
-			assert.deepStrictEqual(await listEndpointModels({ base: '', key: 'k', signal: new AbortController().signal }), [], 'no base URL, no request');
-		} finally {
-			globalThis.fetch = original;
-		}
-	});
-
-	test('an endpoint list is shaped by the profile, not by provider code', () => {
-		// Gemini answers its native `models/<id>` form and lists plenty that cannot run a chat turn;
-		// both rules are data on the profile.
-		const gemini = {
-			id: 'gemini',
-			model: 'gemini-3.8-flash',
-			modelPrefix: 'models/',
-			modelSkip: 'computer-use|deep-research|antigravity|aqa|-image|imagen|veo|embedding|-tts|live',
-		};
-		const reported = [
-			'models/antigravity-preview-05-2026',
-			'models/aqa',
-			'models/deep-research-max-preview',
-			'models/gemini-2.5-flash',
-			'models/gemini-2.5-flash-image',
-			'models/gemini-3.8-flash',
-			'models/gemini-3.9-pro',
-			'models/gemini-2.5-computer-use-preview',
-			'models/text-embedding-005',
-			'models/gemini-3.8-flash',
-		];
-		assert.deepStrictEqual(shapeModels(reported, gemini), ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-3.9-pro'], 'the prefix goes, non-chat models stay out, duplicates collapse');
-		// A profile without a prefix keeps what the endpoint said, and a broken regex hides nothing.
-		const deepseek = { id: 'deepseek', model: 'deepseek-flash', modelSkip: '([' };
-		assert.deepStrictEqual(shapeModels(['deepseek-flash', 'deepseek-v4-pro'], deepseek), ['deepseek-flash', 'deepseek-v4-pro']);
-		assert.deepStrictEqual(shapeModels([], deepseek), []);
-		// The two id forms the menu and `comonad.model` use.
-		assert.deepStrictEqual(parseModelId('gemini:gemini-3.9-pro'), { profile: 'gemini', model: 'gemini-3.9-pro' });
-		assert.deepStrictEqual(parseModelId('auto'), { profile: 'auto' });
-		assert.strictEqual(formatModelId('gemini', 'gemini-3.9-pro'), 'gemini:gemini-3.9-pro');
 	});
 
 	test('context forms shape the message list', () => {
@@ -2672,14 +2400,6 @@ suite('Comonad domain', () => {
 		const marks: Mark[] = [0, 3, 8, 12].map((length) => ({ turn: length, entryCount: length, length, at: length }));
 		// Coverage is model context, not a transcript cut, so the canonical indices stay exactly as they are.
 		assert.deepStrictEqual(marks.map((mark) => mark.length), [0, 3, 8, 12]);
-	});
-
-	test('a context rejection is told apart from a request that is simply wrong', () => {
-		assert.ok(isContextOverflow(new ModelRequestError(400, 'This model\'s maximum context length is 128000 tokens')));
-		assert.ok(isContextOverflow(new ModelRequestError(413, 'prompt is too long')));
-		assert.ok(!isContextOverflow(new ModelRequestError(400, 'invalid model name')), 'a 400 about the model is not a size problem');
-		assert.ok(!isContextOverflow(new ModelRequestError(401, 'maximum context length exceeded')), 'the status has to match too');
-		assert.ok(!isContextOverflow(new Error('model request failed (400): maximum context length')), 'a plain error is not one of ours');
 	});
 
 	test('a `hidden` attribute hides, in both webview documents', () => {
@@ -2972,14 +2692,14 @@ suite('Comonad domain', () => {
 		assert.ok(!(manifest.activationEvents ?? []).includes('onWebviewPanel:comonad.fileReview'), 'the panel view type is gone');
 	});
 
-	test('the shipped profiles in the manifest match the code defaults', () => {
-		// VS Code hands `comonad.profiles` its manifest default, so `DEFAULT_PROFILES` only applies
-		// when the setting is empty. A field missing here — the context window once was — silently
-		// drops the shipped model to the 128K fallback and the menu says `Auto (128K)`.
+	test('the manifest ships no provider map, and the code stands the shipped instances in', () => {
+		// `comonad.providers` ships empty — "use the shipped instances" — so the manifest cannot
+		// drift from the brand facts the merge engine layers in at resolve time.
 		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
 			contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
 		};
-		assert.deepStrictEqual(manifest.contributes.configuration.properties['comonad.profiles']?.default, DEFAULT_PROFILES);
+		assert.deepStrictEqual(manifest.contributes.configuration.properties['comonad.providers']?.default, {});
+		assert.deepStrictEqual(providersOf({ providers: {} }).map((instance) => instance.id), ['deepseek', 'deepseek-pro', 'gemini']);
 	});
 
 	test('the settings panel injects every service it reads', () => {
@@ -3101,9 +2821,9 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel();
 		try {
 			const seen: { role: string; content: string }[][] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
-				async chat(request: AdapterRequest) {
+				async chat(request: FakeModelCall) {
 					seen.push(request.messages.map((message) => ({ role: message.role, content: message.content })));
 					return { message: { role: 'assistant' as const, content: 'grown.' }, toolCalls: [], usage: { input: 1, output: 1 } };
 				},
@@ -3164,9 +2884,9 @@ suite('Cordis kernel', () => {
 				// The model asks for the tool anyway: the impersonation is not offered it, so the call is dropped.
 				{ content: '', toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{"path":"a.txt"}' }] },
 			];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
-				async chat(request: AdapterRequest) {
+				async chat(request: FakeModelCall) {
 					offered.push(request.tools.length);
 					const reply = replies.shift() ?? { content: 'x' };
 					return { message: { role: 'assistant' as const, content: reply.content, toolCalls: reply.toolCalls }, toolCalls: reply.toolCalls ?? [], usage: { input: 1, output: 1 } };
@@ -3225,9 +2945,9 @@ suite('Cordis kernel', () => {
 				{ content: '', toolCalls: [{ id: 'q1', name: 'read_file', arguments: '{"path":"a.txt"}' }] },
 				{ content: 'private answer' },
 			];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
-				async chat(request: AdapterRequest) {
+				async chat(request: FakeModelCall) {
 					offered.push(request.tools.map((tool) => tool.name));
 					const reply = replies.shift() ?? { content: 'x' };
 					return { message: { role: 'assistant' as const, content: reply.content, toolCalls: reply.toolCalls }, toolCalls: reply.toolCalls ?? [], usage: { input: 1, output: 1 } };
@@ -3277,9 +2997,9 @@ suite('Cordis kernel', () => {
 				{ content: '', toolCalls: [{ id: 'c1', name: 'write_file', arguments: '{"path":"a.txt","content":"x"}' }] },
 				{ content: 'no write here' },
 			];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
-				async chat(request: AdapterRequest) {
+				async chat(request: FakeModelCall) {
 					seen.push(request.messages);
 					const reply = replies.shift() ?? { content: 'x' };
 					return { message: { role: 'assistant' as const, content: reply.content, toolCalls: reply.toolCalls }, toolCalls: reply.toolCalls ?? [], usage: { input: 1, output: 1 } };
@@ -3330,9 +3050,9 @@ suite('Cordis kernel', () => {
 				{ content: '', toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{"path":"a.txt"}' }] },
 				{ content: 'private answer' },
 			];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
-				async chat(request: AdapterRequest) {
+				async chat(request: FakeModelCall) {
 					const reply = replies.shift() ?? { content: 'x' };
 					return { message: { role: 'assistant' as const, content: reply.content, toolCalls: reply.toolCalls }, toolCalls: reply.toolCalls ?? [], usage: { input: 1, output: 1 } };
 				},
@@ -3426,9 +3146,9 @@ suite('Cordis kernel', () => {
 			assert.match(kernel.ctx.attachments.dataUrlById(picture.id) ?? '', /^data:image\/png;base64,/);
 
 			const seen: Message[][] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'quiet-store',
-				async chat(request: AdapterRequest) {
+				async chat(request: FakeModelCall) {
 					seen.push(request.messages);
 					return { message: { role: 'assistant' as const, content: 'next' }, toolCalls: [], usage: { input: 1, output: 1 } };
 				},
@@ -4232,7 +3952,7 @@ suite('Cordis kernel', () => {
 			assert.strictEqual((kernel.ctx.get('book') as { constructor: { name: string } } | undefined)?.constructor.name, 'Book');
 
 			let told = '';
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'caller',
 				async chat(request) {
 					const last = request.messages[request.messages.length - 1];
@@ -4338,7 +4058,7 @@ suite('Cordis kernel', () => {
 			writeFileSync(join(workspace, 'journaled.txt'), 'before\n');
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'journaled');
 			kernel.ctx.sessions.save(session);
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'writer',
 				async chat(request) {
 					const last = request.messages[request.messages.length - 1];
@@ -5037,7 +4757,7 @@ suite('Cordis kernel', () => {
 				{ input: 200, output: 20, cached: 100 },
 			];
 			let calls = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					const usage = reports[Math.min(calls, reports.length - 1)];
@@ -5125,7 +4845,7 @@ suite('Cordis kernel', () => {
 	test('the estimate painted before the first reply is that request\'s calibration sample', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					return { message: { role: 'assistant', content: 'done' }, toolCalls: [], usage: { input: 100, output: 10 } };
@@ -5151,7 +4871,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel();
 		try {
 			let calls = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					calls += 1;
@@ -5247,7 +4967,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel({ config: { mode: 'chat' } });
 		try {
 			let offered: string[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					offered = request.tools.map((tool) => tool.name);
@@ -5266,7 +4986,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel();
 		try {
 			let seen: Message[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					seen = request.messages;
@@ -5290,7 +5010,7 @@ suite('Cordis kernel', () => {
 		try {
 			let seen: Message[] = [];
 			let effort: string | undefined;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					// The summarization call is the one with two messages and a summarizing system prompt.
@@ -5339,7 +5059,7 @@ suite('Cordis kernel', () => {
 			let seen: Message[] = [];
 			const notices: { text: string; detail?: NoticeDetail }[] = [];
 			kernel.ctx.on('agent/notice', (_ref, text, detail) => notices.push({ text, detail }));
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages.some((message) => message.content.startsWith('You summarize'))) {
@@ -5403,7 +5123,7 @@ suite('Cordis kernel', () => {
 			});
 			let summaryCalls = 0;
 			let last: Message[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages.some((message) => message.content.startsWith('You summarize'))) {
@@ -5458,7 +5178,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000 } });
 		try {
 			let summaryCalls = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages.some((message) => message.content.startsWith('You summarize'))) {
@@ -5507,7 +5227,7 @@ suite('Cordis kernel', () => {
 		try {
 			const notices: string[] = [];
 			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages.some((message) => message.content.startsWith('You summarize'))) {
@@ -5544,7 +5264,7 @@ suite('Cordis kernel', () => {
 		try {
 			const notices: string[] = [];
 			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.reasoningEffort === 'none') {
@@ -5555,10 +5275,20 @@ suite('Cordis kernel', () => {
 			});
 			// The opt-in flag names the cause; without it a completion is still just empty text.
 			await assert.rejects(
-				kernel.ctx.llm.complete('auto', 'sys', 'user', { reasoningEffort: 'none', rejectReasoningOnly: true }),
+				kernel.ctx.model.complete({
+					model: 'auto',
+					system: 'sys',
+					prompt: 'user',
+					ctx: makeCtx('test', 0, 'compaction'),
+					options: { reasoningEffort: 'none' },
+					rejectReasoningOnly: true,
+				}),
 				/only reasoning/,
 			);
-			assert.strictEqual(await kernel.ctx.llm.complete('auto', 'sys', 'user', { reasoningEffort: 'none' }), '');
+			assert.strictEqual(
+				await kernel.ctx.model.complete({ model: 'auto', system: 'sys', prompt: 'user', ctx: makeCtx('test', 0, 'compaction'), options: { reasoningEffort: 'none' } }),
+				'',
+			);
 
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'reasoning-only');
 			session.contextWindow = 40_000;
@@ -5606,7 +5336,7 @@ suite('Cordis kernel', () => {
 	test('/context reports the compaction trigger, retain target and pressure', async () => {
 		const kernel = await createTestKernel({ config: { compactionHeadroom: 20_000, compactionRetainPercent: 10 } });
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -5639,7 +5369,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel();
 		try {
 			let seen: Message[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -5674,7 +5404,7 @@ suite('Cordis kernel', () => {
 	test('a summarized turn keeps its attachments in the canonical history', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -5794,7 +5524,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel();
 		try {
 			let summaryPrompt = '';
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -5825,7 +5555,7 @@ suite('Cordis kernel', () => {
 	test('a compaction keeps every restore point it can still honour', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -5882,7 +5612,7 @@ suite('Cordis kernel', () => {
 				execute: async () => `START ${'x'.repeat(60_000)} END`,
 			});
 			const calls: Message[][] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					calls.push(request.messages);
@@ -5943,7 +5673,7 @@ suite('Cordis kernel', () => {
 				execute: async () => `START ${'x'.repeat(30_000)} END`,
 			});
 			let step = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -5995,7 +5725,7 @@ suite('Cordis kernel', () => {
 	test('a fold during a quiet turn leaves the record the summary it folded into', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -6033,7 +5763,7 @@ suite('Cordis kernel', () => {
 	test('extending a summary keeps what it already stood in for', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -6066,16 +5796,16 @@ suite('Cordis kernel', () => {
 	test('a model with no window of its own uses the fallback, and says so', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
 				},
 			});
-			// A profile is configured, but it declares no window — which is every endpoint added by hand.
-			await kernel.ctx.settings.update('profiles', [
-				{ id: 'custom', label: 'A custom endpoint', base: 'https://example.invalid', model: 'whatever', keyEnv: 'K' },
-			]);
+			// A provider is configured, but its model carries no window — which is every endpoint added by hand.
+			await kernel.ctx.settings.update('providers', {
+				custom: { brand: 'custom', base: 'https://example.invalid', model: 'whatever', keyEnv: 'K' },
+			});
 			await kernel.ctx.settings.update('model', 'custom');
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'nowin');
 			assert.strictEqual(kernel.ctx.agent.windowFor(session), DEFAULT_CONTEXT_WINDOW, 'the fallback stands in');
@@ -6085,7 +5815,7 @@ suite('Cordis kernel', () => {
 			const report = kernel.ctx.agent.contextReport();
 			assert.ok(report.includes(String(DEFAULT_CONTEXT_WINDOW)), 'the report names the window in use');
 			assert.ok(report.includes('a fallback'), 'and does not pass a guess off as the model’s own number');
-			assert.ok(report.includes('Set `contextWindow` on its profile'), 'and says how to correct it');
+			assert.ok(report.includes('Set `contextWindow` on its provider'), 'and says how to correct it');
 		} finally {
 			await kernel.dispose();
 		}
@@ -6096,7 +5826,7 @@ suite('Cordis kernel', () => {
 		try {
 			let attempts = 0;
 			let second: Message[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -6105,7 +5835,7 @@ suite('Cordis kernel', () => {
 					attempts += 1;
 					if (attempts === 1) {
 						// Worded the way an endpoint words it, with the status that means "too big".
-						throw new ModelRequestError(400, "This model's maximum context length is 128000 tokens, but you requested 200000");
+						throw modelHttpError(400, "This model's maximum context length is 128000 tokens, but you requested 200000");
 					}
 					second = request.messages;
 					return { message: { role: 'assistant', content: 'ok after retry' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -6141,7 +5871,7 @@ suite('Cordis kernel', () => {
 	test('a summary that fails leaves the conversation exactly as it was', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -6179,7 +5909,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel();
 		try {
 			let summaryPrompt = '';
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					if (request.messages[0]!.content.startsWith('You summarize')) {
@@ -6226,40 +5956,48 @@ suite('Cordis kernel', () => {
 	test('the model menu is read from the endpoints, then whatever you configure', async () => {
 		const kernel = await createTestKernel();
 		try {
-			// With no adapter loaded the menu still renders: every profile offers the model it declares.
-			const shipped = await kernel.ctx.llm.availableModels();
+			// With an endpoint that cannot answer the menu still renders: every instance offers the
+			// model it declares.
+			useFakeModel(kernel, {
+				name: 'offline',
+				async chat() {
+					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
+				},
+				async listModels() {
+					throw new Error('offline');
+				},
+			});
+			const shipped = await kernel.ctx.model.availableModels();
 			assert.deepStrictEqual(shipped.map((choice) => choice.label), ['deepseek-flash', 'deepseek-v4-pro', 'gemini-3.8-flash', 'Auto']);
 			assert.strictEqual(
 				shipped[0]!.description,
-				'DeepSeek Flash · https://api.deepseek.com · models not listed · no key — set DEEPSEEK_API_KEY',
+				'deepseek · https://api.deepseek.com · models not listed · no key — set DEEPSEEK_API_KEY',
 			);
-			assert.strictEqual(shipped[0]!.id, 'deepseek:deepseek-flash', 'a choice names profile and model');
-			assert.match(shipped[3]!.description, /DeepSeek Flash — the first profile, model deepseek-flash/);
+			assert.strictEqual(shipped[0]!.id, 'deepseek:deepseek-flash', 'a choice names instance and model');
+			assert.match(shipped[3]!.description, /deepseek — the first provider, model deepseek-flash/);
 			assert.ok(shipped.every((choice) => choice.needsKey), 'no key anywhere marks every row, including Auto');
-			const shippedProfiles = kernel.ctx.settings.get().profiles;
-			assert.deepStrictEqual(profileKeyEnvs(shippedProfiles[0]!), ['DEEPSEEK_API_KEY'], 'a single name is still a list');
+			assert.strictEqual(kernel.ctx.model.instanceFor('deepseek')!.keyEnv, 'DEEPSEEK_API_KEY');
 			// The shipped prices are DeepSeek's peak cache-miss input and output rates, with the much
-			// cheaper cache-hit rate, so /cost is an upper bound rather than a guess.
-			assert.deepStrictEqual(
-				[shippedProfiles[0]!.pricingIn, shippedProfiles[0]!.pricingCachedIn, shippedProfiles[0]!.pricingOut],
-				[0.3, 0.006, 1.2],
-			);
-			assert.deepStrictEqual([shippedProfiles[1]!.pricingIn, shippedProfiles[1]!.pricingOut], [1.32, 3.96]);
+			// cheaper cache-hit rate, so /cost is an upper bound rather than a guess. They ride the brand.
+			const flash = kernel.ctx.model.modelInfo('deepseek')!.pricing;
+			assert.deepStrictEqual([flash?.inPerM, flash?.cachedInPerM, flash?.outPerM], [0.3, 0.006, 1.2]);
+			const pro = kernel.ctx.model.modelInfo('deepseek-pro')!.pricing;
+			assert.deepStrictEqual([pro?.inPerM, pro?.outPerM], [1.32, 3.96]);
 
-			// With an adapter, the list is whatever the endpoint reports — a new model needs no release.
+			// With an endpoint that answers, the list is whatever it reports — a new model needs no release.
 			let asked = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'openai',
 				async chat() {
 					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
 				},
-				async listModels(request) {
+				async listModels(base) {
 					asked += 1;
-					return request.profile.base?.includes('googleapis') ? ['gemini-3.8-flash', 'gemini-3.9-pro'] : ['deepseek-v5-preview', 'deepseek-flash'];
+					return base.includes('googleapis') ? ['gemini-3.8-flash', 'gemini-3.9-pro'] : ['deepseek-v5-preview', 'deepseek-flash'];
 				},
 			});
 			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-env';
-			const live = await kernel.ctx.llm.availableModels({ refresh: true });
+			const live = await kernel.ctx.model.availableModels({ refresh: true });
 			assert.deepStrictEqual(live.map((choice) => choice.label), ['deepseek-v5-preview', 'deepseek-flash', 'gemini-3.8-flash', 'gemini-3.9-pro', 'Auto']);
 			assert.ok(!live[0]!.description.includes('no key'), 'the DeepSeek endpoint has a key now');
 			assert.strictEqual(live[0]!.needsKey, false);
@@ -6267,194 +6005,62 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(live[2]!.needsKey, true);
 			assert.strictEqual(asked, 3, 'one request per endpoint');
 			// The list is cached, so opening the menu is not a request storm; refresh asks again.
-			await kernel.ctx.llm.availableModels();
+			await kernel.ctx.model.availableModels();
 			assert.strictEqual(asked, 3, 'the cache answers the next call');
-			await kernel.ctx.llm.availableModels({ refresh: true });
+			await kernel.ctx.model.availableModels({ refresh: true });
 			assert.strictEqual(asked, 6, 'a refresh re-reads the endpoints');
 
-			// An explicit model id selects that model; a bare profile id keeps its declared default.
-			// The label names the model the turn will run, not the profile that provides it.
-			assert.strictEqual(kernel.ctx.llm.describe('deepseek:deepseek-v5-preview'), 'deepseek-v5-preview');
-			assert.strictEqual(kernel.ctx.llm.describe('deepseek'), 'deepseek-flash');
-			assert.strictEqual(kernel.ctx.llm.known('gemini:gemini-3.9-pro'), true);
-			assert.strictEqual(kernel.ctx.llm.known('nope:any'), false);
+			// An explicit model id selects that model; a bare provider id keeps its declared default.
+			// The label names the model the turn will run, not the provider that provides it.
+			assert.strictEqual(kernel.ctx.model.describe('deepseek:deepseek-v5-preview'), 'deepseek-v5-preview');
+			assert.strictEqual(kernel.ctx.model.describe('deepseek'), 'deepseek-flash');
+			assert.strictEqual(kernel.ctx.model.known('gemini:gemini-3.9-pro'), true);
+			assert.strictEqual(kernel.ctx.model.known('nope:any'), false);
 
-			// An explicitly empty list still means "nothing configured", so the defaults stand in.
-			await kernel.ctx.settings.update('profiles', []);
-			assert.deepStrictEqual(kernel.ctx.settings.get().profiles.map((profile) => profile.id), ['deepseek', 'deepseek-pro', 'gemini']);
+			// An explicitly empty map still means "nothing configured", so the shipped instances stand in.
+			await kernel.ctx.settings.update('providers', {});
+			assert.deepStrictEqual(providersOf(kernel.ctx.settings.get()).map((instance) => instance.id), ['deepseek', 'deepseek-pro', 'gemini']);
 		} finally {
 			await kernel.dispose();
 		}
 	});
 
-	test('a configured profile inherits the facts it omits from the shipped profile for its endpoint', async () => {
-		const kernel = await createTestKernel({
-			config: {
-				profiles: [
-					{
-						id: 'deepseek',
-						base: 'https://api.deepseek.com',
-						model: 'deepseek-flash',
-						keyEnv: ['DEEPSEEK_API_KEY'],
-						includeUsage: true,
-					},
-				],
-			},
-		});
-		try {
-			const profiles = () => kernel.ctx.settings.get().profiles;
-			const first = profiles()[0]!;
-			assert.strictEqual(first.thinkingOff, 'thinking', 'the summarizer can switch thinking off');
-			assert.strictEqual(first.topEffort, 'max');
-			assert.strictEqual(first.contextWindow, 1_048_576);
-			assert.strictEqual(first.label, 'DeepSeek Flash');
-			assert.deepStrictEqual([first.pricingIn, first.pricingCachedIn, first.pricingOut], [0.3, 0.006, 1.2]);
-			assert.strictEqual(first.id, 'deepseek');
-			assert.strictEqual(first.base, 'https://api.deepseek.com');
-			assert.strictEqual(first.model, 'deepseek-flash');
-
-			// Explicit values win; a sibling fact that is still missing inherits.
-			await kernel.ctx.settings.update('profiles', [
-				{
-					id: 'mine',
-					base: 'https://api.deepseek.com',
-					model: 'deepseek-flash',
-					label: 'Mine',
-					thinkingOff: 'effort',
-					topEffort: 'high',
-					contextWindow: 32_000,
-					pricingIn: 9,
-					keyEnv: 'MINE_KEY',
-					includeUsage: false,
-				},
-			]);
-			const mine = profiles()[0]!;
-			assert.strictEqual(mine.label, 'Mine');
-			assert.strictEqual(mine.thinkingOff, 'effort');
-			assert.strictEqual(mine.topEffort, 'high');
-			assert.strictEqual(mine.contextWindow, 32_000);
-			assert.strictEqual(mine.pricingIn, 9);
-			assert.strictEqual(mine.pricingOut, 1.2, 'an omitted price still inherits');
-			assert.deepStrictEqual(mine.keyEnv, 'MINE_KEY');
-			assert.strictEqual(mine.includeUsage, false);
-
-			// Another endpoint is not the shipped one: nothing is inherited.
-			await kernel.ctx.settings.update('profiles', [{ id: 'other', base: 'https://example.invalid', model: 'deepseek-flash' }]);
-			assert.deepStrictEqual(profiles()[0], { id: 'other', base: 'https://example.invalid', model: 'deepseek-flash' });
-
-			// The same endpoint with another model: endpoint facts, and that model's own facts.
-			await kernel.ctx.settings.update('profiles', [{ id: 'pro', base: 'https://api.deepseek.com/', model: 'deepseek-v4-pro' }]);
-			const pro = profiles()[0]!;
-			assert.strictEqual(pro.thinkingOff, 'thinking');
-			assert.strictEqual(pro.keyEnv, 'DEEPSEEK_API_KEY');
-			assert.strictEqual(pro.includeUsage, true);
-			assert.strictEqual(pro.label, 'DeepSeek V4 Pro');
-			assert.strictEqual(pro.contextWindow, 1_048_576);
-			assert.deepStrictEqual([pro.pricingIn, pro.pricingCachedIn, pro.pricingOut], [1.32, 0.044, 3.96]);
-			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-deepseek';
-			assert.strictEqual(await kernel.ctx.llm.resolveKey(profiles()[0]!), 'sk-deepseek', 'the endpoint key name is inherited');
-
-			// An unknown model on a known endpoint gets the endpoint facts and no model facts.
-			await kernel.ctx.settings.update('profiles', [{ id: 'unknown', base: 'https://api.deepseek.com', model: 'deepseek-v9' }]);
-			const unknown = profiles()[0]!;
-			assert.strictEqual(unknown.thinkingOff, 'thinking');
-			assert.strictEqual(unknown.contextWindow, undefined);
-			assert.strictEqual(unknown.pricingIn, undefined);
-			assert.strictEqual(unknown.label, undefined);
-
-			// No base: no inheritance, so the adapter's loud "no API base URL" error stays.
-			await kernel.ctx.settings.update('profiles', [{ id: 'nobase', model: 'deepseek-flash' }]);
-			assert.deepStrictEqual(profiles()[0], { id: 'nobase', model: 'deepseek-flash' });
-
-			// An empty list still yields the shipped profiles.
-			await kernel.ctx.settings.update('profiles', []);
-			assert.deepStrictEqual(profiles().map((profile) => profile.id), ['deepseek', 'deepseek-pro', 'gemini']);
-
-			// Pure: a fresh object, the input untouched, the shipped defaults unmodified; null is absent.
-			const before = JSON.stringify(DEFAULT_PROFILES);
-			const partial = { id: 'literal', base: 'https://api.deepseek.com', model: 'deepseek-flash', thinkingOff: null } as unknown as Profile;
-			const filled = inheritProfileDefaults(partial);
-			assert.notStrictEqual(filled, partial);
-			assert.strictEqual(partial.thinkingOff, null);
-			assert.strictEqual(filled.thinkingOff, 'thinking');
-			assert.strictEqual(JSON.stringify(DEFAULT_PROFILES), before);
-		} finally {
-			await kernel.dispose();
-		}
-	});
-
-	test('a completed profile turns thinking off for a summary request', async () => {
-		const bodies: Record<string, unknown>[] = [];
-		const original = globalThis.fetch;
-		globalThis.fetch = (async (_url: string, init: { body: string }): Promise<Response> => {
-			bodies.push(JSON.parse(init.body) as Record<string, unknown>);
-			return new Response(new ReadableStream({ start: (c) => c.close() }), { status: 200 });
-		}) as unknown as typeof fetch;
-		const kernel = await createTestKernel({
-			config: {
-				profiles: [{ id: 'deepseek', base: 'https://api.deepseek.com', model: 'deepseek-flash', keyEnv: ['DEEPSEEK_API_KEY'], includeUsage: true }],
-			},
-		});
-		try {
-			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-deepseek';
-			kernel.ctx.llm.use(openaiAdapter);
-			await kernel.ctx.llm.chat('auto', [{ role: 'user', content: 'hi' }], [], {}, new AbortController().signal, {
-				reasoningEffort: 'none',
-				maxTokens: 3_072,
-			});
-			assert.deepStrictEqual(bodies[0]!.thinking, { type: 'disabled' }, 'the summary asks the endpoint to stop thinking');
-			assert.ok(!('reasoning_effort' in bodies[0]!), 'DeepSeek takes its own field, not the generic one');
-		} finally {
-			globalThis.fetch = original;
-			await kernel.dispose();
-		}
-	});
-
-	test('a profile resolves, and its key comes from the environment', async () => {
+	test('a provider resolves its key from storage and the environment', async () => {
 		const kernel = await createTestKernel();
 		try {
-			let seen: { model: string; key?: string; base?: string } | undefined;
-			kernel.ctx.llm.use({
+			let seen: { model: string } | undefined;
+			useFakeModel(kernel, {
 				name: 'openai',
 				async chat(request) {
-					seen = { model: request.model, key: request.key, base: request.profile.base };
+					seen = { model: request.model };
 					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [] };
 				},
 			});
-			// The first DeepSeek profile, with no key anywhere: the empty key reaches the adapter,
-			// which turns it into a message that names the variables to set.
-			assert.strictEqual(kernel.ctx.llm.describe('auto'), 'deepseek-flash');
-			assert.strictEqual(kernel.ctx.llm.describe('deepseek-pro'), 'deepseek-v4-pro');
-			assert.strictEqual(kernel.ctx.llm.describe('gemini'), 'gemini-3.8-flash');
-			await kernel.ctx.llm.chat('auto', [{ role: 'user', content: 'hi' }], [], {}, new AbortController().signal);
-			assert.deepStrictEqual(seen, { model: 'deepseek-flash', key: '', base: 'https://api.deepseek.com' });
+			assert.strictEqual(kernel.ctx.model.describe('auto'), 'deepseek-flash');
+			assert.strictEqual(kernel.ctx.model.describe('deepseek-pro'), 'deepseek-v4-pro');
+			assert.strictEqual(kernel.ctx.model.describe('gemini'), 'gemini-3.8-flash');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('auto'), '', 'no key anywhere');
+			assert.strictEqual(await kernel.ctx.model.keyReady('auto'), false);
 
 			// Cached input is billed at the cache rate: 1M fresh + 1M cached + 1M out, peak prices.
 			assert.strictEqual(
-				Number(
-					kernel.ctx.llm
-						.costFor('deepseek', { input: 2_000_000, output: 1_000_000, cached: 1_000_000 })
-						.toFixed(3),
-				),
+				Number((kernel.ctx.model.costFor('deepseek', { input: 2_000_000, output: 1_000_000, cached: 1_000_000 }) ?? 0).toFixed(3)),
 				0.3 + 0.006 + 1.2,
 				'cache hits cost 2 % of a fresh prompt',
 			);
-			assert.strictEqual(kernel.ctx.llm.costFor('gemini', { input: 1_000_000, output: 1_000_000 }), 0, 'no prices, no estimate');
+			assert.strictEqual(kernel.ctx.model.costFor('gemini', { input: 1_000_000, output: 1_000_000 }), null, 'no prices, no estimate');
 
 			// A stored key wins over the environment; the environment is the fallback.
-			await kernel.ctx.llm.setSecret('deepseek', 'sk-stored');
-			await kernel.ctx.llm.chat('deepseek', [], [], {}, new AbortController().signal);
-			assert.strictEqual(seen?.key, 'sk-stored');
+			await kernel.ctx.model.setSecret('deepseek', 'sk-stored');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('auto'), 'sk-stored');
+			await kernel.ctx.model.chat({ model: 'deepseek', messages: [], tools: [], ctx: makeCtx('t', 0, 'chat') });
+			assert.strictEqual(seen?.model, 'deepseek-flash');
+			await kernel.ctx.model.setSecret('deepseek', '');
 			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-env';
-			// The stored key belongs to the endpoint now, so clear it before asserting the env fallback.
-			await kernel.ctx.llm.setSecret('deepseek', '');
-			const profiles = kernel.ctx.settings.get().profiles.map((profile) => ({ ...profile }));
-			await kernel.ctx.settings.update('profiles', profiles.map((profile) => ({ ...profile, id: `${profile.id}-x`, keyEnv: 'DEEPSEEK_API_KEY' })));
-			await kernel.ctx.llm.chat('deepseek-x', [], [], {}, new AbortController().signal);
-			assert.strictEqual(seen?.key, 'sk-env', 'the environment variable is read when nothing is stored');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('auto'), 'sk-env', 'the environment variable is read when nothing is stored');
 
-			// A chat that still remembers the removed Copilot provider keeps working on the first
-			// profile, and the turn says so once instead of failing.
+			// A chat that still remembers a removed provider keeps working on the first instance,
+			// and the turn says so once instead of failing.
 			const notices: string[] = [];
 			kernel.ctx.on('agent/notice', (_ref, text) => notices.push(text));
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'legacy');
@@ -6463,53 +6069,39 @@ suite('Cordis kernel', () => {
 			await kernel.ctx.agent.runTurn({ text: 'hello', sessionId: 'legacy', policy: { model: 'copilot:deepseek-flash' } });
 			assert.strictEqual(seen?.model, 'deepseek-flash', 'the stale id runs on the shipped default');
 			assert.deepStrictEqual(notices, ['model profile "copilot:deepseek-flash" is gone — using deepseek-flash. Pick one from the model menu.']);
-			assert.strictEqual(kernel.ctx.llm.known('copilot:deepseek-flash'), false);
-			assert.strictEqual(kernel.ctx.llm.known('auto'), true);
+			assert.strictEqual(kernel.ctx.model.known('copilot:deepseek-flash'), false);
+			assert.strictEqual(kernel.ctx.model.known('auto'), true);
 
-			// A profile may name several variables; the first one that is set wins.
-			await kernel.ctx.settings.update('profiles', [
-				{ id: 'multi', base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.8-flash', keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'] },
-			]);
+			// A provider may name several variables; the first one that is set wins.
+			await kernel.ctx.settings.update('providers', {
+				multi: {
+					brand: 'google',
+					base: 'https://generativelanguage.googleapis.com/v1beta/openai',
+					model: 'gemini-3.8-flash',
+					keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+				},
+			});
 			kernel.host.envValues.GOOGLE_API_KEY = 'sk-google';
-			await kernel.ctx.llm.chat('multi', [], [], {}, new AbortController().signal);
-			assert.strictEqual(seen?.key, 'sk-google');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('multi'), 'sk-google');
 			kernel.host.envValues.GEMINI_API_KEY = 'sk-gemini';
-			await kernel.ctx.llm.chat('multi', [], [], {}, new AbortController().signal);
-			assert.strictEqual(seen?.key, 'sk-gemini', 'the first variable in the list wins');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('multi'), 'sk-gemini', 'the first variable in the list wins');
 		} finally {
 			await kernel.dispose();
 		}
 	});
 
-	test('a key is shared by every profile on the same endpoint', async () => {
+	test('a key is shared by every provider on the same endpoint', async () => {
 		const kernel = await createTestKernel();
 		try {
-			let seen: { key?: string } | undefined;
-			kernel.ctx.llm.use({
-				name: 'openai',
-				async chat(request) {
-					seen = { key: request.key };
-					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
-				},
-			});
-			// A key stored under one profile id before keys were endpoint-scoped still serves the other
-			// profiles on that base (the shipped DeepSeek block has two).
-			kernel.host.secretValues.set('comonad.key.deepseek', 'sk-legacy');
-			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek')!), 'sk-legacy');
-			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek-pro')!), 'sk-legacy');
-			await kernel.ctx.llm.chat('deepseek-pro', [], [], {}, new AbortController().signal);
-			assert.strictEqual(seen?.key, 'sk-legacy', 'the sibling profile runs on the stored key');
-
-			// New writes are endpoint-scoped: rotating through either profile updates both.
-			await kernel.ctx.llm.setSecret('deepseek-pro', 'sk-new');
-			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek')!), 'sk-new');
-			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek-pro')!), 'sk-new');
-
-			// Clearing it falls back to the environment once the legacy secret is gone too.
-			await kernel.ctx.llm.setSecret('deepseek-pro', '');
-			kernel.host.secretValues.delete('comonad.key.deepseek');
+			// The provider-scoped secret serves every instance on that base (the shipped DeepSeek
+			// block has two): rotating through either one updates both.
+			await kernel.ctx.model.setSecret('deepseek-pro', 'sk-new');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('deepseek'), 'sk-new');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('deepseek-pro'), 'sk-new');
+			// Clearing it falls back to the environment.
+			await kernel.ctx.model.setSecret('deepseek-pro', '');
 			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-env';
-			assert.strictEqual(await kernel.ctx.llm.resolveKey(kernel.ctx.llm.profile('deepseek-pro')!), 'sk-env');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('deepseek-pro'), 'sk-env');
 		} finally {
 			await kernel.dispose();
 		}
@@ -6521,32 +6113,31 @@ suite('Cordis kernel', () => {
 		assert.strictEqual(normalizeEndpoint('https://api.deepseek.com/V1'), 'https://api.deepseek.com/V1', 'paths are case-sensitive');
 		assert.strictEqual(normalizeEndpoint('https://x.test/base/?account=b#frag'), 'https://x.test/base?account=b');
 		assert.strictEqual(normalizeEndpoint(''), '');
-		assert.strictEqual(normalizeEndpoint(undefined), '');
 	});
 
-	test('a model row binds to a profile that can actually run it', async () => {
+	test('a model row binds to a provider that can actually run it', async () => {
 		const kernel = await createTestKernel({
 			config: {
-				profiles: [
-					{ id: 'a', base: 'https://a.test', model: 'only-a', keyEnv: 'A_KEY' },
-					{ id: 'b', base: 'https://b.test', model: 'only-b', keyEnv: 'B_KEY' },
-				],
+				providers: {
+					a: { brand: 'custom', base: 'https://a.test', model: 'only-a', keyEnv: 'A_KEY' },
+					b: { brand: 'custom', base: 'https://b.test', model: 'only-b', keyEnv: 'B_KEY' },
+				},
 			},
 		});
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'openai',
 				async chat() {
 					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
 				},
-				async listModels(request) {
-					return request.profile.base?.includes('a.test') ? ['shared', 'only-a'] : ['shared', 'only-b'];
+				async listModels(base) {
+					return base.includes('a.test') ? ['shared', 'only-a'] : ['shared', 'only-b'];
 				},
 			});
 			kernel.host.envValues.B_KEY = 'sk-b';
-			const choices = await kernel.ctx.llm.availableModels({ refresh: true });
+			const choices = await kernel.ctx.model.availableModels({ refresh: true });
 			const shared = choices.find((choice) => choice.label === 'shared')!;
-			assert.strictEqual(shared.id, 'b:shared', 'the keyed profile wins the duplicate');
+			assert.strictEqual(shared.id, 'b:shared', 'the keyed provider wins the duplicate');
 			assert.strictEqual(shared.needsKey, false);
 			const onlyA = choices.find((choice) => choice.label === 'only-a')!;
 			assert.strictEqual(onlyA.id, 'a:only-a');
@@ -6554,7 +6145,7 @@ suite('Cordis kernel', () => {
 			assert.match(onlyA.description, /no key — set A_KEY/);
 			const auto = choices.at(-1)!;
 			assert.strictEqual(auto.label, 'Auto');
-			assert.strictEqual(auto.needsKey, true, 'Auto runs on the first profile, which has no key');
+			assert.strictEqual(auto.needsKey, true, 'Auto runs on the first provider, which has no key');
 		} finally {
 			await kernel.dispose();
 		}
@@ -6562,34 +6153,30 @@ suite('Cordis kernel', () => {
 
 	test('the model cache follows the key, so a new key is not stuck on the old list', async () => {
 		const kernel = await createTestKernel({
-			config: { profiles: [{ id: 'p', base: 'https://p.test', model: 'fallback', keyEnv: 'P_KEY' }] },
+			config: { providers: { p: { brand: 'custom', base: 'https://p.test', model: 'fallback', keyEnv: 'P_KEY' } } },
 		});
 		try {
 			let asked = 0;
-			let lastKey = '';
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'openai',
 				async chat() {
 					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
 				},
-				async listModels(request) {
+				async listModels() {
 					asked += 1;
-					lastKey = request.key;
-					return request.key ? ['with-key'] : ['without-key'];
+					return ['one-model'];
 				},
 			});
-			let choices = await kernel.ctx.llm.availableModels();
-			assert.deepStrictEqual(choices.map((choice) => choice.label), ['without-key', 'Auto']);
+			let choices = await kernel.ctx.model.availableModels();
+			assert.deepStrictEqual(choices.map((choice) => choice.label), ['one-model', 'Auto']);
 			assert.strictEqual(asked, 1);
 			// The same read is cached.
-			await kernel.ctx.llm.availableModels();
+			await kernel.ctx.model.availableModels();
 			assert.strictEqual(asked, 1);
 			// A key appears (stored, endpoint-scoped): the cached no-key list is not served.
-			await kernel.ctx.llm.setSecret('p', 'sk-p', 'https://p.test');
-			assert.strictEqual(lastKey, '', 'storing a key alone does not fetch');
-			choices = await kernel.ctx.llm.availableModels();
-			assert.deepStrictEqual(choices.map((choice) => choice.label), ['with-key', 'Auto']);
-			assert.strictEqual(asked, 2);
+			await kernel.ctx.model.setSecret('p', 'sk-p', 'https://p.test');
+			choices = await kernel.ctx.model.availableModels();
+			assert.strictEqual(asked, 2, 'the key change alone re-reads the endpoint');
 			assert.strictEqual(choices[0]!.needsKey, false);
 		} finally {
 			await kernel.dispose();
@@ -6599,7 +6186,7 @@ suite('Cordis kernel', () => {
 	test('a failed model list keeps the error for the wizard', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'openai',
 				async chat() {
 					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
@@ -6608,49 +6195,32 @@ suite('Cordis kernel', () => {
 					throw new Error('model list failed (401): invalid key');
 				},
 			});
-			const profile = kernel.ctx.settings.get().profiles[0]!;
-			const probe = await kernel.ctx.llm.probeModels(profile, '', true);
+			const probe = await kernel.ctx.model.probeInstance(kernel.ctx.model.instanceFor('auto')!, '');
 			assert.deepStrictEqual(probe.ids, []);
 			assert.match(probe.error ?? '', /401/);
-			const choices = await kernel.ctx.llm.availableModels();
+			const choices = await kernel.ctx.model.availableModels();
 			assert.match(choices[0]!.description, /models not listed/);
 		} finally {
 			await kernel.dispose();
 		}
 	});
 
-	test('a missing key names the variable to set', async () => {
-		await assert.rejects(
-			() =>
-				openAiChat({
-					base: 'https://api.deepseek.com',
-					key: '',
-					keyEnv: 'DEEPSEEK_API_KEY',
-					model: 'deepseek-flash',
-					messages: [{ role: 'user', content: 'hi' }],
-					tools: [],
-					signal: new AbortController().signal,
-				}),
-			/DEEPSEEK_API_KEY/,
-		);
-	});
-
 	test('agent runs the tool loop, streams events and records the transcript', async () => {
 		const kernel = await createTestKernel();
 		try {
 			let calls = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					calls += 1;
 					if (calls === 1) {
 						const toolCall: ToolCall = { id: 'c1', name: 'probe', arguments: JSON.stringify({ value: '42' }) };
-						request.sink.onToken?.('working');
+						request.emit('working');
 						return { message: { role: 'assistant', content: 'working', toolCalls: [toolCall] }, toolCalls: [toolCall], usage: { input: 5, output: 3 } };
 					}
 					const last = [...request.messages].reverse().find((message) => message.role === 'tool');
 					const text = `done: ${last?.content ?? ''}`;
-					request.sink.onToken?.(text);
+					request.emit(text);
 					return { message: { role: 'assistant', content: text }, toolCalls: [], usage: { input: 2, output: 2 } };
 				},
 			});
@@ -6694,7 +6264,7 @@ suite('Cordis kernel', () => {
 		try {
 			const reports: Array<number | undefined> = [60, undefined, 0];
 			let calls = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					const cached = reports[Math.min(calls, reports.length - 1)];
@@ -6723,7 +6293,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel({ config: { approval: 'manual' } });
 		try {
 			let calls = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					calls += 1;
@@ -6785,7 +6355,7 @@ suite('Cordis kernel', () => {
 			kernel.ctx.plugin(askTools);
 			let calls = 0;
 			const toolResults: string[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					calls += 1;
@@ -6839,7 +6409,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel();
 		try {
 			kernel.ctx.plugin(askTools);
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					const toolCall: ToolCall = { id: 'c1', name: 'ask_user', arguments: JSON.stringify({ question: 'Pick' }) };
@@ -6877,7 +6447,7 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel({ config: { approval: 'manual' } });
 		try {
 			let calls = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					calls += 1;
@@ -6946,7 +6516,7 @@ suite('Cordis kernel', () => {
 			kernel.host.sandboxValue = 'none';
 			let calls = 0;
 			let rejected = '';
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					calls += 1;
@@ -6996,7 +6566,7 @@ suite('Cordis kernel', () => {
 		try {
 			let calls = 0;
 			let rejected = '';
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					calls += 1;
@@ -7061,7 +6631,7 @@ flowchart TD
 		try {
 			let ran = 0;
 			let seen = '';
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					const answer = request.messages.find((message) => message.role === 'tool');
@@ -7170,7 +6740,7 @@ suite('Generations and prompt layout', () => {
 			});
 			const requests: { tools: string[]; messages: Message[] }[] = [];
 			let attempts = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					attempts += 1;
@@ -7227,7 +6797,7 @@ suite('Generations and prompt layout', () => {
 
 			const requests: { tools: string[]; messages: Message[] }[] = [];
 			let attempts = 0;
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					attempts += 1;
@@ -7266,7 +6836,7 @@ suite('Generations and prompt layout', () => {
 		try {
 			writeFileSync(join(kernel.root, 'ws', 'COMONAD.md'), 'Project rules.');
 			let seen: Message[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					seen = request.messages;
@@ -7289,7 +6859,7 @@ suite('Generations and prompt layout', () => {
 		const kernel = await createTestKernel();
 		try {
 			const replies = ['first.', 'second.', 'yours.', 'unwritten.'];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					return { message: { role: 'assistant' as const, content: replies.shift() ?? 'x' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -7331,7 +6901,7 @@ suite('Generations and prompt layout', () => {
 		const kernel = await createTestKernel();
 		try {
 			const replies = ['still here.'];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					return { message: { role: 'assistant' as const, content: replies.shift() ?? 'x' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -7365,7 +6935,7 @@ suite('Generations and prompt layout', () => {
 		const kernel = await createTestKernel();
 		try {
 			const replies = ['one.', 'two.', 'later.'];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					return { message: { role: 'assistant' as const, content: replies.shift() ?? 'x' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -7394,7 +6964,7 @@ suite('Generations and prompt layout', () => {
 		const kernel = await createTestKernel();
 		try {
 			const replies = ['one.', 'two.', 'three.', 'again.', 'again again.'];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					return { message: { role: 'assistant' as const, content: replies.shift() ?? 'x' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -7751,7 +7321,7 @@ suite('Per-file checkpoints', () => {
 		try {
 			assert.strictEqual(kernel.ctx.get('checkpoints'), undefined, 'the row is off, so nothing provides the journal');
 			const workspace = kernel.host.workspace();
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'writer',
 				async chat(request) {
 					const last = request.messages[request.messages.length - 1];
@@ -7800,7 +7370,7 @@ suite('Per-file checkpoints', () => {
 				execute: (args) => ({ echoed: (args as { value?: string }).value ?? '' }),
 			});
 			let told = '';
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'caller',
 				async chat(request) {
 					const last = request.messages[request.messages.length - 1];
@@ -7846,7 +7416,7 @@ suite('Per-file checkpoints', () => {
 		try {
 			const workspace = kernel.host.workspace();
 			writeFileSync(join(workspace, 'note.txt'), 'start\n');
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'writer',
 				async chat(request) {
 					const last = request.messages[request.messages.length - 1];
@@ -8570,7 +8140,7 @@ suite('Plan tools', () => {
 	test('an edited prompt replaces its turn and every later one', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'echo',
 				async chat(request) {
 					const last = request.messages[request.messages.length - 1];
@@ -8607,7 +8177,7 @@ suite('Plan tools', () => {
 	test('prepareRewrite can cancel before the transcript is cut, and a blocked prompt never calls it', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'echo',
 				async chat(request) {
 					const last = request.messages[request.messages.length - 1];
@@ -8659,7 +8229,7 @@ suite('Plan tools', () => {
 	test('restoring before an edit puts files back where the edited turn began', async () => {
 		const kernel = await createTestKernel({ config: { checkpoints: true } });
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'writer',
 				async chat(request) {
 					const last = request.messages[request.messages.length - 1];
@@ -9042,7 +8612,7 @@ suite('Explicit references', () => {
 		try {
 			writeFileSync(join(kernel.host.workspace(), 'note.txt'), 'note body\n');
 			let seen: Message[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					seen = request.messages;
@@ -9068,7 +8638,7 @@ suite('Explicit references', () => {
 			const note = join(kernel.host.workspace(), 'note.txt');
 			writeFileSync(note, 'first version\n');
 			const requests: Message[][] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat(request) {
 					requests.push(request.messages);
@@ -9126,7 +8696,7 @@ suite('Explicit references', () => {
 					throw new Error('boom');
 				},
 			});
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -9142,7 +8712,7 @@ suite('Explicit references', () => {
 	test('native references resolve after a rewrite has cut the transcript', async () => {
 		const kernel = await createTestKernel();
 		try {
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'test',
 				async chat() {
 					return { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -10025,13 +9595,13 @@ suite('Images', () => {
 	});
 
 	test('an image refusal is told apart from a context refusal and a reset', () => {
-		assert.ok(isImageUnsupported(new ModelRequestError(400, 'image input is not supported by this model')));
-		assert.ok(isImageUnsupported(new ModelRequestError(422, 'vision is not enabled')));
-		assert.ok(!isImageUnsupported(new ModelRequestError(400, 'maximum context length exceeded')));
-		assert.ok(!isImageUnsupported(new ModelRequestError(413, 'request too large')));
+		assert.ok(isImageUnsupported(modelHttpError(400, 'image input is not supported by this model')));
+		assert.ok(isImageUnsupported(modelHttpError(422, 'vision is not enabled')));
+		assert.ok(!isImageUnsupported(modelHttpError(400, 'maximum context length exceeded')));
+		assert.ok(!isImageUnsupported(modelHttpError(413, 'request too large')));
 		assert.ok(isTransportFailure(new TypeError('terminated')));
 		assert.ok(isTransportFailure(Object.assign(new TypeError('fetch failed'), { cause: new Error('other side closed') })));
-		assert.ok(!isTransportFailure(new ModelRequestError(500, 'boom')));
+		assert.ok(!isTransportFailure(modelHttpError(500, 'boom')));
 	});
 
 	test('read_file attaches an image and leaves text behavior alone', async () => {
@@ -10064,7 +9634,7 @@ suite('Images', () => {
 			writeFileSync(join(kernel.host.workspace(), 'pic.png'), pngOf(3, 2));
 			let calls = 0;
 			let second: Message[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'images',
 				async chat(request) {
 					calls += 1;
@@ -10101,13 +9671,13 @@ suite('Images', () => {
 			const image: ImageAttachment = { ...stored, origin: 'user' };
 			let calls = 0;
 			let first: Message[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'vision',
 				async chat(request) {
 					calls += 1;
 					if (calls === 1) {
 						first = request.messages;
-						throw new ModelRequestError(400, 'image input is not supported');
+						throw modelHttpError(400, 'image input is not supported');
 					}
 					assert.ok(request.messages.every((message) => !message.attachments?.some((part) => part.kind === 'image')), 'the retry is text only');
 					return { message: { role: 'assistant', content: 'text only' }, toolCalls: [], usage: { input: 1, output: 1 } };
@@ -10145,7 +9715,7 @@ suite('Images', () => {
 			const image: ImageAttachment = { ...stored, origin: 'user' };
 			let calls = 0;
 			const sawImages: boolean[] = [];
-			kernel.ctx.llm.use({
+			useFakeModel(kernel, {
 				name: 'reset',
 				async chat(request) {
 					calls += 1;

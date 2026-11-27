@@ -37,7 +37,8 @@ import {
 	type SoftRequest,
 } from '../lib/graph';
 import { instructionBody, loadInstructions, memoryDir, readMemory } from '../lib/instructions';
-import { isContextOverflow, isImageUnsupported, isTransportFailure, type Completion } from '../lib/openai';
+import { isContextOverflow, isImageUnsupported, isTransportFailure, type ChatResult, type InvocationContext, type UsageRecord } from '@comonad/model';
+import { freshRequestId, makeCtx } from '../lib/invocation';
 import {
 	ALL_CAPABILITIES,
 	APPROVAL_LABELS,
@@ -355,7 +356,7 @@ declare module 'cordis' {
  * `ctx.agent.runTurn()` and watch `agent/*` events.
  */
 export class Agent extends Service {
-	static inject = ['host', 'settings', 'graphs', 'sessions', 'attachments', 'references', 'tools', 'llm', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'decisions', 'orchestrator', 'log'];
+	static inject = ['host', 'settings', 'graphs', 'sessions', 'attachments', 'references', 'tools', 'model', 'hooks', 'catalog', 'commands', 'tokenizers', 'usage', 'tasks', 'approval', 'audit', 'decisions', 'orchestrator', 'log'];
 
 	private readonly turns = new Map<string, Turn>();
 	/** Session → the model that refused images there. A different model gets to try them again. */
@@ -575,12 +576,12 @@ export class Agent extends Service {
 			if (session.modelContext && !this.ctx.sessions.verifyModelContext(session)) {
 				this.notice(ref, 'The stored summary no longer matches the chat; it was dropped from the model context.');
 			}
-			if (!this.ctx.llm.known(session.policy.model) && !this.warned.has(session.id)) {
+			if (!this.ctx.model.known(session.policy.model) && !this.warned.has(session.id)) {
 				// The chat remembers a model that no longer exists; say which one runs instead, once.
 				this.warned.add(session.id);
 				this.notice(
 					{ sessionId: session.id, surface: input.surface },
-					`model profile "${session.policy.model}" is gone — using ${this.ctx.llm.describe('auto')}. Pick one from the model menu.`,
+					`model profile "${session.policy.model}" is gone — using ${this.ctx.model.describe('auto')}. Pick one from the model menu.`,
 				);
 			}
 			if (session.title === 'New session' && (text || attachments?.length)) {
@@ -592,13 +593,21 @@ export class Agent extends Service {
 				this.greeted.add(session.id);
 				const start = await abortable(
 					turn.signal,
-					this.ctx.hooks.fire('SessionStart', undefined, { session_id: session.id, cwd: session.policy.workingDirectory }),
+					this.ctx.hooks.fire('SessionStart', undefined, { session_id: session.id, cwd: session.policy.workingDirectory }, {
+						sessionId: session.id,
+						turn: session.turnIndex,
+						signal: turn.signal,
+					}),
 				);
 				contexts.push(...start.contexts);
 			}
 			const submitted = await abortable(
 				turn.signal,
-				this.ctx.hooks.fire('UserPromptSubmit', undefined, { session_id: session.id, prompt: text }),
+				this.ctx.hooks.fire('UserPromptSubmit', undefined, { session_id: session.id, prompt: text }, {
+					sessionId: session.id,
+					turn: session.turnIndex,
+					signal: turn.signal,
+				}),
 			);
 			if (submitted.blocked) {
 				restoreReplay();
@@ -748,7 +757,7 @@ export class Agent extends Service {
 			const system = promptText(applyPromptLayout(blocks, config.prompts));
 			// The context budget and every counter in the panels read the same counter, so the model's own
 			// tokenizer is made exact before anything is measured with it.
-			await abortable(turn.signal, this.ctx.tokenizers.warm(this.ctx.llm.modelName(session.policy.model)));
+			await abortable(turn.signal, this.ctx.tokenizers.warm(this.ctx.model.modelName(session.policy.model)));
 			// The budget measures exactly the tools the turn offers: none for an impersonation, the read-only
 			// set for a quiet turn.
 			const tools = this.offeredTools(trigger, session.policy);
@@ -1037,10 +1046,9 @@ export class Agent extends Service {
 
 		/** The input budget of one request: the window, less the reply's share, less the fixed part. */
 	private budgetFor(policy: SessionPolicy, window: number | undefined, system: string, tools: ToolSpec[]): Budget {
-		const profile = this.ctx.llm.profileFor(policy.model);
 		return resolveBudget(
 			this.windowOf(policy, window),
-			policy.maxTokens ?? profile?.maxTokens ?? DEFAULT_OUTPUT_RESERVE,
+			policy.maxTokens ?? this.ctx.model.maxTokensFor(policy.model) ?? DEFAULT_OUTPUT_RESERVE,
 			estimateTokens(system) + this.toolTokens(tools),
 		);
 	}
@@ -1056,7 +1064,7 @@ export class Agent extends Service {
 	 * override, so it is measured against the window of the model it runs on rather than its parent's.
 	 */
 	private windowOf(policy: SessionPolicy, override: number | undefined): number {
-		return override || this.ctx.llm.profileFor(policy.model)?.contextWindow || DEFAULT_CONTEXT_WINDOW;
+		return override || this.ctx.model.modelInfo(policy.model)?.contextWindow || DEFAULT_CONTEXT_WINDOW;
 	}
 
 	/**
@@ -1194,11 +1202,12 @@ export class Agent extends Service {
 		// must not starve it.
 		const sourceTokens = Math.max(4_000, Math.min(SUMMARY_SOURCE_TOKENS, Math.max(0, window - SUMMARY_RESERVE)));
 		const text = await this.summaryText(
-			session.policy.model,
+			makeCtx(session.id, session.turnIndex, 'compaction', signal),
+			// A summary may run on its own model — a small one for folding old turns.
+			this.ctx.settings.get().modelRoutes.compaction ?? session.policy.model,
 			older,
 			rebuild ? undefined : previous?.summary,
 			instructions,
-			signal,
 			onUsage,
 			sourceTokens,
 		);
@@ -1213,16 +1222,19 @@ export class Agent extends Service {
 	}
 
 	/** A summary is a real request: count it, but never let it overwrite the chat's last input size. */
-	private recordSummaryUsage(session: Session, usage: CompletionUsage): void {
+	private recordSummaryUsage(session: Session, usage: UsageRecord): void {
 		session.usage.inputTokens += usage.input;
 		session.usage.outputTokens += usage.output;
 		session.usage.requests += 1;
 		if (usage.cached !== undefined && Number.isFinite(usage.cached)) {
 			session.usage.cachedTokens = (session.usage.cachedTokens ?? 0) + Math.min(Math.max(0, usage.cached), usage.input);
 		}
+		if (usage.cacheWrite !== undefined && Number.isFinite(usage.cacheWrite)) {
+			session.usage.cacheWriteTokens = (session.usage.cacheWriteTokens ?? 0) + Math.max(0, usage.cacheWrite);
+		}
 		this.ctx.usage.add(usage);
-		const cost = this.ctx.llm.costFor(session.policy.model, usage);
-		if (cost > 0) {
+		const cost = this.ctx.model.costFor(session.policy.model, usage);
+		if (cost) {
 			session.usage.cost += cost;
 		}
 		this.ctx.sessions.save(session);
@@ -1387,7 +1399,7 @@ export class Agent extends Service {
 		signal: AbortSignal,
 		session: Session | undefined,
 		live: boolean,
-	): Promise<{ completion: Completion; messages: Message[] }> {
+	): Promise<{ completion: ChatResult; messages: Message[] }> {
 		// Whether this attempt already reached the screen. A failure after tokens were streamed must not
 		// retry: the reader would see the answer twice.
 		let streamed = false;
@@ -1405,33 +1417,39 @@ export class Agent extends Service {
 			);
 		};
 		const callSignal = AbortSignal.any([signal, watchdog.signal]);
-		const call = (messages: Message[]): Promise<Completion> =>
-			this.ctx.llm.chat(
-				state.policy.model,
-				messages,
+		// One invocation context per request; a semantic retry below mints a fresh requestId.
+		const callCtx = makeCtx(state.sessionId, state.turn, 'chat', callSignal, {
+			...(state.ref.surface ? { surface: state.ref.surface } : {}),
+			...(state.agentName ? { agentName: state.agentName } : {}),
+		});
+		const call = (messages: Message[]): Promise<ChatResult> =>
+			this.ctx.model.chat({
+				model: state.policy.model,
+				// The transcript keeps attachment metadata only; the request copy carries the bytes.
+				messages: this.ctx.attachments.resolveMessages(messages),
 				tools,
-				{
-					onToken: (text) => {
+				ctx: freshRequestId(callCtx),
+				options: { reasoningEffort: this.ctx.model.effortFor(state.policy.model, session?.reasoningEffort ?? 'auto') },
+				onEvent: (event) => {
+					if (event.type === 'text') {
 						streamed = true;
 						arm();
-						this.ctx.emit('agent/token', state.ref, text);
-					},
-					onReasoning: (text) => {
+						this.ctx.emit('agent/token', state.ref, event.text);
+					} else if (event.type === 'reasoning') {
 						streamed = true;
 						arm();
-						this.ctx.emit('agent/reasoning', state.ref, text);
-					},
-					onToolDelta: (call) => {
+						this.ctx.emit('agent/reasoning', state.ref, event.text);
+					} else if (event.type === 'tool-call') {
 						streamed = true;
 						arm();
-						this.ctx.emit('agent/tool-delta', state.ref, call);
-					},
+						this.ctx.emit('agent/tool-delta', state.ref, event.call);
+					} else if (event.type === 'notice') {
+						this.notice(state.ref, event.message);
+					}
 				},
-				callSignal,
-				{ reasoningEffort: session?.reasoningEffort },
-			);
+			});
 		arm();
-		const attempt = (messages: Message[]): Promise<Completion> => {
+		const attempt = (messages: Message[]): Promise<ChatResult> => {
 			streamed = false;
 			return call(messages);
 		};
@@ -1441,7 +1459,7 @@ export class Agent extends Service {
 		const refusedModel = this.imagesOff.get(state.sessionId);
 		const off = refusedModel === state.policy.model || state.imagesOff === state.policy.model;
 		let messages = off ? stripImageAttachments(state.messages) : state.messages;
-		let completion: Completion;
+		let completion: ChatResult;
 		// A new chat has no provider count yet, so the status line would show no context segment during
 		// its first reply. Hand the surface the same local estimate that calibrates the provider's count
 		// below, marked provisional. Emitted once per request, outside `attempt`, so an image, transport
@@ -1464,20 +1482,13 @@ export class Agent extends Service {
 				messages = stripImageAttachments(state.messages);
 				completion = await attempt(messages);
 			} else if (isTransportFailure(error) && !streamed && hasImageAttachments(messages) && !off) {
-				// The usual cause is a stale keep-alive socket; one repeat can succeed. If it does not,
-				// the endpoint cannot take the picture and the text is still worth answering.
-				this.notice(state.ref, `The connection ended while sending images (${describe(error)}); retrying once.`);
-				try {
-					completion = await attempt(messages);
-				} catch (again) {
-					if (!isTransportFailure(again)) {
-						throw again;
-					}
-					state.imagesOff = state.policy.model;
-					this.notice(state.ref, 'Images could not be sent to this endpoint; resending the request as text.');
-					messages = stripImageAttachments(state.messages);
-					completion = await attempt(messages);
-				}
+				// The runtime already retried the same request while nothing streamed — the usual
+				// cause is a stale keep-alive socket. If the connection still refuses, the endpoint
+				// cannot take the picture and the text is still worth answering.
+				state.imagesOff = state.policy.model;
+				this.notice(state.ref, `Images could not be sent to this endpoint (${describe(error)}); resending the request as text.`);
+				messages = stripImageAttachments(state.messages);
+				completion = await attempt(messages);
 			} else if (!isContextOverflow(error)) {
 				throw error;
 			} else {
@@ -1511,14 +1522,19 @@ export class Agent extends Service {
 				session.usage.cachedTokens =
 					(session.usage.cachedTokens ?? 0) + Math.min(Math.max(0, cached), completion.usage.input);
 			}
+			const cacheWrite = completion.usage.cacheWrite;
+			if (cacheWrite !== undefined && Number.isFinite(cacheWrite)) {
+				session.usage.cacheWriteTokens = (session.usage.cacheWriteTokens ?? 0) + Math.max(0, cacheWrite);
+			}
 			session.lastInputTokens = completion.usage.input;
 			// The local estimate for the request whose size the provider just reported. Their ratio
 			// calibrates the next pressure check against the endpoint's own tokenizer.
 			session.lastEstimateTokens = estimateMessages(messages) + this.toolTokens(tools);
 			session.lastInputModel = state.policy.model;
 			this.ctx.usage.add(completion.usage);
-			const cost = this.ctx.llm.costFor(state.policy.model, completion.usage);
-			if (cost > 0) {
+			// An unpriced model is null — cost stays untouched rather than pretending it is free.
+			const cost = this.ctx.model.costFor(state.policy.model, completion.usage);
+			if (cost) {
 				session.usage.cost += cost;
 				this.checkBudget(session, state.ref);
 			}
@@ -1614,12 +1630,12 @@ export class Agent extends Service {
 	 * so in the text the model sees. A previous summary is handed over as the base to extend.
 	 */
 	private async summaryText(
+		ctx: InvocationContext,
 		model: string,
 		older: Message[],
 		previous?: string,
 		instructions?: string,
-		signal?: AbortSignal,
-		onUsage?: (usage: { input: number; output: number }) => void,
+		onUsage?: (usage: UsageRecord) => void,
 		sourceTokens = SUMMARY_SOURCE_TOKENS,
 	): Promise<string> {
 		const lines = older.map((message) => {
@@ -1647,10 +1663,10 @@ export class Agent extends Service {
 			tail.unshift(lines[index]!);
 		}
 		const omitted = lines.length - head - tail.length;
-		const text = await this.ctx.llm.complete(
+		const text = await this.ctx.model.complete({
 			model,
-			this.summaryInstruct(instructions),
-			[
+			system: this.summaryInstruct(instructions),
+			prompt: [
 				previous ? `It was summarized once before; extend that summary rather than starting over:\n\n${previous}` : '',
 				`The earliest turns:\n\n${lines.slice(0, head).join('\n\n')}`,
 				omitted > 0 ? `[...${omitted} messages between these were left out of this request]` : '',
@@ -1658,19 +1674,16 @@ export class Agent extends Service {
 			]
 				.filter(Boolean)
 				.join('\n\n'),
-			{
-				signal,
-				onUsage,
-				// Summarizing is not reasoning: the chat's Max effort belongs to the answer, not to
-				// folding old turns, and a thinking summary can sit for minutes before emitting text.
-				reasoningEffort: 'none',
-				// A thinking-only reply from a profile that cannot switch thinking off must not look
-				// like a silently empty summary.
-				rejectReasoningOnly: true,
-				maxTokens: SUMMARY_MAX_TOKENS,
-				timeoutMs: SUMMARY_TIMEOUT_MS,
-			},
-		);
+			ctx,
+			// Summarizing is not reasoning: the chat's Max effort belongs to the answer, not to
+			// folding old turns, and a thinking summary can sit for minutes before emitting text.
+			// A thinking-only reply from a provider that cannot switch thinking off must not look
+			// like a silently empty summary.
+			options: { reasoningEffort: 'none', maxTokens: SUMMARY_MAX_TOKENS },
+			rejectReasoningOnly: true,
+			timeoutMs: SUMMARY_TIMEOUT_MS,
+			onUsage,
+		});
 		return text.length <= SUMMARY_TEXT_LIMIT
 			? text
 			: `${text.slice(0, SUMMARY_TEXT_LIMIT)}\n[... summary truncated, ${text.length - SUMMARY_TEXT_LIMIT} chars]`;
@@ -1738,7 +1751,7 @@ export class Agent extends Service {
 		// list that would have been offered without the block.
 		const visible = this.toolModes.get(session.id) === false ? [] : this.ctx.tools.visible(session.policy);
 		const files = session.instructions ?? [];
-		const profile = this.ctx.llm.profileFor(session.policy.model);
+		const instance = this.ctx.model.instanceFor(session.policy.model);
 		const system = this.systems.get(session.id) ?? '';
 		const budget = this.budgetFor(session.policy, session.contextWindow, system, visible);
 		const room = this.roomFor(budget);
@@ -1746,9 +1759,9 @@ export class Agent extends Service {
 		const ratio = calibrationRatio(sample);
 		const currentPressure = calibrate(estimateMessages(modelHistory) + budget.overhead, sample);
 		const used = session.lastInputTokens;
-		const windowLine = profile?.contextWindow
-			? `- window: ${budget.window} tokens${session.contextWindow ? ' (set for this chat)' : ` — from the ${profile.label || profile.id} profile`}`
-			: `- window: ${budget.window} tokens — **a fallback, not this model's own**. Set \`contextWindow\` on its profile.`;
+		const windowLine = this.ctx.model.modelInfo(session.policy.model)?.contextWindow
+			? `- window: ${budget.window} tokens${session.contextWindow ? ' (set for this chat)' : ` — from the ${instance?.id ?? 'first'} provider`}`
+			: `- window: ${budget.window} tokens — **a fallback, not this model's own**. Set \`contextWindow\` on its provider.`;
 		return [
 			'**Context**',
 			windowLine,
@@ -1856,8 +1869,13 @@ export class Agent extends Service {
 					resume: cursor,
 					signal,
 					choose: (request: SoftRequest) =>
-						this.ctx.llm.choose(state.policy.model, request, signal, (usage) =>
-							state.budget?.spendTokens(usage.input + usage.output),
+						this.ctx.model.choose(
+							this.ctx.settings.get().modelRoutes.softRoute ?? state.policy.model,
+							request,
+							makeCtx(state.sessionId, state.turn, 'soft-route', signal, {
+								...(state.ref.surface ? { surface: state.ref.surface } : {}),
+							}),
+							(usage) => state.budget?.spendTokens(usage.input + usage.output),
 						),
 					// The chat's stored transcript follows the turn as it runs. A panel that reloads or
 					// resyncs mid-turn can then redraw the steps it missed, and a turn suspended on an
@@ -1931,10 +1949,15 @@ export class Agent extends Service {
 	private fireStop(session: Session, state: RunState, signal: AbortSignal) {
 		return abortable(
 			signal,
-			this.ctx.hooks.fire('Stop', undefined, {
-				session_id: session.id,
-				last_assistant_message: lastAssistant(state.transcript)?.content ?? '',
-			}),
+			this.ctx.hooks.fire(
+				'Stop',
+				undefined,
+				{
+					session_id: session.id,
+					last_assistant_message: lastAssistant(state.transcript)?.content ?? '',
+				},
+				{ sessionId: state.sessionId, turn: state.turn, signal },
+			),
 		);
 	}
 
@@ -2327,11 +2350,16 @@ export class Agent extends Service {
 				try {
 					pre = await abortable(
 						runtime.signal,
-						this.ctx.hooks.fire('PreToolUse', call.name, {
-							session_id: state.sessionId,
-							tool_name: call.name,
-							tool_input: parseArguments(call.arguments),
-						}),
+						this.ctx.hooks.fire(
+							'PreToolUse',
+							call.name,
+							{
+								session_id: state.sessionId,
+								tool_name: call.name,
+								tool_input: parseArguments(call.arguments),
+							},
+							{ sessionId: state.sessionId, turn: state.turn, signal: runtime.signal },
+						),
 					);
 				} catch (error) {
 					if (runtime.signal.aborted) {
@@ -2388,12 +2416,17 @@ export class Agent extends Service {
 					try {
 						post = await abortable(
 							runtime.signal,
-							this.ctx.hooks.fire(failed ? 'PostToolUseFailure' : 'PostToolUse', call.name, {
-								session_id: state.sessionId,
-								tool_name: call.name,
-								tool_input: parseArguments(args),
-								tool_response: outcome.content,
-							}),
+							this.ctx.hooks.fire(
+								failed ? 'PostToolUseFailure' : 'PostToolUse',
+								call.name,
+								{
+									session_id: state.sessionId,
+									tool_name: call.name,
+									tool_input: parseArguments(args),
+									tool_response: outcome.content,
+								},
+								{ sessionId: state.sessionId, turn: state.turn, signal: runtime.signal },
+							),
 						);
 					} catch (error) {
 						if (runtime.signal.aborted) {
@@ -3327,8 +3360,13 @@ export class Agent extends Service {
 				runGraph(this.graph(), current, {
 					signal: abort.signal,
 					choose: (soft: SoftRequest) =>
-						this.ctx.llm.choose(policy.model, soft, abort.signal, (usage) =>
-							state.budget?.spendTokens(usage.input + usage.output),
+						this.ctx.model.choose(
+							this.ctx.settings.get().modelRoutes.softRoute ?? policy.model,
+							soft,
+							makeCtx(state.sessionId, state.turn, 'soft-route', abort.signal, {
+								...(state.agentName ? { agentName: state.agentName } : {}),
+							}),
+							(usage) => state.budget?.spendTokens(usage.input + usage.output),
 						),
 					onStep: (next) => remember(next.transcript),
 				});

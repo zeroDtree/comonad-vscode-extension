@@ -6,7 +6,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import * as vscode from 'vscode';
 import type { Context } from 'cordis';
 import { COMONAD_BLOCK, COMONAD_BLOCKS, DEFAULT_BLOCK_PREFIX, type ComonadBlockId } from '../lib/blocks';
-import { isLoopbackBase, normalizeEndpoint } from '../lib/endpoint';
+import { isLoopbackBase } from '../lib/endpoint';
 import { defaultPromptLayout, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
 import { pluginNodeStatus, pluginTree, type PluginNode } from '../lib/plugins';
 import {
@@ -22,7 +22,9 @@ import { type ContextForm } from '../lib/prompt';
 import { ensureSettingsFile, settingsDisplayPath, workspaceFirstScope, type SettingsScope } from '../lib/settings-file';
 import { estimateTokens } from '../lib/tokens';
 import { describe } from '../lib/util';
-import { asList, normalizeAgentPatch, profileKeyEnvs, sanitizeSubagentGrants, subagentGrant, type Profile, type ToolCardMode } from '../services/settings';
+import { asList, normalizeAgentPatch, providersOf, sanitizeProviders, sanitizeSubagentGrants, subagentGrant, type ToolCardMode } from '../services/settings';
+import { formatModelId } from '../services/model';
+import type { ProviderInstanceConfig } from '@comonad/model';
 import { unavailableInSandbox } from '../services/tools';
 import { registerCommand } from './register';
 
@@ -230,7 +232,7 @@ export function settingsPanel(ctx: Context): void {
 	 * The model list the panel shows. It is fetched off the push path — an endpoint that is slow or
 	 * down must never stall a state message — and posted on its own when it lands.
 	 */
-	let lastModels: Awaited<ReturnType<typeof ctx.llm.availableModels>> = [];
+	let lastModels: Awaited<ReturnType<typeof ctx.model.availableModels>> = [];
 	let modelsAt = 0;
 	let modelsInFlight: Promise<void> | null = null;
 	/** A forced refresh arrived while a fetch was running: its answer is already stale. */
@@ -250,7 +252,7 @@ export function settingsPanel(ctx: Context): void {
 				let refresh = force;
 				for (;;) {
 					modelsDirty = false;
-					lastModels = await ctx.llm.availableModels({ refresh });
+					lastModels = await ctx.model.availableModels({ refresh });
 					modelsAt = Date.now();
 					if (!modelsDirty) {
 						break;
@@ -301,6 +303,8 @@ export function settingsPanel(ctx: Context): void {
 				questionNotification: config.questionNotification,
 				excludeComonadFromReview: config.excludeComonadFromReview,
 				model: config.model,
+				providers: config.providers,
+				modelRoutes: config.modelRoutes,
 				permissions: config.permissions,
 			},
 			subagents: {
@@ -473,6 +477,35 @@ export function settingsPanel(ctx: Context): void {
 		};
 	};
 
+	/**
+	 * Probe every provider and hand the rows to the panel. Touches no settings, so no
+	 * state push — a completion here must never re-arm the push that clears the table.
+	 */
+	const postProviderStatus = async (): Promise<void> => {
+		if (!panel) {
+			return;
+		}
+		const rows: Record<string, unknown>[] = [];
+		for (const instance of providersOf(ctx.settings.get())) {
+			const keyReady = await ctx.model.keyReady(instance.id);
+			const probe = await ctx.model.probeModels(instance.id);
+			rows.push({
+				id: instance.id,
+				brand: instance.brand,
+				base: instance.base,
+				model: instance.model ?? '',
+				keyReady,
+				listed: probe.ids.length,
+				rules: instance.modelRules ? `${instance.modelRules.prefix ?? ''} ${instance.modelRules.skip ?? ''}`.trim() : '',
+				fallback: (instance.fallback ?? []).join(' → '),
+				error: probe.error ?? '',
+			});
+		}
+		if (panel) {
+			void panel.webview.postMessage({ type: 'providerStatus', rows });
+		}
+	};
+
 	const handle = async (message: Record<string, unknown>): Promise<void> => {
 		if (!panel) {
 			return;
@@ -506,7 +539,45 @@ export function settingsPanel(ctx: Context): void {
 					break;
 				case 'configureModel':
 					await vscode.commands.executeCommand('comonad.configureModel');
+					// A newly added provider shows without another click on List models.
+					void postProviderStatus();
 					break;
+				case 'saveProviders': {
+					let parsed: unknown;
+					try {
+						parsed = JSON.parse(String(message.json ?? '{}')) as unknown;
+					} catch {
+						void panel.webview.postMessage({ type: 'error', message: 'Providers must be a JSON object.' });
+						return;
+					}
+					const scope = panelScope(message.scope);
+					await ctx.settings.update('providers', sanitizeProviders(parsed), scope);
+					ctx.model.invalidateCatalog();
+					void panel.webview.postMessage({
+						type: 'ok',
+						message: `Providers updated in ${settingsDisplayPath(ctx.host.settingsPath(scope), homedir())}.`,
+					});
+					void refreshModels(true);
+					void postProviderStatus();
+					break;
+				}
+				case 'saveRoutes': {
+					const routes = (message.routes ?? {}) as Record<string, unknown>;
+					const clean: Record<string, string> = {};
+					for (const key of ['compaction', 'softRoute', 'hook'] as const) {
+						const value = routes[key];
+						if (typeof value === 'string' && value.trim()) {
+							clean[key] = value.trim();
+						}
+					}
+					await ctx.settings.update('modelRoutes', clean, panelScope(message.scope));
+					void panel.webview.postMessage({ type: 'ok', message: 'Model routing saved.' });
+					break;
+				}
+				case 'probeProviders':
+					// No settings changed: answer with rows only, and skip the fall-through schedulePush.
+					await postProviderStatus();
+					return;
 				case 'saveMcp': {
 					const parsed = JSON.parse(String(message.json ?? '{}')) as Record<string, unknown>;
 					const scope = panelScope(message.scope);
@@ -625,10 +696,10 @@ export function settingsPanel(ctx: Context): void {
 	registerCommand(ctx, 'comonad.pickModel', () => pickModel(ctx));
 	registerCommand(ctx, 'comonad.configureModel', () => configureModel(ctx));
 }
-settingsPanel.inject = ['host', 'settings', 'llm', 'tools', 'mcp', 'sessions', 'agent', 'catalog'];
+settingsPanel.inject = ['host', 'settings', 'model', 'tools', 'mcp', 'sessions', 'agent', 'catalog'];
 
 export async function pickModel(ctx: Context): Promise<void> {
-	const choices = await ctx.llm.availableModels({ refresh: true });
+	const choices = await ctx.model.availableModels({ refresh: true });
 	const picked = await vscode.window.showQuickPick(
 		[
 			...choices.map((choice) => ({
@@ -662,20 +733,36 @@ export async function pickModel(ctx: Context): Promise<void> {
 }
 
 export async function configureModel(ctx: Context): Promise<void> {
-	const shipped = ctx.settings.get().profiles[0];
+	// With nothing configured the shipped instances stand in, so "add a provider" starts from
+	// them: the written map materializes the set the user sees, plus the new one.
+	const configured = providersOf(ctx.settings.get());
+	const sample = configured[0];
 	const id = await vscode.window.showInputBox({
-		prompt: 'Profile id (letters, digits, dash, no colon)',
-		value: `${shipped?.id ?? 'my-model'}-2`,
+		prompt: 'Provider id (letters, digits, dash, no colon)',
+		value: `${sample?.id ?? 'my-provider'}-2`,
 		ignoreFocusOut: true,
 	});
 	if (!id) {
 		return;
 	}
 	if (id.includes(':')) {
-		void vscode.window.showWarningMessage('Comonad: a profile id cannot contain ":", it separates the model in `comonad.model`.');
+		void vscode.window.showWarningMessage('Comonad: a provider id cannot contain ":", it separates the model in `comonad.model`.');
 		return;
 	}
-	const base = await vscode.window.showInputBox({ prompt: 'API base URL', value: shipped?.base ?? '', ignoreFocusOut: true });
+	const brand = await vscode.window.showQuickPick(
+		[
+			{ label: 'custom', description: 'Any OpenAI-compatible endpoint; everything comes from this wizard', id: 'custom' },
+			{ label: 'deepseek', description: 'DeepSeek — its thinking switch and cache prices ride along', id: 'deepseek' },
+			{ label: 'openai', description: 'OpenAI', id: 'openai' },
+			{ label: 'opencode-go', description: 'OpenCode Go — session header, its own chat and models paths', id: 'opencode-go' },
+			{ label: 'google', description: "Google's OpenAI-compatible layer — models/ prefix, thought signatures", id: 'google' },
+		],
+		{ title: `${id}: which brand does this endpoint speak?`, ignoreFocusOut: true },
+	);
+	if (!brand) {
+		return;
+	}
+	const base = await vscode.window.showInputBox({ prompt: 'API base URL', value: sample?.base ?? '', ignoreFocusOut: true });
 	if (!base) {
 		return;
 	}
@@ -689,15 +776,9 @@ export async function configureModel(ctx: Context): Promise<void> {
 			return;
 		}
 	}
-	// A profile on an endpoint that is already configured inherits the provider-level facts; the
-	// per-model ones (pricing, window, samplers) are copied later only if it declares the same model.
-	// Hand-written profiles get the same completion from `inheritProfileDefaults` (services/settings.ts):
-	// keep the two field groups in sync.
-	const identity = normalizeEndpoint(base);
-	const match = ctx.settings.get().profiles.find((profile) => identity && normalizeEndpoint(profile.base) === identity);
 	const keyEnvAnswer = await vscode.window.showInputBox({
 		prompt: 'Environment variable(s) holding the key, comma separated (optional)',
-		value: profileKeyEnvs(match ?? shipped ?? { id: '', model: '' }).join(', '),
+		value: '',
 		ignoreFocusOut: true,
 	});
 	if (keyEnvAnswer === undefined) {
@@ -707,18 +788,11 @@ export async function configureModel(ctx: Context): Promise<void> {
 		.split(',')
 		.map((name) => name.trim())
 		.filter(Boolean);
-	const profile: Profile = { id, base, model: '', includeUsage: match?.includeUsage ?? true };
-	if (match) {
-		profile.provider = match.provider;
-		profile.modelPrefix = match.modelPrefix;
-		profile.modelSkip = match.modelSkip;
-		profile.thinkingOff = match.thinkingOff;
-		profile.topEffort = match.topEffort;
-		profile.keyEnv = keyEnv.length ? keyEnv : match.keyEnv;
-	} else if (keyEnv.length) {
-		profile.keyEnv = keyEnv;
+	const instance: ProviderInstanceConfig = { id, brand: brand.id, base, model: '' };
+	if (keyEnv.length) {
+		instance.keyEnv = keyEnv;
 	}
-	const existing = await ctx.llm.resolveKey(profile);
+	const existing = await ctx.model.storedKeyFor(base);
 	const key = await vscode.window.showInputBox({
 		prompt: existing
 			? 'API key — this endpoint already has a saved key; leave empty to reuse it'
@@ -731,52 +805,40 @@ export async function configureModel(ctx: Context): Promise<void> {
 	if (key === undefined) {
 		return;
 	}
-	// Ask the endpoint what it offers, so the saved profile names a model that exists. The key is used
-	// here but only stored after the profile is saved, so cancelling leaves no secret behind.
-	const probe = await ctx.llm.probeModels(profile, key || existing, true);
+	// Ask the endpoint what it offers, so the saved instance names a model that exists. The key is used
+	// here but only stored after the instance is saved, so cancelling leaves no secret behind.
+	const probe = await ctx.model.probeInstance(instance, key || existing);
 	if (probe.error) {
 		void vscode.window.showWarningMessage(`Comonad: could not list models from ${base}: ${probe.error}`);
 	}
-	const declared = match?.model ?? shipped?.model ?? '';
-	const offered = probe.ids.length ? probe.ids : declared ? [declared] : [];
 	const model = await vscode.window.showQuickPick(
-		offered.filter((value, index, all) => all.indexOf(value) === index),
+		[...new Set(probe.ids)],
 		{ title: `${id}: pick the model`, ignoreFocusOut: true },
 	);
 	if (!model) {
-		const typed = await vscode.window.showInputBox({ prompt: 'Model name', value: declared, ignoreFocusOut: true });
+		const typed = await vscode.window.showInputBox({ prompt: 'Model name', value: '', ignoreFocusOut: true });
 		if (!typed) {
 			return;
 		}
-		profile.model = typed;
+		instance.model = typed;
 	} else {
-		profile.model = model;
+		instance.model = model;
 	}
-	// The metadata belongs to the model, not to the endpoint: copy it from any configured profile that
-	// declares this exact model (DeepSeek Pro prices and window are not Flash's), not merely from the
-	// first profile on the endpoint.
-	const declaredBy = identity
-		? ctx.settings.get().profiles.find((item) => item.model === profile.model && normalizeEndpoint(item.base) === identity)
-		: undefined;
-	if (declaredBy) {
-		profile.label = declaredBy.label;
-		profile.topEffort = declaredBy.topEffort;
-		profile.contextWindow = declaredBy.contextWindow;
-		profile.pricingIn = declaredBy.pricingIn;
-		profile.pricingCachedIn = declaredBy.pricingCachedIn;
-		profile.pricingOut = declaredBy.pricingOut;
-		profile.temperature = declaredBy.temperature;
-		profile.topP = declaredBy.topP;
-		profile.maxTokens = declaredBy.maxTokens;
+	// Model facts (window, prices, thinking quirks) are not copied around: the brand carries them
+	// and the merge engine layers them under this instance at resolve time.
+	const providers: Record<string, ProviderInstanceConfig> = {};
+	for (const entry of configured) {
+		if (entry.id !== id) {
+			providers[entry.id] = entry;
+		}
 	}
-	const profiles = ctx.settings.get().profiles.filter((item) => item.id !== id);
-	profiles.push(profile);
-	await ctx.settings.update('profiles', profiles);
-	await ctx.settings.update('model', `${id}:${profile.model}`);
+	providers[id] = instance;
+	await ctx.settings.update('providers', providers);
+	await ctx.settings.update('model', formatModelId(id, instance.model));
 	if (key) {
-		await ctx.llm.setSecret(id, key, base);
+		await ctx.model.setSecret(id, key, base);
 	}
-	void vscode.window.showInformationMessage(`Comonad: profile ${id} saved (${profile.model}).`);
+	void vscode.window.showInformationMessage(`Comonad: provider ${id} saved (${instance.model}).`);
 }
 
 /** A pane names its own tab and titles it, and that text lands in the host's markup: it is escaped. */
@@ -790,6 +852,9 @@ const tabIcon = (body: string): string => `<svg viewBox="0 0 16 16" aria-hidden=
 const TAB_ICONS = {
 	agent: tabIcon(
 		'<rect x="3" y="5" width="10" height="7" rx="2"/><path d="M8 2.3v2.7M5.7 8.1h.01M10.3 8.1h.01M6.2 11.9v1.6M9.8 11.9v1.6"/>',
+	),
+	models: tabIcon(
+		'<ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v4c0 1.1 2.2 2 5 2s5-.9 5-2V4"/><path d="M3 8v4c0 1.1 2.2 2 5 2s5-.9 5-2V8"/>',
 	),
 	policies: tabIcon('<path d="M8 2.2 12.5 4v3.2c0 2.8-1.8 5-4.5 5.6-2.7-.6-4.5-2.8-4.5-5.6V4z"/><path d="M5.8 7.6 7.3 9l3-3"/>'),
 	ui: tabIcon(
@@ -846,6 +911,7 @@ export function settingsDocument(
     <input id="search" class="control" type="search" placeholder="Search settings" spellcheck="false" autocomplete="off" />
     <nav id="tabs" role="tablist" aria-orientation="vertical" aria-label="Comonad settings">
 ${tabButton('agent', 'Agent', 'Agent — model, workspace, conversation', TAB_ICONS.agent)}
+${tabButton('models', 'Models', 'Models — provider connections, discovery and routing', TAB_ICONS.models)}
 ${tabButton('policies', 'Policies', 'Policies — the runtime policy pipeline', TAB_ICONS.policies)}
 ${tabButton('ui', 'UI', 'UI — how the conversation is displayed', TAB_ICONS.ui)}
 ${tabButton('subagents', 'Subagents', 'Subagents — step budget and per-agent capability grants', TAB_ICONS.subagents)}
@@ -953,6 +1019,38 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
       <div class="field">
         <label for="budget-milliseconds">Time (ms)</label>
         <input id="budget-milliseconds" class="control" type="number" min="0" step="1" />
+      </div>
+    </div>
+  </section>
+
+  <section data-pane="models" hidden>
+    <h1 class="page-title">Models</h1>
+    <p class="group-note">One provider instance per entry: <code>{ "id": { "brand": "deepseek", "base": "https://api.deepseek.com", "model": "deepseek-flash", "keyEnv": "DEEPSEEK_API_KEY" } }</code>. An empty map uses the shipped instances. Per-model facts (<code>models</code>), paths, headers, options, retry and the <code>fallback</code> chain ride on the same entries.</p>
+    <div class="group">
+      <div class="field">
+        <label for="providers">Providers</label>
+        <p class="hint">JSON object keyed by provider id. The wizard fills one in for you; edit facts, paths or the fallback chain here.</p>
+        <textarea id="providers" class="control" spellcheck="false" style="min-height:200px"></textarea>
+        <div class="row">
+          <button class="secondary" id="providers-save" type="button">Save providers</button>
+          <button class="secondary" id="providers-add" type="button">Add provider…</button>
+          <button class="secondary" id="providers-probe" type="button">List models</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>Status</label>
+        <p class="hint">What each effective instance resolves to, and what its endpoint lists.</p>
+        <table id="provider-status"></table>
+      </div>
+      <div class="field">
+        <label>Model routing</label>
+        <p class="hint">Per-purpose overrides as <code>provider[:model]</code> ids. Empty uses the chat's own model.</p>
+        <div class="row">
+          <input class="control" id="route-compaction" placeholder="compaction (summaries)" spellcheck="false" />
+          <input class="control" id="route-softRoute" placeholder="soft routes (graph choices)" spellcheck="false" />
+          <input class="control" id="route-hook" placeholder="prompt hooks" spellcheck="false" />
+          <button class="secondary" id="routes-save" type="button">Save routing</button>
+        </div>
       </div>
     </div>
   </section>

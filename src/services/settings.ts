@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
+import { SHIPPED_INSTANCES, type ModelInfo, type ProviderInstanceConfig } from '@comonad/model';
 import { BUILTIN_ROLES, READ_ONLY_GRANT, type AgentRole, type SubagentGrant } from '../lib/agents';
 import { normalizeBudget, type BudgetLimits, type SubagentBudgetMode } from '../lib/budget';
-import { normalizeEndpoint } from '../lib/endpoint';
-import type { EffortTop } from '../lib/effort';
 import { asApproval, asApprovalResponse, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
 import {
 	DEFAULT_COMPACTION_HEADROOM,
@@ -30,113 +29,247 @@ export const DEFAULT_SUBAGENT_BUDGET: BudgetLimits = { turns: 24, tools: 100, to
 export const SUBAGENT_BUDGET_MODES: readonly SubagentBudgetMode[] = ['inherit', 'custom'];
 export const DEFAULT_SUBAGENT_BUDGET_MODE: SubagentBudgetMode = 'inherit';
 
-export interface Profile {
-	id: string;
-	label?: string;
-	/** Which model adapter runs this profile; the built-in one is `openai`. */
-	provider?: string;
-	base?: string;
-	/** The model a bare profile id selects; the model menu lists what the endpoint itself reports. */
-	model: string;
-	/**
-	 * Prefix the endpoint puts on the ids it reports (`GET /models`), stripped so the menu and the
-	 * requests use the plain name — Gemini answers `models/gemini-3.8-flash`, chats as `gemini-3.8-flash`.
-	 */
-	modelPrefix?: string;
-	/** Regex of reported model ids to leave out of the menu — providers list non-chat models too. */
-	modelSkip?: string;
-	/** Environment variable(s) holding the key when none is stored in the OS keychain, tried in order. */
-	keyEnv?: string | string[];
-	/** How this endpoint turns thinking off for the `none` effort (`thinking` = DeepSeek's field). */
-	thinkingOff?: 'thinking' | 'effort';
-	/** The deepest thinking level the endpoint accepts; a pick above it runs at this level. */
-	topEffort?: EffortTop;
-	temperature?: number;
-	topP?: number;
-	maxTokens?: number;
-	/**
-	 * The model's input window in tokens. This is what `Auto` resolves the chat's budget from, so a
-	 * model missing here counts against `DEFAULT_CONTEXT_WINDOW` and the panel says so rather than
-	 * guessing silently. Values come from the provider's own documentation.
-	 */
-	contextWindow?: number;
-	includeUsage?: boolean;
-	/** USD per million input tokens (cache miss), for /cost estimates. */
-	pricingIn?: number;
-	/** USD per million input tokens served from the prompt cache. */
-	pricingCachedIn?: number;
-	/** USD per million output tokens. */
-	pricingOut?: number;
+/**
+ * A user's `comonad.providers` map: one provider instance per entry — the connection, its brand,
+ * and whatever the user overrides. Empty (or absent) means "use SHIPPED_INSTANCES". Model facts
+ * (windows, prices, thinking quirks) are not configured here: the brand carries them and the
+ * merge engine layers them under the instance at resolve time.
+ */
+export type ProviderMap = Record<string, ProviderInstanceConfig>;
+
+const PROVIDER_NAME = /^[a-z0-9][a-z0-9._-]*$/;
+const MAX_PROVIDER_INSTANCES = 64;
+
+/** A settings file is untrusted input: bad entries drop out, good ones survive. */
+export function sanitizeProviders(value: unknown): ProviderMap {
+	const out: ProviderMap = {};
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return out;
+	}
+	for (const [rawName, rawInstance] of Object.entries(value as Record<string, unknown>).slice(0, MAX_PROVIDER_INSTANCES)) {
+		const name = rawName.trim().toLowerCase();
+		if (!PROVIDER_NAME.test(name) || name.length > 64 || UNSAFE_PROVIDER_KEYS.has(name)) {
+			continue;
+		}
+		if (!rawInstance || typeof rawInstance !== 'object' || Array.isArray(rawInstance)) {
+			continue;
+		}
+		const entry = rawInstance as Record<string, unknown>;
+		const brand = typeof entry.brand === 'string' ? entry.brand.trim() : '';
+		const base = typeof entry.base === 'string' ? entry.base.trim() : '';
+		const model = typeof entry.model === 'string' ? entry.model.trim() : '';
+		if (!brand || !base || !model) {
+			continue;
+		}
+		const instance: ProviderInstanceConfig = { id: name, brand, base, model };
+		if (typeof entry.protocol === 'string' && entry.protocol.trim()) {
+			instance.protocol = entry.protocol.trim();
+		}
+		const keyEnv = Array.isArray(entry.keyEnv)
+			? entry.keyEnv.map((item) => String(item).trim()).filter(Boolean)
+			: typeof entry.keyEnv === 'string' && entry.keyEnv.trim()
+				? entry.keyEnv.trim()
+				: undefined;
+		if (keyEnv !== undefined && (!Array.isArray(keyEnv) || keyEnv.length > 0)) {
+			instance.keyEnv = keyEnv;
+		}
+		if (typeof entry.chatPath === 'string' && entry.chatPath.trim()) {
+			instance.chatPath = entry.chatPath.trim();
+		}
+		if (typeof entry.modelsPath === 'string' && entry.modelsPath.trim()) {
+			instance.modelsPath = entry.modelsPath.trim();
+		}
+		const auth = sanitizeAuth(entry.auth);
+		if (auth) {
+			instance.auth = auth;
+		}
+		const headers = sanitizeStringMap(entry.headers);
+		if (headers) {
+			instance.headers = headers;
+		}
+		const options = sanitizeRecord(entry.options);
+		if (options) {
+			instance.options = options;
+		}
+		const models = sanitizeModelFacts(entry.models);
+		if (models) {
+			instance.models = models;
+		}
+		const rules = entry.modelRules;
+		if (rules && typeof rules === 'object' && !Array.isArray(rules)) {
+			const rule = rules as Record<string, unknown>;
+			const modelRules: { prefix?: string; skip?: string } = {};
+			if (typeof rule.prefix === 'string') {
+				modelRules.prefix = rule.prefix;
+			}
+			if (typeof rule.skip === 'string') {
+				try {
+					new RegExp(rule.skip);
+					modelRules.skip = rule.skip;
+				} catch {
+					// A skip that is not a regex drops out; the listing just stays unfiltered.
+				}
+			}
+			if (modelRules.prefix !== undefined || modelRules.skip !== undefined) {
+				instance.modelRules = modelRules;
+			}
+		}
+		const retry = sanitizeRetry(entry.retry);
+		if (retry) {
+			instance.retry = retry;
+		}
+		if (Array.isArray(entry.fallback)) {
+			const fallback = entry.fallback.map((item) => String(item).trim()).filter(Boolean);
+			if (fallback.length > 0) {
+				instance.fallback = [...new Set(fallback)];
+			}
+		}
+		out[name] = instance;
+	}
+	return out;
 }
 
-/** The variable names a profile would read its key from, in order. */
-export function profileKeyEnvs(profile: Profile): string[] {
-	if (!profile.keyEnv) {
-		return [];
+const UNSAFE_PROVIDER_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function sanitizeAuth(value: unknown): ProviderInstanceConfig['auth'] {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return undefined;
 	}
-	return Array.isArray(profile.keyEnv) ? profile.keyEnv : [profile.keyEnv];
+	const auth = value as Record<string, unknown>;
+	if (auth.kind === 'bearer') {
+		return { kind: 'bearer' };
+	}
+	if (auth.kind === 'header' || auth.kind === 'query') {
+		const name = typeof auth.name === 'string' ? auth.name.trim() : '';
+		if (name) {
+			return { kind: auth.kind, name };
+		}
+	}
+	return undefined;
+}
+
+function sanitizeStringMap(value: unknown): Record<string, string> | undefined {
+	const map = sanitizeRecord(value);
+	if (!map) {
+		return undefined;
+	}
+	const out: Record<string, string> = {};
+	for (const [key, entry] of Object.entries(map)) {
+		if (typeof entry === 'string') {
+			out[key] = entry;
+		}
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeRecord(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return undefined;
+	}
+	const out: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+		if (!UNSAFE_PROVIDER_KEYS.has(key) && entry !== undefined) {
+			out[key] = entry;
+		}
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeModelFacts(value: unknown): ProviderInstanceConfig['models'] {
+	const map = sanitizeRecord(value);
+	if (!map) {
+		return undefined;
+	}
+	const out: NonNullable<ProviderInstanceConfig['models']> = {};
+	for (const [id, rawFacts] of Object.entries(map)) {
+		if (!rawFacts || typeof rawFacts !== 'object' || Array.isArray(rawFacts)) {
+			continue;
+		}
+		const facts = rawFacts as Record<string, unknown>;
+		const entry: Record<string, unknown> = {};
+		if (typeof facts.label === 'string') {
+			entry.label = facts.label;
+		}
+		for (const key of ['contextWindow', 'maxOutput'] as const) {
+			const count = Number(facts[key]);
+			if (Number.isFinite(count) && count > 0) {
+				entry[key] = count;
+			}
+		}
+		const pricing = facts.pricing;
+		if (pricing && typeof pricing === 'object' && !Array.isArray(pricing)) {
+			const priced: Record<string, number> = {};
+			for (const key of ['inPerM', 'cachedInPerM', 'cacheWritePerM', 'outPerM'] as const) {
+				const price = Number((pricing as Record<string, unknown>)[key]);
+				if (Number.isFinite(price) && price >= 0) {
+					priced[key] = price;
+				}
+			}
+			if (Object.keys(priced).length) {
+				entry.pricing = priced;
+			}
+		}
+		if (Object.keys(entry).length) {
+			out[id] = entry as Partial<ModelInfo>;
+		}
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeRetry(value: unknown): ProviderInstanceConfig['retry'] {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return undefined;
+	}
+	const retry = value as Record<string, unknown>;
+	const out: NonNullable<ProviderInstanceConfig['retry']> = {};
+	const attempts = Number(retry.maxAttempts);
+	if (Number.isInteger(attempts) && attempts >= 1 && attempts <= 10) {
+		out.maxAttempts = attempts;
+	}
+	if (Array.isArray(retry.retryableCodes) && retry.retryableCodes.length) {
+		out.retryableCodes = retry.retryableCodes.map(String).filter(Boolean).slice(0, 16) as NonNullable<
+			ProviderInstanceConfig['retry']
+		>['retryableCodes'];
+	}
+	for (const key of ['baseDelayMs', 'maxDelayMs'] as const) {
+		const delay = Number(retry[key]);
+		if (Number.isFinite(delay) && delay >= 0) {
+			out[key] = delay;
+		}
+	}
+	return Object.keys(out).length ? out : undefined;
 }
 
 /**
- * The shipped defaults, and the only place in the code that knows a provider's name. Everything the
- * adapters need is data on the profile: the endpoint, the default model, the variables the key is
- * read from (`keyEnv`), how to switch thinking off (`thinkingOff`) and what the tokens cost.
- *
- * DeepSeek Flash comes first, so `Auto` runs on it. Prices are DeepSeek's list rates in USD per
- * million tokens from https://api-docs.deepseek.com/quick_start/pricing — **peak** hours, cache-miss
- * input, so `/cost` is an upper bound (off-peak is half) while `pricingCachedIn` keeps long agent
- * loops honest, since a cached prompt costs 2 % of a fresh one.
- *
- * `contextWindow` is the provider's **input** window, not its maximum output: DeepSeek documents a
- * 1M context for V4 Flash and V4 Pro on that same pricing page, and Google documents 1,048,576 input
- * tokens for Gemini 3.8 Flash. A model added later needs the same figure from its own provider.
+ * Per-purpose model overrides: a summary or a policy hook can run on a different model
+ * than the chat it serves. Absent means "the chat's own model".
  */
-export const DEFAULT_PROFILES: Profile[] = [
-	{
-		id: 'deepseek',
-		label: 'DeepSeek Flash',
-		base: 'https://api.deepseek.com',
-		model: 'deepseek-flash',
-		keyEnv: 'DEEPSEEK_API_KEY',
-		thinkingOff: 'thinking',
-		topEffort: 'max',
-		includeUsage: true,
-		contextWindow: 1_048_576,
-		pricingIn: 0.3,
-		pricingCachedIn: 0.006,
-		pricingOut: 1.2,
-	},
-	{
-		id: 'deepseek-pro',
-		label: 'DeepSeek V4 Pro',
-		base: 'https://api.deepseek.com',
-		model: 'deepseek-v4-pro',
-		keyEnv: 'DEEPSEEK_API_KEY',
-		thinkingOff: 'thinking',
-		topEffort: 'max',
-		includeUsage: true,
-		contextWindow: 1_048_576,
-		pricingIn: 1.32,
-		pricingCachedIn: 0.044,
-		pricingOut: 3.96,
-	},
-	{
-		id: 'gemini',
-		label: 'Gemini 3.8 Flash',
-		base: 'https://generativelanguage.googleapis.com/v1beta/openai',
-		model: 'gemini-3.8-flash',
-		// Gemini reports its native `models/<id>` form, and lists image, computer-use, research and
-		// embedding models that cannot run a chat turn — both are data, so edit them freely.
-		modelPrefix: 'models/',
-		modelSkip: 'computer-use|deep-research|antigravity|aqa|-image|imagen|veo|embedding|-tts|live',
-		keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
-		thinkingOff: 'effort',
-		// Gemini 3's ladder stops at high: minimal/low/medium/high, and some probes only low/high.
-		topEffort: 'high',
-		includeUsage: true,
-		contextWindow: 1_048_576,
-	},
-];
+export interface ModelRoutes {
+	compaction?: string;
+	softRoute?: string;
+	hook?: string;
+}
+
+function sanitizeRoutes(value: unknown): ModelRoutes {
+	const out: ModelRoutes = {};
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return out;
+	}
+	const routes = value as Record<string, unknown>;
+	for (const key of ['compaction', 'softRoute', 'hook'] as const) {
+		const model = routes[key];
+		if (typeof model === 'string' && model.trim()) {
+			out[key] = model.trim();
+		}
+	}
+	return out;
+}
+
+/** The configured instances, in menu order; the first one is `auto`. */
+export function providersOf(config: Pick<Config, 'providers'>): ProviderInstanceConfig[] {
+	const entries = Object.values(config.providers);
+	return entries.length ? entries : [...SHIPPED_INSTANCES];
+}
 
 /**
  * What a model with no configured window is assumed to hold. 128K is the floor every current
@@ -239,7 +372,10 @@ export interface Config {
 	/** `inherit` copies the parent's four limits; `custom` spends `subagentBudget`. */
 	subagentBudgetMode: SubagentBudgetMode;
 	model: string;
-	profiles: Profile[];
+	/** One provider instance per entry; empty means the shipped instances. */
+	providers: ProviderMap;
+	/** Per-purpose model overrides; absent falls back to the chat's own model. */
+	modelRoutes: ModelRoutes;
 	mcpServers: Record<string, McpServerSettings>;
 	permissions: PermissionsConfig;
 	/** Per-agent capability grants for subagents; see `SubagentGrant`. */
@@ -296,7 +432,8 @@ export const CONFIG_KEYS = [
 	'subagentBudget',
 	'subagentBudgetMode',
 	'model',
-	'profiles',
+	'providers',
+	'modelRoutes',
 	'mcpServers',
 	'permissions',
 	'subagents',
@@ -510,7 +647,6 @@ export class Settings extends Service {
 				: fallback;
 		};
 		const permissions = value('permissions', undefined as unknown as PermissionsConfig);
-		const profiles = value('profiles', undefined as unknown as Profile[]);
 		return {
 			mode: asWorkMode(raw.mode),
 			approval: asApproval(raw.approval),
@@ -526,11 +662,10 @@ export class Settings extends Service {
 			subagentBudget: budget('subagentBudget', DEFAULT_SUBAGENT_BUDGET),
 			subagentBudgetMode: oneOf('subagentBudgetMode', SUBAGENT_BUDGET_MODES, DEFAULT_SUBAGENT_BUDGET_MODE),
 			model: typeof raw.model === 'string' ? raw.model : 'auto',
-			// An empty list means "nothing configured", which would leave the chat without a model, so
-			// the built-in DeepSeek profiles stand in for it. A configured entry is completed from the
-			// shipped profile for its endpoint, so a hand-written one cannot silently lose thinkingOff,
-			// its window or its prices.
-			profiles: withDefaults(Array.isArray(profiles) ? profiles : []),
+			// A settings file is untrusted input; bad entries drop out. An empty map means "nothing
+			// configured", and `providersOf` stands the shipped instances in for it.
+			providers: sanitizeProviders(raw.providers),
+			modelRoutes: sanitizeRoutes(raw.modelRoutes),
 			mcpServers: raw.mcpServers && typeof raw.mcpServers === 'object' ? (raw.mcpServers as Record<string, McpServerSettings>) : {},
 			permissions:
 				permissions && typeof permissions === 'object'
@@ -633,90 +768,6 @@ export class Settings extends Service {
 }
 
 export const settingsPlugin = Settings;
-
-/** Facts an endpoint supplies to every model it serves. */
-const ENDPOINT_PROFILE_FACTS = [
-	'provider',
-	'modelPrefix',
-	'modelSkip',
-	'thinkingOff',
-	'topEffort',
-	'keyEnv',
-	'includeUsage',
-] as const satisfies readonly (keyof Profile)[];
-
-/** Facts that belong to one exact model: its name, window, samplers and prices. */
-const MODEL_PROFILE_FACTS = [
-	'label',
-	'topEffort',
-	'contextWindow',
-	'pricingIn',
-	'pricingCachedIn',
-	'pricingOut',
-	'temperature',
-	'topP',
-	'maxTokens',
-] as const satisfies readonly (keyof Profile)[];
-
-/**
- * Fill only the facts a configured profile left out, from the shipped profile for its endpoint —
- * the same policy Configure Model Provider applies when it adds a profile. Endpoint facts come
- * from the first shipped profile on the same normalized base; model facts need the same base and
- * the exact model. Endpoint facts are written first, then model facts may replace them for fields
- * the user did not set, so a model-specific ceiling beats an endpoint default. `id`, `base` and
- * `model` are identity and are never inherited. Null counts as absent; the input and
- * `DEFAULT_PROFILES` are never mutated.
- */
-export function inheritProfileDefaults(profile: Profile): Profile {
-	const next: Profile = { ...profile };
-	// A missing or malformed base identifies no endpoint; the adapter keeps its loud "no base" error.
-	const identity = typeof next.base === 'string' ? normalizeEndpoint(next.base) : '';
-	if (!identity) {
-		return next;
-	}
-	const present = new Set<keyof Profile>();
-	for (const field of [...ENDPOINT_PROFILE_FACTS, ...MODEL_PROFILE_FACTS]) {
-		if (next[field] !== undefined && next[field] !== null) {
-			present.add(field);
-		}
-	}
-	copyProfileFacts(
-		next,
-		DEFAULT_PROFILES.find((defaults) => normalizeEndpoint(defaults.base) === identity),
-		ENDPOINT_PROFILE_FACTS,
-		present,
-	);
-	copyProfileFacts(
-		next,
-		DEFAULT_PROFILES.find((defaults) => normalizeEndpoint(defaults.base) === identity && defaults.model === next.model),
-		MODEL_PROFILE_FACTS,
-		present,
-	);
-	return next;
-}
-
-function copyProfileFacts<K extends keyof Profile>(
-	target: Profile,
-	source: Profile | undefined,
-	fields: readonly K[],
-	present: ReadonlySet<keyof Profile>,
-): void {
-	if (!source) {
-		return;
-	}
-	for (const field of fields) {
-		const value = source[field];
-		// Skip absent source values too, so a completed profile gains no `field: undefined` keys.
-		if (!present.has(field) && value !== undefined && value !== null) {
-			target[field] = value;
-		}
-	}
-}
-
-/** Configured profiles, completed from the shipped facts, or the built-ins when nothing is configured. */
-function withDefaults(profiles: Profile[]): Profile[] {
-	return profiles.length ? profiles.map(inheritProfileDefaults) : DEFAULT_PROFILES;
-}
 
 /** The remaining value sets a `get()` may fall back within — a settings file is untrusted input. */
 const CONTEXT_FORMS: readonly ContextForm[] = ['rendered', 'token', 'raw'];

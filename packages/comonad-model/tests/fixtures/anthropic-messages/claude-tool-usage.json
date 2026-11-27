@@ -1,0 +1,25 @@
+{
+	"name": "anthropic text + tool call + cache usage",
+	"meta": {
+		"protocol": "anthropic-messages",
+		"brand": "anthropic",
+		"status": 200,
+		"note": "Hand-written shape of a Messages stream: two text deltas, a tool_use assembled from input_json_delta, cache-split usage across message_start/message_delta."
+	},
+	"request": {
+		"model": "claude-sonnet-5-5",
+		"messages": [{ "role": "user", "content": "read a.ts" }]
+	},
+	"sse": [
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":2}}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi \"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"there\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"read_file\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.ts\\\"}\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	]
+}

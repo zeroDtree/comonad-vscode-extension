@@ -9,6 +9,7 @@ import {
 	explicitSettings,
 	mergeSettings,
 	migrateLegacySettings,
+	migrateProfilesToProviders,
 	readMigrationState,
 	readSettings,
 	settingsDisplayPath,
@@ -219,7 +220,7 @@ suite('Settings files', () => {
 		const markerFile = join(root, 'storage', 'settings-migration.json');
 		mkdirSync(dirname(markerFile), { recursive: true });
 		writeFileSync(markerFile, 'not json', 'utf8');
-		assert.deepStrictEqual(readMigrationState(markerFile), { version: 1, user: false, workspaces: [] });
+		assert.deepStrictEqual(readMigrationState(markerFile), { version: 1, user: false, workspaces: [], providers: false });
 		migrateLegacySettings({
 			markerFile,
 			userFile: join(root, 'home', '.comonad', 'settings.json'),
@@ -229,5 +230,123 @@ suite('Settings files', () => {
 			trusted: true,
 		});
 		assert.strictEqual(readMigrationState(markerFile).user, true);
+	});
+});
+
+suite('Profiles to providers migration', () => {
+	let root: string;
+
+	setup(() => {
+		root = mkdtempSync(join(tmpdir(), 'comonad-migrate-'));
+	});
+
+	teardown(() => {
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	test('legacy profiles become providers and the legacy key moves to the endpoint', async () => {
+		const markerFile = join(root, 'settings-migration.json');
+		const userFile = join(root, 'settings.json');
+		writeFileSync(
+			userFile,
+			JSON.stringify({
+				model: 'deepseek:deepseek-flash',
+				profiles: [
+					{
+						id: 'deepseek',
+						base: 'https://api.deepseek.com',
+						model: 'deepseek-flash',
+						keyEnv: 'DEEPSEEK_API_KEY',
+						thinkingOff: 'thinking',
+						topEffort: 'max',
+						includeUsage: true,
+						contextWindow: 1_048_576,
+						pricingIn: 0.3,
+						pricingCachedIn: 0.006,
+						pricingOut: 1.2,
+					},
+					{
+						id: 'gemini',
+						base: 'https://generativelanguage.googleapis.com/v1beta/openai',
+						model: 'gemini-3.8-flash',
+						modelPrefix: 'models/',
+						keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+					},
+					{ id: 'mine', base: 'https://x.test', model: 'm' },
+				],
+			}),
+			'utf8',
+		);
+		const written: Array<{ base: string; key: string }> = [];
+		await migrateProfilesToProviders({
+			markerFile,
+			files: [userFile],
+			readLegacyKey: async (id) => (id === 'deepseek' ? 'sk-legacy' : undefined),
+			providerKeyStored: async () => false,
+			writeProviderKey: async (base, key) => void written.push({ base, key }),
+		});
+		const data = parsed(userFile) as Record<string, any>;
+		// `profiles` stays for a rollback; `providers` carries the rewrite.
+		assert.ok(Array.isArray(data.profiles), 'the old shape is left in place');
+		assert.deepStrictEqual(data.providers.deepseek, {
+			brand: 'deepseek',
+			base: 'https://api.deepseek.com',
+			model: 'deepseek-flash',
+			keyEnv: 'DEEPSEEK_API_KEY',
+			options: { thinkingOff: 'thinking', topEffort: 'max', includeUsage: true },
+			models: { 'deepseek-flash': { contextWindow: 1_048_576, pricing: { inPerM: 0.3, cachedInPerM: 0.006, outPerM: 1.2 } } },
+		});
+		assert.strictEqual(data.providers.gemini.brand, 'google', 'the brand is inferred from the endpoint');
+		assert.deepStrictEqual(data.providers.gemini.keyEnv, ['GEMINI_API_KEY', 'GOOGLE_API_KEY']);
+		assert.strictEqual(data.providers.gemini.modelRules.prefix, 'models/');
+		assert.strictEqual(data.providers.mine.brand, 'custom');
+		// The legacy per-profile secret moves to the endpoint-scoped id.
+		assert.deepStrictEqual(written, [{ base: 'https://api.deepseek.com', key: 'sk-legacy' }]);
+		assert.strictEqual(readMigrationState(markerFile).providers, true);
+
+		// A rerun is a no-op: the marker closed the migration.
+		await migrateProfilesToProviders({
+			markerFile,
+			files: [userFile],
+			readLegacyKey: async () => 'sk-legacy',
+			providerKeyStored: async () => false,
+			writeProviderKey: async (base, key) => void written.push({ base, key }),
+		});
+		assert.strictEqual(written.length, 1, 'the second run moves no key');
+	});
+
+	test('a stored endpoint key is never overwritten, and a file with providers is left alone', async () => {
+		const markerFile = join(root, 'settings-migration.json');
+		const userFile = join(root, 'settings.json');
+		writeFileSync(
+			userFile,
+			JSON.stringify({
+				profiles: [{ id: 'deepseek', base: 'https://api.deepseek.com', model: 'deepseek-flash' }],
+			}),
+			'utf8',
+		);
+		const written: Array<{ base: string; key: string }> = [];
+		await migrateProfilesToProviders({
+			markerFile,
+			files: [userFile],
+			readLegacyKey: async () => 'sk-legacy',
+			providerKeyStored: async () => true,
+			writeProviderKey: async (base, key) => void written.push({ base, key }),
+		});
+		assert.deepStrictEqual(written, [], 'one is already stored');
+		assert.strictEqual(readMigrationState(markerFile).providers, true);
+
+		const other = join(root, 'other.json');
+		writeFileSync(other, JSON.stringify({ providers: { a: {} }, profiles: [{ id: 'x' }] }), 'utf8');
+		await migrateProfilesToProviders({
+			markerFile: join(root, 'fresh-marker.json'),
+			files: [other],
+			readLegacyKey: async () => undefined,
+			providerKeyStored: async () => false,
+			writeProviderKey: async () => {
+				throw new Error('no key should move');
+			},
+		});
+		assert.deepStrictEqual(parsed(other), { providers: { a: {} }, profiles: [{ id: 'x' }] }, 'a rewritten file is never touched again');
 	});
 });

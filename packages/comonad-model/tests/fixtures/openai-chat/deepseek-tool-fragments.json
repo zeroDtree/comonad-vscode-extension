@@ -1,0 +1,21 @@
+{
+	"name": "deepseek tool-call argument fragments",
+	"meta": {
+		"protocol": "openai-chat",
+		"brand": "deepseek",
+		"status": 200,
+		"note": "Hand-written shape of a tool call whose JSON arguments arrive split across deltas, id first."
+	},
+	"request": {
+		"model": "deepseek-chat",
+		"messages": [{ "role": "user", "content": "read a.ts" }],
+		"tools": [{ "name": "read_file" }]
+	},
+	"sse": [
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}]}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"a.ts\\\"}\"}}]}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":8}}\n\n",
+		"data: [DONE]\n\n"
+	]
+}
