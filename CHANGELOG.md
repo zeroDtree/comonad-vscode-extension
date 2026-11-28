@@ -4,6 +4,10 @@ All notable changes to the "comonad" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.3.0] — 2026-11-28
+
+model adapter
+
 ## [0.2.2] — 2026-11-25
 
 - Reference chips under a sent message, and the `@` tokens in its text, are now clickable: a file
