@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
  * The anthropic-messages protocol: the Messages API over SSE. One implementation serves
- * every brand that speaks it — Anthropic itself, and proxies that mirror the wire. Tool
+ * every vendor that speaks it — Anthropic itself, and proxies that mirror the wire. Tool
  * calls assemble from `tool_use` + `input_json_delta` pieces; usage folds from the two
  * halves the stream carries.
  */

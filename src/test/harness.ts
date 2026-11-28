@@ -87,12 +87,12 @@ export interface FakeModel {
 }
 
 /**
- * Registers a scripted model on the kernel through the same protocol seam real brands use,
+ * Registers a scripted model on the kernel through the same protocol seam real vendors use,
  * so a test's fake exercises the whole runtime path (retry guards, notices, usage) around it.
  */
 export function useFakeModel(kernel: TestKernel, fake: FakeModel): Disposable {
 	// The fake replaces every shipped wire outright — the old adapter seam's semantics —
-	// so every configured instance routes to the script, brands and their facts included.
+	// so every configured instance routes to the script, vendors and their facts included.
 	const definition = makeFakeProtocol({
 			id: 'openai-chat',
 			handler: async (call, emit) => {

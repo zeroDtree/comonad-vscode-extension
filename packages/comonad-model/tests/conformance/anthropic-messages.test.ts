@@ -4,8 +4,8 @@ import { ModelRuntime } from '../../src/runtime/runtime';
 import { anthropicMessagesProtocol, toAnthropicMessages, toAnthropicTools } from '../../src/protocols/anthropic-messages';
 import { foldUsage } from '../../src/protocols/anthropic-messages/wire';
 import { ReplayTransport, type FixtureEnvelope } from '../../src/replay/replay-transport';
-import { makeFakeInstance } from '../../src/testing';
-import { anthropicBrand } from '../../src/brands/anthropic';
+import { makeFakeEntry } from '../../src/testing';
+import { anthropicProvider } from '../../src/providers/anthropic';
 import { ModelError } from '../../src/errors';
 import type { Transport } from '../../src/transport/transport';
 import type { InvocationContext, RuntimeStreamEvent } from '../../src/types';
@@ -22,10 +22,10 @@ function setup(envelopes: FixtureEnvelope[]) {
 	const runtime = new ModelRuntime({
 		transport,
 		keys: { keyFor: async () => 'sk-ant-test', env: () => undefined },
-		instances: () => [makeFakeInstance({ id: 'claude', brand: 'anthropic', base: 'https://api.anthropic.com', model: 'claude-sonnet-5-5' })],
+		entries: () => [makeFakeEntry({ id: 'claude', provider: 'anthropic', base: 'https://api.anthropic.com', model: 'claude-sonnet-5-5' })],
 	});
 	runtime.registerProtocol(anthropicMessagesProtocol);
-	runtime.registerBrand(anthropicBrand);
+	runtime.registerDefinition(anthropicProvider);
 	return { runtime, transport };
 }
 
@@ -115,10 +115,10 @@ suite('anthropic-messages conformance', () => {
 		const runtime = new ModelRuntime({
 			transport,
 			keys: { keyFor: async () => 'sk-ant-test', env: () => undefined },
-			instances: () => [makeFakeInstance({ id: 'claude', brand: 'anthropic', base: 'https://api.anthropic.com', model: 'claude-sonnet-5-5' })],
+			entries: () => [makeFakeEntry({ id: 'claude', provider: 'anthropic', base: 'https://api.anthropic.com', model: 'claude-sonnet-5-5' })],
 		});
 		runtime.registerProtocol(anthropicMessagesProtocol);
-		runtime.registerBrand(anthropicBrand);
+		runtime.registerDefinition(anthropicProvider);
 		const result = await chatOf(runtime, ctxOf(controller.signal), []);
 		assert.strictEqual(result.finish, 'aborted');
 		assert.strictEqual(result.message.content, 'kept');

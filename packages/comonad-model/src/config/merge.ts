@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The declarative merge engine: Protocol Defaults → Brand Defaults → Provider Instance
+ * The declarative merge engine: Protocol Defaults → Provider Defaults → Entry
  * Overrides, one explicit rule per field. Not a deep merge — each field's semantics are
  * spelled out in MERGE_RULES and implemented as its own pure function, so a layer can
  * never accidentally inherit something the rule did not say it inherits.
@@ -11,12 +11,12 @@ import { normalizeEndpoint } from '../transport/security';
 import type { ModelInfo } from '../types';
 import {
 	DEFAULT_RETRY_POLICY,
-	type BrandDefinition,
+	type ProviderDefinition,
 	type OptionField,
 	type OptionSchema,
 	type OptionValues,
 	type ProtocolDefinition,
-	type ProviderInstanceConfig,
+	type ProviderEntry,
 	type ResolvedWire,
 	type RetryPolicy,
 } from './schema';
@@ -39,55 +39,55 @@ export interface MergeRuleRow {
 
 /** The layering contract, in one table. Tests walk it row by row. */
 export const MERGE_RULES: readonly MergeRuleRow[] = [
-	{ field: 'protocol', rule: 'override', note: "instance may re-point the brand's protocol" },
-	{ field: 'baseURL', rule: 'override', note: 'normalized; instance over brand, brand over nothing' },
+	{ field: 'protocol', rule: 'override', note: "entry may re-point the definition's protocol" },
+	{ field: 'baseURL', rule: 'override', note: 'normalized; entry over definition, definition over nothing' },
 	{ field: 'auth', rule: 'replace', note: 'whole scheme per layer, never field-merged' },
 	{ field: 'keyEnv', rule: 'override', note: 'array replaces wholesale; the key itself never appears in config' },
 	{ field: 'headers', rule: 'headers', note: 'case-insensitive merge; the winning layer keeps its casing' },
-	{ field: 'headerHooks', rule: 'concat', note: 'protocol, then brand, executed in order' },
-	{ field: 'requestHooks', rule: 'concat', note: 'protocol, then brand, executed in order' },
+	{ field: 'headerHooks', rule: 'concat', note: 'protocol, then definition, executed in order' },
+	{ field: 'requestHooks', rule: 'concat', note: 'protocol, then definition, executed in order' },
 	{ field: 'chatPath', rule: 'override', note: 'protocol default /chat/completions; origin-locked at resolve' },
 	{ field: 'modelsPath', rule: 'override', note: 'protocol default /models; origin-locked at resolve' },
 	{ field: 'options', rule: 'options', note: 'shallow fold; validated by the protocol schema, unknown keys rejected' },
 	{ field: 'models', rule: 'models', note: 'merged by model id; per-field override, pricing per price key' },
 	{ field: 'modelRules', rule: 'scalars', note: 'prefix/skip last-wins; skip compiles to a RegExp' },
 	{ field: 'retry', rule: 'scalars', note: 'per-field over DEFAULT_RETRY_POLICY; retryableCodes replaces wholesale' },
-	{ field: 'fallback', rule: 'override', note: "instance's list; empty = none" },
-	{ field: 'create()', rule: 'protocol-only', note: 'brands and instances customize via data and hooks, never by swapping it' },
+	{ field: 'fallback', rule: 'override', note: "entry's list; empty = none" },
+	{ field: 'create()', rule: 'protocol-only', note: 'definitions and entries customize via data and hooks, never by swapping it' },
 ];
 
-/** Which protocol a provider speaks: the instance may re-point the brand's choice. */
-export function protocolIdFor(instance: ProviderInstanceConfig, brand: BrandDefinition): string {
-	return instance.protocol ?? brand.protocol;
+/** Which protocol a provider speaks: the entry may re-point the definition's choice. */
+export function protocolIdFor(entry: ProviderEntry, definition: ProviderDefinition): string {
+	return entry.protocol ?? definition.protocol;
 }
 
 /** Folds the three layers into the wire every request runs against. Pure. */
 export function mergeWire(
 	protocol: ProtocolDefinition,
-	brand: BrandDefinition,
-	instance: ProviderInstanceConfig,
+	definition: ProviderDefinition,
+	entry: ProviderEntry,
 ): ResolvedWire {
-	const baseURL = normalizeEndpoint(instance.base || brand.defaults.baseURL || '');
+	const baseURL = normalizeEndpoint(entry.base || definition.defaults.baseURL || '');
 	if (!baseURL) {
-		throw new ModelError('invalid_request', `provider instance "${instance.id}" has no base URL`);
+		throw new ModelError('invalid_request', `provider "${entry.id}" has no base URL`);
 	}
 	return {
 		baseURL,
-		chatPath: instance.chatPath ?? brand.defaults.chatPath ?? protocol.defaults.chatPath,
-		modelsPath: instance.modelsPath ?? brand.defaults.modelsPath ?? protocol.defaults.modelsPath,
-		auth: instance.auth ?? brand.defaults.auth ?? protocol.defaults.auth ?? BEARER,
-		headers: mergeHeaders(protocol.defaults.headers, brand.defaults.headers, instance.headers),
-		headerHooks: [...(protocol.headerHooks ?? []), ...(brand.headerHooks ?? [])],
-		requestHooks: [...(protocol.requestHooks ?? []), ...(brand.requestHooks ?? [])],
+		chatPath: entry.chatPath ?? definition.defaults.chatPath ?? protocol.defaults.chatPath,
+		modelsPath: entry.modelsPath ?? definition.defaults.modelsPath ?? protocol.defaults.modelsPath,
+		auth: entry.auth ?? definition.defaults.auth ?? protocol.defaults.auth ?? BEARER,
+		headers: mergeHeaders(protocol.defaults.headers, definition.defaults.headers, entry.headers),
+		headerHooks: [...(protocol.headerHooks ?? []), ...(definition.headerHooks ?? [])],
+		requestHooks: [...(protocol.requestHooks ?? []), ...(definition.requestHooks ?? [])],
 		options: validateOptions(protocol.defaults.optionsSchema, {
 			...protocol.defaults.options,
-			...brand.defaults.options,
-			...instance.options,
+			...definition.defaults.options,
+			...entry.options,
 		}),
-		models: mergeModels(brand.modelCatalog, instance.models),
-		modelRules: compileModelRules(brand.modelRules, instance.modelRules),
-		retry: mergeRetry(instance.retry),
-		fallback: instance.fallback ?? [],
+		models: mergeModels(definition.modelCatalog, entry.models),
+		modelRules: compileModelRules(definition.modelRules, entry.modelRules),
+		retry: mergeRetry(entry.retry),
+		fallback: entry.fallback ?? [],
 	};
 }
 
@@ -143,7 +143,7 @@ function matchesField(field: OptionField, value: unknown): boolean {
 	}
 }
 
-/** Catalog facts seeded by the brand, adjusted per model id by the instance. */
+/** Catalog facts seeded by the definition, adjusted per model id by the entry. */
 export function mergeModels(
 	catalog: readonly ModelInfo[] | undefined,
 	overrides: Record<string, Partial<ModelInfo>> | undefined,

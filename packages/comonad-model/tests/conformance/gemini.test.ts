@@ -3,8 +3,8 @@ import * as assert from 'node:assert';
 import { ModelRuntime } from '../../src/runtime/runtime';
 import { geminiProtocol, toGeminiContents } from '../../src/protocols/gemini';
 import { ReplayTransport, type FixtureEnvelope } from '../../src/replay/replay-transport';
-import { makeFakeInstance } from '../../src/testing';
-import { googleBrand } from '../../src/brands/google';
+import { makeFakeEntry } from '../../src/testing';
+import { googleProvider } from '../../src/providers/google';
 import { ModelError } from '../../src/errors';
 import type { Transport } from '../../src/transport/transport';
 import type { InvocationContext, RuntimeStreamEvent } from '../../src/types';
@@ -21,10 +21,10 @@ function setup(envelopes: FixtureEnvelope[]) {
 	const runtime = new ModelRuntime({
 		transport,
 		keys: { keyFor: async () => 'g-key', env: () => undefined },
-		instances: () => [makeFakeInstance({ id: 'gemini', brand: 'google', base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-3.8-flash' })],
+		entries: () => [makeFakeEntry({ id: 'gemini', provider: 'google', base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-3.8-flash' })],
 	});
 	runtime.registerProtocol(geminiProtocol);
-	runtime.registerBrand(googleBrand);
+	runtime.registerDefinition(googleProvider);
 	return { runtime, transport };
 }
 
@@ -105,10 +105,10 @@ suite('gemini conformance', () => {
 		const runtime = new ModelRuntime({
 			transport,
 			keys: { keyFor: async () => 'g-key', env: () => undefined },
-			instances: () => [makeFakeInstance({ id: 'gemini', brand: 'google', base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-3.8-flash' })],
+			entries: () => [makeFakeEntry({ id: 'gemini', provider: 'google', base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-3.8-flash' })],
 		});
 		runtime.registerProtocol(geminiProtocol);
-		runtime.registerBrand(googleBrand);
+		runtime.registerDefinition(googleProvider);
 		const result = await chatOf(runtime, ctxOf(controller.signal), []);
 		assert.strictEqual(result.finish, 'aborted');
 		assert.strictEqual(result.message.content, 'kept');
@@ -119,7 +119,7 @@ suite('gemini conformance', () => {
 			{ name: 'listing', body: { models: [{ name: 'models/gemini-3.8-flash' }, { name: 'models/gemini-3.9-pro' }] } },
 		]);
 		const models = await runtime.listModels('gemini', ctxOf());
-		// The google brand strips the `models/` prefix and drops non-chat listings.
+		// The google vendor strips the `models/` prefix and drops non-chat listings.
 		assert.deepStrictEqual(models.map((model) => model.id), ['gemini-3.8-flash', 'gemini-3.9-pro']);
 	});
 

@@ -2781,6 +2781,19 @@ footer {
 	flex: none;
 }
 
+/* Vendor header inside the model flyout: a label, not a row — never clickable. */
+.pill-flyout-group {
+	padding: 6px 8px 2px;
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	opacity: 0.55;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
 .pill-choice-value {
 	flex: 0 1 auto;
 	min-width: 0;

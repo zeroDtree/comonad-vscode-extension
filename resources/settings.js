@@ -341,18 +341,137 @@
 		}
 	}
 
-	function fillModels(models, current) {
-		const node = $('model');
-		if (!node || document.activeElement === node) {
+	/** Unique providers behind the model choices, in first-appearance order. */
+	function providersIn(models) {
+		const rows = [];
+		const seen = new Set();
+		for (const m of models || []) {
+			if (!m || !m.id || m.id === 'auto') {
+				continue;
+			}
+			const entryId = m.id.split(':')[0];
+			if (!entryId || seen.has(entryId)) {
+				continue;
+			}
+			seen.add(entryId);
+			const name = m.providerLabel || entryId;
+			rows.push({ id: entryId, label: m.definitionId && entryId !== m.definitionId ? name + ' (' + entryId + ')' : name });
+		}
+		return rows;
+	}
+
+	/** A model option's text: the id, plus whatever the description keeps besides the endpoint URL. */
+	function modelOptionText(m) {
+		const entryId = m.id.split(':')[0] || '';
+		let text = String(m.description || '').replace(/https?:\/\/\S+/g, '');
+		if (entryId) {
+			text = text.replace(new RegExp('^' + entryId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' · '), '');
+		}
+		text = text.replace(/\s*·\s*·\s*/g, ' · ').replace(/^\s*·\s*/, '').replace(/\s+$/, '');
+		return text ? m.label + ' — ' + text : m.label;
+	}
+
+	/** The model half of a pair: the models one provider lists, keeping a stored ref visible. */
+	function fillModelOptions(node, models, entryId, currentRef) {
+		if (!node) {
 			return;
 		}
 		node.innerHTML = '';
-		for (const model of models || []) {
-			node.append(option([model.id, model.label + (model.description ? ' — ' + model.description : '')], current));
+		if (entryId === 'auto') {
+			const auto = (models || []).find((m) => m.id === 'auto');
+			node.append(option(['auto', auto && auto.description ? 'Auto — ' + auto.description : 'Auto'], ''));
+			node.value = 'auto';
+			return;
 		}
-		if (current && node.value !== current) {
-			node.append(option([current, current], current));
+		if (entryId === '') {
+			node.append(option(['', "Chat's own model"], ''));
+			node.value = '';
+			return;
 		}
+		const rows = (models || []).filter((m) => m && m.id && m.id !== 'auto' && m.id.split(':')[0] === entryId);
+		for (const m of rows) {
+			node.append(option([m.id, modelOptionText(m)], ''));
+		}
+		const owned = Boolean(currentRef) && currentRef.split(':')[0] === entryId;
+		const desired = owned ? currentRef : rows.length ? rows[0].id : '';
+		if (desired && !rows.some((m) => m.id === desired)) {
+			node.append(option([desired, desired], ''));
+		}
+		node.value = desired;
+	}
+
+	function fillModels(models, current) {
+		const provNode = $('model-provider');
+		const node = $('model');
+		if (!node) {
+			return;
+		}
+		// The pair moves together: a push never rewrites either half mid-interaction.
+		if ((provNode && document.activeElement === provNode) || document.activeElement === node) {
+			return;
+		}
+		const ref = String(current || 'auto');
+		const entryId = ref.split(':')[0] || 'auto';
+		if (provNode) {
+			provNode.innerHTML = '';
+			provNode.append(option(['auto', 'Auto'], ''));
+			for (const p of providersIn(models)) {
+				provNode.append(option([p.id, p.label], ''));
+			}
+			provNode.value = entryId;
+			if (provNode.value !== entryId) {
+				provNode.append(option([entryId, entryId], entryId));
+			}
+		}
+		fillModelOptions(node, models, entryId, ref);
+	}
+
+	/** The routing pair: provider first, then its models; "Chat's own model" is the empty first. */
+	function fillRoutes() {
+		const models = (state && state.models) || [];
+		for (const key of ['compaction', 'softRoute', 'hook']) {
+			const provNode = $('route-' + key + '-provider');
+			const node = $('route-' + key);
+			if (!node) {
+				continue;
+			}
+			if ((provNode && document.activeElement === provNode) || document.activeElement === node) {
+				continue;
+			}
+			const current = ((state.config && state.config.modelRoutes) || {})[key] || '';
+			const entryId = current ? current.split(':')[0] : '';
+			if (provNode) {
+				provNode.innerHTML = '';
+				provNode.append(option(['', "Chat's own model"], ''));
+				provNode.append(option(['auto', 'Auto'], ''));
+				for (const p of providersIn(models)) {
+					provNode.append(option([p.id, p.label], ''));
+				}
+				provNode.value = entryId;
+				if (provNode.value !== entryId) {
+					provNode.append(option([entryId, entryId], entryId));
+				}
+			}
+			fillModelOptions(node, models, entryId, current);
+		}
+	}
+
+	/** A provider select drives its model select; the model half persists when it owns a data-key. */
+	function wirePair(provId, modelId, persist) {
+		const prov = $(provId);
+		const node = $(modelId);
+		if (!prov || !node) {
+			return;
+		}
+		prov.addEventListener('change', () => {
+			const models = (state && state.models) || [];
+			const entryId = prov.value;
+			const keep = node.value && node.value.split(':')[0] === entryId ? node.value : '';
+			fillModelOptions(node, models, entryId, keep);
+			if (persist) {
+				node.dispatchEvent(new Event('change'));
+			}
+		});
 	}
 
 	/** The live tabs (Agent, UI) save themselves, so they are redrawn on every state push. */
@@ -622,6 +741,10 @@
 	}
 
 	$('model-refresh').addEventListener('click', () => post({ type: 'refresh' }));
+	wirePair('model-provider', 'model', true);
+	for (const routeKey of ['compaction', 'softRoute', 'hook']) {
+		wirePair('route-' + routeKey + '-provider', 'route-' + routeKey, false);
+	}
 	$('pr-refresh').addEventListener('click', () => {
 		// A refresh is a fresh read: unsaved layout edits are dropped, as on the Inspect tab.
 		promptDirty = false;
@@ -630,7 +753,6 @@
 	});
 	$('pr-save').addEventListener('click', savePrompts);
 	$('pr-reset').addEventListener('click', resetPrompts);
-	$('model-add').addEventListener('click', () => post({ type: 'configureModel' }));
 
 	$('close').addEventListener('click', () => post({ type: 'close' }));
 
@@ -1258,31 +1380,129 @@
 		}
 	}
 
-	/** The Models tab: the provider map as JSON (the MCP idiom), its status, and the routes. */
+	/** The Providers section: definition-grouped rows over the entry list, with a status dot each. */
+	function renderProviderList() {
+		const node = $('provider-list');
+		if (!node) {
+			return;
+		}
+		node.innerHTML = '';
+		const endpoints = (state && state.endpoints) || [];
+		const statusById = new Map((providerStatus || []).map((row) => [row.id, row]));
+		const groups = new Map();
+		for (const entry of endpoints) {
+			const list = groups.get(entry.definitionId) || { label: entry.providerLabel || entry.definitionId, items: [] };
+			list.items.push(entry);
+			groups.set(entry.definitionId, list);
+		}
+		for (const group of groups.values()) {
+			const header = document.createElement('div');
+			header.className = 'provider-list-group';
+			header.textContent = group.label + (group.items.length > 1 ? ` · ${group.items.length}` : '');
+			node.append(header);
+			for (const entry of group.items) {
+				const status = statusById.get(entry.id);
+				const key = status ? String(status.key || 'missing') : 'unknown';
+				const keyMissing = key === 'missing';
+				const row = document.createElement('button');
+				row.type = 'button';
+				row.className = 'provider-list-row';
+				const dot = document.createElement('span');
+				dot.className =
+					'provider-dot ' + (status && status.error ? 'is-error' : keyMissing ? 'is-warn' : 'is-ok');
+				dot.title = status && status.error ? status.error : keyMissing ? 'no key' : key;
+				row.append(dot);
+				const text = document.createElement('span');
+				text.className = 'provider-list-text';
+				text.textContent = [entry.id, entry.base, entry.model].filter(Boolean).join(' · ');
+				row.append(text);
+				// Where the key comes from. When both a keychain key and an env var exist, the
+				// endpoint records which one wins — the row lets the user pick right there.
+				const bothAvailable = Boolean(status && status.keyStored && status.keyEnvName);
+				if (bothAvailable) {
+					const chooser = document.createElement('select');
+					chooser.className = 'provider-key provider-key-choose';
+					chooser.title = 'Both a keychain key and an environment variable are set — choose which one this endpoint uses';
+					chooser.append(
+						option(['keychain', 'keychain'], 'keychain'),
+						option(['env', `env ${status.keyEnvName}`], 'env'),
+					);
+					chooser.value = status.keyPreferred === 'env' ? 'env' : 'keychain';
+					chooser.addEventListener('click', (event) => event.stopPropagation());
+					chooser.addEventListener('change', () =>
+						post({ type: 'setKeySource', id: entry.id, source: chooser.value }),
+					);
+					row.append(chooser);
+				} else {
+					const keyChip = document.createElement('span');
+					const kind = keyMissing ? 'is-missing' : key.startsWith('env ') ? 'is-env' : key === 'keychain' ? 'is-stored' : 'is-unknown';
+					keyChip.className = 'provider-key ' + kind;
+					keyChip.textContent = key;
+					keyChip.title =
+						(keyMissing
+							? 'No API key: run "Comonad: Configure Model Provider"'
+							: key === 'keychain'
+								? 'Saved in the VS Code keychain for this endpoint'
+								: key.startsWith('env ')
+									? `Read from the ${key.slice(4)} environment variable`
+									: 'Status not probed yet') + ' — click to set the environment variable name';
+					keyChip.addEventListener('click', (event) => {
+						event.stopPropagation();
+						post({ type: 'editKeyEnv', id: entry.id });
+					});
+					row.append(keyChip);
+				}
+				row.title = 'Edit under Advanced';
+				row.addEventListener('click', () => {
+					const advanced = $('providers');
+					if (advanced) {
+						advanced.focus();
+						advanced.scrollIntoView({ block: 'center' });
+					}
+				});
+				node.append(row);
+			}
+		}
+		if (!endpoints.length) {
+			const empty = document.createElement('p');
+			empty.className = 'hint';
+			empty.textContent = 'No providers yet — the shipped ones stand in until you add one.';
+			node.append(empty);
+		}
+	}
+
+	/** The Models tab: the provider list, the JSON map, its status, and the routes. */
+	/** An empty map runs the shipped providers: show them — the example and the effective config. */
+	function shippedProvidersJson() {
+		const map = {};
+		for (const entry of (state && state.endpoints) || []) {
+			map[entry.id] = { base: entry.base, model: entry.model };
+		}
+		return JSON.stringify(map, null, 2);
+	}
+
 	function renderModels() {
+		renderProviderList();
 		const providers = $('providers');
 		if (providers && document.activeElement !== providers) {
-			const text = JSON.stringify(state.config?.providers || {}, null, 2);
+			const stored = state.config?.providers;
+			const text = stored && Object.keys(stored).length ? JSON.stringify(stored, null, 2) : shippedProvidersJson();
 			if (providers.value !== text) {
 				providers.value = text;
 			}
 		}
-		for (const key of ['compaction', 'softRoute', 'hook']) {
-			const input = $('route-' + key);
-			if (input && document.activeElement !== input) {
-				input.value = (state.config?.modelRoutes || {})[key] || '';
-			}
-		}
+		fillRoutes();
 		const status = $('provider-status');
 		if (status) {
 			status.innerHTML = '';
-			// Six fixed columns; what a fixed width cannot hold — the endpoint URL, the
-			// prefix/skip rules, the fallback chain — rides in the row's hover note.
+			// Five fixed columns; what a fixed width cannot hold — the definition, the endpoint
+			// URL, the prefix/skip rules, the fallback chain — rides in the row's hover note.
 			table(
 				status,
-				['provider', 'brand', 'model', 'key', 'listed', 'error'],
+				['provider', 'model', 'key', 'listed', 'error'],
 				providerStatus.map((row) => ({
 					title: [
+						row.definitionId !== row.id ? `provider: ${row.definitionId}` : '',
 						row.base,
 						row.rules ? `rules: ${row.rules}` : '',
 						row.fallback ? `fallback: ${row.fallback}` : '',
@@ -1291,7 +1511,6 @@
 						.join('\n'),
 					cells: [
 						{ text: row.id, mono: true },
-						{ text: row.brand },
 						{ text: row.model, mono: true },
 						{ text: row.key, mono: row.key.startsWith('env ') },
 						{ text: String(row.listed) },
@@ -1792,7 +2011,9 @@
 				}
 				break;
 			case 'models':
+				state.models = Array.isArray(message.models) ? message.models : state.models;
 				fillModels(message.models, state ? state.config.model : '');
+				fillRoutes();
 				break;
 			case 'dirs':
 				dirs = message;

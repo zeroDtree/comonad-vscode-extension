@@ -9,12 +9,12 @@ Comonad 是 **workspace extension**。在远程窗口中，VS Code 会把它安�
 API key 存在 VS Code `SecretStorage` 中，即使扩展在远程，它也是客户端侧的：key 由本地 OS keychain
 加密，不会写进远程工作区或 `~/.vscode-server`。请求时只读入远程扩展宿主的内存。
 
-已存储的 key 属于**端点**（规范化后的 base URL），所以指向该端点的所有 profile 共用它。`keyEnv` 是
+已存储的 key 属于**端点**（规范化后的 base URL），所以指向该端点的所有提供商共用它。`keyEnv` 是
 例外 —— 它读取**远程**环境。
 
 ## 从远程主机调用模型
 
-base URL 为 `localhost` 的 profile 指向远程机器。要访问你自己电脑上的模型服务器，在
+base URL 为 `localhost` 的提供商指向远程机器。要访问你自己电脑上的模型服务器，在
 `~/.ssh/config` 中转发：
 
 ```text
@@ -41,4 +41,4 @@ Network access policy 为 on，shell 命令会被拒绝。在远程安装 bubble
 ## 下一步
 
 - [安全](/zh/guide/safety) —— 沙箱与审批细节
-- [设置](/zh/reference/settings) —— `workingDirectory`、`sandboxMode`、`profiles`
+- [设置](/zh/reference/settings) —— `workingDirectory`、`sandboxMode`、`providers`

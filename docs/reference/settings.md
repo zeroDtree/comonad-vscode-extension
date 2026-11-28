@@ -18,10 +18,9 @@ workspace's file when a folder is open and trusted, and to your user file otherw
 different projects therefore keep their own picks. In a multi-root workspace the first folder is
 the workspace.
 
-The workspace file is read, imported and written only in a trusted workspace. Existing VS Code
-`comonad.*` values are imported once on activation and are not read afterwards; edit the files
-instead. The Model, display and policy tabs save each control as it changes, and a running turn
-keeps the policy it started with, so a change applies from the next message.
+The workspace file is read and written only in a trusted workspace. The Model, display and policy
+tabs save each control as it changes, and a running turn keeps the policy it started with, so a
+change applies from the next message.
 
 This page lists the keys you are likely to change. The Settings panel documents each control; the
 JSON files hold the same names.
@@ -30,10 +29,11 @@ JSON files hold the same names.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `model` | `auto` | `auto` for the first profile, a profile id for its default model, or `profile:model` |
-| `profiles` | shipped DeepSeek/Gemini profiles | OpenAI-compatible endpoints; a profile that omits fields inherits them from the shipped profile for the same normalized `base` (model facts such as window and pricing also need the same `model`), and explicit values win. See [Chat](/guide/chat) |
-| `reasoningEffort` | `auto` | Thinking effort: `auto`, `none` (Off), `low`, `medium`, `high` or `max`; a profile's `topEffort` caps it |
-| `contextWindow` | `0` | Override the model's input window; `0` uses the profile |
+| `model` | `auto` | `auto` for the first provider, a provider id for its default model, or `provider:model` for a model that provider lists |
+| `providers` | shipped DeepSeek and Google | One provider per entry: `{ "deepseek": { "base": "…", "model": "deepseek-flash" } }`. The key names the provider unless `"provider"` says otherwise (`{ "my-proxy": { "provider": "custom", … } }`); `keyEnv`, `keySource`, paths, headers, options, retry and the `fallback` chain ride on the entry and override its definition. An empty map uses the shipped providers. See [Chat](/guide/chat) |
+| `modelRoutes` | absent | Per-purpose model overrides (`{compaction, softRoute, hook}`, each a `provider[:model]` id). Absent uses the chat's own model |
+| `reasoningEffort` | `auto` | Thinking effort: `auto`, `none` (Off), `low`, `medium`, `high` or `max`; the provider's `topEffort` caps it |
+| `contextWindow` | `0` | Override the model's input window; `0` uses the provider |
 
 ## Context compaction
 

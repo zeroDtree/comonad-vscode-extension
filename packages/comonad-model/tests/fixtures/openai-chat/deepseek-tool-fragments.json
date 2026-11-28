@@ -2,7 +2,7 @@
 	"name": "deepseek tool-call argument fragments",
 	"meta": {
 		"protocol": "openai-chat",
-		"brand": "deepseek",
+		"vendor": "deepseek",
 		"status": 200,
 		"note": "Hand-written shape of a tool call whose JSON arguments arrive split across deltas, id first."
 	},

@@ -2,7 +2,7 @@
 /**
  * The version of @comonad/model's external API surface.
  *
- * Protocol and brand definitions declare the apiVersion they were written against;
+ * Protocol and vendor definitions declare the apiVersion they were written against;
  * registration rejects anything this build does not support. Additive, optional
  * fields do not bump the version; removals or semantic changes do.
  */

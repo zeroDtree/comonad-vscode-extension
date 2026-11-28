@@ -14,7 +14,7 @@ export interface FixtureEnvelope {
 	name: string;
 	meta?: {
 		protocol?: string;
-		brand?: string;
+		vendor?: string;
 		/** HTTP status the endpoint answered with; 200 streams `sse`, anything else sends `body`. */
 		status?: number;
 		headers?: Record<string, string>;

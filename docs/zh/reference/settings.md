@@ -25,10 +25,11 @@ Settings 面板顶部的 Scope 选择器决定保存写入哪个文件；打开�
 
 | 键 | 默认值 | 用途 |
 | --- | --- | --- |
-| `model` | `auto` | `auto` 取第一个 profile；profile id 取其默认模型；或 `profile:model` |
-| `profiles` | 内置 DeepSeek/Gemini profile | OpenAI 兼容端点；见[聊天](/zh/guide/chat) |
-| `reasoningEffort` | `auto` | 思考强度：`auto`、`none`（Off）、`low`、`medium`、`high`、`max`；受 profile 的 `topEffort` 封顶 |
-| `contextWindow` | `0` | 覆盖模型输入窗口；`0` 使用 profile |
+| `model` | `auto` | `auto` 取第一个提供商；提供商 id 取其默认模型；或 `provider:model` 指定该提供商列出的模型 |
+| `providers` | 内置 DeepSeek 与 Google | 每个提供商一条：`{ "deepseek": { "base": "…", "model": "deepseek-flash" } }`。key 即提供商名，除非 `"provider"` 另指（`{ "my-proxy": { "provider": "custom", … } }`）；`keyEnv`、`keySource`、路径、请求头、选项、重试与 `fallback` 链都在条目上并覆盖其定义。空 map 使用内置提供商。见[聊天](/zh/guide/chat) |
+| `modelRoutes` | 无 | 按用途的模型覆盖（`{compaction, softRoute, hook}`，每项为 `provider[:model]` id）。缺省使用聊天自己的模型 |
+| `reasoningEffort` | `auto` | 思考强度：`auto`、`none`（Off）、`low`、`medium`、`high`、`max`；受提供商的 `topEffort` 封顶 |
+| `contextWindow` | `0` | 覆盖模型输入窗口；`0` 使用提供商 |
 
 ## 上下文压缩
 

@@ -205,7 +205,7 @@ async function main() {
 						'model-replay.test': 'packages/comonad-model/tests/replay.test.ts',
 						'model-boundary.test': 'packages/comonad-model/tests/boundary.test.ts',
 						'model-conformance-openai-chat.test': 'packages/comonad-model/tests/conformance/openai-chat.test.ts',
-						'model-brands.test': 'packages/comonad-model/tests/brands.test.ts',
+						'model-providers.test': 'packages/comonad-model/tests/providers.test.ts',
 						'model-conformance-anthropic.test': 'packages/comonad-model/tests/conformance/anthropic-messages.test.ts',
 						'model-conformance-gemini.test': 'packages/comonad-model/tests/conformance/gemini.test.ts',
 						'model-conformance-matrix.test': 'packages/comonad-model/tests/conformance/cross-protocol.test.ts',

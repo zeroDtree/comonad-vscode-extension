@@ -1751,7 +1751,7 @@ export class Agent extends Service {
 		// list that would have been offered without the block.
 		const visible = this.toolModes.get(session.id) === false ? [] : this.ctx.tools.visible(session.policy);
 		const files = session.instructions ?? [];
-		const instance = this.ctx.model.instanceFor(session.policy.model);
+		const instance = this.ctx.model.providerFor(session.policy.model);
 		const system = this.systems.get(session.id) ?? '';
 		const budget = this.budgetFor(session.policy, session.contextWindow, system, visible);
 		const room = this.roomFor(budget);

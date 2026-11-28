@@ -6,7 +6,7 @@ turn may run. All of it is paid out of the model's window, which is why a 128K m
 
 ## The window
 
-The window is data on the model profile (`contextWindow`). **Auto** in the model menu resolves to
+The window is data on the provider (`contextWindow`). **Auto** in the model menu resolves to
 the current model's own window; fixed sizes override it for an endpoint whose window is not what its
 provider documents. A model with no configured window falls back to 128K and says so in `/context`.
 
@@ -26,7 +26,7 @@ The status line above the composer shows the same share, e.g.
 input; a provider that reports no cache statistics is left off the line rather than shown as
 `0 (0%)`. The context share is not clamped: `context 117% · 299K/256K` means the last request
 exceeded the configured window. A provider may accept it anyway; the fix is to correct the model
-profile's `contextWindow`, not to read 100% as a hard ceiling.
+provider's `contextWindow`, not to read 100% as a hard ceiling.
 
 Before the provider has measured a chat, the context segment is a local estimate marked with `~`,
 e.g. `turn 0 · context ~27% · ~69K/256K`; the first completed round trip replaces it with the
@@ -52,7 +52,7 @@ still cannot fit the reply-reserved window, and only then let the endpoint's ref
 shrink and retry. Subagent requests are not foldable from the chat record, so they only elide. A
 successful fold reports the before/after size once; a trimmed request
 reports at most once per turn. A summary is a short, non-thinking call and is attempted at most four
-times per turn; one that fails is reported once and the turn continues. A profile that cannot turn
+times per turn; one that fails is reported once and the turn continues. A provider that cannot turn
 thinking off reports that the summarizer produced only reasoning, rather than pretending it returned
 an empty summary.
 

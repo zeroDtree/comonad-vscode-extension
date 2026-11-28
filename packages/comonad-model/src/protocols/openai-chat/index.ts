@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
  * The openai-chat protocol: OpenAI-compatible Chat Completions over SSE, with tool-call
- * delta assembly. One implementation serves every brand that speaks this wire — DeepSeek,
+ * delta assembly. One implementation serves every vendor that speaks this wire — DeepSeek,
  * OpenCode Go, Google's compatible layer, OpenAI itself — and knows nothing about any
- * of them: quirks are brand data and hooks.
+ * of them: quirks are vendor data and hooks.
  */
 import type { ProtocolDefinition, ProtocolImpl, ResolvedProvider } from '../../config/schema';
 import { ModelError, classifyHttpRefusal, modelHttpError, toTransportError } from '../../errors';

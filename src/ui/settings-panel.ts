@@ -23,8 +23,9 @@ import { ensureSettingsFile, settingsDisplayPath, workspaceFirstScope, type Sett
 import { estimateTokens } from '../lib/tokens';
 import { describe } from '../lib/util';
 import { asList, normalizeAgentPatch, providersOf, sanitizeProviders, sanitizeSubagentGrants, subagentGrant, type ToolCardMode } from '../services/settings';
-import { formatModelId } from '../services/model';
-import type { ProviderInstanceConfig } from '@comonad/model';
+import { formatModelId, groupModelChoices, providerLabelFor } from '../services/model';
+import { definitionIdOf } from '@comonad/model';
+import type { ProviderEntry } from '@comonad/model';
 import { unavailableInSandbox } from '../services/tools';
 import { registerCommand } from './register';
 
@@ -352,6 +353,13 @@ export function settingsPanel(ctx: Context): void {
 				contexts: CONTEXT_LABELS,
 			},
 			models: lastModels,
+			endpoints: providersOf(config).map((entry) => ({
+				id: entry.id,
+				definitionId: definitionIdOf(entry),
+				providerLabel: providerLabelFor(definitionIdOf(entry)),
+				base: entry.base,
+				model: entry.model ?? '',
+			})),
 			mcpServers: config.mcpServers,
 			mcp: ctx.mcp.status(),
 			tools: ctx.tools.all().map((tool) => ({
@@ -491,7 +499,7 @@ export function settingsPanel(ctx: Context): void {
 			const probe = await ctx.model.probeModels(instance.id);
 			rows.push({
 				id: instance.id,
-				brand: instance.brand,
+				definitionId: definitionIdOf(instance),
 				base: instance.base,
 				model: instance.model ?? '',
 				key:
@@ -500,6 +508,9 @@ export function settingsPanel(ctx: Context): void {
 						: info.source === 'env'
 							? `env ${info.envName ?? ''}`.trim()
 							: 'missing',
+				keyStored: info.stored,
+				keyEnvName: info.envName ?? '',
+				keyPreferred: info.preferred,
 				listed: probe.ids.length,
 				rules: instance.modelRules ? `${instance.modelRules.prefix ?? ''} ${instance.modelRules.skip ?? ''}`.trim() : '',
 				fallback: (instance.fallback ?? []).join(' → '),
@@ -583,6 +594,65 @@ export function settingsPanel(ctx: Context): void {
 					// No settings changed: answer with rows only, and skip the fall-through schedulePush.
 					await postProviderStatus();
 					return;
+				case 'setKeySource': {
+					// Both a keychain key and an env var exist: the endpoint records which wins.
+					const id = String(message.id ?? '');
+					const source = message.source === 'env' ? 'env' : 'keychain';
+					const providers: Record<string, ProviderEntry> = {};
+					for (const entry of providersOf(ctx.settings.get())) {
+						providers[entry.id] = entry.id === id ? { ...entry, keySource: source } : entry;
+					}
+					if (!providers[id]) {
+						return;
+					}
+					await ctx.settings.update('providers', providers);
+					ctx.model.invalidateCatalog(id);
+					void panel.webview.postMessage({ type: 'ok', message: `${id}: key now comes from ${source === 'env' ? 'the environment' : 'the keychain'}.` });
+					void postProviderStatus();
+					break;
+				}
+				case 'editKeyEnv': {
+					// The key chip opens a prompt: the env var name(s) this provider reads.
+					const id = String(message.id ?? '');
+					const entry = providersOf(ctx.settings.get()).find((row) => row.id === id);
+					if (!entry) {
+						return;
+					}
+					const definition = ctx.model.definitions().find((row) => row.id === definitionIdOf(entry));
+					const effective = entry.keyEnv ?? definition?.keyEnv ?? '';
+					const current = Array.isArray(effective) ? effective.join(', ') : effective;
+					const answer = await vscode.window.showInputBox({
+						prompt: `${id}: environment variable(s) holding the key, comma separated — empty uses the definition's default`,
+						value: current,
+						ignoreFocusOut: true,
+					});
+					if (answer === undefined) {
+						return;
+					}
+					const names = answer.split(',').map((name) => name.trim()).filter(Boolean);
+					const providers: Record<string, ProviderEntry> = {};
+					for (const row of providersOf(ctx.settings.get())) {
+						if (row.id !== id) {
+							providers[row.id] = row;
+							continue;
+						}
+						const next: ProviderEntry = { ...row };
+						if (names.length === 0) {
+							delete next.keyEnv;
+						} else {
+							next.keyEnv = names.length === 1 ? names[0] : names;
+						}
+						providers[id] = next;
+					}
+					await ctx.settings.update('providers', providers);
+					ctx.model.invalidateCatalog(id);
+					void panel.webview.postMessage({
+						type: 'ok',
+						message: names.length ? `${id}: keyEnv = ${names.join(', ')}.` : `${id}: keyEnv cleared — using the definition's default.`,
+					});
+					void postProviderStatus();
+					break;
+				}
 				case 'saveMcp': {
 					const parsed = JSON.parse(String(message.json ?? '{}')) as Record<string, unknown>;
 					const scope = panelScope(message.scope);
@@ -699,24 +769,57 @@ export function settingsPanel(ctx: Context): void {
 		void vscode.window.showInformationMessage('Comonad: MCP servers reloaded.');
 	});
 	registerCommand(ctx, 'comonad.pickModel', () => pickModel(ctx));
-	registerCommand(ctx, 'comonad.configureModel', () => configureModel(ctx));
+	registerCommand(ctx, 'comonad.configureModel', (preset?: { providerId?: string; model?: string }) => configureModel(ctx, preset));
 }
 settingsPanel.inject = ['host', 'settings', 'model', 'tools', 'mcp', 'sessions', 'agent', 'catalog'];
 
 export async function pickModel(ctx: Context): Promise<void> {
 	const choices = await ctx.model.availableModels({ refresh: true });
-	const picked = await vscode.window.showQuickPick(
-		[
-			...choices.map((choice) => ({
-				label: choice.needsKey ? `$(warning) ${choice.label}` : choice.label,
-				description: choice.description,
-				id: choice.id,
-			})),
-			{ label: '$(gear) Configure a provider…', description: 'Add an OpenAI-compatible endpoint', id: '' },
-		],
-		{ title: 'Comonad model', ignoreFocusOut: true },
-	);
+	const setup = ctx.model.setupChoices();
+	const groups = groupModelChoices(choices);
+	const auto = choices.find((choice) => choice.id === 'auto');
+	const items: (vscode.QuickPickItem & { id: string })[] = [];
+	const setupByDefinition = new Map<string, typeof setup>();
+	for (const row of setup) {
+		const list = setupByDefinition.get(row.providerId) ?? [];
+		list.push(row);
+		setupByDefinition.set(row.providerId, list);
+	}
+	const emit = (choice: (typeof choices)[number]): void => {
+		items.push({
+			label: choice.needsKey ? `$(warning) ${choice.label}` : choice.label,
+			description: choice.description,
+			id: choice.id,
+		});
+	};
+	for (const group of groups) {
+		items.push({ kind: vscode.QuickPickItemKind.Separator, label: group.providerLabel, id: '' });
+		for (const choice of group.choices) {
+			emit(choice);
+		}
+		for (const row of setupByDefinition.get(group.definitionId) ?? []) {
+			items.push({ label: row.label, description: row.description, id: row.id });
+			setupByDefinition.delete(group.definitionId);
+		}
+	}
+	// Definitions that only offer setup (not configured yet) get their own group at the end.
+	for (const [providerId, rows] of setupByDefinition) {
+		items.push({ kind: vscode.QuickPickItemKind.Separator, label: rows[0]?.providerLabel ?? providerId, id: '' });
+		for (const row of rows) {
+			items.push({ label: row.label, description: row.description, id: row.id });
+		}
+	}
+	if (auto) {
+		emit(auto);
+	}
+	items.push({ label: '$(gear) Configure a provider…', description: 'Add an OpenAI-compatible endpoint', id: '' });
+	const picked = await vscode.window.showQuickPick(items, { title: 'Comonad model', ignoreFocusOut: true });
 	if (!picked) {
+		return;
+	}
+	const setupRef = parseSetupRef(picked.id);
+	if (setupRef) {
+		await configureModel(ctx, setupRef);
 		return;
 	}
 	if (!picked.id) {
@@ -737,41 +840,147 @@ export async function pickModel(ctx: Context): Promise<void> {
 	await ctx.settings.update('model', picked.id);
 }
 
-export async function configureModel(ctx: Context): Promise<void> {
-	// With nothing configured the shipped instances stand in, so "add a provider" starts from
-	// them: the written map materializes the set the user sees, plus the new one.
+/** Persist one provider: write the providers map, adopt it as the chat's model, keep its key. */
+async function saveEndpoint(ctx: Context, instance: ProviderEntry, key?: string): Promise<void> {
+	// Model facts (window, prices, thinking quirks) are not copied around: the definition carries them
+	// and the merge engine layers them under this instance at resolve time.
+	const providers: Record<string, ProviderEntry> = {};
+	for (const entry of providersOf(ctx.settings.get())) {
+		if (entry.id !== instance.id) {
+			providers[entry.id] = entry;
+		}
+	}
+	providers[instance.id] = instance;
+	await ctx.settings.update('providers', providers);
+	await ctx.settings.update('model', formatModelId(instance.id, instance.model));
+	if (key) {
+		await ctx.model.setSecret(instance.id, key, instance.base);
+	}
+	ctx.model.invalidateCatalog(instance.id);
+}
+
+/**
+ * A setup row's payload: `__setup:<providerId>[:<model>]`. Split on the first two colons only, so a
+ * model id containing colons survives intact.
+ */
+export function parseSetupRef(ref: string): { providerId: string; model?: string } | undefined {
+	if (!ref.startsWith('__setup:')) {
+		return undefined;
+	}
+	const rest = ref.slice('__setup:'.length);
+	const colon = rest.indexOf(':');
+	if (colon < 0) {
+		return { providerId: rest };
+	}
+	const model = rest.slice(colon + 1);
+	return { providerId: rest.slice(0, colon), model: model || undefined };
+}
+
+/**
+ * The one add-provider flow. No preset: pick a definition, then base/key/model — definitions
+ * that carry defaults (base URL, keyEnv) skip those questions. With a preset (a `__setup:` row)
+ * the definition and often the model are already known, so only the missing pieces are asked.
+ */
+export async function configureModel(ctx: Context, preset?: { providerId?: string; model?: string }): Promise<void> {
+	const definitions = ctx.model.definitions();
 	const configured = providersOf(ctx.settings.get());
-	const sample = configured[0];
-	const id = await vscode.window.showInputBox({
-		prompt: 'Provider id (letters, digits, dash, no colon)',
-		value: `${sample?.id ?? 'my-provider'}-2`,
-		ignoreFocusOut: true,
-	});
-	if (!id) {
-		return;
-	}
-	if (id.includes(':')) {
-		void vscode.window.showWarningMessage('Comonad: a provider id cannot contain ":", it separates the model in `comonad.model`.');
-		return;
-	}
-	const brand = await vscode.window.showQuickPick(
-		[
-			{ label: 'custom', description: 'Any OpenAI-compatible endpoint; everything comes from this wizard', id: 'custom' },
-			{ label: 'deepseek', description: 'DeepSeek — its thinking switch and cache prices ride along', id: 'deepseek' },
-			{ label: 'openai', description: 'OpenAI', id: 'openai' },
-			{ label: 'opencode-go', description: 'OpenCode Go — session header, its own chat and models paths', id: 'opencode-go' },
-			{ label: 'google', description: "Google's OpenAI-compatible layer — models/ prefix, thought signatures", id: 'google' },
-		],
-		{ title: `${id}: which brand does this endpoint speak?`, ignoreFocusOut: true },
-	);
-	if (!brand) {
-		return;
-	}
-	const base = await vscode.window.showInputBox({ prompt: 'API base URL', value: sample?.base ?? '', ignoreFocusOut: true });
-	if (!base) {
-		return;
-	}
 	const remote = ctx.host.remoteName();
+
+	// --- which provider? ---
+	const presetId = preset?.providerId;
+	let definition = presetId ? definitions.find((def) => def.id === presetId) : undefined;
+	if (preset?.providerId && !definition) {
+		// A stale setup ref: the full wizard owns it.
+		preset = undefined;
+	}
+	if (!definition) {
+		const ordered = [...definitions].sort((a, b) => (a.id === 'custom' ? 1 : b.id === 'custom' ? -1 : 0));
+		const picked = await vscode.window.showQuickPick(
+			ordered.map((def) => ({
+				label: providerLabelFor(def.id),
+				description: def.defaults?.baseURL ?? 'base URL entered next',
+				id: def.id,
+			})),
+			{ title: 'Add a provider', ignoreFocusOut: true },
+		);
+		if (!picked) {
+			return;
+		}
+		definition = definitions.find((def) => def.id === picked.id);
+		if (!definition) {
+			return;
+		}
+	}
+	const def = definition;
+	const defLabel = providerLabelFor(def.id);
+
+	// --- entry id: the definition id, or the first free suffix; existing → confirm replace ---
+	let id = def.id;
+	if (configured.some((entry) => entry.id === id)) {
+		if (preset) {
+			// The setup row raced an existing entry of the same provider: reuse it below.
+			id = '';
+		} else {
+			const replace = await vscode.window.showWarningMessage(
+				`Comonad: ${defLabel} is already configured as "${def.id}". Replace it?`,
+				'Replace',
+			);
+			if (replace !== 'Replace') {
+				return;
+			}
+			id = def.id;
+		}
+	} else if (!preset) {
+		const answer = await vscode.window.showInputBox({
+			prompt: 'Provider id (letters, digits, dash, no colon)',
+			value: id,
+			ignoreFocusOut: true,
+		});
+		if (answer === undefined) {
+			return;
+		}
+		if (answer.includes(':')) {
+			void vscode.window.showWarningMessage('Comonad: a provider id cannot contain ":", it separates the model in `comonad.model`.');
+			return;
+		}
+		id = answer || def.id;
+	} else {
+		// Preset with a free id: mint it without asking (suffix if a race took the name).
+		for (let n = 2; configured.some((entry) => entry.id === id); n++) {
+			id = `${def.id}-${n}`;
+		}
+	}
+
+	// An existing entry for this definition (setup-row race): repoint the chat, nothing to create.
+	const existing = id === '' ? configured.find((entry) => definitionIdOf(entry) === def.id) : undefined;
+	if (existing) {
+		const model = preset?.model ?? existing.model ?? '';
+		if (model) {
+			await ctx.settings.update('model', formatModelId(existing.id, model));
+		}
+		return;
+	}
+
+	// --- base: from the definition when it has one, else asked ---
+	const defaultBase = def.defaults?.baseURL?.trim();
+	let base: string;
+	if (defaultBase) {
+		const answer = await vscode.window.showInputBox({
+			prompt: `API base URL for ${defLabel}`,
+			value: defaultBase,
+			ignoreFocusOut: true,
+		});
+		if (answer === undefined) {
+			return;
+		}
+		base = answer.trim() || defaultBase;
+	} else {
+		const answer = await vscode.window.showInputBox({ prompt: 'API base URL', ignoreFocusOut: true });
+		if (!answer?.trim()) {
+			return;
+		}
+		base = answer.trim();
+	}
 	if (remote && isLoopbackBase(base)) {
 		const go = await vscode.window.showWarningMessage(
 			`Comonad runs on the remote (${remote}). ${base} is a loopback address there: it reaches the remote machine, not your local one.`,
@@ -781,69 +990,77 @@ export async function configureModel(ctx: Context): Promise<void> {
 			return;
 		}
 	}
-	const keyEnvAnswer = await vscode.window.showInputBox({
-		prompt: 'Environment variable(s) holding the key, comma separated (optional)',
-		value: '',
-		ignoreFocusOut: true,
-	});
-	if (keyEnvAnswer === undefined) {
-		return;
+
+	// --- keyEnv: the definition owns it; only definitions without one are asked ---
+	let keyEnv: string[] = [];
+	if (!def.keyEnv) {
+		const answer = await vscode.window.showInputBox({
+			prompt: 'Environment variable(s) holding the key, comma separated (optional)',
+			value: '',
+			ignoreFocusOut: true,
+		});
+		if (answer === undefined) {
+			return;
+		}
+		keyEnv = answer.split(',').map((name) => name.trim()).filter(Boolean);
 	}
-	const keyEnv = keyEnvAnswer
-		.split(',')
-		.map((name) => name.trim())
-		.filter(Boolean);
-	const instance: ProviderInstanceConfig = { id, brand: brand.id, base, model: '' };
-	if (keyEnv.length) {
-		instance.keyEnv = keyEnv;
-	}
-	const existing = await ctx.model.storedKeyFor(base);
+
+	// --- key: always asked, so a stored one can be replaced ---
+	const stored = await ctx.model.storedKeyFor(base);
 	const key = await vscode.window.showInputBox({
-		prompt: existing
-			? 'API key — this endpoint already has a saved key; leave empty to reuse it'
+		prompt: stored
+			? 'API key — this provider already has a saved key; leave empty to reuse it'
 			: keyEnv.length
-				? `API key — stored by VS Code for this endpoint; leave empty to read ${keyEnv.join(' or ')} from the ${remote ? 'remote ' : ''}environment`
-				: 'API key — stored by VS Code for this endpoint',
+				? `API key — stored by VS Code; leave empty to read ${keyEnv.join(' or ')} from the ${remote ? 'remote ' : ''}environment`
+				: def.keyEnv
+					? `API key — stored by VS Code; leave empty to read ${def.keyEnv} from the ${remote ? 'remote ' : ''}environment`
+					: 'API key — stored by VS Code for this provider',
 		password: true,
 		ignoreFocusOut: true,
 	});
 	if (key === undefined) {
 		return;
 	}
-	// Ask the endpoint what it offers, so the saved instance names a model that exists. The key is used
-	// here but only stored after the instance is saved, so cancelling leaves no secret behind.
-	const probe = await ctx.model.probeInstance(instance, key || existing);
+
+	// --- probe, then pick the model ---
+	const probeEntry: ProviderEntry = { id: id || def.id, provider: def.id, base, model: preset?.model || 'placeholder' };
+	const probe = await ctx.model.probeProvider(probeEntry, key || stored);
 	if (probe.error) {
 		void vscode.window.showWarningMessage(`Comonad: could not list models from ${base}: ${probe.error}`);
 	}
-	const model = await vscode.window.showQuickPick(
-		[...new Set(probe.ids)],
-		{ title: `${id}: pick the model`, ignoreFocusOut: true },
-	);
+	let model = preset?.model ?? '';
 	if (!model) {
-		const typed = await vscode.window.showInputBox({ prompt: 'Model name', value: '', ignoreFocusOut: true });
-		if (!typed) {
+		const ids = [...new Set(probe.ids)];
+		if (ids.length) {
+			const picked = await vscode.window.showQuickPick(ids, { title: `${defLabel}: pick the model`, ignoreFocusOut: true });
+			if (picked === undefined) {
+				return; // cancel aborts — a model is required
+			}
+			model = picked;
+		} else {
+			const typed = await vscode.window.showInputBox({ prompt: 'Model name', value: '', ignoreFocusOut: true });
+			if (!typed) {
+				return;
+			}
+			model = typed;
+		}
+	} else if (probe.ids.length && !probe.ids.includes(model)) {
+		const go = await vscode.window.showWarningMessage(`Comonad: ${model} is not in ${base}'s list.`, 'Continue anyway');
+		if (go !== 'Continue anyway') {
 			return;
 		}
-		instance.model = typed;
-	} else {
-		instance.model = model;
 	}
-	// Model facts (window, prices, thinking quirks) are not copied around: the brand carries them
-	// and the merge engine layers them under this instance at resolve time.
-	const providers: Record<string, ProviderInstanceConfig> = {};
-	for (const entry of configured) {
-		if (entry.id !== id) {
-			providers[entry.id] = entry;
-		}
+
+	// --- save ---
+	const entry: ProviderEntry = { id: id || def.id, base, model };
+	if ((id || def.id) !== def.id) {
+		entry.provider = def.id;
 	}
-	providers[id] = instance;
-	await ctx.settings.update('providers', providers);
-	await ctx.settings.update('model', formatModelId(id, instance.model));
-	if (key) {
-		await ctx.model.setSecret(id, key, base);
+	if (keyEnv.length) {
+		entry.keyEnv = keyEnv;
 	}
-	void vscode.window.showInformationMessage(`Comonad: provider ${id} saved (${instance.model}).`);
+	await saveEndpoint(ctx, entry, key || (stored || undefined));
+	void vscode.window.showInformationMessage(`Comonad: ${defLabel} connected (${model}).`);
 }
 
 /** A pane names its own tab and titles it, and that text lands in the host's markup: it is escaped. */
@@ -916,7 +1133,7 @@ export function settingsDocument(
     <input id="search" class="control" type="search" placeholder="Search settings" spellcheck="false" autocomplete="off" />
     <nav id="tabs" role="tablist" aria-orientation="vertical" aria-label="Comonad settings">
 ${tabButton('agent', 'Agent', 'Agent — model, workspace, conversation', TAB_ICONS.agent)}
-${tabButton('models', 'Models', 'Models — provider connections, discovery and routing', TAB_ICONS.models)}
+${tabButton('models', 'Models', 'Models — providers, discovery and routing', TAB_ICONS.models)}
 ${tabButton('policies', 'Policies', 'Policies — the runtime policy pipeline', TAB_ICONS.policies)}
 ${tabButton('ui', 'UI', 'UI — how the conversation is displayed', TAB_ICONS.ui)}
 ${tabButton('subagents', 'Subagents', 'Subagents — step budget and per-agent capability grants', TAB_ICONS.subagents)}
@@ -950,18 +1167,6 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
   <section data-pane="agent">
     <h1 class="page-title">Agent</h1>
     <p class="group-note">Work mode, network, user rules, approvals and sandbox live in the <strong>Policies</strong> tab.</p>
-    <h2 class="group-title">Model</h2>
-    <div class="group">
-      <div class="field">
-        <label for="model">Default model</label>
-        <p class="hint">What a new chat talks to. A profile is any OpenAI-compatible endpoint.</p>
-        <div class="row">
-          <select id="model" class="control" data-key="model"></select>
-          <button class="secondary" id="model-refresh" type="button">Refresh</button>
-          <button class="secondary" id="model-add" type="button">Add provider…</button>
-        </div>
-      </div>
-    </div>
     <h2 class="group-title">Workspace</h2>
     <div class="group">
       <div class="field">
@@ -1030,32 +1235,70 @@ ${tabButton('plugins', 'Plugins', 'Plugins — every plugin in the tree, and wha
 
   <section data-pane="models" hidden>
     <h1 class="page-title">Models</h1>
-    <p class="group-note">One provider instance per entry: <code>{ "id": { "brand": "deepseek", "base": "https://api.deepseek.com", "model": "deepseek-flash", "keyEnv": "DEEPSEEK_API_KEY" } }</code>. An empty map uses the shipped instances. Per-model facts (<code>models</code>), paths, headers, options, retry and the <code>fallback</code> chain ride on the same entries.</p>
+    <p class="group-note">Pick the provider and model you talk to. Keys and raw JSON live under Advanced.</p>
+    <h2 class="group-title">Providers</h2>
     <div class="group">
       <div class="field">
-        <label for="providers">Providers</label>
-        <p class="hint">JSON object keyed by provider id. The wizard fills one in for you; edit facts, paths or the fallback chain here.</p>
+        <label>Added providers</label>
+        <p class="hint">Every provider you have added. Click a row to edit its raw entry under Advanced.</p>
+        <div id="provider-list" class="provider-list"></div>
+        <div class="row">
+          <button class="secondary" id="providers-add" type="button">Add provider…</button>
+        </div>
+      </div>
+    </div>
+    <h2 class="group-title">Models</h2>
+    <div class="group">
+      <div class="field">
+        <label for="model">Default model</label>
+        <p class="hint">What a new chat talks to. Pick the provider first, then one of its models.</p>
+        <div class="row">
+          <select id="model-provider" class="control" title="Provider"></select>
+          <select id="model" class="control" data-key="model" title="Model"></select>
+          <button class="secondary" id="model-refresh" type="button">Refresh</button>
+        </div>
+      </div>
+    </div>
+    <h2 class="group-title">Routing</h2>
+    <div class="group">
+      <div class="field">
+        <label>Per-purpose models</label>
+        <p class="hint">Background tasks may run on their own model. Pick the provider first, then one of its models; empty uses the chat's own model.</p>
+        <div class="row">
+          <label class="route-label" for="route-compaction-provider">Compaction (summaries)</label>
+          <select id="route-compaction-provider" class="control"></select>
+          <select id="route-compaction" class="control"></select>
+        </div>
+        <div class="row">
+          <label class="route-label" for="route-softRoute-provider">Soft routes (graph choices)</label>
+          <select id="route-softRoute-provider" class="control"></select>
+          <select id="route-softRoute" class="control"></select>
+        </div>
+        <div class="row">
+          <label class="route-label" for="route-hook-provider">Prompt hooks</label>
+          <select id="route-hook-provider" class="control"></select>
+          <select id="route-hook" class="control"></select>
+        </div>
+        <div class="row">
+          <button class="secondary" id="routes-save" type="button">Save routing</button>
+        </div>
+      </div>
+    </div>
+    <h2 class="group-title">Advanced</h2>
+    <div class="group">
+      <div class="field">
+        <label for="providers">Providers JSON</label>
+        <p class="hint">One provider per entry: <code>{ "deepseek": { "base": "https://api.deepseek.com", "model": "deepseek-flash" } }</code>. The key names the provider unless <code>"provider"</code> says otherwise (<code>{ "my-proxy": { "provider": "custom", … } }</code>). The box starts with the shipped providers (DeepSeek Flash, Gemini 3.8 Flash) — clearing it back to <code>{}</code> keeps using them; an entry's <code>keyEnv</code> replaces its definition's. Per-model facts (<code>models</code>), paths, headers, options, retry and the <code>fallback</code> chain ride on the same entries.</p>
         <textarea id="providers" class="control" spellcheck="false" style="min-height:200px"></textarea>
         <div class="row">
           <button class="secondary" id="providers-save" type="button">Save providers</button>
-          <button class="secondary" id="providers-add" type="button">Add provider…</button>
           <button class="secondary" id="providers-probe" type="button">List models</button>
         </div>
       </div>
       <div class="field">
         <label>Status</label>
-        <p class="hint">What each effective instance resolves to, and what its endpoint lists. Key: <code>keychain</code> = saved for this endpoint, <code>env NAME</code> = read from the provider's <code>keyEnv</code>, <code>missing</code> = none set. Hover a row for its base URL, model rules and fallback chain.</p>
+        <p class="hint">What each effective provider resolves to, and what its endpoint lists. Key: <code>keychain</code> = saved for this endpoint, <code>env NAME</code> = read from <code>keyEnv</code>, <code>missing</code> = none set. Hover a row for its definition, base URL, model rules and fallback chain.</p>
         <table id="provider-status"></table>
-      </div>
-      <div class="field">
-        <label>Model routing</label>
-        <p class="hint">Per-purpose overrides as <code>provider[:model]</code> ids. Empty uses the chat's own model.</p>
-        <div class="row">
-          <input class="control" id="route-compaction" placeholder="compaction (summaries)" spellcheck="false" />
-          <input class="control" id="route-softRoute" placeholder="soft routes (graph choices)" spellcheck="false" />
-          <input class="control" id="route-hook" placeholder="prompt hooks" spellcheck="false" />
-          <button class="secondary" id="routes-save" type="button">Save routing</button>
-        </div>
       </div>
     </div>
   </section>

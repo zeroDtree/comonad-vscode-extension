@@ -2,21 +2,21 @@
 /**
  * @comonad/model — the Comonad Model Runtime.
  *
- * A protocol-driven, brand-extensible model calling stack:
+ * A protocol-driven, vendor-extensible model calling stack:
  *
  *   Model Runtime        resolve · stream · retry · fallback · usage · cost
- *   Brand Adapters       openai · deepseek · opencode-go · anthropic · google · custom
+ *   Vendor Adapters       openai · deepseek · opencode-go · anthropic · google · custom
  *   Protocol Impls       openai-chat · anthropic-messages · gemini
  *   Transport            HTTP · Auth · Headers · SSE · Abort · Origin/Secret security
  *
  * This barrel is the frozen public API surface (MODEL_API_VERSION).
  */
 export { MODEL_API_VERSION, assertApiVersion } from './api-version';
-export { customBrand } from './brands/custom';
-export { deepseekBrand } from './brands/deepseek';
-export { SKIP_SIGNATURE, demandsSignature, googleBrand, googleSignatures } from './brands/google';
-export { openaiBrand } from './brands/openai';
-export { opencodeGoBrand } from './brands/opencode-go';
+export { customProvider } from './providers/custom';
+export { deepseekProvider } from './providers/deepseek';
+export { SKIP_SIGNATURE, demandsSignature, googleProvider, googleSignatures } from './providers/google';
+export { openaiProvider } from './providers/openai';
+export { opencodeGoProvider } from './providers/opencode-go';
 export {
 	isDocumentAttachment,
 	isImageAttachment,
@@ -44,7 +44,7 @@ export {
 export type { AnthropicStreamEvent } from './protocols/anthropic-messages';
 export { GEMINI_OPTIONS, geminiProtocol, toGeminiContents, toGeminiTools } from './protocols/gemini';
 export type { GeminiStreamEvent } from './protocols/gemini';
-export { anthropicBrand } from './brands/anthropic';
+export { anthropicProvider } from './providers/anthropic';
 export {
 	ModelError,
 	classifyHttpRefusal,
@@ -70,20 +70,18 @@ export {
 } from './config/merge';
 export type { MergeRule, MergeRuleRow } from './config/merge';
 export { keyEnvNames, resolveProvider } from './config/resolve';
-export { SHIPPED_INSTANCES } from './config/shipped-instances';
-export {
-	DEFAULT_RETRY_POLICY,
-} from './config/schema';
+export { SHIPPED_PROVIDERS } from './config/shipped-instances';
+export { definitionIdOf, DEFAULT_RETRY_POLICY } from './config/schema';
 export type {
-	BrandDefaults,
-	BrandDefinition,
+	ProviderDefaults,
+	ProviderDefinition,
 	KeyProvider,
 	OptionField,
 	OptionSchema,
 	OptionValues,
 	ProtocolDefinition,
 	ProtocolImpl,
-	ProviderInstanceConfig,
+	ProviderEntry,
 	RequestHook,
 	ResolvedProvider,
 	ResolvedWire,
@@ -102,7 +100,7 @@ export { addUsage } from './runtime/usage';
 export { RecordingTransport, formatSse } from './replay/record';
 export { ReplayTransport } from './replay/replay-transport';
 export type { FixtureEnvelope } from './replay/replay-transport';
-export { FAKE_OPTIONS_SCHEMA, makeFakeBrand, makeFakeInstance, makeFakeProtocol } from './testing';
+export { FAKE_OPTIONS_SCHEMA, makeFakeProvider, makeFakeEntry, makeFakeProtocol } from './testing';
 export type { FakeCall, FakeOutcome, FakeProtocol, FakeProtocolOptions } from './testing';
 export { BEARER, applyAuth, maskSecret, redactSecrets } from './transport/auth';
 export type { AuthScheme } from './transport/auth';

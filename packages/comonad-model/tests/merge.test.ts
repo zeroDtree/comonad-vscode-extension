@@ -12,11 +12,11 @@ import {
 } from '../src/config/merge';
 import { keyEnvNames, resolveProvider } from '../src/config/resolve';
 import type {
-	BrandDefinition,
+	ProviderDefinition,
 	KeyProvider,
 	OptionSchema,
 	ProtocolDefinition,
-	ProviderInstanceConfig,
+	ProviderEntry,
 	ResolvedWire,
 } from '../src/config/schema';
 import { ModelError } from '../src/errors';
@@ -52,24 +52,24 @@ function makeProtocol(overrides: Partial<ProtocolDefinition> = {}): ProtocolDefi
 	};
 }
 
-function makeBrand(overrides: Partial<BrandDefinition> = {}): BrandDefinition {
+function makeProvider(overrides: Partial<ProviderDefinition> = {}): ProviderDefinition {
 	return {
 		apiVersion: 1,
 		id: 'deepseek',
 		protocol: 'openai-chat',
 		defaults: {
 			baseURL: 'https://api.deepseek.com',
-			headers: { 'x-layer': 'brand', 'x-brand': 'deepseek' },
+			headers: { 'x-layer': 'vendor', 'x-brand': 'deepseek' },
 			options: { thinkingOff: 'thinking' },
 		},
 		...overrides,
 	};
 }
 
-function makeInstance(overrides: Partial<ProviderInstanceConfig> = {}): ProviderInstanceConfig {
+function makeEntry(overrides: Partial<ProviderEntry> = {}): ProviderEntry {
 	return {
 		id: 'deepseek',
-		brand: 'deepseek',
+		provider: 'deepseek',
 		base: 'https://api.deepseek.com',
 		keyEnv: 'DEEPSEEK_API_KEY',
 		...overrides,
@@ -77,11 +77,11 @@ function makeInstance(overrides: Partial<ProviderInstanceConfig> = {}): Provider
 }
 
 function wireOf(
-	instance: Partial<ProviderInstanceConfig> = {},
-	brand: Partial<BrandDefinition> = {},
+	entry: Partial<ProviderEntry> = {},
+	definition: Partial<ProviderDefinition> = {},
 	protocol: Partial<ProtocolDefinition> = {},
 ): ResolvedWire {
-	return mergeWire(makeProtocol(protocol), makeBrand(brand), makeInstance(instance));
+	return mergeWire(makeProtocol(protocol), makeProvider(definition), makeEntry(entry));
 }
 
 function keysOf(overrides: Partial<KeyProvider> = {}): KeyProvider {
@@ -127,22 +127,22 @@ suite('merge rules', () => {
 	});
 
 	suite('protocol (override)', () => {
-		test('the instance re-points the brand protocol', () => {
-			assert.strictEqual(protocolIdFor(makeInstance({ protocol: 'gemini' }), makeBrand()), 'gemini');
+		test('the instance re-points the vendor protocol', () => {
+			assert.strictEqual(protocolIdFor(makeEntry({ protocol: 'gemini' }), makeProvider()), 'gemini');
 		});
-		test('the brand protocol is the default', () => {
-			assert.strictEqual(protocolIdFor(makeInstance(), makeBrand()), 'openai-chat');
+		test('the vendor protocol is the default', () => {
+			assert.strictEqual(protocolIdFor(makeEntry(), makeProvider()), 'openai-chat');
 		});
 		test('an explicit nullish instance value does not re-point', () => {
-			assert.strictEqual(protocolIdFor(makeInstance({ protocol: undefined }), makeBrand({ protocol: 'anthropic-messages' })), 'anthropic-messages');
+			assert.strictEqual(protocolIdFor(makeEntry({ protocol: undefined }), makeProvider({ protocol: 'anthropic-messages' })), 'anthropic-messages');
 		});
 	});
 
 	suite('baseURL (override)', () => {
-		test('the instance base wins over the brand default', () => {
+		test('the instance base wins over the vendor default', () => {
 			assert.strictEqual(wireOf({ base: 'https://proxy.example/v1' }).baseURL, 'https://proxy.example/v1');
 		});
-		test('the brand default fills an instance without one', () => {
+		test('the vendor default fills an instance without one', () => {
 			assert.strictEqual(wireOf({ base: '' }).baseURL, 'https://api.deepseek.com');
 		});
 		test('the base is normalized (trailing slashes, host case)', () => {
@@ -157,11 +157,11 @@ suite('merge rules', () => {
 	});
 
 	suite('auth (replace)', () => {
-		test('the instance scheme replaces the brand one wholesale', () => {
+		test('the instance scheme replaces the vendor one wholesale', () => {
 			const wire = wireOf({ auth: { kind: 'header', name: 'x-api-key' } }, { defaults: { baseURL: 'https://b', auth: { kind: 'query', name: 'key' } } });
 			assert.deepStrictEqual(wire.auth, { kind: 'header', name: 'x-api-key' });
 		});
-		test('the brand scheme replaces the protocol default', () => {
+		test('the vendor scheme replaces the protocol default', () => {
 			const wire = wireOf({}, { defaults: { baseURL: 'https://b', auth: { kind: 'query', name: 'key' } } });
 			assert.deepStrictEqual(wire.auth, { kind: 'query', name: 'key' });
 		});
@@ -173,13 +173,13 @@ suite('merge rules', () => {
 
 	suite('keyEnv (override)', () => {
 		test('a single name normalizes to a one-element list', () => {
-			assert.deepStrictEqual(keyEnvNames(makeInstance({ keyEnv: 'KEY_A' })), ['KEY_A']);
+			assert.deepStrictEqual(keyEnvNames(makeEntry({ keyEnv: 'KEY_A' }).keyEnv), ['KEY_A']);
 		});
 		test('an array keeps its order and trims', () => {
-			assert.deepStrictEqual(keyEnvNames(makeInstance({ keyEnv: [' KEY_A ', 'KEY_B'] })), ['KEY_A', 'KEY_B']);
+			assert.deepStrictEqual(keyEnvNames(makeEntry({ keyEnv: [' KEY_A ', 'KEY_B'] }).keyEnv), ['KEY_A', 'KEY_B']);
 		});
 		test('absent means no env fallback at all', () => {
-			assert.deepStrictEqual(keyEnvNames(makeInstance({ keyEnv: undefined })), []);
+			assert.deepStrictEqual(keyEnvNames(makeEntry({ keyEnv: undefined }).keyEnv), []);
 		});
 	});
 
@@ -194,8 +194,8 @@ suite('merge rules', () => {
 			assert.strictEqual(wire.headers['x-brand'], 'deepseek');
 			assert.strictEqual(wire.headers['content-type'], 'application/json');
 		});
-		test('the brand wins over the protocol', () => {
-			assert.strictEqual(wireOf().headers['x-layer'], 'brand');
+		test('the vendor wins over the protocol', () => {
+			assert.strictEqual(wireOf().headers['x-layer'], 'vendor');
 		});
 		test('nothing is merged field-wise inside a header value', () => {
 			const wire = wireOf({ headers: { 'x-brand': 'other' } });
@@ -204,14 +204,14 @@ suite('merge rules', () => {
 	});
 
 	suite('headerHooks / requestHooks (concat)', () => {
-		test('protocol hooks run before brand hooks', () => {
+		test('protocol hooks run before vendor hooks', () => {
 			const order: string[] = [];
 			const wire = wireOf(
 				{},
 				{
 					headerHooks: [
 						() => {
-							order.push('brand');
+							order.push('vendor');
 						},
 					],
 				},
@@ -226,7 +226,7 @@ suite('merge rules', () => {
 			for (const hook of wire.headerHooks) {
 				hook({}, ctx);
 			}
-			assert.deepStrictEqual(order, ['protocol', 'brand']);
+			assert.deepStrictEqual(order, ['protocol', 'vendor']);
 		});
 		test('every layer contributes its hooks, none replace', () => {
 			const wire = wireOf({}, { requestHooks: [noopHook, noopHook] }, { requestHooks: [noopHook] });
@@ -242,15 +242,15 @@ suite('merge rules', () => {
 		test('independent paths override per layer', () => {
 			const wire = wireOf(
 				{ chatPath: '/inference/go/openai/v1/chat/completions', modelsPath: '/inference/go/v1/models' },
-				{ defaults: { baseURL: 'https://b', chatPath: '/brand/chat', modelsPath: '/brand/models' } },
+				{ defaults: { baseURL: 'https://b', chatPath: '/vendor/chat', modelsPath: '/vendor/models' } },
 			);
 			assert.strictEqual(wire.chatPath, '/inference/go/openai/v1/chat/completions');
 			assert.strictEqual(wire.modelsPath, '/inference/go/v1/models');
 		});
-		test('brand paths win over protocol defaults', () => {
-			const wire = wireOf({}, { defaults: { baseURL: 'https://b', chatPath: '/brand/chat', modelsPath: '/brand/models' } });
-			assert.strictEqual(wire.chatPath, '/brand/chat');
-			assert.strictEqual(wire.modelsPath, '/brand/models');
+		test('vendor paths win over protocol defaults', () => {
+			const wire = wireOf({}, { defaults: { baseURL: 'https://b', chatPath: '/vendor/chat', modelsPath: '/vendor/models' } });
+			assert.strictEqual(wire.chatPath, '/vendor/chat');
+			assert.strictEqual(wire.modelsPath, '/vendor/models');
 		});
 		test('the protocol defaults fill everything absent', () => {
 			const wire = wireOf();
@@ -259,7 +259,7 @@ suite('merge rules', () => {
 		});
 		test('a path outside the base origin is refused at resolve', async () => {
 			await assert.rejects(
-				resolveProvider(makeProtocol(), makeBrand(), makeInstance({ modelsPath: 'https://evil.example/models' }), keysOf()),
+				resolveProvider(makeProtocol(), makeProvider(), makeEntry({ modelsPath: 'https://evil.example/models' }), keysOf()),
 				(error: unknown) => error instanceof ModelError && error.code === 'invalid_request',
 			);
 		});
@@ -297,7 +297,7 @@ suite('merge rules', () => {
 	});
 
 	suite('models (merge by id)', () => {
-		test('brand catalog facts seed the map', () => {
+		test('vendor catalog facts seed the map', () => {
 			const wire = wireOf({}, {
 				modelCatalog: [{ id: 'deepseek-flash', contextWindow: 1048576, pricing: { inPerM: 0.3, outPerM: 1.2 } }],
 			});
@@ -319,14 +319,14 @@ suite('merge rules', () => {
 			);
 			assert.deepStrictEqual(wire.models.get('m')?.pricing, { inPerM: 1, outPerM: 2 });
 		});
-		test('the instance may introduce a model the brand catalog never listed', () => {
+		test('the instance may introduce a model the vendor catalog never listed', () => {
 			const wire = wireOf({ models: { custom: { contextWindow: 2048 } } });
 			assert.deepStrictEqual(wire.models.get('custom'), { id: 'custom', contextWindow: 2048, pricing: undefined });
 		});
 	});
 
 	suite('modelRules (scalars)', () => {
-		test('the brand rules fill an instance without any', () => {
+		test('the vendor rules fill an instance without any', () => {
 			const rules = compileModelRules({ prefix: 'models/', skip: '^models/gemini-1' }, undefined);
 			assert.strictEqual(rules.prefix, 'models/');
 			assert.ok(rules.skip?.test('models/gemini-1.5'));
@@ -386,13 +386,13 @@ suite('merge rules', () => {
 		});
 		test('only a protocol definition declares one', () => {
 			assert.strictEqual(typeof makeProtocol().create, 'function');
-			assert.ok(!('create' in makeBrand()));
-			assert.ok(!('create' in makeInstance()));
+			assert.ok(!('create' in makeProvider()));
+			assert.ok(!('create' in makeEntry()));
 		});
 		test('mergeWire returns the protocol its caller passed, untouched', () => {
 			const protocol = makeProtocol();
 			const before = protocol.create;
-			mergeWire(protocol, makeBrand(), makeInstance());
+			mergeWire(protocol, makeProvider(), makeEntry());
 			assert.strictEqual(protocol.create, before);
 		});
 	});
@@ -402,8 +402,8 @@ suite('resolveProvider', () => {
 	test('the stored key wins over the environment', async () => {
 		const resolved = await resolveProvider(
 			makeProtocol(),
-			makeBrand(),
-			makeInstance({ keyEnv: ['KEY_A', 'KEY_B'] }),
+			makeProvider(),
+			makeEntry({ keyEnv: ['KEY_A', 'KEY_B'] }),
 			keysOf({ keyFor: async () => 'stored-key', env: () => 'env-key' }),
 		);
 		assert.strictEqual(resolved.key, 'stored-key');
@@ -414,8 +414,8 @@ suite('resolveProvider', () => {
 		const seen: string[] = [];
 		const resolved = await resolveProvider(
 			makeProtocol(),
-			makeBrand(),
-			makeInstance({ keyEnv: ['KEY_A', 'KEY_B'] }),
+			makeProvider(),
+			makeEntry({ keyEnv: ['KEY_A', 'KEY_B'] }),
 			keysOf({
 				env: (name) => {
 					seen.push(name);
@@ -429,16 +429,49 @@ suite('resolveProvider', () => {
 	});
 
 	test('a keyless provider resolves with keySource none', async () => {
-		const resolved = await resolveProvider(makeProtocol(), makeBrand(), makeInstance(), keysOf());
+		const resolved = await resolveProvider(makeProtocol(), makeProvider(), makeEntry(), keysOf());
 		assert.strictEqual(resolved.key, undefined);
 		assert.strictEqual(resolved.keySource, 'none');
+	});
+
+	test('keySource env prefers the environment when both sources hold a key', async () => {
+		const resolved = await resolveProvider(
+			makeProtocol(),
+			makeProvider(),
+			makeEntry({ keyEnv: ['KEY_A'], keySource: 'env' }),
+			keysOf({ keyFor: async () => 'stored-key', env: () => 'env-key' }),
+		);
+		assert.strictEqual(resolved.key, 'env-key');
+		assert.strictEqual(resolved.keySource, 'env');
+	});
+
+	test('keySource env still falls back to the stored key when the environment is empty', async () => {
+		const resolved = await resolveProvider(
+			makeProtocol(),
+			makeProvider(),
+			makeEntry({ keyEnv: ['KEY_A'], keySource: 'env' }),
+			keysOf({ keyFor: async () => 'stored-key', env: () => undefined }),
+		);
+		assert.strictEqual(resolved.key, 'stored-key');
+		assert.strictEqual(resolved.keySource, 'stored');
+	});
+
+	test('keySource keychain is the default and beats the environment', async () => {
+		const resolved = await resolveProvider(
+			makeProtocol(),
+			makeProvider(),
+			makeEntry({ keyEnv: ['KEY_A'], keySource: 'keychain' }),
+			keysOf({ keyFor: async () => 'stored-key', env: () => 'env-key' }),
+		);
+		assert.strictEqual(resolved.key, 'stored-key');
+		assert.strictEqual(resolved.keySource, 'stored');
 	});
 
 	test('the chat and models URLs are absolute and origin-locked', async () => {
 		const resolved = await resolveProvider(
 			makeProtocol(),
-			makeBrand(),
-			makeInstance({ base: 'https://api.opencode.ai/inference/go', chatPath: 'openai/v1/chat/completions', modelsPath: 'v1/models' }),
+			makeProvider(),
+			makeEntry({ base: 'https://api.opencode.ai/inference/go', chatPath: 'openai/v1/chat/completions', modelsPath: 'v1/models' }),
 			keysOf(),
 		);
 		assert.strictEqual(resolved.chatURL, 'https://api.opencode.ai/inference/go/openai/v1/chat/completions');
@@ -446,9 +479,9 @@ suite('resolveProvider', () => {
 	});
 
 	test('identity rides along for logs and retries', async () => {
-		const resolved = await resolveProvider(makeProtocol(), makeBrand(), makeInstance(), keysOf());
-		assert.strictEqual(resolved.instanceId, 'deepseek');
-		assert.strictEqual(resolved.brandId, 'deepseek');
+		const resolved = await resolveProvider(makeProtocol(), makeProvider(), makeEntry(), keysOf());
+		assert.strictEqual(resolved.providerId, 'deepseek');
+		assert.strictEqual(resolved.definitionId, 'deepseek');
 		assert.strictEqual(resolved.protocolId, 'openai-chat');
 	});
 });

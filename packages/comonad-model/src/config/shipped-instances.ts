@@ -1,31 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The shipped provider instances: the connections every install starts with. Model facts
- * (windows, prices) are not duplicated here — they live on each brand's `modelCatalog`,
- * merged by model id at resolve time. DeepSeek Flash comes first, so `auto` runs on it.
+ * The shipped providers: what every install starts with. Model facts (windows, prices) and
+ * `keyEnv` live on each provider's definition, not here — an entry only says which provider
+ * it is, where to reach it, and which model a bare ref runs. DeepSeek comes first, so `auto`
+ * runs on DeepSeek Flash.
  */
-import type { ProviderInstanceConfig } from './schema';
+import type { ProviderEntry } from './schema';
 
-export const SHIPPED_INSTANCES: readonly ProviderInstanceConfig[] = [
+export const SHIPPED_PROVIDERS: readonly ProviderEntry[] = [
 	{
 		id: 'deepseek',
-		brand: 'deepseek',
 		base: 'https://api.deepseek.com',
 		model: 'deepseek-flash',
-		keyEnv: 'DEEPSEEK_API_KEY',
 	},
 	{
-		id: 'deepseek-pro',
-		brand: 'deepseek',
-		base: 'https://api.deepseek.com',
-		model: 'deepseek-v4-pro',
-		keyEnv: 'DEEPSEEK_API_KEY',
-	},
-	{
-		id: 'gemini',
-		brand: 'google',
+		id: 'google',
 		base: 'https://generativelanguage.googleapis.com/v1beta',
 		model: 'gemini-3.8-flash',
-		keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
 	},
 ];

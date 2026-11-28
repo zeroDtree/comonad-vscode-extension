@@ -2,7 +2,7 @@
 	"name": "deepseek text + reasoning + cache usage",
 	"meta": {
 		"protocol": "openai-chat",
-		"brand": "deepseek",
+		"vendor": "deepseek",
 		"status": 200,
 		"note": "Hand-written shape of a DeepSeek chat stream: reasoning first, two content deltas, cache-split usage, [DONE]."
 	},

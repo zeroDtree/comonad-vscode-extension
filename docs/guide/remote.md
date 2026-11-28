@@ -10,12 +10,12 @@ API keys are stored with VS Code `SecretStorage`, which is client-side even for 
 the key is encrypted by your local OS keychain and is not written to the remote workspace or
 `~/.vscode-server`. It is read into the remote extension host's memory when a request is made.
 
-A stored key belongs to the **endpoint** (its normalized base URL), so every profile pointing at that
+A stored key belongs to the **endpoint** (its normalized base URL), so every provider pointing at that
 endpoint shares it. `keyEnv` is the exception — it reads the **remote** environment.
 
 ## Model calls from a remote host
 
-A profile whose base URL is `localhost` points at the remote machine. To reach a model server on your
+A provider whose base URL is `localhost` points at the remote machine. To reach a model server on your
 own computer, forward it in `~/.ssh/config`:
 
 ```text
@@ -43,4 +43,4 @@ directory; bind another folder with `comonad.workingDirectory` if needed.
 ## Next
 
 - [Safety](/guide/safety) — sandbox and approval details
-- [Settings](/reference/settings) — `workingDirectory`, `sandboxMode`, `profiles`
+- [Settings](/reference/settings) — `workingDirectory`, `sandboxMode`, `providers`

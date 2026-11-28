@@ -10,14 +10,15 @@
 import { assertApiVersion } from '../api-version';
 import { ModelError } from '../errors';
 import { mergeWire, protocolIdFor } from '../config/merge';
+import { definitionIdOf } from '../config/schema';
 import { resolveProvider } from '../config/resolve';
 import type {
-	BrandDefinition,
+	ProviderDefinition,
 	KeyProvider,
 	OptionValues,
 	ProtocolDefinition,
 	ProtocolImpl,
-	ProviderInstanceConfig,
+	ProviderEntry,
 	ResolvedProvider,
 	ResolvedWire,
 } from '../config/schema';
@@ -37,9 +38,9 @@ import { ModelCatalog } from './catalog';
 import { fallbackChain } from './fallback';
 import { planRetry, sleep } from './retry';
 
-/** `auto` picks the first instance; `instance` its default model; `instance:model` names one. */
+/** `auto` picks the first provider; a bare id its default model; `id:model` names one. */
 export interface ModelRef {
-	instanceId?: string;
+	providerId?: string;
 	model?: string;
 }
 
@@ -50,16 +51,16 @@ export function parseModelRef(ref: string): ModelRef {
 	}
 	const colon = trimmed.indexOf(':');
 	if (colon === -1) {
-		return { instanceId: trimmed };
+		return { providerId: trimmed };
 	}
-	return { instanceId: trimmed.slice(0, colon), model: trimmed.slice(colon + 1) || undefined };
+	return { providerId: trimmed.slice(0, colon), model: trimmed.slice(colon + 1) || undefined };
 }
 
 export interface ModelRuntimeDeps {
 	transport: Transport;
 	keys: KeyProvider;
-	/** The configured provider instances, in menu order; the first one is `auto`. */
-	instances: () => ProviderInstanceConfig[];
+	/** The configured providers, in menu order; the first one is `auto`. */
+	entries: () => ProviderEntry[];
 	catalogTtlMs?: number;
 }
 
@@ -88,7 +89,7 @@ export interface Disposable {
 
 export class ModelRuntime {
 	private readonly protocols = new Map<string, ProtocolDefinition>();
-	private readonly brands = new Map<string, BrandDefinition>();
+	private readonly definitions = new Map<string, ProviderDefinition>();
 	private readonly catalog: ModelCatalog;
 
 	constructor(private readonly deps: ModelRuntimeDeps) {
@@ -102,11 +103,11 @@ export class ModelRuntime {
 		return { dispose: () => this.protocols.delete(def.id) };
 	}
 
-	/** Registers a provider brand. The definition's apiVersion is checked against this build. */
-	registerBrand(def: BrandDefinition): Disposable {
-		assertApiVersion(def.apiVersion, `brand "${def.id}"`);
-		this.brands.set(def.id, def);
-		return { dispose: () => this.brands.delete(def.id) };
+	/** Registers a provider definition. The definition's apiVersion is checked against this build. */
+	registerDefinition(def: ProviderDefinition): Disposable {
+		assertApiVersion(def.apiVersion, `provider "${def.id}"`);
+		this.definitions.set(def.id, def);
+		return { dispose: () => this.definitions.delete(def.id) };
 	}
 
 	/** One attempt over one provider: the conformance primitive and the retry engine's body. */
@@ -115,7 +116,7 @@ export class ModelRuntime {
 		const result = await this.attemptOne(call, request);
 		return {
 			...result,
-			attempts: [{ requestId: request.ctx.requestId, instanceId: call.provider.instanceId, ok: true }],
+			attempts: [{ requestId: request.ctx.requestId, providerId: call.provider.providerId, ok: true }],
 		};
 	}
 
@@ -134,12 +135,12 @@ export class ModelRuntime {
 				request.onEvent?.(event);
 			},
 		};
-		const chain = fallbackChain(start.provider.instanceId, start.provider.fallback);
+		const chain = fallbackChain(start.provider.providerId, start.provider.fallback);
 		let lastError: unknown;
 		let hop: ResolvedCall;
-		for (const [index, instanceId] of chain.entries()) {
+		for (const [index, providerId] of chain.entries()) {
 			try {
-				hop = index === 0 ? start : await this.resolveCall({ instanceId, model: parsed.model });
+				hop = index === 0 ? start : await this.resolveCall({ providerId, model: parsed.model });
 			} catch (error) {
 				lastError = error;
 				continue;
@@ -148,16 +149,16 @@ export class ModelRuntime {
 				request.onEvent?.({
 					type: 'notice',
 					kind: 'fallback',
-					message: `falling back to provider instance "${instanceId}"`,
+					message: `falling back to provider "${providerId}"`,
 				});
 			}
 			for (let attempt = 1; ; attempt += 1) {
 				try {
 					const result = await this.attemptOne(hop, counting);
-					attempts.push({ requestId: request.ctx.requestId, instanceId, ok: true });
+					attempts.push({ requestId: request.ctx.requestId, providerId, ok: true });
 					return { ...result, attempts };
 				} catch (error) {
-					attempts.push({ requestId: request.ctx.requestId, instanceId, ok: false });
+					attempts.push({ requestId: request.ctx.requestId, providerId, ok: false });
 					lastError = error;
 					const plan = planRetry(error, attempt, hop.provider.retry, visible > 0);
 					if (!plan.retry) {
@@ -171,14 +172,14 @@ export class ModelRuntime {
 					request.onEvent?.({
 						type: 'notice',
 						kind: 'retry',
-						message: `retrying ${instanceId}: ${plan.reason}`,
+						message: `retrying ${providerId}: ${plan.reason}`,
 						attempt,
 					});
 					await sleep(plan.delayMs ?? 0, request.ctx.signal);
 				}
 			}
 		}
-		throw lastError ?? new ModelError('invalid_request', `no provider instance for "${request.model}"`);
+		throw lastError ?? new ModelError('invalid_request', `no provider for "${request.model}"`);
 	}
 
 	/** One-shot text: a stopped or timed-out call throws rather than returning a partial. */
@@ -211,47 +212,47 @@ export class ModelRuntime {
 		return text;
 	}
 
-	/** The shaped, fact-merged models an instance offers, cached briefly. */
+/** The shaped, fact-merged models a provider offers, cached briefly. */
 	async listModels(modelRef: string, ctx: InvocationContext): Promise<ModelInfo[]> {
 		const call = await this.resolveCall(parseModelRef(modelRef));
-		return this.catalog.list(call.provider.instanceId, call.provider, () => call.impl.listModels(ctx));
+		return this.catalog.list(call.provider.providerId, call.provider, () => call.impl.listModels(ctx));
 	}
 
 	/**
-	 * The models an instance shape offers, without it being configured anywhere — what a
+	 * The models an entry's provider offers, without it being configured anywhere — what a
 	 * configure wizard probes before it saves. `keyOverride` is used for this call only.
 	 */
 	async listModelsOf(
-		instance: ProviderInstanceConfig,
+		entry: ProviderEntry,
 		ctx: InvocationContext,
 		keyOverride?: string,
 	): Promise<ModelInfo[]> {
-		const brand = this.brands.get(instance.brand);
-		if (!brand) {
-			throw new ModelError('invalid_request', `provider instance "${instance.id}" names unknown brand "${instance.brand}"`);
+		const definition = this.definitions.get(definitionIdOf(entry));
+		if (!definition) {
+			throw new ModelError('invalid_request', `provider "${entry.id}" names unknown definition "${definitionIdOf(entry)}"`);
 		}
-		const protocolId = protocolIdFor(instance, brand);
+		const protocolId = protocolIdFor(entry, definition);
 		const protocol = this.protocols.get(protocolId);
 		if (!protocol) {
-			throw new ModelError('invalid_request', `provider instance "${instance.id}" names unknown protocol "${protocolId}"`);
+			throw new ModelError('invalid_request', `provider "${entry.id}" names unknown protocol "${protocolId}"`);
 		}
 		const keys: KeyProvider =
 			keyOverride === undefined
 				? this.deps.keys
 				: { keyFor: async () => keyOverride, env: () => undefined };
-		const provider = await resolveProvider(protocol, brand, instance, keys);
+		const provider = await resolveProvider(protocol, definition, entry, keys);
 		const impl = protocol.create(this.deps.transport, provider);
-		return this.catalog.list(`${instance.id}#probe`, provider, () => impl.listModels(ctx));
+		return this.catalog.list(`${entry.id}#probe`, provider, () => impl.listModels(ctx));
 	}
 
-	invalidateCatalog(instanceId?: string): void {
-		this.catalog.invalidate(instanceId);
+	invalidateCatalog(providerId?: string): void {
+		this.catalog.invalidate(providerId);
 	}
 
 	/** Resolves a model ref to a runnable call: provider, protocol impl, and concrete model id. */
 	async resolveCall(ref: ModelRef): Promise<ResolvedCall> {
 		const preview = this.previewCall(ref);
-		const provider = await resolveProvider(preview.protocol, preview.brand, preview.instance, this.deps.keys);
+		const provider = await resolveProvider(preview.protocol, preview.definition, preview.entry, this.deps.keys);
 		return {
 			provider,
 			impl: preview.protocol.create(this.deps.transport, provider),
@@ -266,29 +267,29 @@ export class ModelRuntime {
 	previewCall(ref: ModelRef): {
 		wire: ResolvedWire;
 		model: string;
-		instance: ProviderInstanceConfig;
-		brand: BrandDefinition;
+		entry: ProviderEntry;
+		definition: ProviderDefinition;
 		protocol: ProtocolDefinition;
 	} {
-		const instances = this.deps.instances();
-		const instance = ref.instanceId ? instances.find((entry) => entry.id === ref.instanceId) : instances[0];
-		if (!instance) {
-			throw new ModelError('invalid_request', `unknown provider instance "${ref.instanceId ?? ''}"`);
+		const entries = this.deps.entries();
+		const entry = ref.providerId ? entries.find((row) => row.id === ref.providerId) : entries[0];
+		if (!entry) {
+			throw new ModelError('invalid_request', `unknown provider "${ref.providerId ?? ''}"`);
 		}
-		const brand = this.brands.get(instance.brand);
-		if (!brand) {
-			throw new ModelError('invalid_request', `provider instance "${instance.id}" names unknown brand "${instance.brand}"`);
+		const definition = this.definitions.get(definitionIdOf(entry));
+		if (!definition) {
+			throw new ModelError('invalid_request', `provider "${entry.id}" names unknown definition "${definitionIdOf(entry)}"`);
 		}
-		const protocolId = protocolIdFor(instance, brand);
+		const protocolId = protocolIdFor(entry, definition);
 		const protocol = this.protocols.get(protocolId);
 		if (!protocol) {
-			throw new ModelError('invalid_request', `provider instance "${instance.id}" names unknown protocol "${protocolId}"`);
+			throw new ModelError('invalid_request', `provider "${entry.id}" names unknown protocol "${protocolId}"`);
 		}
-		const model = ref.model ?? instance.model;
+		const model = ref.model ?? entry.model;
 		if (!model) {
-			throw new ModelError('invalid_request', `provider instance "${instance.id}" names no model`);
+			throw new ModelError('invalid_request', `provider "${entry.id}" names no model`);
 		}
-		return { wire: mergeWire(protocol, brand, instance), model, instance, brand, protocol };
+		return { wire: mergeWire(protocol, definition, entry), model, entry, definition, protocol };
 	}
 
 	/** One attempt. Failures throw; an aborted stream returns its partial with finish `aborted`. */

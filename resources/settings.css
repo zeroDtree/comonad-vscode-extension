@@ -640,6 +640,13 @@ input[type='range'] {
 	align-items: center;
 }
 
+/* Purpose label beside a routing provider/model pair. */
+.route-label {
+	flex: 0 0 170px;
+	font-size: var(--st-label);
+	color: var(--st-muted);
+}
+
 .check {
 	display: flex;
 	align-items: center;
@@ -1325,7 +1332,7 @@ th {
 
 #provider-status th:nth-child(2),
 #provider-status td:nth-child(2) {
-	width: 12%; /* brand */
+	width: 12%; /* vendor */
 }
 
 #provider-status th:nth-child(3),
@@ -1346,6 +1353,113 @@ th {
 #provider-status th:nth-child(6),
 #provider-status td:nth-child(6) {
 	width: 16%; /* error */
+}
+
+/* The Providers section: vendor-grouped connection rows, one status dot each. */
+.provider-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.provider-list-group {
+	margin-top: 8px;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--st-muted);
+	opacity: 1;
+}
+
+.provider-list-group:first-child {
+	margin-top: 0;
+}
+
+.provider-list-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 5px 8px;
+	border: none;
+	border-radius: 5px;
+	background: transparent;
+	text-align: left;
+	font-family: inherit;
+	font-size: 12px;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+}
+
+.provider-list-row:hover {
+	background: var(--st-hover);
+}
+
+.provider-list-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--vscode-foreground);
+}
+
+/* Where the endpoint's key comes from: keychain, an env var, or nothing yet. */
+.provider-key {
+	flex: none;
+	padding: 1px 6px;
+	border-radius: 8px;
+	font-size: 10px;
+	font-family: var(--st-mono);
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.provider-key.is-stored {
+	color: var(--st-green);
+	background: color-mix(in srgb, var(--st-green) 14%, transparent);
+}
+
+.provider-key.is-env {
+	color: var(--vscode-focusBorder, var(--st-accent));
+	background: color-mix(in srgb, var(--st-accent) 14%, transparent);
+}
+
+.provider-key.is-missing {
+	color: var(--st-warning);
+	background: color-mix(in srgb, var(--st-warning) 14%, transparent);
+}
+
+.provider-key.is-unknown {
+	color: var(--st-muted);
+	background: color-mix(in srgb, var(--st-muted) 14%, transparent);
+}
+
+/* Both sources exist: the chip becomes a pick of which one this endpoint uses. */
+.provider-key-choose {
+	cursor: pointer;
+	border: 1px solid var(--st-border-soft);
+	color: var(--vscode-foreground);
+}
+
+.provider-dot {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+}
+
+.provider-dot.is-ok {
+	background: var(--st-green);
+}
+
+.provider-dot.is-warn {
+	background: var(--st-warning);
+}
+
+.provider-dot.is-error {
+	background: var(--st-danger);
 }
 
 /* Rows are appended to the table directly (no tbody), so a `tbody` selector would never match. */

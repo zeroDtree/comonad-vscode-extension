@@ -2,21 +2,22 @@
 import { createHash } from 'node:crypto';
 import { Service, type Context } from 'cordis';
 import {
+	definitionIdOf,
 	HttpTransport,
 	ModelRuntime,
-	anthropicBrand,
+	anthropicProvider,
 	anthropicMessagesProtocol,
 	costFor,
-	customBrand,
-	deepseekBrand,
+	customProvider,
+	deepseekProvider,
 	geminiProtocol,
-	googleBrand,
+	googleProvider,
 	normalizeEndpoint,
-	openaiBrand,
+	openaiProvider,
 	openaiChatProtocol,
-	opencodeGoBrand,
+	opencodeGoProvider,
 	parseModelRef,
-	type BrandDefinition,
+	type ProviderDefinition,
 	type ChatOptions,
 	type ChatRequest,
 	type ChatResult,
@@ -25,7 +26,7 @@ import {
 	type KeyProvider,
 	type ModelInfo,
 	type ProtocolDefinition,
-	type ProviderInstanceConfig,
+	type ProviderEntry,
 	type UsageRecord,
 } from '@comonad/model';
 import { limitEffort, type EffortTop } from '../lib/effort';
@@ -39,6 +40,69 @@ export interface ModelChoice {
 	description: string;
 	/** No key resolves for the instance behind this row; picking it would fail on the next turn. */
 	needsKey: boolean;
+	/** The definition this row's provider speaks for; '' on the Auto row. */
+	definitionId: string;
+	/** Display name for `definitionId`, shipped from the host so webviews carry no label map. */
+	providerLabel: string;
+}
+
+/** A provider not configured yet, offered as a setup row rather than a resolvable ref. */
+export interface ModelSetupChoice {
+	/** `__setup:<providerId>[:<model>]` — never stored; picking it opens the setup flow. */
+	id: string;
+	providerId: string;
+	providerLabel: string;
+	/** The model id, or '' for a whole-provider setup row. */
+	label: string;
+	description: string;
+}
+
+/** Choices of one definition, in menu order, for grouped pickers. Auto is excluded. */
+export interface ModelGroup {
+	definitionId: string;
+	providerLabel: string;
+	choices: ModelChoice[];
+}
+
+/** Group rows by definition, first-appearance order; the Auto row (`id === 'auto'`) is not grouped. */
+export function groupModelChoices(choices: readonly ModelChoice[]): ModelGroup[] {
+	const groups: ModelGroup[] = [];
+	const byDefinition = new Map<string, ModelGroup>();
+	for (const choice of choices) {
+		if (choice.id === 'auto' || !choice.definitionId) {
+			continue;
+		}
+		let group = byDefinition.get(choice.definitionId);
+		if (!group) {
+			group = { definitionId: choice.definitionId, providerLabel: choice.providerLabel, choices: [] };
+			byDefinition.set(choice.definitionId, group);
+			groups.push(group);
+		}
+		group.choices.push(choice);
+	}
+	return groups;
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+	anthropic: 'Anthropic',
+	custom: 'Custom',
+	deepseek: 'DeepSeek',
+	google: 'Google',
+	openai: 'OpenAI',
+	'opencode-go': 'OpenCode Go',
+};
+
+/** The name a provider is shown under; unknown ids humanize (capitalize, `-` → space). */
+export function providerLabelFor(id: string): string {
+	const known = PROVIDER_LABELS[id];
+	if (known) {
+		return known;
+	}
+	if (!id) {
+		return '';
+	}
+	const humanized = id.replace(/-/g, ' ');
+	return humanized.charAt(0).toUpperCase() + humanized.slice(1);
 }
 
 export interface CompleteCall {
@@ -74,6 +138,7 @@ export class Model extends Service {
 
 	private readonly runtime: ModelRuntime;
 	private readonly keyLogged = new Set<string>();
+	private readonly definitionMap = new Map<string, ProviderDefinition>();
 
 	constructor(ctx: Context) {
 		super(ctx, 'model');
@@ -87,13 +152,14 @@ export class Model extends Service {
 		this.runtime = new ModelRuntime({
 			transport: new HttpTransport(),
 			keys,
-			instances: () => providersOf(this.ctx.settings.get()),
+			entries: () => providersOf(this.ctx.settings.get()),
 		});
 		for (const protocol of [openaiChatProtocol, anthropicMessagesProtocol, geminiProtocol]) {
 			this.runtime.registerProtocol(protocol);
 		}
-		for (const brand of [deepseekBrand, openaiBrand, opencodeGoBrand, googleBrand, anthropicBrand, customBrand]) {
-			this.runtime.registerBrand(brand);
+		for (const definition of [deepseekProvider, openaiProvider, opencodeGoProvider, googleProvider, anthropicProvider, customProvider]) {
+			this.runtime.registerDefinition(definition);
+			this.definitionMap.set(definition.id, definition);
 		}
 	}
 
@@ -102,8 +168,14 @@ export class Model extends Service {
 		return this.runtime.registerProtocol(def);
 	}
 
-	registerBrand(def: BrandDefinition): Disposable {
-		return this.runtime.registerBrand(def);
+	registerDefinition(def: ProviderDefinition): Disposable {
+		this.definitionMap.set(def.id, def);
+		return this.runtime.registerDefinition(def);
+	}
+
+	/** Every registered provider definition, for setup rows and the setup flow. */
+	definitions(): ProviderDefinition[] {
+		return [...this.definitionMap.values()];
 	}
 
 	/** One attempt over one provider: the conformance primitive. */
@@ -175,21 +247,30 @@ export class Model extends Service {
 	async availableModels(options: { refresh?: boolean } = {}): Promise<ModelChoice[]> {
 		const instances = providersOf(this.ctx.settings.get());
 		const first = instances[0];
+		// A definition with several entries needs the entry id on each row to tell them apart;
+		// a single-entry provider shows the base alone.
+		const entriesByDefinition = new Map<string, number>();
+		for (const entry of instances) {
+			const defId = definitionIdOf(entry);
+			entriesByDefinition.set(defId, (entriesByDefinition.get(defId) ?? 0) + 1);
+		}
 		interface Candidate {
 			choice: ModelChoice;
 			position: number;
 			declared: boolean;
 			hasKey: boolean;
+			base: string;
 		}
 		const candidates: Candidate[] = [];
 		let position = 0;
 		for (const instance of instances) {
-			const resolved = await this.resolveInstance(instance.id);
+			const resolved = await this.resolveCall(instance.id);
 			const where = resolved.provider.key
 				? ''
 				: resolved.provider.keyEnvNames.length
 					? ` · no key — set ${resolved.provider.keyEnvNames.join(' or ')}`
 					: ' · no key — run "Comonad: Configure Model Provider"';
+			const hint = (entriesByDefinition.get(definitionIdOf(instance)) ?? 0) > 1 ? `${instance.id} · ` : '';
 			let listed: ModelInfo[] = [];
 			let failed = false;
 			try {
@@ -207,55 +288,105 @@ export class Model extends Service {
 					choice: {
 						id: formatModelId(instance.id, model),
 						label: model,
-						description: `${instance.id} · ${instance.base}${failed ? ' · models not listed' : ''}${where}`,
+						description: `${hint}${instance.base}${failed ? ' · models not listed' : ''}${where}`,
 						needsKey: !resolved.provider.key,
+						definitionId: definitionIdOf(instance),
+						providerLabel: providerLabelFor(definitionIdOf(instance)),
 					},
 					position: position++,
 					declared: instance.model === model,
 					hasKey: Boolean(resolved.provider.key),
+					base: normalizeEndpoint(instance.base),
 				});
 			}
 		}
-		// Two instances on one endpoint can report the same model. Show it once, bound to the instance
-		// that can run it: a keyed instance beats a keyless one, and the one that declares the model
-		// beats one that merely discovered it (its pricing and context window are the right ones).
-		const byLabel = new Map<string, Candidate>();
+		// Two endpoints on one physical base can report the same model. Show it once, bound to the
+		// instance that can run it: a keyed instance beats a keyless one, and the one that declares
+		// the model beats one that merely discovered it. Different bases never collapse — those are
+		// genuinely different endpoints (official API vs a proxy) and each row must stay pickable.
+		const byKey = new Map<string, Candidate>();
 		for (const candidate of candidates) {
-			const label = candidate.choice.label.toLowerCase();
-			const current = byLabel.get(label);
+			const key = `${candidate.base} ${candidate.choice.label.toLowerCase()}`;
+			const current = byKey.get(key);
 			if (!current) {
-				byLabel.set(label, candidate);
+				byKey.set(key, candidate);
 				continue;
 			}
 			const better =
 				(candidate.hasKey && !current.hasKey) ||
 				(candidate.hasKey === current.hasKey && candidate.declared && !current.declared);
 			if (better) {
-				byLabel.set(label, { ...candidate, position: current.position });
+				byKey.set(key, { ...candidate, position: current.position });
 			}
 		}
-		const choices = [...byLabel.values()]
+		const choices = [...byKey.values()]
 			.sort((a, b) => a.position - b.position)
 			.map((candidate) => candidate.choice);
 		if (first) {
-			const resolved = await this.resolveInstance(first.id).catch(() => undefined);
+			const resolved = await this.resolveCall(first.id).catch(() => undefined);
 			choices.push({
 				id: 'auto',
 				label: 'Auto',
 				description: `${first.id} — the first provider, model ${first.model ?? ''}`,
 				needsKey: !resolved?.provider.key,
+				definitionId: '',
+				providerLabel: '',
 			});
 		}
 		return choices;
 	}
 
 	/**
+	 * Providers not configured yet, as setup rows. Eligible: a registered definition with a default
+	 * base, no configured entry, and not `custom` (its base comes only from the full wizard). These
+	 * are never resolvable refs — picking one opens the setup flow, which stores the final id itself.
+	 */
+	setupChoices(): ModelSetupChoice[] {
+		const configured = providersOf(this.ctx.settings.get());
+		const rows: ModelSetupChoice[] = [];
+		for (const def of this.definitions()) {
+			if (def.id === 'custom') {
+				continue;
+			}
+			if (configured.some((entry) => definitionIdOf(entry) === def.id)) {
+				continue;
+			}
+			const base = def.defaults?.baseURL?.trim();
+			if (!base) {
+				continue;
+			}
+			const providerLabel = providerLabelFor(def.id);
+			const models = def.modelCatalog?.map((model) => model.id) ?? [];
+			if (models.length) {
+				for (const model of models) {
+					rows.push({
+						id: `__setup:${def.id}:${model}`,
+						providerId: def.id,
+						providerLabel,
+						label: model,
+						description: `Set up ${providerLabel} — ${base}`,
+					});
+				}
+			} else {
+				rows.push({
+					id: `__setup:${def.id}`,
+					providerId: def.id,
+					providerLabel,
+					label: `Set up ${providerLabel}…`,
+					description: base,
+				});
+			}
+		}
+		return rows;
+	}
+
+	/**
 	 * The same read, with the failure kept: the wizard says why a list is missing instead of silently
 	 * offering the one model the instance declares.
 	 */
-	async probeModels(instanceId: string): Promise<{ ids: string[]; error?: string }> {
+	async probeModels(providerId: string): Promise<{ ids: string[]; error?: string }> {
 		try {
-			const models = await this.runtime.listModels(instanceId, this.ctxOf());
+			const models = await this.runtime.listModels(providerId, this.ctxOf());
 			return { ids: models.map((model) => model.id) };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -264,7 +395,7 @@ export class Model extends Service {
 	}
 
 	/** The wizard's probe of an endpoint before its instance is saved. `key` is used once, never stored. */
-	async probeInstance(instance: ProviderInstanceConfig, key?: string): Promise<{ ids: string[]; error?: string }> {
+	async probeProvider(instance: ProviderEntry, key?: string): Promise<{ ids: string[]; error?: string }> {
 		try {
 			const models = await this.runtime.listModelsOf(instance, this.ctxOf(), key || undefined);
 			return { ids: models.map((model) => model.id) };
@@ -284,9 +415,9 @@ export class Model extends Service {
 	 * screen: every instance with the same normalized base resolves the same secret. An empty key
 	 * clears the stored one, letting the environment fallback take over.
 	 */
-	async setSecret(instanceId: string, key: string, base?: string): Promise<void> {
-		const instance = this.instance(instanceId);
-		const endpoint = base ?? instance?.base;
+	async setSecret(providerId: string, key: string, base?: string): Promise<void> {
+		const entry = this.provider(providerId);
+		const endpoint = base ?? entry?.base;
 		const id = providerSecretKey(endpoint);
 		if (key) {
 			await this.ctx.host.setSecret(id, key);
@@ -300,8 +431,8 @@ export class Model extends Service {
 
 	/** The key of an instance and where it came from, for the menu and the once-per-instance log. */
 	async resolveKey(policyModel: string): Promise<string> {
-		const resolved = await this.resolveInstanceFor(policyModel);
-		this.noteKey(resolved.provider.instanceId, resolved.provider.keySource, resolved.provider.key);
+		const resolved = await this.resolveCallFor(policyModel);
+		this.noteKey(resolved.provider.providerId, resolved.provider.keySource, resolved.provider.key);
 		return resolved.provider.key ?? '';
 	}
 
@@ -315,27 +446,31 @@ export class Model extends Service {
 	}
 
 	/**
-	 * Where an instance's key comes from: the endpoint's keychain entry, one of its
-	 * `keyEnv` variables (the first one set), or nowhere. A key the wizard saved and a
-	 * key the shell exports are not the same thing, and the status table shows which.
+	 * Where an instance's key comes from — and what it could come from. `source` is the effective
+	 * one (what a turn will use, honoring the endpoint's `keySource` preference); `stored`/`env`
+	 * say which sources are available so the UI can offer the choice when both are.
 	 */
-	async keyInfo(instanceId: string): Promise<{ source: 'stored' | 'env' | 'none'; envName?: string }> {
-		const resolved = await this.resolveInstance(instanceId).catch(() => undefined);
-		if (!resolved) {
-			return { source: 'none' };
-		}
-		if (resolved.provider.keySource === 'stored') {
-			return { source: 'stored' };
-		}
-		for (const name of resolved.provider.keyEnvNames) {
-			if (this.ctx.host.env(name)) {
-				return { source: 'env', envName: name };
-			}
-		}
-		return { source: 'none' };
+	async keyInfo(providerId: string): Promise<{
+		source: 'stored' | 'env' | 'none';
+		envName?: string;
+		stored: boolean;
+		env: boolean;
+		preferred: 'keychain' | 'env';
+	}> {
+		const entry = this.provider(providerId);
+		const resolved = await this.resolveCall(providerId).catch(() => undefined);
+		const stored = entry ? Boolean((await this.storedKeyFor(entry.base)).trim()) : false;
+		const envName = resolved?.provider.keyEnvNames.find((name) => this.ctx.host.env(name)?.trim());
+		return {
+			source: resolved?.provider.keySource ?? 'none',
+			envName,
+			stored,
+			env: Boolean(envName),
+			preferred: entry?.keySource === 'env' ? 'env' : 'keychain',
+		};
 	}
 
-	instance(id: string): ProviderInstanceConfig | undefined {
+	provider(id: string): ProviderEntry | undefined {
 		return providersOf(this.ctx.settings.get()).find((entry) => entry.id === id);
 	}
 
@@ -345,7 +480,7 @@ export class Model extends Service {
 		if (!wanted || wanted === 'auto') {
 			return true;
 		}
-		return Boolean(this.instance(parseModelRef(wanted).instanceId ?? ''));
+		return Boolean(this.provider(parseModelRef(wanted).providerId ?? ''));
 	}
 
 	/** The concrete model a chat's model id resolves to; the tokenizer keys off this. */
@@ -372,10 +507,10 @@ export class Model extends Service {
 	 * an id whose instance is gone. Reads settings only: a panel drawing its state must not need a
 	 * key to exist yet.
 	 */
-	instanceFor(policyModel: string): ProviderInstanceConfig | undefined {
+	providerFor(policyModel: string): ProviderEntry | undefined {
 		const wanted = policyModel.trim();
 		if (wanted && wanted !== 'auto') {
-			const named = this.instance(parseModelRef(wanted).instanceId ?? '');
+			const named = this.provider(parseModelRef(wanted).providerId ?? '');
 			if (named) {
 				return named;
 			}
@@ -420,8 +555,8 @@ export class Model extends Service {
 		}
 	}
 
-	invalidateCatalog(instanceId?: string): void {
-		this.runtime.invalidateCatalog(instanceId);
+	invalidateCatalog(providerId?: string): void {
+		this.runtime.invalidateCatalog(providerId);
 	}
 
 	/** A chat can remember an instance that is gone; its intent is "my model", so it runs on the first. */
@@ -439,7 +574,7 @@ export class Model extends Service {
 		if (!first) {
 			return wanted;
 		}
-		this.ctx.log.message(`unknown provider instance in "${wanted}"; using ${first.id}`);
+		this.ctx.log.message(`unknown provider in "${wanted}"; using ${first.id}`);
 		return first.id;
 	}
 
@@ -447,11 +582,11 @@ export class Model extends Service {
 		return this.runtime.previewCall(this.refFor(policyModel));
 	}
 
-	private async resolveInstance(instanceId: string) {
-		return this.runtime.resolveCall({ instanceId });
+	private async resolveCall(providerId: string) {
+		return this.runtime.resolveCall({ providerId });
 	}
 
-	private async resolveInstanceFor(policyModel: string) {
+	private async resolveCallFor(policyModel: string) {
 		return this.runtime.resolveCall(this.refFor(policyModel));
 	}
 
@@ -461,7 +596,7 @@ export class Model extends Service {
 			return {};
 		}
 		const parsed = parseModelRef(wanted);
-		return this.instance(parsed.instanceId ?? '') ? parsed : {};
+		return this.provider(parsed.providerId ?? '') ? parsed : {};
 	}
 
 	private ctxOf(): InvocationContext {
@@ -474,19 +609,19 @@ export class Model extends Service {
 	}
 
 	/** One line per instance saying where its key came from, and a fingerprint to tell keys apart. */
-	private noteKey(instanceId: string, source: string, key?: string): void {
-		if (this.keyLogged.has(instanceId)) {
+	private noteKey(providerId: string, source: string, key?: string): void {
+		if (this.keyLogged.has(providerId)) {
 			return;
 		}
-		this.keyLogged.add(instanceId);
+		this.keyLogged.add(providerId);
 		const fingerprint = key ? ` sha256:${createHash('sha256').update(key).digest('hex').slice(0, 10)}` : '';
-		this.ctx.log.message(`key ${instanceId}: ${source}${fingerprint}`);
+		this.ctx.log.message(`key ${providerId}: ${source}${fingerprint}`);
 	}
 }
 
 /** `instance` or `instance:model`, the form `comonad.model` and the menu use. */
-export function formatModelId(instanceId: string, model?: string): string {
-	return model ? `${instanceId}:${model}` : instanceId;
+export function formatModelId(providerId: string, model?: string): string {
+	return model ? `${providerId}:${model}` : providerId;
 }
 
 export const modelPlugin = Model;

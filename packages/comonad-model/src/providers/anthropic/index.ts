@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * Anthropic: the reference anthropic-messages brand. The wire's fixed facts (the
- * version header, the `x-api-key` scheme, mandatory max_tokens) ride as brand data.
+ * Anthropic: the reference anthropic-messages vendor. The wire's fixed facts (the
+ * version header, the `x-api-key` scheme, mandatory max_tokens) ride as vendor data.
  * Prices are Anthropic's first-party list rates in USD per million tokens; a cache
  * write costs 1.25× input and a cache read is the published discount. Facts come from
  * the provider's own pricing page — edit freely.
  */
-import type { BrandDefinition } from '../../config/schema';
+import type { ProviderDefinition } from '../../config/schema';
 
-export const anthropicBrand: BrandDefinition = {
+export const anthropicProvider: ProviderDefinition = {
 	apiVersion: 1,
 	id: 'anthropic',
 	protocol: 'anthropic-messages',

@@ -5,12 +5,12 @@
  * through the same `registerProtocol` seam real protocols use.
  */
 import type {
-	BrandDefinition,
+	ProviderDefinition,
 	OptionSchema,
 	OptionValues,
 	ProtocolDefinition,
 	ProtocolImpl,
-	ProviderInstanceConfig,
+	ProviderEntry,
 	ResolvedProvider,
 } from '../config/schema';
 import { OPENAI_CHAT_OPTIONS } from '../protocols/openai-chat/wire';
@@ -115,8 +115,8 @@ export function makeFakeProtocol(options: FakeProtocolOptions = {}): FakeProtoco
 	return { definition, calls };
 }
 
-/** A brand riding the fake protocol, with only the fields a test cares about filled in. */
-export function makeFakeBrand(overrides: Partial<BrandDefinition> = {}): BrandDefinition {
+/** A provider definition riding the fake protocol, with only the fields a test cares about filled in. */
+export function makeFakeProvider(overrides: Partial<ProviderDefinition> = {}): ProviderDefinition {
 	return {
 		apiVersion: 1,
 		id: 'fake',
@@ -126,11 +126,11 @@ export function makeFakeBrand(overrides: Partial<BrandDefinition> = {}): BrandDe
 	};
 }
 
-/** A provider instance riding the fake brand. */
-export function makeFakeInstance(overrides: Partial<ProviderInstanceConfig> = {}): ProviderInstanceConfig {
+/** An entry riding the fake provider definition. */
+export function makeFakeEntry(overrides: Partial<ProviderEntry> = {}): ProviderEntry {
 	return {
 		id: 'fake',
-		brand: 'fake',
+		provider: 'fake',
 		base: 'https://fake.example',
 		model: 'fake-small',
 		keyEnv: 'FAKE_KEY',

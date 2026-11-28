@@ -3,7 +3,7 @@
  * The model catalog: live endpoint listings shaped by data rules (prefix stripping,
  * skip lists) and merged with shipped facts, cached briefly so a menu opens instantly
  * and a key change or TTL refreshes it. "Providers disagree on the shape" is handled
- * here, once, not in every brand.
+ * here, once, not in every vendor.
  */
 import type { ResolvedProvider } from '../config/schema';
 import type { ModelInfo } from '../types';
@@ -51,13 +51,13 @@ export class ModelCatalog {
 
 	/** The shaped, fact-merged models an instance offers, live-fetched at most once per TTL. */
 	async list(
-		instanceId: string,
+		providerId: string,
 		wire: ResolvedProvider,
 		fetchIds: () => Promise<string[]>,
 		now: () => number = Date.now,
 	): Promise<ModelInfo[]> {
 		const keyFingerprint = fingerprint(wire.key);
-		const cached = this.cache.get(instanceId);
+		const cached = this.cache.get(providerId);
 		if (cached && cached.keyFingerprint === keyFingerprint && now() - cached.at < this.ttlMs) {
 			return cached.models;
 		}
@@ -66,15 +66,15 @@ export class ModelCatalog {
 			const facts = wire.models.get(id);
 			return { ...facts, id, label: facts?.label ?? id };
 		});
-		this.cache.set(instanceId, { models, at: now(), keyFingerprint });
+		this.cache.set(providerId, { models, at: now(), keyFingerprint });
 		return models;
 	}
 
-	invalidate(instanceId?: string): void {
-		if (instanceId === undefined) {
+	invalidate(providerId?: string): void {
+		if (providerId === undefined) {
 			this.cache.clear();
 		} else {
-			this.cache.delete(instanceId);
+			this.cache.delete(providerId);
 		}
 	}
 }

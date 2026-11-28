@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import * as assert from 'node:assert';
-import type { ProviderInstanceConfig, RetryPolicy, Transport } from '../src/index';
+import type { ProviderEntry, RetryPolicy, Transport } from '../src/index';
 import { ModelError } from '../src/errors';
 import { fallbackChain } from '../src/runtime/fallback';
 import { planRetry } from '../src/runtime/retry';
 import { ModelRuntime, parseModelRef } from '../src/runtime/runtime';
 import { shapeModelIds } from '../src/runtime/catalog';
 import {
-	makeFakeBrand,
-	makeFakeInstance,
+	makeFakeProvider,
+	makeFakeEntry,
 	makeFakeProtocol,
 	type FakeCall,
 	type FakeOutcome,
@@ -36,17 +36,17 @@ function ctxOf(): InvocationContext {
 
 function runtimeOf(
 	handler: ((call: FakeCall, emit: (event: ProviderStreamEvent) => void) => Promise<FakeOutcome>) | undefined,
-	instances: ProviderInstanceConfig[] = [makeFakeInstance({ retry: { baseDelayMs: 0, maxDelayMs: 0 } })],
-	options: { listModels?: () => Promise<string[]>; brand?: Partial<import('../src/config/schema').BrandDefinition> } = {},
+	entries: ProviderEntry[] = [makeFakeEntry({ retry: { baseDelayMs: 0, maxDelayMs: 0 } })],
+	options: { listModels?: () => Promise<string[]>; definition?: Partial<import('../src/config/schema').ProviderDefinition> } = {},
 ) {
 	const fake = makeFakeProtocol({ handler, listModels: options.listModels });
 	const runtime = new ModelRuntime({
 		transport: noTransport,
 		keys: keysWith(),
-		instances: () => instances,
+		entries: () => entries,
 	});
 	runtime.registerProtocol(fake.definition);
-	runtime.registerBrand(makeFakeBrand(options.brand));
+	runtime.registerDefinition(makeFakeProvider(options.definition));
 	return { runtime, fake };
 }
 
@@ -54,9 +54,9 @@ suite('model refs', () => {
 	test('the grammar is auto | instance | instance:model', () => {
 		assert.deepStrictEqual(parseModelRef('auto'), {});
 		assert.deepStrictEqual(parseModelRef(''), {});
-		assert.deepStrictEqual(parseModelRef('deepseek'), { instanceId: 'deepseek' });
-		assert.deepStrictEqual(parseModelRef('deepseek:deepseek-chat'), { instanceId: 'deepseek', model: 'deepseek-chat' });
-		assert.deepStrictEqual(parseModelRef('deepseek:'), { instanceId: 'deepseek', model: undefined });
+		assert.deepStrictEqual(parseModelRef('deepseek'), { providerId: 'deepseek' });
+		assert.deepStrictEqual(parseModelRef('deepseek:deepseek-chat'), { providerId: 'deepseek', model: 'deepseek-chat' });
+		assert.deepStrictEqual(parseModelRef('deepseek:'), { providerId: 'deepseek', model: undefined });
 	});
 });
 
@@ -141,16 +141,16 @@ suite('runtime chat pipeline', () => {
 				return { message: { role: 'assistant', content: 'from b' } as Message };
 			},
 			[
-				makeFakeInstance({ id: 'a', model: 'model-a', fallback: ['b'], retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
-				makeFakeInstance({ id: 'b', model: 'model-b', retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
+				makeFakeEntry({ id: 'a', model: 'model-a', fallback: ['b'], retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
+				makeFakeEntry({ id: 'b', model: 'model-b', retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
 			],
 		);
 		const events: RuntimeStreamEvent[] = [];
 		const result = await runtime.chat({ model: 'a', messages: [], tools: [], ctx: ctxOf(), onEvent: (event) => events.push(event) });
 		assert.strictEqual(result.message.content, 'from b');
-		assert.deepStrictEqual(result.attempts.map((attempt) => `${attempt.instanceId}:${attempt.ok}`), ['a:false', 'b:true']);
+		assert.deepStrictEqual(result.attempts.map((attempt) => `${attempt.providerId}:${attempt.ok}`), ['a:false', 'b:true']);
 		const notice = events.find((event) => event.type === 'notice');
-		assert.deepStrictEqual(notice, { type: 'notice', kind: 'fallback', message: 'falling back to provider instance "b"' });
+		assert.deepStrictEqual(notice, { type: 'notice', kind: 'fallback', message: 'falling back to provider "b"' });
 		assert.strictEqual(fake.calls.length, 2);
 	});
 
@@ -164,8 +164,8 @@ suite('runtime chat pipeline', () => {
 				return { message: { role: 'assistant', content: 'from b' } as Message };
 			},
 			[
-				makeFakeInstance({ id: 'a', model: 'model-a', fallback: ['b'], retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
-				makeFakeInstance({ id: 'b', model: 'model-b', retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
+				makeFakeEntry({ id: 'a', model: 'model-a', fallback: ['b'], retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
+				makeFakeEntry({ id: 'b', model: 'model-b', retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
 			],
 		);
 		await assert.rejects(
@@ -184,21 +184,21 @@ suite('runtime chat pipeline', () => {
 				return { message: { role: 'assistant', content: 'from b' } as Message };
 			},
 			[
-				makeFakeInstance({ id: 'a', model: 'model-a', fallback: ['b'], retry: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 } }),
-				makeFakeInstance({ id: 'b', model: 'model-b', retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
+				makeFakeEntry({ id: 'a', model: 'model-a', fallback: ['b'], retry: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 } }),
+				makeFakeEntry({ id: 'b', model: 'model-b', retry: { baseDelayMs: 0, maxDelayMs: 0 } }),
 			],
 		);
 		const events: RuntimeStreamEvent[] = [];
 		const result = await runtime.chat({ model: 'a', messages: [], tools: [], ctx: ctxOf(), onEvent: (event) => events.push(event) });
 		assert.strictEqual(result.message.content, 'from b');
-		assert.deepStrictEqual(result.attempts.map((attempt) => `${attempt.instanceId}:${attempt.ok}`), ['a:false', 'a:false', 'b:true']);
+		assert.deepStrictEqual(result.attempts.map((attempt) => `${attempt.providerId}:${attempt.ok}`), ['a:false', 'a:false', 'b:true']);
 		assert.strictEqual(events.filter((event) => event.type === 'notice' && event.kind === 'retry').length, 1);
 	});
 
 	test('a narrowed retryableCodes refuses a normally-retryable code', async () => {
 		const { runtime, fake } = runtimeOf(async () => {
 			throw new ModelError('timeout', 'slow');
-		}, [makeFakeInstance({ retry: { retryableCodes: ['transport'], baseDelayMs: 0, maxDelayMs: 0 } })]);
+		}, [makeFakeEntry({ retry: { retryableCodes: ['transport'], baseDelayMs: 0, maxDelayMs: 0 } })]);
 		await assert.rejects(
 			runtime.chat({ model: 'fake', messages: [], tools: [], ctx: ctxOf() }),
 			(error: unknown) => error instanceof ModelError && error.code === 'timeout',
@@ -215,39 +215,39 @@ suite('runtime chat pipeline', () => {
 suite('runtime resolve', () => {
 	test('auto runs the first instance; a bare instance runs its default model', async () => {
 		const { runtime } = runtimeOf(undefined, [
-			makeFakeInstance({ id: 'a', model: 'model-a' }),
-			makeFakeInstance({ id: 'b', model: 'model-b' }),
+			makeFakeEntry({ id: 'a', model: 'model-a' }),
+			makeFakeEntry({ id: 'b', model: 'model-b' }),
 		]);
 		assert.strictEqual((await runtime.resolveCall({})).model, 'model-a');
-		assert.strictEqual((await runtime.resolveCall({ instanceId: 'b' })).model, 'model-b');
-		assert.strictEqual((await runtime.resolveCall({ instanceId: 'b', model: 'named' })).model, 'named');
+		assert.strictEqual((await runtime.resolveCall({ providerId: 'b' })).model, 'model-b');
+		assert.strictEqual((await runtime.resolveCall({ providerId: 'b', model: 'named' })).model, 'named');
 	});
 
-	test('an unknown instance, brand or protocol is a refusal', async () => {
-		const { runtime } = runtimeOf(undefined, [makeFakeInstance({ id: 'a', model: 'm' })]);
+	test('an unknown provider, definition or protocol is a refusal', async () => {
+		const { runtime } = runtimeOf(undefined, [makeFakeEntry({ id: 'a', model: 'm' })]);
 		await assert.rejects(
-			runtime.resolveCall({ instanceId: 'ghost' }),
-			(error: unknown) => error instanceof ModelError && /unknown provider instance/.test(error.message),
+			runtime.resolveCall({ providerId: 'ghost' }),
+			(error: unknown) => error instanceof ModelError && /unknown provider/.test(error.message),
 		);
-		const ghostBrand = new ModelRuntime({
+		const ghostDefinition = new ModelRuntime({
 			transport: noTransport,
 			keys: keysWith(),
-			instances: () => [makeFakeInstance({ id: 'x', model: 'm', brand: 'ghost' })],
+			entries: () => [makeFakeEntry({ id: 'x', model: 'm', provider: 'ghost' })],
 		});
-		ghostBrand.registerProtocol(makeFakeProtocol().definition);
+		ghostDefinition.registerProtocol(makeFakeProtocol().definition);
 		await assert.rejects(
-			ghostBrand.resolveCall({ instanceId: 'x' }),
-			(error: unknown) => error instanceof ModelError && /brand/.test(error.message),
+			ghostDefinition.resolveCall({ providerId: 'x' }),
+			(error: unknown) => error instanceof ModelError && /definition/.test(error.message),
 		);
 		const withoutModel = new ModelRuntime({
 			transport: noTransport,
 			keys: keysWith(),
-			instances: () => [makeFakeInstance({ model: undefined })],
+			entries: () => [makeFakeEntry({ model: undefined })],
 		});
 		withoutModel.registerProtocol(makeFakeProtocol().definition);
-		withoutModel.registerBrand(makeFakeBrand());
+		withoutModel.registerDefinition(makeFakeProvider());
 		await assert.rejects(
-			withoutModel.resolveCall({ instanceId: 'fake' }),
+			withoutModel.resolveCall({ providerId: 'fake' }),
 			(error: unknown) => error instanceof ModelError && /names no model/.test(error.message),
 		);
 	});
@@ -255,7 +255,7 @@ suite('runtime resolve', () => {
 	test('registration checks the apiVersion', async () => {
 		const { runtime } = runtimeOf(undefined);
 		assert.throws(() => runtime.registerProtocol({ ...makeFakeProtocol().definition, apiVersion: 2 }), /apiVersion/);
-		assert.throws(() => runtime.registerBrand({ ...makeFakeBrand(), apiVersion: 99 }), /apiVersion/);
+		assert.throws(() => runtime.registerDefinition({ ...makeFakeProvider(), apiVersion: 99 }), /apiVersion/);
 	});
 });
 
@@ -322,10 +322,10 @@ suite('model catalog', () => {
 		const runtime = new ModelRuntime({
 			transport: noTransport,
 			keys: { keyFor: async () => key, env: () => undefined },
-			instances: () => [makeFakeInstance()],
+			entries: () => [makeFakeEntry()],
 		});
 		runtime.registerProtocol(fake.definition);
-		runtime.registerBrand(makeFakeBrand());
+		runtime.registerDefinition(makeFakeProvider());
 		const ctx = ctxOf();
 		await runtime.listModels('fake', ctx);
 		key = 'two';
@@ -334,9 +334,9 @@ suite('model catalog', () => {
 	});
 
 	test('the skip list and prefix shape a live listing, and facts merge by id', async () => {
-		const { runtime } = runtimeOf(undefined, [makeFakeInstance({ models: { 'fake-small': { contextWindow: 99 } } })], {
+		const { runtime } = runtimeOf(undefined, [makeFakeEntry({ models: { 'fake-small': { contextWindow: 99 } } })], {
 			listModels: async () => ['models/legacy-1', 'models/fake-small', 'models/fake-small'],
-			brand: { modelRules: { prefix: 'models/', skip: '^models/legacy' } },
+			definition: { modelRules: { prefix: 'models/', skip: '^models/legacy' } },
 		});
 		const models = await runtime.listModels('fake', ctxOf());
 		assert.deepStrictEqual(models, [{ id: 'fake-small', label: 'fake-small', contextWindow: 99, pricing: undefined }]);

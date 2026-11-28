@@ -38,7 +38,7 @@ npm run compile
 
 在 VS Code 中按 `F5` 启动 Extension Development Host。
 
-然后配置模型 key —— 默认的 DeepSeek Flash profile 只需要 `DEEPSEEK_API_KEY` —— 或用
+然后配置模型 key —— 默认的 DeepSeek 提供商只需要 `DEEPSEEK_API_KEY` —— 或用
 **Comonad: Configure Model Provider** 添加任意 OpenAI 兼容端点。用 **Comonad: Open Chat**
 （`Cmd+Alt+C` / `Ctrl+Alt+C`）打开聊天。
 

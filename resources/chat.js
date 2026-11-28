@@ -249,6 +249,7 @@
 
 	const modelState = {
 		models: [],
+		setup: [],
 		model: '',
 		modelLabel: 'auto',
 		reasoningEffort: 'auto',
@@ -334,11 +335,53 @@
 	/** The rows of one page. Kept apart from placement so a list that lands while the flyout is open can refill it. */
 	function fillFlyout(page) {
 		modelFlyout.innerHTML = '';
-		for (const item of pageItems(page)) {
-			modelFlyout.append(choiceRow(item, pageCurrent(page), (id) => pagePick(page, id), modelPill));
-		}
 		if (page === 'model') {
-			// The way out when there is no profile yet: the wizard writes `comonad.profiles` and the key.
+			// Grouped by vendor: the user picks a provider's model, not an internal endpoint id.
+			const setupByDefinition = new Map();
+			for (const row of modelState.setup || []) {
+				const list = setupByDefinition.get(row.providerId) || [];
+				list.push(row);
+				setupByDefinition.set(row.providerId, list);
+			}
+			const groups = new Map();
+			for (const item of modelState.models) {
+				if (item.id === 'auto' || !item.definitionId) {
+					continue;
+				}
+				const list = groups.get(item.definitionId) || { label: item.providerLabel || item.definitionId, items: [] };
+				list.items.push(item);
+				groups.set(item.definitionId, list);
+			}
+			const groupHeader = (label) => {
+				const header = document.createElement('div');
+				header.className = 'pill-flyout-group';
+				header.textContent = label;
+				return header;
+			};
+			const emit = (item) => modelFlyout.append(choiceRow(item, pageCurrent(page), (id) => pagePick(page, id), modelPill));
+			for (const [definitionId, group] of groups) {
+				modelFlyout.append(groupHeader(group.label));
+				for (const item of group.items) {
+					emit(item);
+				}
+				for (const row of setupByDefinition.get(definitionId) || []) {
+					emit(row);
+				}
+				setupByDefinition.delete(definitionId);
+			}
+			// Vendors with no endpoint yet still deserve their group.
+			for (const [providerId, rows] of setupByDefinition) {
+				modelFlyout.append(groupHeader(rows[0].providerLabel || providerId));
+				for (const row of rows) {
+					emit(row);
+				}
+			}
+			for (const item of modelState.models) {
+				if (item.id === 'auto') {
+					emit(item);
+				}
+			}
+			// The way out when nothing is configured yet: the wizard writes the provider and its key.
 			modelFlyout.append(
 				choiceRow(
 					{ id: '__configure', label: '⚙ Configure a provider…', description: 'add an OpenAI-compatible endpoint' },
@@ -347,6 +390,10 @@
 					modelPill,
 				),
 			);
+			return;
+		}
+		for (const item of pageItems(page)) {
+			modelFlyout.append(choiceRow(item, pageCurrent(page), (id) => pagePick(page, id), modelPill));
 		}
 	}
 
@@ -4774,6 +4821,7 @@
 			case 'models':
 				// The list travels on its own message so a slow endpoint never delays the state above.
 				modelState.models = Array.isArray(message.models) ? message.models : [];
+				modelState.setup = Array.isArray(message.setup) ? message.setup : [];
 				// Open pickers read the list live: relabel the plan cards and refill a flyout on screen.
 				syncPlanCards();
 				if (flyoutPage === 'model' && !modelFlyout.hidden) {

@@ -2,7 +2,7 @@
 	"name": "anthropic text + tool call + cache usage",
 	"meta": {
 		"protocol": "anthropic-messages",
-		"brand": "anthropic",
+		"vendor": "anthropic",
 		"status": 200,
 		"note": "Hand-written shape of a Messages stream: two text deltas, a tool_use assembled from input_json_delta, cache-split usage across message_start/message_delta."
 	},

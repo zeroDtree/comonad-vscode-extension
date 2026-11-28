@@ -881,12 +881,13 @@ export function chatPanel(ctx: Context): void {
 	 * that lands while one is in flight folds into one more pass, so only the newest list is posted.
 	 */
 	let lastModels: Awaited<ReturnType<typeof ctx.model.availableModels>> | null = null;
+	let lastSetup: ReturnType<typeof ctx.model.setupChoices> = [];
 	let modelsInFlight: Promise<void> | null = null;
 	let modelsDirty = false;
 
 	const postModels = (only?: vscode.Webview): void => {
 		if (lastModels) {
-			post({ type: 'models', models: lastModels }, only);
+			post({ type: 'models', models: lastModels, setup: lastSetup }, only);
 		}
 	};
 
@@ -905,6 +906,7 @@ export function chatPanel(ctx: Context): void {
 				do {
 					modelsDirty = false;
 					lastModels = await ctx.model.availableModels();
+					lastSetup = ctx.model.setupChoices();
 				} while (modelsDirty);
 				postModels();
 			} catch (error) {
@@ -2485,6 +2487,15 @@ export function chatPanel(ctx: Context): void {
 				}
 				case 'setModel': {
 					const model = String(message.model ?? 'auto');
+					// A setup row is not a ref: it opens the slim flow, which stores the final id itself.
+					if (model.startsWith('__setup:')) {
+						const rest = model.slice('__setup:'.length);
+						const colon = rest.indexOf(':');
+						const providerId = colon < 0 ? rest : rest.slice(0, colon);
+						const presetModel = colon < 0 ? undefined : rest.slice(colon + 1) || undefined;
+						await vscode.commands.executeCommand('comonad.configureModel', { providerId, model: presetModel });
+						break;
+					}
 					if (!(await ctx.model.keyReady(model))) {
 						const action = await vscode.window.showWarningMessage(
 							`Comonad: ${ctx.model.describe(model)} has no API key for its endpoint.`,

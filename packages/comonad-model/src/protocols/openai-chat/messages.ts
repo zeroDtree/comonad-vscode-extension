@@ -2,7 +2,7 @@
 /**
  * Internal messages → Chat Completions shape. Generic openai-chat only: `extra_content`
  * is echoed back opaque (whatever the endpoint sent with a call returns with it), and
- * provider policies — Google's thought-signature fallback, for one — live in the brand's
+ * provider policies — Google's thought-signature fallback, for one — live in the vendor's
  * request hooks, not here.
  */
 import { isImageAttachment, renderAttachments } from '../../messages/render';

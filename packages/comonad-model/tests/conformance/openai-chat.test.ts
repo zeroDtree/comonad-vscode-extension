@@ -3,8 +3,8 @@ import * as assert from 'node:assert';
 import { ModelRuntime } from '../../src/runtime/runtime';
 import { openaiChatProtocol, toOpenAiMessages } from '../../src/protocols/openai-chat';
 import { ReplayTransport, type FixtureEnvelope } from '../../src/replay/replay-transport';
-import { makeFakeInstance } from '../../src/testing';
-import type { BrandDefinition } from '../../src/config/schema';
+import { makeFakeEntry } from '../../src/testing';
+import type { ProviderDefinition } from '../../src/config/schema';
 import { ModelError } from '../../src/errors';
 import type { Transport, TransportRequest } from '../../src/transport/transport';
 import type { InvocationContext, RuntimeStreamEvent } from '../../src/types';
@@ -15,10 +15,10 @@ import googleSignature from '../fixtures/openai-chat/google-signature.json';
 /**
  * openai-chat conformance: the ProviderStreamEvent sequence a consumer may rely on, and
  * the error codes, driven by recorded endpoint bytes through the real parser. Adding a
- * brand that speaks this wire means adding fixtures here, not new expectations there.
+ * vendor that speaks this wire means adding fixtures here, not new expectations there.
  */
 
-const DEEPSEEK_BRAND: BrandDefinition = {
+const DEEPSEEK_BRAND: ProviderDefinition = {
 	apiVersion: 1,
 	id: 'deepseek',
 	protocol: 'openai-chat',
@@ -32,15 +32,15 @@ function ctxOf(signal = new AbortController().signal): InvocationContext {
 	return { conversationId: 's1', turnId: 's1:1', requestId: `r-${Math.random().toString(36).slice(2)}`, signal };
 }
 
-function setup(envelopes: FixtureEnvelope[], brand: BrandDefinition = DEEPSEEK_BRAND) {
+function setup(envelopes: FixtureEnvelope[], vendor: ProviderDefinition = DEEPSEEK_BRAND) {
 	const transport = new ReplayTransport(envelopes);
 	const runtime = new ModelRuntime({
 		transport,
 		keys: { keyFor: async () => 'sk-test', env: () => undefined },
-		instances: () => [makeFakeInstance({ id: 'deepseek', brand: brand.id, base: brand.defaults.baseURL ?? 'https://api.deepseek.com', model: 'deepseek-chat' })],
+		entries: () => [makeFakeEntry({ id: 'deepseek', provider: vendor.id, base: vendor.defaults.baseURL ?? 'https://api.deepseek.com', model: 'deepseek-chat' })],
 	});
 	runtime.registerProtocol(openaiChatProtocol);
-	runtime.registerBrand(brand);
+	runtime.registerDefinition(vendor);
 	return { runtime, transport };
 }
 
@@ -202,10 +202,10 @@ suite('openai-chat conformance', () => {
 		const runtime = new ModelRuntime({
 			transport,
 			keys: { keyFor: async () => 'sk-test', env: () => undefined },
-			instances: () => [makeFakeInstance({ id: 'deepseek', brand: 'deepseek', base: 'https://api.deepseek.com', model: 'deepseek-chat' })],
+			entries: () => [makeFakeEntry({ id: 'deepseek', provider: 'deepseek', base: 'https://api.deepseek.com', model: 'deepseek-chat' })],
 		});
 		runtime.registerProtocol(openaiChatProtocol);
-		runtime.registerBrand(DEEPSEEK_BRAND);
+		runtime.registerDefinition(DEEPSEEK_BRAND);
 		const events: RuntimeStreamEvent[] = [];
 		const result = await chatOf(runtime, ctxOf(controller.signal), events);
 		assert.strictEqual(result.finish, 'aborted');
@@ -227,7 +227,7 @@ suite('openai-chat conformance', () => {
 			assert.strictEqual(body.model, 'deepseek-chat');
 		});
 
-		test('thinkingOff maps effort none onto the brand\'s own switch', async () => {
+		test('thinkingOff maps effort none onto the vendor\'s own switch', async () => {
 			const { runtime, transport } = setup([textUsage]);
 			await runtime.stream({
 				model: 'deepseek:deepseek-chat',
@@ -242,7 +242,7 @@ suite('openai-chat conformance', () => {
 		});
 
 		test('a provider without thinkingOff sends effort none as reasoning_effort', async () => {
-			const gemini: BrandDefinition = {
+			const gemini: ProviderDefinition = {
 				apiVersion: 1,
 				id: 'google',
 				protocol: 'openai-chat',
@@ -267,10 +267,10 @@ suite('openai-chat conformance', () => {
 		const runtime = new ModelRuntime({
 			transport,
 			keys: { keyFor: async () => undefined, env: () => undefined },
-			instances: () => [makeFakeInstance({ id: 'deepseek', brand: 'deepseek', base: 'https://api.deepseek.com', model: 'deepseek-flash', keyEnv: 'DEEPSEEK_API_KEY' })],
+			entries: () => [makeFakeEntry({ id: 'deepseek', provider: 'deepseek', base: 'https://api.deepseek.com', model: 'deepseek-flash', keyEnv: 'DEEPSEEK_API_KEY' })],
 		});
 		runtime.registerProtocol(openaiChatProtocol);
-		runtime.registerBrand(DEEPSEEK_BRAND);
+		runtime.registerDefinition(DEEPSEEK_BRAND);
 		await assert.rejects(chatOf(runtime, ctxOf(), []), /DEEPSEEK_API_KEY/);
 	});
 

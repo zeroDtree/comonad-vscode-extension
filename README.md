@@ -32,7 +32,7 @@ npm run compile
 
 Press `F5` in VS Code to launch the Extension Development Host.
 
-Set a model key — `DEEPSEEK_API_KEY` is enough for the default DeepSeek Flash profile — or add any
+Set a model key — `DEEPSEEK_API_KEY` is enough for the default DeepSeek provider — or add any
 OpenAI-compatible endpoint with **Comonad: Configure Model Provider**. Open the chat with
 **Comonad: Open Chat** (`Cmd+Alt+C` / `Ctrl+Alt+C`).
 

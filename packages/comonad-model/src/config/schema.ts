@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The declarative layering vocabulary: what a protocol declares, what a brand declares,
- * what a user's provider instance configures — and the merged wire they produce.
+ * The declarative layering vocabulary: what a protocol declares, what a provider declares,
+ * what a user's provider entry configures — and the merged wire they produce.
  *
- * There is no class inheritance between brands: every field's merge semantics are
+ * There is no class inheritance between providers: every field's merge semantics are
  * spelled out in `merge.ts`, and the layers never see each other's internals.
  */
 import type { AuthScheme } from '../transport/auth';
@@ -35,7 +35,7 @@ export type OptionSchema = Record<string, OptionField>;
 /** A header mutation that sees the invocation context (e.g. a session header). */
 export type HeaderHook = (headers: Record<string, string>, ctx: InvocationContext) => void;
 
-/** A body mutation a brand applies after the protocol built the wire body. */
+/** A body mutation a provider applies after the protocol built the wire body. */
 export type RequestHook = (body: Record<string, unknown>, wire: ResolvedWire, ctx: InvocationContext) => void;
 
 /** When and how a runtime retry may re-attempt a logical call. */
@@ -57,7 +57,7 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 
 /**
  * A wire protocol: how to talk to a family of endpoints. `create()` is the protocol's
- * alone — brands and instances customize the wire through data and hooks, never by
+ * alone — definitions and entries customize the wire through data and hooks, never by
  * swapping the transport or the conversation encoder.
  */
 export interface ProtocolDefinition {
@@ -91,13 +91,15 @@ export interface ProtocolImpl {
 	listModels(ctx: InvocationContext): Promise<string[]>;
 }
 
-/** A provider brand: everything a vendor does differently, as data and hooks. */
-export interface BrandDefinition {
+/** A provider definition: everything one vendor does differently, as data and hooks. */
+export interface ProviderDefinition {
 	apiVersion: number;
 	id: string;
-	/** The protocol this brand speaks by default; an instance may re-point it. */
+	/** The protocol this provider speaks by default; an entry may re-point it. */
 	protocol: string;
-	defaults: BrandDefaults;
+	/** Environment variable(s) holding the key; an entry's `keyEnv` replaces this list wholesale. */
+	keyEnv?: string | string[];
+	defaults: ProviderDefaults;
 	/** Catalog filtering rules, kept data-driven (prefix stripping, id skip-list). */
 	modelRules?: { prefix?: string; skip?: string };
 	/** Shipped model facts (pricing, windows), merged by model id. */
@@ -108,8 +110,8 @@ export interface BrandDefinition {
 	usageMap?(raw: unknown): Partial<UsageRecord>;
 }
 
-/** The brand's default wire shape. Every field is optional; instances may override. */
-export interface BrandDefaults {
+/** The provider's default wire shape. Every field is optional; entries may override. */
+export interface ProviderDefaults {
 	baseURL?: string;
 	chatPath?: string;
 	modelsPath?: string;
@@ -118,31 +120,40 @@ export interface BrandDefaults {
 	options?: OptionValues;
 }
 
-/** A user's provider connection: the settings JSON shape. Pure data, no hooks. */
-export interface ProviderInstanceConfig {
+/** One configured provider: the settings JSON shape. Pure data, no hooks. */
+export interface ProviderEntry {
 	id: string;
-	brand: string;
-	/** Re-points the brand's protocol (e.g. google via openai-chat vs native gemini). */
+	/** The `ProviderDefinition` this entry speaks for. Defaults to the map key (`id`). */
+	provider?: string;
+	/** Re-points the provider's protocol (e.g. google via openai-chat vs native gemini). */
 	protocol?: string;
 	base: string;
-	/** The model a bare `instanceId` ref runs; `instanceId:model` names one explicitly. */
+	/** The model a bare `providerId` ref runs; `providerId:model` names one explicitly. */
 	model?: string;
+	/** Overrides the definition's `keyEnv` list. */
 	keyEnv?: string | string[];
 	chatPath?: string;
 	modelsPath?: string;
 	auth?: AuthScheme;
 	headers?: Record<string, string>;
 	options?: OptionValues;
-	/** Per-model fact overrides, merged over the brand's catalog. */
+	/** Per-model fact overrides, merged over the provider's catalog. */
 	models?: Record<string, Partial<ModelInfo>>;
 	modelRules?: { prefix?: string; skip?: string };
 	retry?: Partial<RetryPolicy>;
-	/** Instance ids to walk when this one fails for good; empty = none. */
+	/** Provider ids to walk when this one fails for good; empty = none. */
 	fallback?: string[];
+	/** Which credential wins when both a stored key and `keyEnv` hold one. Default: keychain. */
+	keySource?: 'keychain' | 'env';
+}
+
+/** Which `ProviderDefinition` an entry speaks for: the explicit field, else the map key. */
+export function definitionIdOf(entry: Pick<ProviderEntry, 'id' | 'provider'>): string {
+	return entry.provider ?? entry.id;
 }
 
 /**
- * The merged wire every request runs against: Protocol → Brand → Instance folded by
+ * The merged wire every request runs against: Protocol → Provider → Entry folded by
  * `mergeWire`. Paths stay as configured here; `resolveProvider` locks them to the
  * base origin and fills the key.
  */
@@ -163,8 +174,8 @@ export interface ResolvedWire {
 
 /** The runtime's resolved provider: merged wire plus identity and credentials. What a protocol implementation sends against. */
 export interface ResolvedProvider extends ResolvedWire {
-	instanceId: string;
-	brandId: string;
+	providerId: string;
+	definitionId: string;
 	protocolId: string;
 	/** Absolute, origin-locked request URLs. */
 	chatURL: string;
@@ -177,7 +188,7 @@ export interface ResolvedProvider extends ResolvedWire {
 /** The credential seam: the package never touches SecretStorage or process.env itself. */
 export interface KeyProvider {
 	/** The stored secret for this endpoint identity, when the user configured one. */
-	keyFor(baseURL: string, instanceId: string): Promise<string | undefined>;
+	keyFor(baseURL: string, providerId: string): Promise<string | undefined>;
 	/** An environment variable's value, or undefined when unset. */
 	env(name: string): string | undefined;
 }

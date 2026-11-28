@@ -4,11 +4,11 @@ import { ModelRuntime } from '../../src/runtime/runtime';
 import { anthropicMessagesProtocol } from '../../src/protocols/anthropic-messages';
 import { geminiProtocol } from '../../src/protocols/gemini';
 import { openaiChatProtocol } from '../../src/protocols/openai-chat';
-import { anthropicBrand } from '../../src/brands/anthropic';
-import { googleBrand } from '../../src/brands/google';
+import { anthropicProvider } from '../../src/providers/anthropic';
+import { googleProvider } from '../../src/providers/google';
 import { ReplayTransport, type FixtureEnvelope } from '../../src/replay/replay-transport';
-import { makeFakeInstance } from '../../src/testing';
-import type { BrandDefinition, ProviderInstanceConfig, ProtocolDefinition } from '../../src/config/schema';
+import { makeFakeEntry } from '../../src/testing';
+import type { ProviderDefinition, ProviderEntry, ProtocolDefinition } from '../../src/config/schema';
 import type { InvocationContext, RuntimeStreamEvent, UsageRecord } from '../../src/types';
 
 /**
@@ -20,8 +20,8 @@ import type { InvocationContext, RuntimeStreamEvent, UsageRecord } from '../../s
 
 interface Scenario {
 	protocol: ProtocolDefinition;
-	brand: BrandDefinition;
-	instance: ProviderInstanceConfig;
+	vendor: ProviderDefinition;
+	instance: ProviderEntry;
 	fixture: FixtureEnvelope;
 }
 
@@ -72,13 +72,13 @@ function usageOf(usage: UsageRecord): Normalized['usage'] {
 const SCENARIOS: Scenario[] = [
 	{
 		protocol: openaiChatProtocol,
-		brand: {
+		vendor: {
 			apiVersion: 1,
 			id: 'matrix-openai',
 			protocol: 'openai-chat',
 			defaults: { baseURL: 'https://x.test' },
 		},
-		instance: makeFakeInstance({ id: 'one', brand: 'matrix-openai', base: 'https://x.test', model: 'm' }),
+		instance: makeFakeEntry({ id: 'one', provider: 'matrix-openai', base: 'https://x.test', model: 'm' }),
 		fixture: {
 			name: 'openai-shape',
 			sse: [
@@ -92,8 +92,8 @@ const SCENARIOS: Scenario[] = [
 	},
 	{
 		protocol: anthropicMessagesProtocol,
-		brand: anthropicBrand,
-		instance: makeFakeInstance({ id: 'two', brand: 'anthropic', base: 'https://api.anthropic.com', model: 'm' }),
+		vendor: anthropicProvider,
+		instance: makeFakeEntry({ id: 'two', provider: 'anthropic', base: 'https://api.anthropic.com', model: 'm' }),
 		fixture: {
 			name: 'anthropic-shape',
 			sse: [
@@ -109,8 +109,8 @@ const SCENARIOS: Scenario[] = [
 	},
 	{
 		protocol: geminiProtocol,
-		brand: googleBrand,
-		instance: makeFakeInstance({ id: 'three', brand: 'google', base: 'https://generativelanguage.googleapis.com/v1beta', model: 'm' }),
+		vendor: googleProvider,
+		instance: makeFakeEntry({ id: 'three', provider: 'google', base: 'https://generativelanguage.googleapis.com/v1beta', model: 'm' }),
 		fixture: {
 			name: 'gemini-shape',
 			sse: [
@@ -129,10 +129,10 @@ suite('cross-protocol matrix', () => {
 			const runtime = new ModelRuntime({
 				transport,
 				keys: { keyFor: async () => 'k', env: () => undefined },
-				instances: () => [scenario.instance],
+				entries: () => [scenario.instance],
 			});
 			runtime.registerProtocol(scenario.protocol);
-			runtime.registerBrand(scenario.brand);
+			runtime.registerDefinition(scenario.vendor);
 			const events: RuntimeStreamEvent[] = [];
 			const result = await runtime.stream({
 				model: scenario.instance.id,

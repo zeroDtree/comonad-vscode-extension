@@ -6,15 +6,16 @@
  * instances that re-point at the OpenAI-compatible layer via `protocol: "openai-chat"`;
  * it is a no-op on native gemini bodies.
  */
-import type { BrandDefinition } from '../../config/schema';
+import type { ProviderDefinition } from '../../config/schema';
 import { googleSignatures } from './signatures';
 
 export { SKIP_SIGNATURE, demandsSignature, googleSignatures } from './signatures';
 
-export const googleBrand: BrandDefinition = {
+export const googleProvider: ProviderDefinition = {
 	apiVersion: 1,
 	id: 'google',
 	protocol: 'gemini',
+	keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
 	defaults: {
 		baseURL: 'https://generativelanguage.googleapis.com/v1beta',
 		// Gemini 3's ladder stops at high (minimal/low/medium/high). Wire-specific knobs

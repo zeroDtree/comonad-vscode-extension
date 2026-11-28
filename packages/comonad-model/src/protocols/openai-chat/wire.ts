@@ -3,7 +3,7 @@
  * The openai-chat wire: request body shape, the SSE chunk shape, and their mapping onto
  * the protocol-neutral events. Both OpenAI cache-token spellings are read here —
  * `prompt_cache_hit_tokens` (DeepSeek) and `prompt_tokens_details.cached_tokens` (OpenAI)
- * are dialects of this one wire — while genuinely odd usage shapes are a brand's `usageMap`.
+ * are dialects of this one wire — while genuinely odd usage shapes are a vendor's `usageMap`.
  */
 import type { OptionSchema, OptionValues, ResolvedProvider } from '../../config/schema';
 import type { FinishReason, Message, ToolDeclaration, UsageRecord } from '../../types';

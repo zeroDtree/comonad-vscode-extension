@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { Service, type Context } from 'cordis';
-import { SHIPPED_INSTANCES, type ModelInfo, type ProviderInstanceConfig } from '@comonad/model';
+import { SHIPPED_PROVIDERS, type ModelInfo, type ProviderEntry } from '@comonad/model';
 import { BUILTIN_ROLES, READ_ONLY_GRANT, type AgentRole, type SubagentGrant } from '../lib/agents';
 import { normalizeBudget, type BudgetLimits, type SubagentBudgetMode } from '../lib/budget';
 import { asApproval, asApprovalResponse, asWorkMode, parseRules, type RuleSet } from '../lib/policy';
@@ -30,12 +30,12 @@ export const SUBAGENT_BUDGET_MODES: readonly SubagentBudgetMode[] = ['inherit', 
 export const DEFAULT_SUBAGENT_BUDGET_MODE: SubagentBudgetMode = 'inherit';
 
 /**
- * A user's `comonad.providers` map: one provider instance per entry — the connection, its brand,
- * and whatever the user overrides. Empty (or absent) means "use SHIPPED_INSTANCES". Model facts
- * (windows, prices, thinking quirks) are not configured here: the brand carries them and the
+ * A user's `comonad.providers` map: one provider per entry — its definition, connection,
+ * and whatever the user overrides. Empty (or absent) means "use SHIPPED_PROVIDERS". Model facts
+ * (windows, prices, thinking quirks) are not configured here: the definition carries them and the
  * merge engine layers them under the instance at resolve time.
  */
-export type ProviderMap = Record<string, ProviderInstanceConfig>;
+export type ProviderMap = Record<string, ProviderEntry>;
 
 const PROVIDER_NAME = /^[a-z0-9][a-z0-9._-]*$/;
 const MAX_PROVIDER_INSTANCES = 64;
@@ -55,13 +55,20 @@ export function sanitizeProviders(value: unknown): ProviderMap {
 			continue;
 		}
 		const entry = rawInstance as Record<string, unknown>;
-		const brand = typeof entry.brand === 'string' ? entry.brand.trim() : '';
-		const base = typeof entry.base === 'string' ? entry.base.trim() : '';
-		const model = typeof entry.model === 'string' ? entry.model.trim() : '';
-		if (!brand || !base || !model) {
+		// `provider` names the definition; absent means the map key (the common case).
+		const provider = typeof entry.provider === 'string' ? entry.provider.trim() : '';
+		if ('provider' in entry && !provider) {
 			continue;
 		}
-		const instance: ProviderInstanceConfig = { id: name, brand, base, model };
+		const base = typeof entry.base === 'string' ? entry.base.trim() : '';
+		const model = typeof entry.model === 'string' ? entry.model.trim() : '';
+		if (!base || !model) {
+			continue;
+		}
+		const instance: ProviderEntry = { id: name, base, model };
+		if (provider) {
+			instance.provider = provider;
+		}
 		if (typeof entry.protocol === 'string' && entry.protocol.trim()) {
 			instance.protocol = entry.protocol.trim();
 		}
@@ -124,6 +131,9 @@ export function sanitizeProviders(value: unknown): ProviderMap {
 				instance.fallback = [...new Set(fallback)];
 			}
 		}
+		if (entry.keySource === 'keychain' || entry.keySource === 'env') {
+			instance.keySource = entry.keySource;
+		}
 		out[name] = instance;
 	}
 	return out;
@@ -131,7 +141,7 @@ export function sanitizeProviders(value: unknown): ProviderMap {
 
 const UNSAFE_PROVIDER_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
-function sanitizeAuth(value: unknown): ProviderInstanceConfig['auth'] {
+function sanitizeAuth(value: unknown): ProviderEntry['auth'] {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
 		return undefined;
 	}
@@ -175,12 +185,12 @@ function sanitizeRecord(value: unknown): Record<string, unknown> | undefined {
 	return Object.keys(out).length ? out : undefined;
 }
 
-function sanitizeModelFacts(value: unknown): ProviderInstanceConfig['models'] {
+function sanitizeModelFacts(value: unknown): ProviderEntry['models'] {
 	const map = sanitizeRecord(value);
 	if (!map) {
 		return undefined;
 	}
-	const out: NonNullable<ProviderInstanceConfig['models']> = {};
+	const out: NonNullable<ProviderEntry['models']> = {};
 	for (const [id, rawFacts] of Object.entries(map)) {
 		if (!rawFacts || typeof rawFacts !== 'object' || Array.isArray(rawFacts)) {
 			continue;
@@ -216,19 +226,19 @@ function sanitizeModelFacts(value: unknown): ProviderInstanceConfig['models'] {
 	return Object.keys(out).length ? out : undefined;
 }
 
-function sanitizeRetry(value: unknown): ProviderInstanceConfig['retry'] {
+function sanitizeRetry(value: unknown): ProviderEntry['retry'] {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
 		return undefined;
 	}
 	const retry = value as Record<string, unknown>;
-	const out: NonNullable<ProviderInstanceConfig['retry']> = {};
+	const out: NonNullable<ProviderEntry['retry']> = {};
 	const attempts = Number(retry.maxAttempts);
 	if (Number.isInteger(attempts) && attempts >= 1 && attempts <= 10) {
 		out.maxAttempts = attempts;
 	}
 	if (Array.isArray(retry.retryableCodes) && retry.retryableCodes.length) {
 		out.retryableCodes = retry.retryableCodes.map(String).filter(Boolean).slice(0, 16) as NonNullable<
-			ProviderInstanceConfig['retry']
+			ProviderEntry['retry']
 		>['retryableCodes'];
 	}
 	for (const key of ['baseDelayMs', 'maxDelayMs'] as const) {
@@ -266,9 +276,9 @@ function sanitizeRoutes(value: unknown): ModelRoutes {
 }
 
 /** The configured instances, in menu order; the first one is `auto`. */
-export function providersOf(config: Pick<Config, 'providers'>): ProviderInstanceConfig[] {
+export function providersOf(config: Pick<Config, 'providers'>): ProviderEntry[] {
 	const entries = Object.values(config.providers);
-	return entries.length ? entries : [...SHIPPED_INSTANCES];
+	return entries.length ? entries : [...SHIPPED_PROVIDERS];
 }
 
 /**

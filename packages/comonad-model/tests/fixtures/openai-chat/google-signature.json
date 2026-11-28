@@ -2,7 +2,7 @@
 	"name": "google thought signature round-trip",
 	"meta": {
 		"protocol": "openai-chat",
-		"brand": "google",
+		"vendor": "google",
 		"status": 200,
 		"note": "A thinking model's call carries extra_content.google.thought_signature; the call must keep it so the next request hands it back."
 	},

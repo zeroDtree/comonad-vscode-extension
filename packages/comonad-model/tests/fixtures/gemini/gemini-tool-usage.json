@@ -2,7 +2,7 @@
 	"name": "gemini text + tool call + cache usage",
 	"meta": {
 		"protocol": "gemini",
-		"brand": "google",
+		"vendor": "google",
 		"status": 200,
 		"note": "Hand-written shape of a streamGenerateContent stream: two text parts, one whole functionCall, cache-split usageMetadata. The call carries a thought signature natively."
 	},

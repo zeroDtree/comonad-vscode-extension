@@ -107,12 +107,11 @@ import {
 import { deletionTargetsAreOwned } from '../lib/deletions';
 import { creationTargets, directoryTargets, rmInvocations, rmTargets } from '../lib/shell';
 import { parseModelRef, shapeModelIds } from '@comonad/model';
-import { formatModelId } from '../services/model';
+import { formatModelId, groupModelChoices, providerLabelFor } from '../services/model';
 import type { FakeModelCall } from './harness';
 import { makeCtx } from '../lib/invocation';
 import {
 	AGENT_KEYS,
-	CONFIG_KEYS,
 	DEFAULT_CONTEXT_WINDOW,
 	DEFAULT_SUBAGENT_GRANTS,
 	normalizeAgentPatch,
@@ -133,7 +132,6 @@ import { harnessAliases, harnessCompat } from '../plugins/harness';
 import { pluginHost, readRows, writeRow } from '../services/plugins';
 import { COMONAD_BLOCK, COMONAD_BLOCKS, type PromptBlock } from '../lib/blocks';
 import { applyPromptLayout, defaultPromptLayout, mergeToolLayout, parsePromptLayout, parseToolLayout } from '../lib/prompt-layout';
-import { GRAPH_SETTING_KEYS } from '../services/graph';
 import { webPlan } from '../services/web-tokenizers';
 /** The math plugin, built by `npm run compile` beside the host. */
 const MATH_PACKAGE = join(__dirname, '..', '..', 'packages', 'comonad-plugin-math');
@@ -148,7 +146,7 @@ import {
 	sanitizeQuestionAnswers,
 	statusDetail,
 } from '../ui/chat-panel';
-import { settingsDocument, settingsPanel } from '../ui/settings-panel';
+import { parseSetupRef, settingsDocument, settingsPanel } from '../ui/settings-panel';
 import { applyFileReviewChanges, fileReviewDocument } from '../ui/file-review-editor';
 import { reviewDocument } from '../ui/review-panel';
 import { keepHunkAction, undoHunkAction } from '../ui/hunk-actions';
@@ -2148,14 +2146,14 @@ suite('Comonad domain', () => {
 	test('a thinking level above the endpoint ceiling runs at the ceiling', async () => {
 		const kernel = await createTestKernel();
 		try {
-			// The shipped brands declare how deep their provider goes: DeepSeek reaches max, Gemini
+			// The shipped vendors declare how deep their provider goes: DeepSeek reaches max, Gemini
 			// stops at high (Gemini 3 has no xhigh or max).
 			assert.strictEqual(kernel.ctx.model.effortFor('deepseek', 'max'), 'max');
-			assert.strictEqual(kernel.ctx.model.effortFor('gemini', 'max'), 'high');
-			assert.strictEqual(kernel.ctx.model.effortFor('gemini', 'medium'), 'medium');
+			assert.strictEqual(kernel.ctx.model.effortFor('google', 'max'), 'high');
+			assert.strictEqual(kernel.ctx.model.effortFor('google', 'medium'), 'medium');
 			// `auto` and `none` are modes, not depths: no ceiling applies to either.
-			assert.strictEqual(kernel.ctx.model.effortFor('gemini', 'auto'), 'auto');
-			assert.strictEqual(kernel.ctx.model.effortFor('gemini', 'none'), 'none');
+			assert.strictEqual(kernel.ctx.model.effortFor('google', 'auto'), 'auto');
+			assert.strictEqual(kernel.ctx.model.effortFor('google', 'none'), 'none');
 			// A profile between high and max keeps its own ceiling, and no ceiling sends the pick as-is.
 			assert.strictEqual(limitEffort('max', 'xhigh'), 'xhigh');
 			assert.strictEqual(limitEffort('high', 'xhigh'), 'high');
@@ -2175,7 +2173,7 @@ suite('Comonad domain', () => {
 				messages: [{ role: 'user', content: 'hi' }],
 				tools: [],
 				ctx: makeCtx('test', 0, 'chat', new AbortController().signal),
-				options: { reasoningEffort: kernel.ctx.model.effortFor('gemini', 'max') },
+				options: { reasoningEffort: kernel.ctx.model.effortFor('google', 'max') },
 			});
 			assert.strictEqual(seen, 'high');
 		} finally {
@@ -2641,43 +2639,16 @@ suite('Comonad domain', () => {
 		assert.ok(!status.includes('composerScope'), 'the status bar keeps the implicit rule');
 	});
 
-	test('every setting the manifest declares is one the code actually reads', () => {
+	test('the manifest runs as a workspace extension with limited trust', () => {
 		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
 			extensionKind?: string[];
 			capabilities?: { virtualWorkspaces?: boolean; untrustedWorkspaces?: { supported?: string } };
-			contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
 		};
 		// The agent runs where the workspace is, exactly like Cursor's server and Copilot's
 		// workspace extension; credentials stay in client-side SecretStorage.
 		assert.deepStrictEqual(manifest.extensionKind, ['workspace'], 'the agent runs with the workspace');
 		assert.strictEqual(manifest.capabilities?.virtualWorkspaces, false, 'node:fs needs a real file system');
 		assert.strictEqual(manifest.capabilities?.untrustedWorkspaces?.supported, 'limited', 'project plugins and hooks need trust');
-		const declared = new Set(Object.keys(manifest.contributes.configuration.properties).map((key) => key.replace(/^comonad\./, '')));
-		const read = new Set<string>([...CONFIG_KEYS, ...GRAPH_SETTING_KEYS]);
-		// A setting the manifest declares but no code reads is a setting the user cannot change: the
-		// panel writes it and nothing comes back.
-		assert.deepStrictEqual(
-			[...declared].filter((key) => !read.has(key)).sort(),
-			[],
-			'the manifest declares settings nothing reads',
-		);
-		assert.deepStrictEqual(
-			[...read].filter((key) => !declared.has(key)).sort(),
-			[],
-			'the code reads settings the manifest does not declare',
-		);
-		// The manifest keeps a copy of the code default for the settings UI; this is the one whose
-		// default is otherwise easy to change in only one place.
-		assert.strictEqual(
-			manifest.contributes.configuration.properties['comonad.compactionRetainPercent']?.default,
-			DEFAULT_COMPACTION_RETAIN_PERCENT,
-			'the manifest default tracks the code default',
-		);
-		assert.strictEqual(
-			manifest.contributes.configuration.properties['comonad.excludeComonadFromReview']?.default,
-			true,
-			'the review filter is on by default',
-		);
 	});
 
 	test('the manifest contributes the file review custom editor, not a webview panel', () => {
@@ -2692,14 +2663,8 @@ suite('Comonad domain', () => {
 		assert.ok(!(manifest.activationEvents ?? []).includes('onWebviewPanel:comonad.fileReview'), 'the panel view type is gone');
 	});
 
-	test('the manifest ships no provider map, and the code stands the shipped instances in', () => {
-		// `comonad.providers` ships empty — "use the shipped instances" — so the manifest cannot
-		// drift from the brand facts the merge engine layers in at resolve time.
-		const manifest = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
-			contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
-		};
-		assert.deepStrictEqual(manifest.contributes.configuration.properties['comonad.providers']?.default, {});
-		assert.deepStrictEqual(providersOf({ providers: {} }).map((instance) => instance.id), ['deepseek', 'deepseek-pro', 'gemini']);
+	test('the code stands the shipped providers in for an empty map', () => {
+		assert.deepStrictEqual(providersOf({ providers: {} }).map((instance) => instance.id), ['deepseek', 'google']);
 	});
 
 	test('the settings panel injects every service it reads', () => {
@@ -4707,6 +4672,32 @@ suite('Cordis kernel', () => {
 		assert.ok(css.includes('.thought-tokens') && css.includes('#chats-scope') && css.includes('#jump-latest'));
 	});
 
+	test('the provider-first model wiring reaches every surface', () => {
+		const root = join(__dirname, '..', '..');
+		const chat = readFileSync(join(root, 'resources', 'chat.js'), 'utf8');
+		assert.ok(chat.includes('pill-flyout-group'), 'chat flyout groups by provider');
+		assert.ok(chat.includes('modelState.setup'), 'setup rows ride the models message');
+		const panel = readFileSync(join(root, 'src', 'ui', 'chat-panel.ts'), 'utf8');
+		assert.ok(panel.includes("startsWith('__setup:')"), 'setModel routes setup rows to the setup flow');
+		assert.ok(panel.includes("type: 'models', models: lastModels"), 'the models message keeps its shape');
+		const settings = readFileSync(join(root, 'resources', 'settings.js'), 'utf8');
+		assert.ok(settings.includes('model-provider'), 'the default model pairs a provider select with the model select');
+		assert.ok(settings.includes("'-provider'"), 'routing rows pair provider and model selects');
+		assert.ok(!settings.includes('optgroup'), 'the flat grouped select is gone');
+		assert.ok(settings.includes('renderProviderList'), 'the Providers section renders endpoint rows');
+		assert.ok(settings.includes('shippedProvidersJson'), 'an empty config shows the shipped providers as the default JSON');
+		assert.ok(settings.includes("type: 'editKeyEnv'"), 'the key chip opens the environment variable name editor');
+		assert.ok(settings.includes('fillRoutes'), 'routing uses model selects');
+		const markup = readFileSync(join(root, 'src', 'ui', 'settings-panel.ts'), 'utf8');
+		assert.ok(markup.includes('id="provider-list"'), 'the Models pane has the Providers section');
+		assert.ok(markup.includes("case 'editKeyEnv'"), 'the host handles the environment variable name edit');
+		assert.ok(markup.includes('id="route-compaction"') && markup.includes('id="route-compaction-provider"'), 'routing rows pair provider and model selects');
+		assert.ok(!markup.includes('id="model-add"'), 'the moved Add button is gone from the Agent pane');
+		assert.ok(markup.includes('Configure a provider'), 'the gear row says provider, not connection');
+		assert.ok(markup.includes('Providers JSON'), 'the advanced section says Providers');
+		assert.ok(!/connection/i.test(markup), 'no connection wording survives in the panel');
+	});
+
 	test('the status line adds a cumulative cache segment only when reported', () => {
 		const window = 131_072;
 		const usage = { inputTokens: 1_048_576, outputTokens: 0, requests: 2, cost: 0.012, cachedTokens: 524_288 };
@@ -5804,7 +5795,7 @@ suite('Cordis kernel', () => {
 			});
 			// A provider is configured, but its model carries no window — which is every endpoint added by hand.
 			await kernel.ctx.settings.update('providers', {
-				custom: { brand: 'custom', base: 'https://example.invalid', model: 'whatever', keyEnv: 'K' },
+				custom: { provider: 'custom', base: 'https://example.invalid', model: 'whatever', keyEnv: 'K' },
 			});
 			await kernel.ctx.settings.update('model', 'custom');
 			const session = kernel.ctx.sessions.create(kernel.ctx.agent.policyFor(), 'nowin');
@@ -5968,20 +5959,20 @@ suite('Cordis kernel', () => {
 				},
 			});
 			const shipped = await kernel.ctx.model.availableModels();
-			assert.deepStrictEqual(shipped.map((choice) => choice.label), ['deepseek-flash', 'deepseek-v4-pro', 'gemini-3.8-flash', 'Auto']);
+			assert.deepStrictEqual(shipped.map((choice) => choice.label), ['deepseek-flash', 'gemini-3.8-flash', 'Auto']);
 			assert.strictEqual(
 				shipped[0]!.description,
-				'deepseek · https://api.deepseek.com · models not listed · no key — set DEEPSEEK_API_KEY',
+				'https://api.deepseek.com · models not listed · no key — set DEEPSEEK_API_KEY',
 			);
-			assert.strictEqual(shipped[0]!.id, 'deepseek:deepseek-flash', 'a choice names instance and model');
-			assert.match(shipped[3]!.description, /deepseek — the first provider, model deepseek-flash/);
+			assert.strictEqual(shipped[0]!.id, 'deepseek:deepseek-flash', 'a choice names provider and model');
+			assert.match(shipped[2]!.description, /deepseek — the first provider, model deepseek-flash/);
 			assert.ok(shipped.every((choice) => choice.needsKey), 'no key anywhere marks every row, including Auto');
-			assert.strictEqual(kernel.ctx.model.instanceFor('deepseek')!.keyEnv, 'DEEPSEEK_API_KEY');
+			assert.deepStrictEqual(kernel.ctx.model.definitions().find((def) => def.id === 'deepseek')!.keyEnv, 'DEEPSEEK_API_KEY');
 			// The shipped prices are DeepSeek's peak cache-miss input and output rates, with the much
-			// cheaper cache-hit rate, so /cost is an upper bound rather than a guess. They ride the brand.
+			// cheaper cache-hit rate, so /cost is an upper bound rather than a guess. They ride the vendor.
 			const flash = kernel.ctx.model.modelInfo('deepseek')!.pricing;
 			assert.deepStrictEqual([flash?.inPerM, flash?.cachedInPerM, flash?.outPerM], [0.3, 0.006, 1.2]);
-			const pro = kernel.ctx.model.modelInfo('deepseek-pro')!.pricing;
+			const pro = kernel.ctx.model.modelInfo('deepseek:deepseek-v4-pro')!.pricing;
 			assert.deepStrictEqual([pro?.inPerM, pro?.outPerM], [1.32, 3.96]);
 
 			// With an endpoint that answers, the list is whatever it reports — a new model needs no release.
@@ -6003,23 +5994,23 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(live[0]!.needsKey, false);
 			assert.match(live[2]!.description, /no key — set GEMINI_API_KEY or GOOGLE_API_KEY/, 'Gemini still has none');
 			assert.strictEqual(live[2]!.needsKey, true);
-			assert.strictEqual(asked, 3, 'one request per endpoint');
+			assert.strictEqual(asked, 2, 'one request per endpoint');
 			// The list is cached, so opening the menu is not a request storm; refresh asks again.
 			await kernel.ctx.model.availableModels();
-			assert.strictEqual(asked, 3, 'the cache answers the next call');
+			assert.strictEqual(asked, 2, 'the cache answers the next call');
 			await kernel.ctx.model.availableModels({ refresh: true });
-			assert.strictEqual(asked, 6, 'a refresh re-reads the endpoints');
+			assert.strictEqual(asked, 4, 'a refresh re-reads the endpoints');
 
-			// An explicit model id selects that model; a bare provider id keeps its declared default.
+			// An explicit model id selects that model; a bare connection id keeps its declared default.
 			// The label names the model the turn will run, not the provider that provides it.
 			assert.strictEqual(kernel.ctx.model.describe('deepseek:deepseek-v5-preview'), 'deepseek-v5-preview');
 			assert.strictEqual(kernel.ctx.model.describe('deepseek'), 'deepseek-flash');
-			assert.strictEqual(kernel.ctx.model.known('gemini:gemini-3.9-pro'), true);
+			assert.strictEqual(kernel.ctx.model.known('google:gemini-3.9-pro'), true);
 			assert.strictEqual(kernel.ctx.model.known('nope:any'), false);
 
 			// An explicitly empty map still means "nothing configured", so the shipped instances stand in.
 			await kernel.ctx.settings.update('providers', {});
-			assert.deepStrictEqual(providersOf(kernel.ctx.settings.get()).map((instance) => instance.id), ['deepseek', 'deepseek-pro', 'gemini']);
+			assert.deepStrictEqual(providersOf(kernel.ctx.settings.get()).map((instance) => instance.id), ['deepseek', 'google']);
 		} finally {
 			await kernel.dispose();
 		}
@@ -6037,8 +6028,8 @@ suite('Cordis kernel', () => {
 				},
 			});
 			assert.strictEqual(kernel.ctx.model.describe('auto'), 'deepseek-flash');
-			assert.strictEqual(kernel.ctx.model.describe('deepseek-pro'), 'deepseek-v4-pro');
-			assert.strictEqual(kernel.ctx.model.describe('gemini'), 'gemini-3.8-flash');
+			assert.strictEqual(kernel.ctx.model.describe('deepseek:deepseek-v4-pro'), 'deepseek-v4-pro');
+			assert.strictEqual(kernel.ctx.model.describe('google'), 'gemini-3.8-flash');
 			assert.strictEqual(await kernel.ctx.model.resolveKey('auto'), '', 'no key anywhere');
 			assert.strictEqual(await kernel.ctx.model.keyReady('auto'), false);
 
@@ -6048,7 +6039,7 @@ suite('Cordis kernel', () => {
 				0.3 + 0.006 + 1.2,
 				'cache hits cost 2 % of a fresh prompt',
 			);
-			assert.strictEqual(kernel.ctx.model.costFor('gemini', { input: 1_000_000, output: 1_000_000 }), null, 'no prices, no estimate');
+			assert.strictEqual(kernel.ctx.model.costFor('google', { input: 1_000_000, output: 1_000_000 }), null, 'no prices, no estimate');
 
 			// A stored key wins over the environment; the environment is the fallback.
 			await kernel.ctx.model.setSecret('deepseek', 'sk-stored');
@@ -6075,7 +6066,7 @@ suite('Cordis kernel', () => {
 			// A provider may name several variables; the first one that is set wins.
 			await kernel.ctx.settings.update('providers', {
 				multi: {
-					brand: 'google',
+					provider: 'google',
 					base: 'https://generativelanguage.googleapis.com/v1beta/openai',
 					model: 'gemini-3.8-flash',
 					keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
@@ -6085,23 +6076,57 @@ suite('Cordis kernel', () => {
 			assert.strictEqual(await kernel.ctx.model.resolveKey('multi'), 'sk-google');
 			kernel.host.envValues.GEMINI_API_KEY = 'sk-gemini';
 			assert.strictEqual(await kernel.ctx.model.resolveKey('multi'), 'sk-gemini', 'the first variable in the list wins');
+
+			// When both sources hold a key, the endpoint's keySource preference picks the winner.
+			await kernel.ctx.model.setSecret('multi', 'sk-stored');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('multi'), 'sk-stored', 'keychain is the default');
+			let info = await kernel.ctx.model.keyInfo('multi');
+			assert.strictEqual(info.source, 'stored');
+			assert.strictEqual(info.stored, true, 'the UI is told both sources exist');
+			assert.strictEqual(info.env, true);
+			assert.strictEqual(info.preferred, 'keychain');
+			await kernel.ctx.settings.update('providers', {
+				multi: {
+					provider: 'google',
+					base: 'https://generativelanguage.googleapis.com/v1beta/openai',
+					model: 'gemini-3.8-flash',
+					keyEnv: ['GEMINI_API_KEY'],
+					keySource: 'env',
+				},
+			});
+			assert.strictEqual(await kernel.ctx.model.resolveKey('multi'), 'sk-gemini', 'the preference flips the winner');
+			info = await kernel.ctx.model.keyInfo('multi');
+			assert.strictEqual(info.source, 'env');
+			assert.strictEqual(info.preferred, 'env');
+			// The preference never leaves the endpoint keyless: env missing → stored wins again.
+			kernel.host.envValues.GEMINI_API_KEY = '';
+			assert.strictEqual(await kernel.ctx.model.resolveKey('multi'), 'sk-stored');
+			info = await kernel.ctx.model.keyInfo('multi');
+			assert.strictEqual(info.source, 'stored');
+			assert.strictEqual(info.env, false, 'the UI knows the env source dried up');
 		} finally {
 			await kernel.dispose();
 		}
 	});
 
 	test('a key is shared by every provider on the same endpoint', async () => {
-		const kernel = await createTestKernel();
+		const kernel = await createTestKernel({
+			config: {
+				providers: {
+					ds2: { provider: 'deepseek', base: 'https://api.deepseek.com', model: 'deepseek-v4-pro' },
+				},
+			},
+		});
 		try {
-			// The provider-scoped secret serves every instance on that base (the shipped DeepSeek
-			// block has two): rotating through either one updates both.
-			await kernel.ctx.model.setSecret('deepseek-pro', 'sk-new');
+			// The provider-scoped secret serves every entry on that base: rotating through
+			// either one updates both.
+			await kernel.ctx.model.setSecret('ds2', 'sk-new');
 			assert.strictEqual(await kernel.ctx.model.resolveKey('deepseek'), 'sk-new');
-			assert.strictEqual(await kernel.ctx.model.resolveKey('deepseek-pro'), 'sk-new');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('ds2'), 'sk-new');
 			// Clearing it falls back to the environment.
-			await kernel.ctx.model.setSecret('deepseek-pro', '');
+			await kernel.ctx.model.setSecret('ds2', '');
 			kernel.host.envValues.DEEPSEEK_API_KEY = 'sk-env';
-			assert.strictEqual(await kernel.ctx.model.resolveKey('deepseek-pro'), 'sk-env');
+			assert.strictEqual(await kernel.ctx.model.resolveKey('ds2'), 'sk-env');
 		} finally {
 			await kernel.dispose();
 		}
@@ -6119,8 +6144,8 @@ suite('Cordis kernel', () => {
 		const kernel = await createTestKernel({
 			config: {
 				providers: {
-					a: { brand: 'custom', base: 'https://a.test', model: 'only-a', keyEnv: 'A_KEY' },
-					b: { brand: 'custom', base: 'https://b.test', model: 'only-b', keyEnv: 'B_KEY' },
+					a: { provider: 'custom', base: 'https://a.test', model: 'only-a', keyEnv: 'A_KEY' },
+					b: { provider: 'custom', base: 'https://b.test', model: 'only-b', keyEnv: 'B_KEY' },
 				},
 			},
 		});
@@ -6136,9 +6161,13 @@ suite('Cordis kernel', () => {
 			});
 			kernel.host.envValues.B_KEY = 'sk-b';
 			const choices = await kernel.ctx.model.availableModels({ refresh: true });
-			const shared = choices.find((choice) => choice.label === 'shared')!;
-			assert.strictEqual(shared.id, 'b:shared', 'the keyed provider wins the duplicate');
-			assert.strictEqual(shared.needsKey, false);
+			// Different bases are different endpoints: the shared model stays pickable on each.
+			const shared = choices.filter((choice) => choice.label === 'shared');
+			assert.strictEqual(shared.length, 2, 'one row per endpoint, no cross-base collapse');
+			assert.strictEqual(shared[0].id, 'a:shared');
+			assert.strictEqual(shared[0].needsKey, true, 'the keyless endpoint is marked');
+			assert.strictEqual(shared[1].id, 'b:shared');
+			assert.strictEqual(shared[1].needsKey, false, 'the keyed endpoint runs it');
 			const onlyA = choices.find((choice) => choice.label === 'only-a')!;
 			assert.strictEqual(onlyA.id, 'a:only-a');
 			assert.strictEqual(onlyA.needsKey, true, 'a keyless endpoint is marked before it is picked');
@@ -6151,9 +6180,91 @@ suite('Cordis kernel', () => {
 		}
 	});
 
+	test('two endpoints on one base collapse to the row that can run it', async () => {
+		const kernel = await createTestKernel({
+			config: {
+				providers: {
+					a1: { provider: 'custom', base: 'https://same.test/v1', model: 'm1', keyEnv: 'K1' },
+					a2: { provider: 'custom', base: 'https://same.test/v1/', model: 'm2', keyEnv: 'K2' },
+				},
+			},
+		});
+		try {
+			useFakeModel(kernel, {
+				name: 'openai',
+				async chat() {
+					return { message: { role: 'assistant', content: '' }, toolCalls: [] };
+				},
+				async listModels() {
+					return ['shared', 'only'];
+				},
+			});
+			kernel.host.envValues.K2 = 'sk-2';
+			const choices = await kernel.ctx.model.availableModels({ refresh: true });
+			const shared = choices.filter((choice) => choice.label === 'shared');
+			assert.strictEqual(shared.length, 1, 'one physical base shows the model once');
+			assert.strictEqual(shared[0].id, 'a2:shared', 'the keyed endpoint wins the collapse');
+			assert.strictEqual(shared[0].needsKey, false);
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('model choices group by definition, Auto excluded', () => {
+		const choices = [
+			{ id: 'deepseek:flash', label: 'flash', description: '', needsKey: false, definitionId: 'deepseek', providerLabel: 'DeepSeek' },
+			{ id: 'gemini:flash', label: 'flash', description: '', needsKey: false, definitionId: 'google', providerLabel: 'Google' },
+			{ id: 'deepseek:pro', label: 'pro', description: '', needsKey: false, definitionId: 'deepseek', providerLabel: 'DeepSeek' },
+			{ id: 'auto', label: 'Auto', description: '', needsKey: false, definitionId: '', providerLabel: '' },
+		];
+		const groups = groupModelChoices(choices);
+		assert.deepStrictEqual(
+			groups.map((group) => [group.definitionId, group.choices.map((choice) => choice.id)]),
+			[
+				['deepseek', ['deepseek:flash', 'deepseek:pro']],
+				['google', ['gemini:flash']],
+			],
+			'first-appearance order, Auto not grouped',
+		);
+		assert.strictEqual(providerLabelFor('opencode-go'), 'OpenCode Go');
+		assert.strictEqual(providerLabelFor('some-new-vendor'), 'Some new vendor', 'unknown ids humanize');
+	});
+
+	test('setup rows cover unconfigured providers with a default base only', async () => {
+		const kernel = await createTestKernel({
+			config: { providers: { only: { provider: 'deepseek', base: 'https://api.deepseek.com', model: 'deepseek-flash' } } },
+		});
+		try {
+			const rows = kernel.ctx.model.setupChoices();
+			const ids = rows.map((row) => row.id);
+			assert.ok(ids.every((id) => id.startsWith('__setup:')), 'setup ids never look like refs');
+			// deepseek already has an endpoint; custom and opencode-go have no default base.
+			assert.ok(!ids.some((id) => id.includes('deepseek') || id.includes('custom') || id.includes('opencode-go')));
+			// openai ships no catalog: one whole-vendor row. google/anthropic ship catalogs: model rows.
+			assert.ok(ids.includes('__setup:openai'), 'openai is a single setup row');
+			assert.ok(ids.includes('__setup:google:gemini-3.8-flash'), 'google lists its catalog model');
+			assert.ok(!ids.includes('__setup:google'), 'a catalog provider never gets a suffix-less row');
+			assert.ok(ids.some((id) => id.startsWith('__setup:anthropic:')), 'anthropic lists its catalog models');
+			for (const row of rows) {
+				assert.ok(row.providerLabel, 'every row carries its display name');
+			}
+		} finally {
+			await kernel.dispose();
+		}
+	});
+
+	test('a setup ref parses provider and optional model, colons in model intact', () => {
+		assert.strictEqual(parseSetupRef('__setup:openai')?.providerId, 'openai');
+		assert.strictEqual(parseSetupRef('__setup:openai')?.model, undefined);
+		assert.deepStrictEqual(parseSetupRef('__setup:openai:gpt-6'), { providerId: 'openai', model: 'gpt-6' });
+		assert.deepStrictEqual(parseSetupRef('__setup:openai:weird:model'), { providerId: 'openai', model: 'weird:model' });
+		assert.strictEqual(parseSetupRef('deepseek:flash'), undefined, 'a real ref is not a setup ref');
+		assert.strictEqual(parseSetupRef('auto'), undefined);
+	});
+
 	test('the model cache follows the key, so a new key is not stuck on the old list', async () => {
 		const kernel = await createTestKernel({
-			config: { providers: { p: { brand: 'custom', base: 'https://p.test', model: 'fallback', keyEnv: 'P_KEY' } } },
+			config: { providers: { p: { provider: 'custom', base: 'https://p.test', model: 'fallback', keyEnv: 'P_KEY' } } },
 		});
 		try {
 			let asked = 0;
@@ -6195,7 +6306,7 @@ suite('Cordis kernel', () => {
 					throw new Error('model list failed (401): invalid key');
 				},
 			});
-			const probe = await kernel.ctx.model.probeInstance(kernel.ctx.model.instanceFor('auto')!, '');
+			const probe = await kernel.ctx.model.probeProvider(kernel.ctx.model.providerFor('auto')!, '');
 			assert.deepStrictEqual(probe.ids, []);
 			assert.match(probe.error ?? '', /401/);
 			const choices = await kernel.ctx.model.availableModels();

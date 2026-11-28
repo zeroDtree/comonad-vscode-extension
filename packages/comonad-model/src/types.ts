@@ -22,7 +22,7 @@ export interface InvocationContext {
 	signal: AbortSignal;
 	/**
 	 * Free-form call metadata: `kind` (`chat` | `compaction` | `soft-route` | `hook`), `surface`,
-	 * `agentName`. Brands read it from header hooks (e.g. OpenCode Go's session header).
+	 * `agentName`. Vendors read it from header hooks (e.g. OpenCode Go's session header).
 	 */
 	attributes?: Record<string, string | number | boolean>;
 }
@@ -221,7 +221,7 @@ export type RuntimeStreamEvent =
 export interface ChatOptions {
 	/**
 	 * The wire-level thinking level. Known menu values are the {@link ReasoningEffort} ladder plus
-	 * the wire-only `xhigh`; a brand may rank anything its endpoint accepts.
+	 * the wire-only `xhigh`; a vendor may rank anything its endpoint accepts.
 	 */
 	reasoningEffort?: string;
 	temperature?: number;
@@ -230,7 +230,7 @@ export interface ChatOptions {
 }
 
 export interface ChatRequest {
-	/** `instanceId[:model]`, or `auto` for the first configured instance. */
+	/** `providerId[:model]`, or `auto` for the first configured instance. */
 	model: string;
 	messages: Message[];
 	tools: ToolDeclaration[];
@@ -242,7 +242,7 @@ export interface ChatRequest {
 /** One runtime attempt inside a logical call, for diagnostics and cost attribution. */
 export interface AttemptRecord {
 	requestId: string;
-	instanceId: string;
+	providerId: string;
 	ok: boolean;
 }
 
